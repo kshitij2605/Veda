@@ -2,6 +2,7 @@
 
 pub mod bitmap_index;
 pub mod delete_bitmap;
+pub mod growing_segment;
 pub mod inverted_index;
 pub mod range_index;
 pub mod segment;

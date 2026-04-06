@@ -1,0 +1,286 @@
+use std::collections::{BinaryHeap, HashMap};
+use std::path::Path;
+
+use roaring::RoaringBitmap;
+use uuid::Uuid;
+use veda_core::error::{Result, VedaError};
+use veda_core::record::{FieldValue, Record};
+use veda_core::schema::CollectionSchema;
+use veda_core::simd;
+use veda_core::types::{DistanceMetric, FieldType, SegmentId};
+
+use crate::delete_bitmap::DeleteBitmap;
+use crate::segment::{SegmentMetadata, SegmentWriter};
+
+/// Default seal threshold: 512 MiB.
+const DEFAULT_MAX_SIZE_BYTES: usize = 512 * 1024 * 1024;
+
+/// Estimated overhead per record for scalar fields (bytes).
+const SCALAR_OVERHEAD_BYTES: usize = 200;
+
+/// The active, mutable segment that receives new writes.
+///
+/// All data lives in memory. Supports fast appends, brute-force vector search,
+/// and sealing to flush to disk as a sealed segment.
+pub struct GrowingSegment {
+    id: SegmentId,
+    schema: CollectionSchema,
+    records: Vec<Record>,
+    /// Per vector field: flattened `Vec<f32>` storage for fast scan.
+    vectors: HashMap<String, Vec<Vec<f32>>>,
+    /// Estimated memory usage in bytes.
+    size_bytes: usize,
+    /// Seal threshold — when `size_bytes` exceeds this, `should_seal()` returns true.
+    max_size_bytes: usize,
+    /// Soft-delete tracking.
+    delete_bitmap: DeleteBitmap,
+}
+
+impl GrowingSegment {
+    /// Create a new growing segment with the default 512 MiB seal threshold.
+    pub fn new(schema: CollectionSchema) -> Self {
+        Self::with_max_size(schema, DEFAULT_MAX_SIZE_BYTES)
+    }
+
+    /// Create a new growing segment with a custom seal threshold.
+    pub fn with_max_size(schema: CollectionSchema, max_size_bytes: usize) -> Self {
+        let mut vectors = HashMap::new();
+        for field in schema.vector_fields() {
+            vectors.insert(field.name().to_owned(), Vec::new());
+        }
+
+        Self {
+            id: Uuid::new_v4(),
+            schema,
+            records: Vec::new(),
+            vectors,
+            size_bytes: 0,
+            max_size_bytes,
+            delete_bitmap: DeleteBitmap::new(),
+        }
+    }
+
+    /// Insert a record. Returns the 0-indexed doc_id.
+    ///
+    /// Returns `Err` if the segment has already exceeded `max_size_bytes`.
+    pub fn insert(&mut self, record: Record) -> Result<u32> {
+        if self.size_bytes >= self.max_size_bytes {
+            return Err(VedaError::Storage(
+                "growing segment is full (exceeds max_size_bytes)".into(),
+            ));
+        }
+
+        let doc_id = self.records.len() as u32;
+        let mut added_bytes = SCALAR_OVERHEAD_BYTES;
+
+        // Extract and store vector fields.
+        for field_def in self.schema.vector_fields() {
+            let name = field_def.name();
+            if let FieldType::Vector { dimension, .. } = field_def.field_type() {
+                match record.get(name) {
+                    Some(FieldValue::Vector(dense)) => {
+                        if dense.dimension() != *dimension as usize {
+                            return Err(VedaError::DimensionMismatch {
+                                expected: *dimension,
+                                actual: dense.dimension() as u32,
+                            });
+                        }
+                        let vec_data = dense.as_slice().to_vec();
+                        added_bytes += vec_data.len() * std::mem::size_of::<f32>();
+                        if let Some(store) = self.vectors.get_mut(name) {
+                            store.push(vec_data);
+                        }
+                    }
+                    Some(_) => {
+                        return Err(VedaError::Storage(format!(
+                            "field '{name}' expected Vector, got different type"
+                        )));
+                    }
+                    None => {
+                        return Err(VedaError::Storage(format!(
+                            "record missing required vector field '{name}'"
+                        )));
+                    }
+                }
+            }
+        }
+
+        self.records.push(record);
+        self.size_bytes += added_bytes;
+
+        Ok(doc_id)
+    }
+
+    /// Check if the segment should be sealed (exceeds `max_size_bytes`).
+    pub fn should_seal(&self) -> bool {
+        self.size_bytes >= self.max_size_bytes
+    }
+
+    /// Number of records (including deleted).
+    pub fn count(&self) -> u32 {
+        self.records.len() as u32
+    }
+
+    /// Estimated memory usage in bytes.
+    pub fn size_bytes(&self) -> usize {
+        self.size_bytes
+    }
+
+    /// Get a record by doc_id.
+    pub fn get_record(&self, doc_id: u32) -> Option<&Record> {
+        self.records.get(doc_id as usize)
+    }
+
+    /// Get a vector by field name and doc_id.
+    pub fn get_vector(&self, field: &str, doc_id: u32) -> Option<&[f32]> {
+        self.vectors
+            .get(field)
+            .and_then(|vecs| vecs.get(doc_id as usize))
+            .map(|v| v.as_slice())
+    }
+
+    /// Brute-force scan: find top-k nearest vectors for a given query on a specific field.
+    ///
+    /// If `filter` is provided, only doc_ids present in the bitmap are considered.
+    /// Returns `Vec<(doc_id, distance)>` sorted by distance ascending.
+    pub fn search(
+        &self,
+        field: &str,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        filter: Option<&RoaringBitmap>,
+    ) -> Result<Vec<(u32, f32)>> {
+        let vecs = self.vectors.get(field).ok_or_else(|| {
+            VedaError::FieldNotFound(format!("vector field '{field}' not found"))
+        })?;
+
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+
+        let distance_fn = select_distance_fn(metric);
+
+        // Max-heap of (distance, doc_id) — we keep the k closest by evicting
+        // the farthest when the heap exceeds size k.
+        let mut heap: BinaryHeap<OrdF32Entry> = BinaryHeap::new();
+
+        for (doc_id, vec) in vecs.iter().enumerate() {
+            let doc_id = doc_id as u32;
+
+            // Skip deleted.
+            if self.delete_bitmap.is_deleted(doc_id) {
+                continue;
+            }
+
+            // Skip if not in filter.
+            if let Some(bm) = filter
+                && !bm.contains(doc_id)
+            {
+                continue;
+            }
+
+            let dist = distance_fn(query, vec);
+
+            if heap.len() < k {
+                heap.push(OrdF32Entry { dist, doc_id });
+            } else if let Some(top) = heap.peek()
+                && dist < top.dist
+            {
+                heap.pop();
+                heap.push(OrdF32Entry { dist, doc_id });
+            }
+        }
+
+        // Drain heap into sorted vec (ascending distance).
+        let mut results: Vec<(u32, f32)> =
+            heap.into_iter().map(|e| (e.doc_id, e.dist)).collect();
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(results)
+    }
+
+    /// Seal: flush this growing segment to disk as a sealed segment.
+    ///
+    /// Consumes self, writes all non-deleted records to the given directory,
+    /// and returns the resulting `SegmentMetadata`.
+    pub fn seal(self, dir: &Path) -> Result<SegmentMetadata> {
+        let mut writer = SegmentWriter::create(dir, &self.schema)?;
+
+        for (doc_id, record) in self.records.iter().enumerate() {
+            if self.delete_bitmap.is_deleted(doc_id as u32) {
+                continue;
+            }
+            writer.insert(record)?;
+        }
+
+        writer.seal()
+    }
+
+    /// Segment ID.
+    pub fn id(&self) -> SegmentId {
+        self.id
+    }
+
+    /// Mark a record as deleted (soft delete).
+    pub fn mark_deleted(&mut self, doc_id: u32) {
+        self.delete_bitmap.mark_deleted(doc_id);
+    }
+
+    /// Check if a record is deleted.
+    pub fn is_deleted(&self, doc_id: u32) -> bool {
+        self.delete_bitmap.is_deleted(doc_id)
+    }
+}
+
+// ── Distance function selection ───────────────────────────────────────────
+
+fn select_distance_fn(metric: DistanceMetric) -> fn(&[f32], &[f32]) -> f32 {
+    match metric {
+        DistanceMetric::Cosine => simd::cosine_distance,
+        DistanceMetric::Euclidean => simd::euclidean_distance,
+        DistanceMetric::DotProduct => |a, b| {
+            // For dot product similarity, higher is better.
+            // Convert to a distance: dist = -dot(a, b) so that smaller is better.
+            -simd::dot_product(a, b)
+        },
+        DistanceMetric::Manhattan => simd::manhattan_distance,
+        // Hamming and Jaccard are not applicable to dense f32 vectors;
+        // fall back to Euclidean.
+        DistanceMetric::Hamming | DistanceMetric::Jaccard => simd::euclidean_distance,
+    }
+}
+
+// ── Ordered f32 entry for BinaryHeap ──────────────────────────────────────
+
+/// A max-heap entry that orders by distance descending (largest on top).
+/// This lets us efficiently maintain the top-k nearest neighbors.
+#[derive(Debug, Clone)]
+struct OrdF32Entry {
+    dist: f32,
+    doc_id: u32,
+}
+
+impl PartialEq for OrdF32Entry {
+    fn eq(&self, other: &Self) -> bool {
+        self.dist == other.dist && self.doc_id == other.doc_id
+    }
+}
+
+impl Eq for OrdF32Entry {}
+
+impl PartialOrd for OrdF32Entry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrdF32Entry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Max-heap: larger distance comes first.
+        self.dist
+            .partial_cmp(&other.dist)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| self.doc_id.cmp(&other.doc_id))
+    }
+}
