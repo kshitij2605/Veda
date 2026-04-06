@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use veda_core::error::{Result, VedaError};
 use veda_core::types::DistanceMetric;
@@ -198,6 +199,66 @@ impl VectorIndex for HnswIndex {
             .take(k)
             .map(|(id, distance)| SearchResult { id, distance })
             .collect();
+
+        Ok(results)
+    }
+
+    fn search_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &RoaringBitmap,
+    ) -> Result<Vec<SearchResult>> {
+        if query.len() as u32 != self.dimension {
+            return Err(VedaError::DimensionMismatch {
+                expected: self.dimension,
+                actual: query.len() as u32,
+            });
+        }
+
+        if k == 0 || self.vectors.is_empty() || filter.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let ep = match self.graph.entry_point() {
+            Some(ep) => ep,
+            None => return Ok(Vec::new()),
+        };
+
+        let max_level = self.graph.max_level();
+        let mut ep_id = ep;
+        let mut ep_dist = compute_distance(query, &self.vectors[ep_id as usize], self.metric);
+
+        // Phase 1: Greedily descend from the top level down to layer 1.
+        if max_level > 0 {
+            for layer in (1..=max_level).rev() {
+                let (nearest_id, nearest_dist) = HnswSearcher::greedy_search(
+                    query,
+                    ep_id,
+                    layer,
+                    &self.graph,
+                    &self.vectors,
+                    self.metric,
+                );
+                ep_id = nearest_id;
+                ep_dist = nearest_dist;
+            }
+        }
+
+        // Phase 2: Filtered search at layer 0.
+        let entry_points = vec![(ep_id, ep_dist)];
+        let results = HnswSearcher::search_layer_filtered(
+            &self.graph,
+            &self.vectors,
+            query,
+            &entry_points,
+            self.ef_search.max(k),
+            0,
+            self.metric,
+            &self.deleted,
+            filter,
+            k,
+        );
 
         Ok(results)
     }

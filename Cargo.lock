@@ -439,6 +439,7 @@ name = "veda-index"
 version = "0.1.0"
 dependencies = [
  "rand",
+ "roaring",
  "serde",
  "serde_json",
  "tempfile",

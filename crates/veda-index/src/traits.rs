@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use roaring::RoaringBitmap;
 use veda_core::error::Result;
 use veda_core::types::DistanceMetric;
 
@@ -24,6 +25,26 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// Returns results sorted by distance in ascending order (closest first).
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>>;
+
+    /// Search with a filter bitmap. Only results whose IDs are in `filter`
+    /// are returned.
+    ///
+    /// The default implementation oversamples by 10x and post-filters.
+    /// Index implementations may override this with a more efficient strategy.
+    fn search_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &RoaringBitmap,
+    ) -> Result<Vec<SearchResult>> {
+        let results = self.search(query, k * 10)?;
+        let filtered: Vec<_> = results
+            .into_iter()
+            .filter(|r| filter.contains(r.id))
+            .take(k)
+            .collect();
+        Ok(filtered)
+    }
 
     /// Insert a single vector with the given ID.
     fn insert(&mut self, id: u32, vector: &[f32]) -> Result<()>;
