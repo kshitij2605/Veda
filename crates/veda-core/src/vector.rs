@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::simd;
+
 /// A dense floating-point vector used for similarity search.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DenseVector {
@@ -58,62 +60,31 @@ impl DenseVector {
     /// Returns 0.0 for identical directions, 2.0 for opposite directions.
     pub fn cosine_distance(&self, other: &Self) -> f32 {
         self.assert_same_dimension(other);
-
-        let dot = self.dot_product_raw(other);
-        let norm_a = self.l2_norm();
-        let norm_b = other.l2_norm();
-        let denom = norm_a * norm_b;
-
-        if denom == 0.0 {
-            return 1.0;
-        }
-
-        1.0 - (dot / denom)
+        simd::cosine_distance(&self.data, &other.data)
     }
 
     /// Euclidean (L2) distance.
     pub fn euclidean_distance(&self, other: &Self) -> f32 {
         self.assert_same_dimension(other);
-
-        let sum_sq: f32 = self
-            .data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| (a - b).powi(2))
-            .sum();
-
-        sum_sq.sqrt()
+        simd::euclidean_distance(&self.data, &other.data)
     }
 
     /// Inner (dot) product.
     pub fn dot_product(&self, other: &Self) -> f32 {
         self.assert_same_dimension(other);
-        self.dot_product_raw(other)
+        simd::dot_product(&self.data, &other.data)
     }
 
     /// Manhattan (L1) distance.
     pub fn manhattan_distance(&self, other: &Self) -> f32 {
         self.assert_same_dimension(other);
-
-        self.data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| (a - b).abs())
-            .sum()
+        simd::manhattan_distance(&self.data, &other.data)
     }
 
     // ── private helpers ──
 
     fn l2_norm(&self) -> f32 {
-        self.data.iter().map(|v| v * v).sum::<f32>().sqrt()
-    }
-
-    fn dot_product_raw(&self, other: &Self) -> f32 {
-        self.data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| a * b)
-            .sum()
+        simd::l2_norm_squared(&self.data).sqrt()
     }
 
     fn assert_same_dimension(&self, other: &Self) {
