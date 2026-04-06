@@ -94,17 +94,12 @@ pub enum ClusterResponse {
 // ---------------------------------------------------------------------------
 
 /// Status of a node in the cluster.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeStatus {
+    #[default]
     Active,
     Draining,
     Inactive,
-}
-
-impl Default for NodeStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 /// Information about a single node in the cluster.
