@@ -70,6 +70,17 @@ impl InvertedIndex {
         result
     }
 
+    /// Return the union of all bitmaps whose key contains `substring`.
+    pub fn search_contains(&self, substring: &str) -> RoaringBitmap {
+        let mut result = RoaringBitmap::new();
+        for (key, bitmap) in &self.postings {
+            if key.contains(substring) {
+                result |= bitmap;
+            }
+        }
+        result
+    }
+
     /// Check whether `doc_id` is associated with `value`.
     pub fn contains(&self, value: &str, doc_id: u32) -> bool {
         self.postings

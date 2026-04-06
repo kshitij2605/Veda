@@ -452,6 +452,11 @@ dependencies = [
 name = "veda-query"
 version = "0.1.0"
 dependencies = [
+ "roaring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
  "veda-core",
  "veda-index",
  "veda-storage",
