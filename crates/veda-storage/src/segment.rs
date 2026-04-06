@@ -533,6 +533,16 @@ impl SegmentReader {
         &self.delete_bitmap
     }
 
+    /// Get a mutable reference to the delete bitmap.
+    pub fn delete_bitmap_mut(&mut self) -> &mut DeleteBitmap {
+        &mut self.delete_bitmap
+    }
+
+    /// Return the segment directory path.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Get an inverted index by scalar field name.
     pub fn inverted_index(&self, field: &str) -> Option<&InvertedIndex> {
         self.inverted_indexes.get(field)
