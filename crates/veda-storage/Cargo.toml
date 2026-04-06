@@ -9,6 +9,7 @@ veda-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }
 memmap2 = "0.9"
 roaring = "0.10"
 
