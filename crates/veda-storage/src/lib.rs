@@ -1,6 +1,7 @@
 // veda-storage: segment management, vector storage, and scalar indexes
 
 pub mod bitmap_index;
+pub mod compaction;
 pub mod delete_bitmap;
 pub mod growing_segment;
 pub mod inverted_index;

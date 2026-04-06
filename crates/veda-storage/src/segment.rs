@@ -558,6 +558,11 @@ impl SegmentReader {
         self.bitmap_indexes.get(field)
     }
 
+    /// Get the collection schema.
+    pub fn schema(&self) -> &CollectionSchema {
+        &self.schema
+    }
+
     /// Return the total row count (including deleted rows).
     pub fn row_count(&self) -> u64 {
         self.metadata.row_count
