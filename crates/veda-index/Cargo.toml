@@ -1,0 +1,9 @@
+[package]
+name = "veda-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+veda-core = { workspace = true }
+veda-storage = { workspace = true }

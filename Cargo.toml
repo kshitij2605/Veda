@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/veda-core",
+    "crates/veda-storage",
+    "crates/veda-index",
+    "crates/veda-query",
+    "crates/veda-coordinator",
+    "crates/veda-gateway",
+    "crates/veda-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+bytes = "1"
+
+# Internal crates
+veda-core = { path = "crates/veda-core" }
+veda-storage = { path = "crates/veda-storage" }
+veda-index = { path = "crates/veda-index" }
+veda-query = { path = "crates/veda-query" }
+veda-coordinator = { path = "crates/veda-coordinator" }
+veda-gateway = { path = "crates/veda-gateway" }
