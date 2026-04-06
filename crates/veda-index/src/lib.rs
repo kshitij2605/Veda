@@ -1,1 +1,3 @@
-// veda-index: HNSW, DiskANN, IVF-PQ, and Flat index implementations
+pub mod distance;
+pub mod flat;
+pub mod traits;
