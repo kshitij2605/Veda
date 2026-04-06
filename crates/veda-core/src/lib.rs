@@ -1,1 +1,3 @@
-// veda-core: shared types, schema definitions, and error types
+pub mod error;
+pub mod schema;
+pub mod types;
