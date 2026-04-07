@@ -1,3 +1,4 @@
+use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::{delete, get, post};
 use axum::Router;
@@ -65,5 +66,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
             auth::auth_middleware,
         ));
 
-    public.merge(protected).with_state(app_state)
+    public
+        .merge(protected)
+        .layer(DefaultBodyLimit::max(256 * 1024 * 1024)) // 256MB max body
+        .with_state(app_state)
 }
