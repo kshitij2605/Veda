@@ -1,8 +1,3 @@
-<p align="center">
-  <!-- TODO: Replace with actual Veda logo -->
-  <img src="docs/assets/veda-logo-placeholder.png" alt="Veda" width="200" />
-</p>
-
 <h1 align="center">Veda</h1>
 
 <p align="center">
@@ -44,14 +39,35 @@
 ### Docker Compose (recommended)
 
 ```bash
+# Copy and configure environment
+cp .env.example .env
+
+# Core services (Veda + MinIO + NATS)
 docker compose up
+
+# With embedding service (HuggingFace TEI)
+docker compose --profile embedding up
+
+# With document OCR (FlashParse + GLM-OCR, text-only, ~8GB VRAM)
+docker compose --profile ocr up
+
+# With full OCR + VLM image captioning (~48GB+ VRAM)
+docker compose --profile ocr --profile ocr-vlm up
 ```
 
-This starts the Veda server, MinIO blob storage, and the Niriksha dashboard.
+This starts the Veda server, MinIO blob storage, and NATS message queue.
 
-- Veda API: `http://localhost:8080`
+- Veda API: `http://localhost:6340`
 - Niriksha dashboard: `http://localhost:5173`
 - MinIO console: `http://localhost:9001`
+
+**Optional profiles:**
+
+| Profile | Services | GPU VRAM | Purpose |
+|---|---|---|---|
+| `embedding` | HuggingFace TEI | CPU | Auto-embedding with BGE-M3 (or custom model) |
+| `ocr` | FlashParse + GLM-OCR | ~8GB | Text/table/formula OCR from documents |
+| `ocr-vlm` | VLM (Qwen3.5-35B-A3B) | ~48GB | Image captioning and classification (use with `ocr`) |
 
 ### Build from source
 
@@ -112,30 +128,33 @@ cd niriksha && npm install && npm run build
 ### Create a collection
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/collections \
+curl -X POST http://localhost:6340/v1/collections \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
     "name": "products",
-    "dimension": 768,
-    "distance": "cosine",
-    "modality": "text",
-    "index_type": "hnsw"
+    "fields": [
+      {"name": "embedding", "type": "vector", "dimension": 768, "metric": "cosine"},
+      {"name": "category", "type": "string", "filterable": true},
+      {"name": "price", "type": "float64", "filterable": true},
+      {"name": "description", "type": "string"}
+    ]
   }'
 ```
 
-### Insert vectors
+### Insert records
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/collections/products/points \
+curl -X POST http://localhost:6340/v1/collections/products/insert \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
-    "points": [
+    "records": [
       {
-        "id": "p1",
-        "vector": [0.1, 0.2, ...],
-        "payload": {"category": "electronics", "price": 299.99}
+        "embedding": [0.1, 0.2, ...],
+        "category": "electronics",
+        "price": 299.99,
+        "description": "Wireless headphones"
       }
     ]
   }'
@@ -144,24 +163,24 @@ curl -X POST http://localhost:8080/api/v1/collections/products/points \
 ### Search
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/collections/products/search \
+curl -X POST http://localhost:6340/v1/collections/products/search \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
-    "vector": [0.15, 0.22, ...],
-    "top_k": 10
+    "query": {"vector": {"field": "embedding", "values": [0.15, 0.22, ...]}},
+    "limit": 10
   }'
 ```
 
 ### Filtered search
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/collections/products/search \
+curl -X POST http://localhost:6340/v1/collections/products/search \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
-    "vector": [0.15, 0.22, ...],
-    "top_k": 10,
+    "query": {"vector": {"field": "embedding", "values": [0.15, 0.22, ...]}},
+    "limit": 10,
     "filter": "category = '\''electronics'\'' AND price < 500"
   }'
 ```
@@ -175,35 +194,34 @@ pip install veda-client
 ```python
 from veda_client import VedaClient
 
-client = VedaClient("http://localhost:8080", api_key="your-token")
+client = VedaClient("http://localhost:6340")
 
 # Create a collection
-client.create_collection(
-    name="products",
-    dimension=768,
-    distance="cosine",
-    modality="text",
-    index_type="hnsw",
-)
-
-# Insert vectors
-client.insert(
-    collection="products",
-    points=[
-        {"id": "p1", "vector": [0.1, 0.2, ...], "payload": {"category": "electronics"}},
+client.create_collection({
+    "name": "products",
+    "fields": [
+        {"name": "embedding", "type": "vector", "dimension": 768, "metric": "cosine"},
+        {"name": "category", "type": "string", "filterable": True},
+        {"name": "price", "type": "float64", "filterable": True},
     ],
-)
+})
+
+# Insert records
+client.insert("products", [
+    {"embedding": [0.1, 0.2, ...], "category": "electronics", "price": 299.99},
+])
 
 # Search
-results = client.search(
+response = client.search(
     collection="products",
+    field="embedding",
     vector=[0.15, 0.22, ...],
-    top_k=10,
+    limit=10,
     filter="category = 'electronics'",
 )
 
-for hit in results:
-    print(f"{hit.id}: {hit.score:.4f}")
+for hit in response.results:
+    print(f"{hit.id}: {hit.distance:.4f}")
 ```
 
 ## Document Processing
@@ -228,21 +246,26 @@ Veda provides **end-to-end document processing**: upload a document and Veda han
 
 ### Setup
 
-1. Copy `.env.example` to `.env` and configure your VLM backend:
+1. Copy `.env.example` to `.env` and configure:
 
 ```bash
 cp .env.example .env
-# Edit .env to set VLM_ENDPOINT, VLM_API_KEY, and VLM_MODEL
 ```
 
-2. Start Veda with FlashParse enabled:
+2. Start Veda with OCR enabled:
 
 ```bash
+# Text-only OCR (FlashParse + GLM-OCR, ~8GB VRAM)
 docker compose --profile ocr up
+
+# Full OCR with VLM image captioning (~48GB+ VRAM)
+docker compose --profile ocr --profile ocr-vlm up
 ```
 
-**VLM configuration:** FlashParse uses a vision-language model for OCR. Set these environment variables to point to any OpenAI-compatible API (vLLM, SGLang, OpenAI, Together AI, etc.):
-- `VLM_ENDPOINT` -- e.g., `http://host.docker.internal:8008/v1/chat/completions`
+The `ocr` profile starts FlashParse and GLM-OCR for text, table, and formula extraction. Add the `ocr-vlm` profile to also start the VLM service (Qwen/Qwen3.5-35B-A3B-FP8 on vLLM) for image captioning and classification.
+
+**VLM configuration:** If you prefer to use an external VLM instead of the Docker-managed one, set these environment variables to point to any OpenAI-compatible API:
+- `VLM_ENDPOINT` -- e.g., `http://your-server:8008/v1/chat/completions`
 - `VLM_API_KEY` -- your API key (leave empty for local models)
 - `VLM_MODEL` -- the model name to use
 
@@ -254,14 +277,16 @@ PDF, DOCX, PPTX, images (PNG, JPG, TIFF, BMP), and other formats supported by Fl
 
 ```bash
 # 1. Create a collection for documents
-curl -X POST http://localhost:6340/v1/collections -d '{
+curl -X POST http://localhost:6340/v1/collections \
+  -H "Content-Type: application/json" \
+  -d '{
   "name": "my-docs",
   "fields": [
-    {"name": "content", "field_type": "string", "filterable": true},
-    {"name": "content_embedding", "field_type": "vector", "dimension": 768, "metric": "cosine"},
-    {"name": "source_file", "field_type": "string", "filterable": true},
-    {"name": "chunk_index", "field_type": "integer"},
-    {"name": "image_blob", "field_type": "blob"}
+    {"name": "content", "type": "string", "filterable": true},
+    {"name": "content_embedding", "type": "vector", "dimension": 768, "metric": "cosine"},
+    {"name": "source_file", "type": "string", "filterable": true},
+    {"name": "chunk_index", "type": "int32"},
+    {"name": "image_blob", "type": "blob"}
   ]
 }'
 
@@ -334,9 +359,6 @@ If FlashParse is not running, the endpoint returns a clear error with setup inst
 
 ## Niriksha Dashboard
 
-<!-- TODO: Replace with actual screenshot -->
-![Niriksha Dashboard](docs/assets/niriksha-screenshot-placeholder.png)
-
 **Niriksha** is Veda's built-in data visualization and exploration dashboard for multimodal vector data. It provides:
 
 - Collection overview with real-time statistics
@@ -381,10 +403,8 @@ project-mdb/
   niriksha/             # Visualization dashboard (React + TypeScript)
   sdk/
     python/             # Python SDK (veda-client)
-  docs/                 # Design documents and plans
-  documentation/        # ADRs and reference docs
+  documentation/        # Architecture docs and ADRs
   research/             # Research notes and analysis
-  scripts/              # Build and deployment scripts
 ```
 
 ## Contributing

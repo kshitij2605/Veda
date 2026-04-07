@@ -1332,24 +1332,9 @@ CompactionResult
 
 ## 13. Configuration
 
-The system uses environment variables and CLI arguments. A `veda.toml` configuration file is planned with these sections:
+The system uses environment variables and CLI arguments. See `.env.example` for all available options.
 
-| Section | Description |
-|---|---|
-| `[cluster]` | Cluster mode (standalone/distributed), node ID, peers |
-| `[coordinator]` | Consensus settings, election timeout |
-| `[gateway]` | Listen address (default `0.0.0.0:6340`), TLS, CORS |
-| `[storage]` | Object storage endpoint, credentials, bucket |
-| `[message_queue]` | NATS/JetStream endpoint, stream names |
-| `[query]` | Default search parameters (ef_search, nprobe) |
-| `[data]` | Local data directory path |
-| `[index]` | Default index types and parameters per modality |
-| `[embedding]` | Model registry configuration (endpoints, dimensions) |
-| `[niriksha]` | Dashboard settings (enabled, port) |
-| `[logging]` | Log level, format (JSON/text), RUST_LOG override |
-| `[metrics]` | Prometheus endpoint, push gateway |
-
-Currently, configuration is done via:
+Configuration is done via:
 - CLI args: `veda-server [data_dir] [listen_addr]`
 - Environment: `RUST_LOG` (tracing filter), `VEDA_STORAGE_ENDPOINT`, `VEDA_STORAGE_ACCESS_KEY`, `VEDA_STORAGE_SECRET_KEY`, `VEDA_MQ_ENDPOINT`
 
@@ -1371,12 +1356,27 @@ Creates the data directory, starts the HTTP server. Auth is disabled by default.
 
 **File:** `docker-compose.yml`
 
-Three services:
+**Core services** (always started):
 - **MinIO** -- S3-compatible object storage for blobs (ports 9000/9001)
 - **NATS** -- JetStream message queue for WAL replication (ports 4222/8222)
 - **Veda** -- The database server (port 6340)
 
-Named volumes: `minio-data`, `nats-data`, `veda-data`.
+**Optional profiles:**
+
+| Profile | Service | Port | GPU VRAM | Description |
+|---|---|---|---|---|
+| `embedding` | HuggingFace TEI | 8090 | CPU | Embedding model server (default: BAAI/bge-m3) |
+| `ocr` | FlashParse | 8000 | ~1GB | Document OCR orchestrator |
+| `ocr` | GLM-OCR (vLLM) | 8080 | ~8GB | Text/table/formula OCR model |
+| `ocr-vlm` | VLM (vLLM) | 8008 | ~48GB | Image captioning VLM (default: Qwen/Qwen3.5-35B-A3B-FP8) |
+
+Usage:
+- `docker compose up` -- core services only
+- `docker compose --profile embedding up` -- core + embedding
+- `docker compose --profile ocr up` -- core + text OCR
+- `docker compose --profile ocr --profile ocr-vlm up` -- core + full OCR pipeline with VLM
+
+Named volumes: `minio-data`, `nats-data`, `veda-data`, `embedding-model-cache`, `vlm-model-cache`, `glm-ocr-model-cache`, `flashparse-data`.
 
 Veda connects to MinIO and NATS via environment variables. MinIO has a health check; Veda depends on MinIO being healthy and NATS being started.
 
@@ -1434,9 +1434,11 @@ The batch endpoint (`process-documents`) accepts multiple files in the multipart
 
 **Docker Compose profile mechanism:**
 
-- FlashParse is defined under `profiles: ["ocr"]` in `docker-compose.yml`
-- Standard `docker compose up` does NOT start FlashParse
-- `docker compose --profile ocr up` starts FlashParse alongside the core services
+- FlashParse and GLM-OCR are defined under `profiles: ["ocr"]` in `docker-compose.yml`
+- VLM is defined under `profiles: ["ocr-vlm"]` -- separate because it requires ~48GB GPU VRAM
+- Standard `docker compose up` does NOT start any OCR services
+- `docker compose --profile ocr up` starts FlashParse + GLM-OCR for text-only OCR (~8GB VRAM)
+- `docker compose --profile ocr --profile ocr-vlm up` starts the full pipeline including VLM for image captioning
 - If FlashParse is not running, the `/process-document` endpoint returns `OCR_SERVICE_UNAVAILABLE` with setup instructions
 
 **Configuration:**
