@@ -1,0 +1,172 @@
+# Veda Configuration
+# Copy this file to veda.toml and edit as needed.
+# Environment variables can be referenced as ${VAR_NAME}.
+
+# ---------------------------------------------------------------------------
+# Cluster
+# ---------------------------------------------------------------------------
+[cluster]
+# Cluster name, used for identification in multi-cluster setups.
+name = "default"
+
+# Directory for local data (WAL, growing segments, cache).
+data_dir = "/var/veda/data"
+
+# ---------------------------------------------------------------------------
+# Coordinator (Raft consensus)
+# ---------------------------------------------------------------------------
+[coordinator]
+# Port for Raft inter-node communication.
+raft_port = 6342
+
+# Peer addresses for the Raft quorum (3 or 5 nodes recommended).
+# raft_peers = ["node1:6342", "node2:6342", "node3:6342"]
+
+# ---------------------------------------------------------------------------
+# Gateway (client-facing API)
+# ---------------------------------------------------------------------------
+[gateway]
+# REST API listen port.
+rest_port = 6340
+
+# gRPC API listen port.
+grpc_port = 6341
+
+# Maximum request body size.
+max_request_size = "256MB"
+
+# ---------------------------------------------------------------------------
+# Object Storage (sealed segments, blobs)
+# ---------------------------------------------------------------------------
+[storage]
+# Backend type: minio | s3 | gcs | azure | local
+backend = "minio"
+
+# Endpoint address (host:port for MinIO, or cloud URL).
+endpoint = "localhost:9000"
+
+# Bucket / container name.
+bucket = "veda-data"
+
+# Credentials (prefer environment variables for secrets).
+access_key = "${VEDA_STORAGE_ACCESS_KEY}"
+secret_key = "${VEDA_STORAGE_SECRET_KEY}"
+
+# ---------------------------------------------------------------------------
+# Message Queue (WAL, event streaming)
+# ---------------------------------------------------------------------------
+[message_queue]
+# Backend type: nats | kafka
+backend = "nats"
+
+# Endpoint address.
+endpoint = "localhost:4222"
+
+# ---------------------------------------------------------------------------
+# Query Engine
+# ---------------------------------------------------------------------------
+[query]
+# Default number of results returned per search.
+default_limit = 20
+
+# Hard ceiling on results per search.
+max_limit = 10000
+
+# Per-query timeout.
+timeout = "30s"
+
+# In-memory cache size for frequently accessed segments.
+cache_size = "2GB"
+
+# ---------------------------------------------------------------------------
+# Data Node
+# ---------------------------------------------------------------------------
+[data]
+# Target size before a growing segment is sealed.
+segment_size = "512MB"
+
+# WAL durability: fsync | async
+wal_sync = "fsync"
+
+# How often compaction runs.
+compaction_interval = "1h"
+
+# ---------------------------------------------------------------------------
+# Index
+# ---------------------------------------------------------------------------
+[index]
+# HNSW defaults.
+default_hnsw_m = 16
+default_hnsw_ef_construction = 200
+default_hnsw_ef_search = 128
+
+# Enable GPU-accelerated index building (requires NVIDIA GPU + cuVS).
+gpu_enabled = false
+
+# Auto-select index type by collection vector count.
+[index.auto_select]
+flat_threshold = 10000          # <= this count -> Flat
+hnsw_threshold = 100000000      # <= this count -> HNSW
+diskann_threshold = 1000000000  # <= this count -> DiskANN
+                                 # above -> IVF-PQ
+
+# Auto-select quantization by vector dimension.
+[index.quantization]
+auto = true
+sq_threshold = 512    # dims <= this -> Scalar Quantization
+rabitq_threshold = 1024  # dims <= this -> RaBitQ; above -> Product Quantization
+
+# ---------------------------------------------------------------------------
+# Embedding Service (optional auto-embedding)
+# ---------------------------------------------------------------------------
+[embedding]
+enabled = false
+
+# Example model configuration (uncomment and adjust):
+# [embedding.models.clip-vit-l-14]
+# endpoint = "http://localhost:8080/v1/embeddings"
+# supported_modalities = ["text", "image"]
+# output_dimension = 768
+
+# [embedding.models.gemini-embedding-2]
+# endpoint = "https://api.google.com/v1/embeddings"
+# supported_modalities = ["text", "image", "video", "audio", "pdf"]
+# output_dimension = 3072
+
+# ---------------------------------------------------------------------------
+# Niriksha Dashboard
+# ---------------------------------------------------------------------------
+[niriksha]
+# Serve the built-in Niriksha UI at /niriksha/.
+enabled = true
+
+# Require JWT authentication for dashboard access.
+auth_enabled = true
+
+# Secret used to sign JWTs (set via environment variable).
+jwt_secret = "${VEDA_JWT_SECRET}"
+
+# LLM-based evaluation engine for data quality scoring.
+[niriksha.evaluation]
+llm_endpoint = "http://localhost:8080/v1/chat/completions"
+llm_model = "qwen-3.5-122b"
+concurrency = 16
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+[logging]
+# Log level: trace | debug | info | warn | error
+level = "info"
+
+# Log format: json | pretty
+format = "json"
+
+# ---------------------------------------------------------------------------
+# Metrics & Observability
+# ---------------------------------------------------------------------------
+[metrics]
+enabled = true
+
+# Port for the Prometheus /metrics endpoint.
+prometheus_port = 9090

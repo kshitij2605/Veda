@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: veda
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-vedapassword}
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:latest
+    command: ["--jetstream", "--store_dir=/data"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"  # monitoring
+    volumes:
+      - nats-data:/data
+
+  veda:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "6340:6340"
+    volumes:
+      - veda-data:/var/veda/data
+    environment:
+      RUST_LOG: info
+      VEDA_STORAGE_ENDPOINT: minio:9000
+      VEDA_STORAGE_ACCESS_KEY: veda
+      VEDA_STORAGE_SECRET_KEY: ${MINIO_PASSWORD:-vedapassword}
+      VEDA_MQ_ENDPOINT: nats:4222
+    depends_on:
+      minio:
+        condition: service_healthy
+      nats:
+        condition: service_started
+
+volumes:
+  minio-data:
+  nats-data:
+  veda-data:

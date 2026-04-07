@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  veda:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "6340:6340"
+    volumes:
+      - veda-dev-data:/var/veda/data
+    environment:
+      RUST_LOG: debug
+
+volumes:
+  veda-dev-data:

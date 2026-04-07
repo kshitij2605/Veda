@@ -1,0 +1,8 @@
+target/
+niriksha/node_modules/
+niriksha/dist/
+.git/
+.claude/
+research/
+docs/
+*.md
