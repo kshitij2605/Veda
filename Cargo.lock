@@ -1555,6 +1555,7 @@ dependencies = [
 name = "veda-storage"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "memmap2",
  "roaring",
  "serde",
