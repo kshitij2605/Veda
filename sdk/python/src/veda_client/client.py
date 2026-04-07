@@ -2,7 +2,6 @@ import requests
 
 from .models import (
     CollectionSchema,
-    FieldDefinition,
     SearchResponse,
     SearchResult,
 )
@@ -15,7 +14,7 @@ from .exceptions import (
 
 
 class VedaClient:
-    def __init__(self, url: str = "http://localhost:6340", token: str = None):
+    def __init__(self, url: str = "http://localhost:6340", token: str | None = None):
         self.url = url.rstrip("/")
         self.session = requests.Session()
         self.session.headers["Content-Type"] = "application/json"
@@ -95,7 +94,7 @@ class VedaClient:
         field: str,
         vector: list[float],
         limit: int = 10,
-        filter: str = None,
+        filter: str | None = None,
     ) -> SearchResponse:
         """Single-vector search."""
         body = {
@@ -116,7 +115,7 @@ class VedaClient:
         queries: list[dict],
         fusion: str = "rrf",
         limit: int = 10,
-        filter: str = None,
+        filter: str | None = None,
     ) -> SearchResponse:
         """Multi-vector fusion search.
 
