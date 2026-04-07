@@ -11,3 +11,8 @@ veda-index = { workspace = true }
 veda-query = { workspace = true }
 veda-coordinator = { workspace = true }
 veda-gateway = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
