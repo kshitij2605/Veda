@@ -47,7 +47,37 @@ services:
       nats:
         condition: service_started
 
+  # --- OCR Services (optional, enabled with --profile ocr) ---
+  flashparse:
+    profiles: ["ocr"]
+    image: ghcr.io/kshitij2605/flashparse:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.flashparse
+    ports:
+      - "8000:8000"
+    environment:
+      VLM_ENDPOINT: ${VLM_ENDPOINT:-http://host.docker.internal:8008/v1/chat/completions}
+      VLM_API_KEY: ${VLM_API_KEY:-}
+      VLM_MODEL: ${VLM_MODEL:-}
+      GLMOCR_CONFIG_PATH: /app/glmocr_config.yaml
+    volumes:
+      - flashparse-data:/tmp/flashparse
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
 volumes:
   minio-data:
   nats-data:
   veda-data:
+  flashparse-data:

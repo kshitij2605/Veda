@@ -6,6 +6,7 @@ use crate::auth;
 
 pub mod admin;
 pub mod collections;
+pub mod document;
 pub mod embed_insert;
 pub mod records;
 pub mod search;
@@ -49,6 +50,11 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/collections/{name}/records",
             delete(records::delete_records),
+        )
+        // Document processing (OCR)
+        .route(
+            "/v1/collections/{name}/process-document",
+            post(document::process_document),
         )
         .layer(middleware::from_fn_with_state(
             app_state.clone(),

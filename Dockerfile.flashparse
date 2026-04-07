@@ -1,0 +1,19 @@
+FROM python:3.10-slim
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    libreoffice-core \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install FlashParse from GitHub
+RUN pip install --no-cache-dir "glm-hybrid-ocr @ git+https://github.com/kshitij2605/FlashParse.git"
+
+# Copy default GLM-OCR config
+RUN pip show glm-hybrid-ocr | grep Location | cut -d' ' -f2 > /tmp/pkg_loc.txt && \
+    cp "$(cat /tmp/pkg_loc.txt)/glm_hybrid_ocr/config/glmocr_config.yaml" /app/glmocr_config.yaml 2>/dev/null || true
+
+EXPOSE 8000
+
+CMD ["python", "-m", "glm_hybrid_ocr.api.main"]

@@ -34,6 +34,8 @@ pub struct AppStateInner {
     pub embedding_registry: RwLock<EmbeddingModelRegistry>,
     /// Base data directory.
     pub data_dir: PathBuf,
+    /// FlashParse OCR endpoint (None = document processing disabled).
+    pub flashparse_endpoint: Option<String>,
     /// Whether JWT authentication is enabled.
     pub auth_enabled: bool,
     /// Secret used for JWT signing and verification.
@@ -52,6 +54,7 @@ impl AppState {
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 data_dir: data_dir.to_owned(),
+                flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: false,
                 jwt_secret: "default-test-secret".to_owned(),
                 users: HashMap::new(),
@@ -76,6 +79,7 @@ impl AppState {
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 data_dir: data_dir.to_owned(),
+                flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: true,
                 jwt_secret: jwt_secret.to_owned(),
                 users,
@@ -96,6 +100,7 @@ impl AppState {
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 data_dir: data_dir.to_owned(),
+                flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: true,
                 jwt_secret: jwt_secret.to_owned(),
                 users,

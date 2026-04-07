@@ -204,6 +204,38 @@ for hit in results:
     print(f"{hit.id}: {hit.score:.4f}")
 ```
 
+## Document Processing
+
+Veda integrates with [FlashParse](https://github.com/kshitij2605/FlashParse) for OCR-based document processing. FlashParse converts PDFs, DOCX, PPTX, images, and other document formats into structured markdown with extracted images, which Veda then chunks and indexes for vector search.
+
+### Enable Document Processing
+
+FlashParse runs as an optional Docker Compose service under the `ocr` profile:
+
+```bash
+# Start Veda with document processing enabled
+docker compose --profile ocr up
+
+# Or start only FlashParse alongside an already-running Veda
+docker compose --profile ocr up flashparse
+```
+
+**GPU requirement:** FlashParse uses a vision-language model for OCR and requires an NVIDIA GPU. Set `VLM_ENDPOINT`, `VLM_API_KEY`, and `VLM_MODEL` environment variables to configure the VLM backend.
+
+### Supported Formats
+
+PDF, DOCX, PPTX, images (PNG, JPG, TIFF, BMP), and other formats supported by FlashParse.
+
+### Usage
+
+```bash
+curl -X POST http://localhost:6340/v1/collections/my-docs/process-document \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@document.pdf"
+```
+
+The endpoint extracts text and images from the document, chunks the content, and inserts the resulting records into the specified collection. If FlashParse is not running, the endpoint returns a clear error with setup instructions.
+
 ## Niriksha Dashboard
 
 <!-- TODO: Replace with actual screenshot -->

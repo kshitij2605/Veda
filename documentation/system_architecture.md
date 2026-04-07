@@ -1351,7 +1351,54 @@ Named volumes: `minio-data`, `nats-data`, `veda-data`.
 
 Veda connects to MinIO and NATS via environment variables. MinIO has a health check; Veda depends on MinIO being healthy and NATS being started.
 
-### 14.3 Kubernetes (Planned)
+### 14.3 FlashParse OCR (Optional Sidecar)
+
+Veda integrates with FlashParse for document processing (OCR). FlashParse is deployed as an optional Docker Compose service using the `ocr` profile, meaning it only starts when explicitly requested.
+
+```
+                ┌──────────────────────────┐
+                │      Client Layer        │
+                │  POST /process-document  │
+                └──────────┬───────────────┘
+                           │ HTTP :6340
+                ┌──────────▼───────────────┐
+                │     veda-gateway         │
+                │   document::process_doc  │
+                └──────────┬───────────────┘
+                           │ HTTP :8000 (internal)
+                ┌──────────▼───────────────┐
+                │     FlashParse           │
+                │   (optional sidecar)     │
+                │   OCR + VLM pipeline     │
+                └──────────┬───────────────┘
+                           │ ZIP (markdown + images)
+                ┌──────────▼───────────────┐
+                │     veda-gateway         │
+                │   chunk → embed → insert │
+                └──────────────────────────┘
+```
+
+**Data flow:**
+
+1. Client uploads a document (PDF, DOCX, image, etc.) to `POST /v1/collections/{name}/process-document`
+2. Gateway forwards the file to FlashParse at `http://flashparse:8000/api/v1/pdf/process`
+3. FlashParse processes the document using its VLM-based OCR pipeline and returns a ZIP containing structured markdown, extracted images, and metadata
+4. Gateway extracts the ZIP, chunks the markdown by headings and page separators, and creates records for each chunk and image
+5. Records are inserted into the specified collection
+
+**Docker Compose profile mechanism:**
+
+- FlashParse is defined under `profiles: ["ocr"]` in `docker-compose.yml`
+- Standard `docker compose up` does NOT start FlashParse
+- `docker compose --profile ocr up` starts FlashParse alongside the core services
+- If FlashParse is not running, the `/process-document` endpoint returns `OCR_SERVICE_UNAVAILABLE` with setup instructions
+
+**Configuration:**
+
+- `VEDA_FLASHPARSE_ENDPOINT` environment variable overrides the default endpoint (`http://flashparse:8000`)
+- FlashParse requires `VLM_ENDPOINT`, `VLM_API_KEY`, and `VLM_MODEL` for the vision-language model backend
+
+### 14.4 Kubernetes (Planned)
 
 A Helm chart is planned for Kubernetes deployment with:
 - StatefulSet for Veda nodes
