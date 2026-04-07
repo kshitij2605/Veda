@@ -1,0 +1,399 @@
+use std::collections::HashMap;
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use veda_core::embedding::Modality;
+use veda_core::embedding_client::EmbeddingClient;
+use veda_core::record::{FieldValue, Record};
+use veda_core::types::FieldType;
+use veda_core::vector::DenseVector;
+
+use super::collections::ErrorResponse;
+use super::records::rebuild_executors;
+use super::state::AppState;
+
+// ── Request / Response types ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct EmbedInsertRequest {
+    pub records: Vec<serde_json::Map<String, serde_json::Value>>,
+    pub auto_embed: HashMap<String, AutoEmbedMapping>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AutoEmbedMapping {
+    pub source_field: String,
+    pub model: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbedInsertResponse {
+    pub inserted: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<RecordError>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecordError {
+    pub index: usize,
+    pub error: String,
+}
+
+// ── Handler ──────────────────────────────────────────────────────────────
+
+pub async fn embed_insert(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<EmbedInsertRequest>,
+) -> Result<(StatusCode, Json<EmbedInsertResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let schema = {
+        let schemas = state.inner.schemas.read().await;
+        schemas.get(&name).cloned().ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("collection '{name}' not found"),
+                }),
+            )
+        })?
+    };
+
+    let registry = state.inner.embedding_registry.read().await;
+
+    // Validate all auto_embed mappings up front.
+    for (target_field, mapping) in &req.auto_embed {
+        // Validate model exists.
+        let model = registry.get(&mapping.model).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("model '{}' not found in registry", mapping.model),
+                }),
+            )
+        })?;
+
+        // Detect modality from source field name.
+        let modality = Modality::from_field_name(&mapping.source_field).unwrap_or(Modality::Text);
+
+        // Validate model supports the modality.
+        registry.validate_modality(&mapping.model, modality).map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+        // Validate target field is a vector field.
+        let target_def = schema.get_field(target_field).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("target field '{target_field}' not found in schema"),
+                }),
+            )
+        })?;
+        match target_def.field_type() {
+            FieldType::Vector { dimension, .. } => {
+                if model.output_dimension != *dimension {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "model '{}' output dimension {} does not match field '{}' dimension {}",
+                                mapping.model, model.output_dimension, target_field, dimension
+                            ),
+                        }),
+                    ));
+                }
+            }
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("target field '{target_field}' is not a vector field"),
+                    }),
+                ));
+            }
+        }
+    }
+
+    // Process each record: generate embeddings, then insert.
+    let mut inserted = 0usize;
+    let mut errors = Vec::new();
+
+    let mut managers = state.inner.segment_managers.write().await;
+    let shard_map = managers.get_mut(&name).ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "no segment managers for collection".into(),
+            }),
+        )
+    })?;
+
+    let shard_count = schema.shard_count();
+
+    for (idx, raw) in req.records.iter().enumerate() {
+        // Clone the raw map so we can inject vector fields.
+        let mut augmented = raw.clone();
+
+        // Generate embeddings for each auto_embed mapping.
+        let mut embed_ok = true;
+        for (target_field, mapping) in &req.auto_embed {
+            let source_value = match raw.get(&mapping.source_field) {
+                Some(v) => v,
+                None => {
+                    errors.push(RecordError {
+                        index: idx,
+                        error: format!("source field '{}' not present in record", mapping.source_field),
+                    });
+                    embed_ok = false;
+                    break;
+                }
+            };
+
+            let model_config = registry.get(&mapping.model).unwrap();
+            let client = EmbeddingClient::new(model_config.clone());
+            let modality = Modality::from_field_name(&mapping.source_field).unwrap_or(Modality::Text);
+
+            let vector = match modality {
+                Modality::Text => {
+                    let text = source_value.as_str().unwrap_or("");
+                    match client.embed_text(text) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            errors.push(RecordError {
+                                index: idx,
+                                error: format!("embedding failed: {e}"),
+                            });
+                            embed_ok = false;
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    // For non-text modalities, expect base64-encoded data.
+                    let b64 = source_value.as_str().unwrap_or("");
+                    let bytes = base64_decode(b64).map_err(|e| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse {
+                                error: format!("invalid base64 in field '{}': {e}", mapping.source_field),
+                            }),
+                        )
+                    })?;
+                    match client.embed_bytes(&bytes, modality) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            errors.push(RecordError {
+                                index: idx,
+                                error: format!("embedding failed: {e}"),
+                            });
+                            embed_ok = false;
+                            break;
+                        }
+                    }
+                }
+            };
+
+            // Inject the vector into the augmented record.
+            augmented.insert(
+                target_field.clone(),
+                serde_json::Value::Array(vector.iter().map(|f| serde_json::json!(*f)).collect()),
+            );
+        }
+
+        if !embed_ok {
+            continue;
+        }
+
+        // Parse the augmented record using existing logic.
+        let record = match parse_record_for_embed(&augmented, &schema) {
+            Ok(r) => r,
+            Err(e) => {
+                errors.push(RecordError {
+                    index: idx,
+                    error: e,
+                });
+                continue;
+            }
+        };
+
+        let shard_id = record.id().as_u128() as u32 % shard_count;
+        let sm = shard_map.get_mut(&shard_id).ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("shard {shard_id} not found"),
+                }),
+            )
+        })?;
+
+        sm.insert(record).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("insert failed: {e}"),
+                }),
+            )
+        })?;
+
+        inserted += 1;
+    }
+
+    // Seal growing segments.
+    for sm in shard_map.values_mut() {
+        sm.seal_growing().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("failed to seal segment: {e}"),
+                }),
+            )
+        })?;
+    }
+
+    drop(managers);
+    drop(registry);
+    rebuild_executors(&state, &name).await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(EmbedInsertResponse { inserted, errors }),
+    ))
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+/// Parse a JSON map into a Record, tolerating missing non-vector fields.
+fn parse_record_for_embed(
+    raw: &serde_json::Map<String, serde_json::Value>,
+    schema: &veda_core::schema::CollectionSchema,
+) -> Result<Record, String> {
+    let mut record = Record::new();
+
+    for field_def in schema.fields() {
+        let name = field_def.name();
+        let value = match raw.get(name) {
+            Some(v) => v,
+            None => {
+                if matches!(field_def.field_type(), FieldType::Vector { .. }) {
+                    return Err(format!("missing required vector field '{name}'"));
+                }
+                continue;
+            }
+        };
+
+        let fv = json_to_field_value(value, field_def.field_type())
+            .map_err(|e| format!("field '{name}': {e}"))?;
+        record.set(name, fv);
+    }
+
+    Ok(record)
+}
+
+fn json_to_field_value(
+    value: &serde_json::Value,
+    field_type: &FieldType,
+) -> Result<FieldValue, String> {
+    match field_type {
+        FieldType::Vector { .. } => {
+            let arr = value.as_array().ok_or("expected array for vector field")?;
+            let floats: Vec<f32> = arr
+                .iter()
+                .map(|v| {
+                    v.as_f64()
+                        .map(|f| f as f32)
+                        .ok_or("vector elements must be numbers")
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(FieldValue::Vector(DenseVector::new(floats)))
+        }
+        FieldType::String => {
+            let s = value.as_str().ok_or("expected string")?;
+            Ok(FieldValue::String(s.to_owned()))
+        }
+        FieldType::Int32 => {
+            let n = value.as_i64().ok_or("expected integer")?;
+            Ok(FieldValue::Int32(n as i32))
+        }
+        FieldType::Int64 => {
+            let n = value.as_i64().ok_or("expected integer")?;
+            Ok(FieldValue::Int64(n))
+        }
+        FieldType::Float32 => {
+            let n = value.as_f64().ok_or("expected number")?;
+            Ok(FieldValue::Float32(n as f32))
+        }
+        FieldType::Float64 => {
+            let n = value.as_f64().ok_or("expected number")?;
+            Ok(FieldValue::Float64(n))
+        }
+        FieldType::Bool => {
+            let b = value.as_bool().ok_or("expected boolean")?;
+            Ok(FieldValue::Bool(b))
+        }
+        FieldType::Timestamp => {
+            let n = value.as_i64().ok_or("expected integer timestamp")?;
+            Ok(FieldValue::Timestamp(n))
+        }
+        FieldType::Blob => {
+            let s = value.as_str().ok_or("expected string for blob ref")?;
+            Ok(FieldValue::BlobRef(s.to_owned()))
+        }
+        FieldType::Json => Ok(FieldValue::Json(value.clone())),
+        FieldType::Uuid => {
+            let s = value.as_str().ok_or("expected string for uuid")?;
+            let u: uuid::Uuid = s.parse().map_err(|_| "invalid UUID")?;
+            Ok(FieldValue::Uuid(u))
+        }
+        _ => Err(format!("unsupported field type: {field_type:?}")),
+    }
+}
+
+/// Simple base64 decoder (standard alphabet, with optional padding).
+fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    const TABLE: [u8; 256] = {
+        let mut t = [255u8; 256];
+        let mut i = 0u8;
+        while i < 26 {
+            t[(b'A' + i) as usize] = i;
+            t[(b'a' + i) as usize] = i + 26;
+            i += 1;
+        }
+        let mut d = 0u8;
+        while d < 10 {
+            t[(b'0' + d) as usize] = d + 52;
+            d += 1;
+        }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t
+    };
+
+    let input = input.trim_end_matches('=');
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+
+    for &b in bytes {
+        let val = TABLE[b as usize];
+        if val == 255 {
+            return Err(format!("invalid base64 character: '{}'", b as char));
+        }
+        buf = (buf << 6) | val as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+
+    Ok(out)
+}

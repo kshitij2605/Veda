@@ -369,7 +369,7 @@ fn field_value_to_json(fv: &FieldValue) -> serde_json::Value {
 ///
 /// Creates new LocalShardSearcher instances that load sealed segments from
 /// disk, then builds vector indexes so search can find the data.
-async fn rebuild_executors(
+pub async fn rebuild_executors(
     state: &AppState,
     collection_name: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {

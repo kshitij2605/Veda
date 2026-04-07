@@ -3,6 +3,7 @@ use axum::Router;
 
 pub mod admin;
 pub mod collections;
+pub mod embed_insert;
 pub mod records;
 pub mod search;
 pub mod state;
@@ -25,6 +26,10 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route("/v1/collections/{name}/search", post(search::search))
         // Records
         .route("/v1/collections/{name}/insert", post(records::insert))
+        .route(
+            "/v1/collections/{name}/embed-insert",
+            post(embed_insert::embed_insert),
+        )
         .route(
             "/v1/collections/{name}/records/{id}",
             get(records::get_record),
