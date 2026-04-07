@@ -76,8 +76,21 @@ services:
               count: 1
               capabilities: [gpu]
 
+  # --- Embedding Service (optional, enabled with --profile embedding) ---
+  embedding:
+    profiles: ["embedding"]
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+    ports:
+      - "8090:80"
+    environment:
+      MODEL_ID: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+    volumes:
+      - embedding-model-cache:/data
+    command: ["--model-id", "${EMBEDDING_MODEL:-BAAI/bge-m3}", "--port", "80"]
+
 volumes:
   minio-data:
   nats-data:
   veda-data:
   flashparse-data:
+  embedding-model-cache:

@@ -73,6 +73,7 @@ impl std::fmt::Display for Modality {
 pub struct EmbeddingModelConfig {
     pub name: String,
     pub endpoint: String,
+    pub api_key: String,
     pub supported_modalities: Vec<Modality>,
     pub output_dimension: u32,
     pub max_input_size_bytes: usize,

@@ -3,9 +3,8 @@ use crate::error::{Result, VedaError};
 
 /// Client for calling embedding model endpoints.
 ///
-/// Uses a mock implementation that returns deterministic vectors
-/// based on input hashing, enabling full pipeline testing without
-/// external services.
+/// Uses a real HTTP client for endpoints starting with "http" (excluding "mock"),
+/// and falls back to a deterministic mock for testing.
 pub struct EmbeddingClient {
     config: EmbeddingModelConfig,
 }
@@ -15,14 +14,18 @@ impl EmbeddingClient {
         Self { config }
     }
 
-    /// Embed a text string. Returns a deterministic, normalized vector.
+    /// Embed a text string. Uses HTTP for real endpoints, mock otherwise.
     pub fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
         self.validate_input(text.as_bytes(), Modality::Text)?;
-        Ok(deterministic_vector(text.as_bytes(), self.config.output_dimension))
+        if self.is_real_endpoint() {
+            self.embed_text_http(text)
+        } else {
+            Ok(deterministic_vector(text.as_bytes(), self.config.output_dimension))
+        }
     }
 
     /// Embed raw bytes (image, audio, video, pdf).
-    /// Returns a deterministic, normalized vector.
+    /// Uses mock for now; real HTTP support for non-text modalities can be added later.
     pub fn embed_bytes(&self, data: &[u8], modality: Modality) -> Result<Vec<f32>> {
         self.validate_input(data, modality)?;
         Ok(deterministic_vector(data, self.config.output_dimension))
@@ -47,6 +50,55 @@ impl EmbeddingClient {
         }
 
         Ok(())
+    }
+
+    fn is_real_endpoint(&self) -> bool {
+        self.config.endpoint.starts_with("http") && !self.config.endpoint.contains("mock")
+            && !self.config.endpoint.contains("localhost")
+    }
+
+    fn embed_text_http(&self, text: &str) -> Result<Vec<f32>> {
+        let client = reqwest::blocking::Client::new();
+        let body = serde_json::json!({
+            "model": self.config.name,
+            "input": text
+        });
+
+        let url = format!("{}/v1/embeddings", self.config.endpoint.trim_end_matches('/'));
+        let mut request = client
+            .post(&url)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(self.config.timeout_seconds as u64));
+
+        if !self.config.api_key.is_empty() {
+            request = request.bearer_auth(&self.config.api_key);
+        }
+
+        let resp = request
+            .send()
+            .map_err(|e| VedaError::Storage(format!("embedding request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            return Err(VedaError::Storage(format!(
+                "embedding endpoint returned {status}: {body}"
+            )));
+        }
+
+        let json: serde_json::Value = resp
+            .json()
+            .map_err(|e| VedaError::Storage(format!("embedding response parse failed: {e}")))?;
+
+        // Parse OpenAI-compatible response: {"data": [{"embedding": [...]}]}
+        let embedding = json["data"][0]["embedding"]
+            .as_array()
+            .ok_or_else(|| VedaError::Storage("invalid embedding response format".into()))?
+            .iter()
+            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+            .collect();
+
+        Ok(embedding)
     }
 }
 

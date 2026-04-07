@@ -17,6 +17,7 @@ async fn start_test_server_with_models() -> (String, tempfile::TempDir) {
         registry.register(EmbeddingModelConfig {
             name: "clip-vit-l-14".into(),
             endpoint: "http://localhost:8080/embed".into(),
+            api_key: String::new(),
             supported_modalities: vec![Modality::Image, Modality::Text],
             output_dimension: 4,
             max_input_size_bytes: 10 * 1024 * 1024,
@@ -26,6 +27,7 @@ async fn start_test_server_with_models() -> (String, tempfile::TempDir) {
         registry.register(EmbeddingModelConfig {
             name: "text-only-model".into(),
             endpoint: "http://localhost:8081/embed".into(),
+            api_key: String::new(),
             supported_modalities: vec![Modality::Text],
             output_dimension: 4,
             max_input_size_bytes: 512 * 1024,

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use veda_core::embedding::EmbeddingModelRegistry;
+use veda_core::embedding::{EmbeddingModelConfig, EmbeddingModelRegistry, Modality};
 use veda_core::schema::CollectionSchema;
 use veda_query::distributed::DistributedQueryExecutor;
 use veda_storage::segment_manager::SegmentManager;
@@ -113,5 +113,37 @@ impl AppState {
         &self,
     ) -> &RwLock<EmbeddingModelRegistry> {
         &self.inner.embedding_registry
+    }
+
+    /// Load embedding model configuration from environment variables and register it.
+    pub async fn load_embedding_from_env(&self) {
+        let endpoint = match std::env::var("EMBEDDING_ENDPOINT").ok() {
+            Some(ep) if !ep.is_empty() => ep,
+            _ => return,
+        };
+        let model = match std::env::var("EMBEDDING_MODEL").ok() {
+            Some(m) if !m.is_empty() => m,
+            _ => return,
+        };
+        let api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_default();
+        let dim = std::env::var("EMBEDDING_DIMENSION")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024);
+
+        let config = EmbeddingModelConfig {
+            name: model.clone(),
+            endpoint: endpoint.clone(),
+            api_key,
+            supported_modalities: vec![Modality::Text],
+            output_dimension: dim,
+            max_input_size_bytes: 32768,
+            timeout_seconds: 30,
+            batch_size: 32,
+        };
+
+        let mut registry = self.inner.embedding_registry.write().await;
+        registry.register(config);
+        tracing::info!(model = %model, endpoint = %endpoint, dimension = dim, "registered embedding model from environment");
     }
 }

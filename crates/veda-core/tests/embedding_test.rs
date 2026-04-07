@@ -11,6 +11,7 @@ fn clip_model() -> EmbeddingModelConfig {
     EmbeddingModelConfig {
         name: "clip-vit-l-14".into(),
         endpoint: "http://localhost:8080/embed".into(),
+        api_key: String::new(),
         supported_modalities: vec![Modality::Image, Modality::Text],
         output_dimension: 768,
         max_input_size_bytes: 10 * 1024 * 1024,
@@ -23,6 +24,7 @@ fn text_only_model() -> EmbeddingModelConfig {
     EmbeddingModelConfig {
         name: "bge-large".into(),
         endpoint: "http://localhost:8081/embed".into(),
+        api_key: String::new(),
         supported_modalities: vec![Modality::Text],
         output_dimension: 1024,
         max_input_size_bytes: 512 * 1024,
@@ -145,6 +147,7 @@ fn test_validate_input_rejects_oversized() {
     let config = EmbeddingModelConfig {
         name: "tiny".into(),
         endpoint: "http://localhost/embed".into(),
+        api_key: String::new(),
         supported_modalities: vec![Modality::Text],
         output_dimension: 4,
         max_input_size_bytes: 100,

@@ -2,6 +2,20 @@ use veda_gateway::server::{ServerConfig, start_server};
 
 #[tokio::main]
 async fn main() {
+    // Load .env file if present.
+    if let Ok(contents) = std::fs::read_to_string(".env") {
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                // SAFETY: called before any threads are spawned.
+                unsafe { std::env::set_var(key.trim(), value.trim()) };
+            }
+        }
+    }
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
