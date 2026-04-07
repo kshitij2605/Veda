@@ -6,6 +6,10 @@ const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', icon: DashboardIcon },
   { to: '/collections', label: 'Collections', icon: CollectionsIcon },
   { to: '/search', label: 'Search', icon: SearchIcon },
+  { to: '/atlas', label: 'Vector Atlas', icon: AtlasIcon },
+  { to: '/indexes', label: 'Indexes', icon: IndexIcon },
+  { to: '/health', label: 'Health', icon: HealthIcon },
+  { to: '/evaluation', label: 'Evaluation', icon: EvalIcon },
 ]
 
 export function Sidebar() {
@@ -99,6 +103,46 @@ function SearchIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="11" cy="11" r="8" />
       <path d="m21 21-4.3-4.3" />
+    </svg>
+  )
+}
+
+function AtlasIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="7.5" cy="7.5" r="2" />
+      <circle cx="16.5" cy="16.5" r="2" />
+      <circle cx="16.5" cy="7.5" r="2" />
+      <circle cx="7.5" cy="16.5" r="2" />
+      <line x1="9.5" y1="7.5" x2="14.5" y2="7.5" />
+      <line x1="7.5" y1="9.5" x2="7.5" y2="14.5" />
+    </svg>
+  )
+}
+
+function IndexIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 7h16" />
+      <path d="M4 12h12" />
+      <path d="M4 17h8" />
+    </svg>
+  )
+}
+
+function HealthIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+    </svg>
+  )
+}
+
+function EvalIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 11l3 3L22 4" />
+      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
     </svg>
   )
 }
