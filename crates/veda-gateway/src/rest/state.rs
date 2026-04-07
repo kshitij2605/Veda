@@ -8,6 +8,15 @@ use veda_core::schema::CollectionSchema;
 use veda_query::distributed::DistributedQueryExecutor;
 use veda_storage::segment_manager::SegmentManager;
 
+use crate::auth::Role;
+
+/// Represents a user in the in-memory user store.
+#[derive(Clone)]
+pub struct UserRecord {
+    pub password: String,
+    pub role: Role,
+}
+
 /// Shared application state accessible from all handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -25,9 +34,16 @@ pub struct AppStateInner {
     pub embedding_registry: RwLock<EmbeddingModelRegistry>,
     /// Base data directory.
     pub data_dir: PathBuf,
+    /// Whether JWT authentication is enabled.
+    pub auth_enabled: bool,
+    /// Secret used for JWT signing and verification.
+    pub jwt_secret: String,
+    /// In-memory user store: username -> UserRecord.
+    pub users: HashMap<String, UserRecord>,
 }
 
 impl AppState {
+    /// Create a new AppState with auth **disabled** (default for tests).
     pub fn new(data_dir: &Path) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -36,6 +52,53 @@ impl AppState {
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 data_dir: data_dir.to_owned(),
+                auth_enabled: false,
+                jwt_secret: "default-test-secret".to_owned(),
+                users: HashMap::new(),
+            }),
+        }
+    }
+
+    /// Create a new AppState with auth **enabled** and a default admin user.
+    pub fn with_auth(data_dir: &Path, jwt_secret: &str) -> Self {
+        let mut users = HashMap::new();
+        users.insert(
+            "admin".to_owned(),
+            UserRecord {
+                password: "admin".to_owned(),
+                role: Role::Admin,
+            },
+        );
+        Self {
+            inner: Arc::new(AppStateInner {
+                schemas: RwLock::new(HashMap::new()),
+                segment_managers: RwLock::new(HashMap::new()),
+                query_executors: RwLock::new(HashMap::new()),
+                embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
+                data_dir: data_dir.to_owned(),
+                auth_enabled: true,
+                jwt_secret: jwt_secret.to_owned(),
+                users,
+            }),
+        }
+    }
+
+    /// Create an AppState with auth enabled and custom users.
+    pub fn with_auth_and_users(
+        data_dir: &Path,
+        jwt_secret: &str,
+        users: HashMap<String, UserRecord>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(AppStateInner {
+                schemas: RwLock::new(HashMap::new()),
+                segment_managers: RwLock::new(HashMap::new()),
+                query_executors: RwLock::new(HashMap::new()),
+                embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
+                data_dir: data_dir.to_owned(),
+                auth_enabled: true,
+                jwt_secret: jwt_secret.to_owned(),
+                users,
             }),
         }
     }

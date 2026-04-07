@@ -1,5 +1,8 @@
+use axum::middleware;
 use axum::routing::{delete, get, post};
 use axum::Router;
+
+use crate::auth;
 
 pub mod admin;
 pub mod collections;
@@ -10,7 +13,16 @@ pub mod state;
 
 /// Build the complete REST API router.
 pub fn build_router(app_state: state::AppState) -> Router {
-    Router::new()
+    // Public routes — no auth required.
+    let public = Router::new()
+        .route("/v1/admin/health", get(admin::health))
+        .route("/v1/auth/login", post(admin::login));
+
+    // Protected routes — auth middleware applied when auth_enabled=true.
+    let protected = Router::new()
+        // Admin
+        .route("/v1/admin/nodes", get(admin::list_nodes))
+        .route("/v1/admin/metrics", get(admin::metrics))
         // Collections
         .route("/v1/collections", post(collections::create_collection))
         .route("/v1/collections", get(collections::list_collections))
@@ -38,9 +50,10 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/collections/{name}/records",
             delete(records::delete_records),
         )
-        // Admin
-        .route("/v1/admin/health", get(admin::health))
-        .route("/v1/admin/nodes", get(admin::list_nodes))
-        // State
-        .with_state(app_state)
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            auth::auth_middleware,
+        ));
+
+    public.merge(protected).with_state(app_state)
 }
