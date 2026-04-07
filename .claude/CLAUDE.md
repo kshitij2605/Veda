@@ -1,7 +1,7 @@
 # Project: Veda - Multimodal Vector Database
 
 ## Overview
-Veda is a next-generation vector database designed for the multimodal era of RAG (Retrieval-Augmented Generation). It supports storing, indexing, and searching embeddings from any modality: text, images, audio, video, and documents. Includes **Niriksha**, a built-in data visualization and exploration dashboard (the "Kibana for multimodal vectors").
+Veda is a next-generation vector database designed for the multimodal era of RAG (Retrieval-Augmented Generation). It supports storing, indexing, and searching embeddings from any modality: text, images, audio, video, and documents. Includes **Niriksha**, a built-in data visualization and exploration dashboard.
 
 ## Project Structure
 ```

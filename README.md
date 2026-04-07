@@ -32,7 +32,7 @@
 - **Pattern search** -- suffix array-backed substring and fuzzy matching on text fields
 - **Built-in blob storage** -- store raw files alongside embeddings via MinIO/S3-compatible backends
 - **Auto-embedding pipeline** -- automatic embedding generation with modality validation
-- **Niriksha dashboard** -- built-in visualization and exploration UI (the "Kibana for multimodal vectors")
+- **Niriksha dashboard** -- built-in visualization and exploration UI for multimodal vector data
 - **JWT authentication + RBAC** -- Admin, Editor, and Viewer roles with token-based auth
 - **Prometheus metrics** -- operational observability out of the box
 - **Python SDK** -- `veda-client` package for idiomatic Python access
@@ -209,7 +209,7 @@ for hit in results:
 <!-- TODO: Replace with actual screenshot -->
 ![Niriksha Dashboard](docs/assets/niriksha-screenshot-placeholder.png)
 
-**Niriksha** is Veda's built-in data visualization and exploration dashboard -- think "Kibana for multimodal vectors." It provides:
+**Niriksha** is Veda's built-in data visualization and exploration dashboard for multimodal vector data. It provides:
 
 - Collection overview with real-time statistics
 - Interactive vector space visualization (2D/3D projections)
