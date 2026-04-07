@@ -57,10 +57,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      VLM_ENDPOINT: ${VLM_ENDPOINT:-http://host.docker.internal:8008/v1/chat/completions}
+      VLM_ENDPOINT: ${VLM_ENDPOINT:-http://vlm:8008/v1/chat/completions}
       VLM_API_KEY: ${VLM_API_KEY:-}
-      VLM_MODEL: ${VLM_MODEL:-}
+      VLM_MODEL: ${VLM_MODEL:-Qwen/Qwen3.5-35B-A3B-FP8}
       GLMOCR_CONFIG_PATH: /app/glmocr_config.yaml
+      GLMOCR_API_HOST: ${GLMOCR_API_HOST:-glm-ocr}
+      GLMOCR_API_PORT: ${GLMOCR_API_PORT:-8080}
     volumes:
       - flashparse-data:/tmp/flashparse
     healthcheck:
@@ -88,9 +90,92 @@ services:
       - embedding-model-cache:/data
     command: ["--model-id", "${EMBEDDING_MODEL:-BAAI/bge-m3}", "--port", "80"]
 
+  # --- VLM Service (optional, enabled with --profile vlm) ---
+  # Used by FlashParse for image captioning and classification.
+  # Default: Qwen/Qwen3.5-35B-A3B-FP8 on vLLM with MTP-1 speculative decoding.
+  # Requires ~48GB GPU VRAM.
+  vlm:
+    profiles: ["vlm"]
+    image: vllm/vllm-openai:latest
+    ports:
+      - "8008:8008"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - vlm-model-cache:/root/.cache/huggingface
+    command:
+      - "--model"
+      - "${VLM_MODEL:-Qwen/Qwen3.5-35B-A3B-FP8}"
+      - "--port"
+      - "8008"
+      - "--served-model-name"
+      - "${VLM_MODEL:-Qwen/Qwen3.5-35B-A3B-FP8}"
+      - "--speculative-config"
+      - '{"method": "mtp", "num_speculative_tokens": 1}'
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--trust-remote-code"
+      - "--max-model-len"
+      - "8192"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8008/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  # --- GLM-OCR Service (optional, enabled with --profile glm-ocr) ---
+  # Used by FlashParse for text/table/formula OCR.
+  # Default: GLM-OCR 0.9B on vLLM with MTP-1.
+  # Requires ~8GB GPU VRAM.
+  glm-ocr:
+    profiles: ["glm-ocr"]
+    image: vllm/vllm-openai:latest
+    ports:
+      - "8080:8080"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - glm-ocr-model-cache:/root/.cache/huggingface
+    command:
+      - "--model"
+      - "zai-org/GLM-OCR"
+      - "--port"
+      - "8080"
+      - "--served-model-name"
+      - "glm-ocr"
+      - "--speculative-config"
+      - '{"method": "mtp", "num_speculative_tokens": 1}'
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--allowed-local-media-path"
+      - "/"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
 volumes:
   minio-data:
   nats-data:
   veda-data:
   flashparse-data:
   embedding-model-cache:
+  vlm-model-cache:
+  glm-ocr-model-cache:
