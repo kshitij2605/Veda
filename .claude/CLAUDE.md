@@ -9,8 +9,16 @@ project-mdb/
   .claude/          # Claude Code configuration
   research/         # Research documents and analysis
   docs/             # Design documents and plans
-  src/              # Source code — Rust core engine
+  crates/           # Rust workspace crates
+    veda-core/      # Shared types, schema, vectors, SIMD, metrics, embedding
+    veda-storage/   # Segments, vector storage, scalar indexes, WAL, blob storage
+    veda-index/     # HNSW, DiskANN, IVF-PQ, Flat, RaBitQ, suffix array
+    veda-query/     # Filter parser, search executor, fusion, distributed query
+    veda-coordinator/ # Cluster state machine, shard router
+    veda-gateway/   # REST API (axum), auth, RBAC
+    veda-server/    # Binary entry point
   niriksha/         # Niriksha visualization dashboard (React/TypeScript)
+  sdk/python/       # Python SDK (veda-client)
 ```
 
 ## 1. Think Before Coding
