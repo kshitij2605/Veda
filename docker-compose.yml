@@ -90,12 +90,12 @@ services:
       - embedding-model-cache:/data
     command: ["--model-id", "${EMBEDDING_MODEL:-BAAI/bge-m3}", "--port", "80"]
 
-  # --- VLM Service (optional, enabled with --profile vlm) ---
+  # --- VLM Service (starts with --profile ocr) ---
   # Used by FlashParse for image captioning and classification.
   # Default: Qwen/Qwen3.5-35B-A3B-FP8 on vLLM with MTP-1 speculative decoding.
   # Requires ~48GB GPU VRAM.
   vlm:
-    profiles: ["vlm"]
+    profiles: ["ocr"]
     image: vllm/vllm-openai:latest
     ports:
       - "8008:8008"
@@ -131,12 +131,12 @@ services:
       retries: 10
       start_period: 120s
 
-  # --- GLM-OCR Service (optional, enabled with --profile glm-ocr) ---
+  # --- GLM-OCR Service (starts with --profile ocr) ---
   # Used by FlashParse for text/table/formula OCR.
   # Default: GLM-OCR 0.9B on vLLM with MTP-1.
   # Requires ~8GB GPU VRAM.
   glm-ocr:
-    profiles: ["glm-ocr"]
+    profiles: ["ocr"]
     image: vllm/vllm-openai:latest
     ports:
       - "8080:8080"
