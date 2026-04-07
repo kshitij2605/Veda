@@ -4,7 +4,11 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
+use veda_core::embedding::Modality;
+use veda_core::embedding_client::EmbeddingClient;
 use veda_core::record::{FieldValue, Record};
+use veda_core::types::FieldType;
+use veda_core::vector::DenseVector;
 
 use super::records::rebuild_executors;
 use super::state::AppState;
@@ -429,6 +433,39 @@ async fn process_single_file(
         )
     };
 
+    // Discover vector fields and find embedding models for auto-embedding.
+    // For each vector field in the schema, try to find a matching model in the registry.
+    let registry = state.inner.embedding_registry.read().await;
+    let mut text_embed_targets: Vec<(String, EmbeddingClient)> = Vec::new();
+    let mut image_embed_targets: Vec<(String, EmbeddingClient)> = Vec::new();
+
+    for field_def in schema.fields() {
+        if let FieldType::Vector { .. } = field_def.field_type() {
+            // Try to find a model that supports the appropriate modality.
+            // Convention: fields named "*_embedding" auto-embed from the corresponding content.
+            let field_name = field_def.name();
+
+            // Check for text embedding models.
+            let text_models = registry.find_by_modality(Modality::Text);
+            if !text_models.is_empty() && (field_name.contains("text") || field_name.contains("content")) {
+                text_embed_targets.push((
+                    field_name.to_owned(),
+                    EmbeddingClient::new(text_models[0].clone()),
+                ));
+            }
+
+            // Check for image embedding models.
+            let image_models = registry.find_by_modality(Modality::Image);
+            if !image_models.is_empty() && field_name.contains("image") {
+                image_embed_targets.push((
+                    field_name.to_owned(),
+                    EmbeddingClient::new(image_models[0].clone()),
+                ));
+            }
+        }
+    }
+    drop(registry);
+
     // Insert text chunks.
     {
         let mut managers = state.inner.segment_managers.write().await;
@@ -446,6 +483,13 @@ async fn process_single_file(
             }
             if has_chunk_index_field {
                 record.set("chunk_index", FieldValue::Int32(idx as i32));
+            }
+
+            // Embed text content into vector fields.
+            for (target_field, client) in &text_embed_targets {
+                if let Ok(vector) = client.embed_text(chunk_text) {
+                    record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
+                }
             }
 
             let record_id = record.id().to_string();
@@ -473,7 +517,6 @@ async fn process_single_file(
         for (img_name, img_data) in &images {
             let mut record = Record::new();
             if has_image_blob_field {
-                // Store image as a blob reference (base64-encoded inline for now).
                 let blob_key = format!("{}/{}/{}", collection_name, record.id(), img_name);
                 record.set("image_blob", FieldValue::BlobRef(blob_key));
             }
@@ -482,6 +525,13 @@ async fn process_single_file(
             }
             if has_source_file_field {
                 record.set("source_file", FieldValue::String(file_name.to_owned()));
+            }
+
+            // Embed image data into vector fields.
+            for (target_field, client) in &image_embed_targets {
+                if let Ok(vector) = client.embed_bytes(img_data, Modality::Image) {
+                    record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
+                }
             }
 
             let record_id = record.id().to_string();
