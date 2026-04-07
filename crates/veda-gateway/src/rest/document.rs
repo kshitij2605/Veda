@@ -309,6 +309,26 @@ fn parse_chunking_strategy(
             max_chunk_size: size.unwrap_or(2000),
             chunk_overlap: overlap.unwrap_or(300),
         },
+        Some("heading_1") | Some("markdown_h1") => ChunkingStrategy::MarkdownHeading {
+            level: 1,
+            max_chunk_size: size.unwrap_or(4000),
+            chunk_overlap: overlap.unwrap_or(300),
+        },
+        Some("heading_2") | Some("markdown_h2") => ChunkingStrategy::MarkdownHeading {
+            level: 2,
+            max_chunk_size: size.unwrap_or(2000),
+            chunk_overlap: overlap.unwrap_or(300),
+        },
+        Some("heading_3") | Some("markdown_h3") => ChunkingStrategy::MarkdownHeading {
+            level: 3,
+            max_chunk_size: size.unwrap_or(2000),
+            chunk_overlap: overlap.unwrap_or(300),
+        },
+        Some("semantic") => ChunkingStrategy::Semantic {
+            max_chunk_size: size.unwrap_or(2000),
+            similarity_threshold: 0.5,
+            window_size: 3,
+        },
         Some("page") => ChunkingStrategy::Page,
         Some("none") => ChunkingStrategy::None,
         _ => ChunkingStrategy::MarkdownRecursive {

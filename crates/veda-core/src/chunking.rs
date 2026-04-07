@@ -21,6 +21,24 @@ pub enum ChunkingStrategy {
     },
     /// Split by page separators (`\n---\n`) only.
     Page,
+    /// Split by markdown headings at a specific depth level.
+    /// Level 1 = split on # only, Level 2 = split on # and ##, Level 3 = split on #, ##, ###.
+    MarkdownHeading {
+        level: u8,             // 1, 2, or 3
+        max_chunk_size: usize, // if a section exceeds this, sub-split by paragraphs
+        chunk_overlap: usize,
+    },
+    /// Semantic chunking: split at points where embedding similarity drops.
+    /// Computes a similarity score between consecutive segments and splits
+    /// where similarity falls below a threshold.
+    /// NOTE: Uses a lightweight text-based similarity heuristic (word overlap)
+    /// since we can't call embedding models synchronously in the chunker.
+    /// For true embedding-based semantic chunking, use the embed-insert pipeline.
+    Semantic {
+        max_chunk_size: usize,     // hard max per chunk (default 2000)
+        similarity_threshold: f32, // 0.0-1.0, split when similarity drops below (default 0.5)
+        window_size: usize,        // sentences per comparison window (default 3)
+    },
     /// No chunking — entire document is one chunk.
     None,
 }
@@ -64,6 +82,16 @@ pub fn chunk_markdown(text: &str, strategy: &ChunkingStrategy) -> Vec<TextChunk>
             max_chunk_size,
             chunk_overlap,
         } => chunk_by_sentence(text, *max_chunk_size, *chunk_overlap),
+        ChunkingStrategy::MarkdownHeading {
+            level,
+            max_chunk_size,
+            chunk_overlap,
+        } => chunk_markdown_heading(text, *level, *max_chunk_size, *chunk_overlap),
+        ChunkingStrategy::Semantic {
+            max_chunk_size,
+            similarity_threshold,
+            window_size,
+        } => chunk_semantic(text, *max_chunk_size, *similarity_threshold, *window_size),
         ChunkingStrategy::Page => chunk_by_page(text),
         ChunkingStrategy::None => chunk_none(text),
     }
@@ -249,6 +277,206 @@ fn chunk_none(text: &str) -> Vec<TextChunk> {
         page_number: None,
         content_types: detect_content_types(text),
     }]
+}
+
+// ── MarkdownHeading ───────────────────────────────────────────────────
+
+fn heading_separator(level: u8) -> Vec<&'static str> {
+    match level {
+        1 => vec!["\n# "],
+        2 => vec!["\n# ", "\n## "],
+        3 => vec!["\n# ", "\n## ", "\n### "],
+        _ => vec!["\n# ", "\n## ", "\n### "],
+    }
+}
+
+fn chunk_markdown_heading(
+    text: &str,
+    level: u8,
+    max_chunk_size: usize,
+    chunk_overlap: usize,
+) -> Vec<TextChunk> {
+    let separators = heading_separator(level);
+
+    // Split text hierarchically by heading levels.
+    let mut sections = vec![text.to_owned()];
+    for sep in &separators {
+        let mut new_sections = Vec::new();
+        for section in &sections {
+            let parts = split_keeping_separator(section, sep);
+            new_sections.extend(parts);
+        }
+        sections = new_sections;
+    }
+
+    // For each section, if it exceeds max_chunk_size, sub-split by paragraphs then fixed-size.
+    let mut raw_pieces: Vec<RawPiece> = Vec::new();
+    let mut current_heading_path: Vec<String> = Vec::new();
+    let mut page_number: usize = 1;
+
+    for section in &sections {
+        // Track headings.
+        for line in section.lines().take(3) {
+            let trimmed = line.trim();
+            if trimmed.starts_with("### ") {
+                if current_heading_path.len() > 2 {
+                    current_heading_path.truncate(2);
+                }
+                current_heading_path.push(trimmed[4..].trim().to_owned());
+            } else if trimmed.starts_with("## ") {
+                current_heading_path.truncate(1);
+                current_heading_path.push(trimmed[3..].trim().to_owned());
+            } else if trimmed.starts_with("# ") {
+                current_heading_path = vec![trimmed[2..].trim().to_owned()];
+            }
+        }
+
+        if section.contains("\n---\n") {
+            page_number += section.matches("\n---\n").count();
+        }
+
+        let trimmed = section.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.len() <= max_chunk_size {
+            raw_pieces.push(RawPiece {
+                text: trimmed.to_owned(),
+                heading_path: current_heading_path.clone(),
+                page_number,
+            });
+        } else {
+            // Sub-split by paragraphs.
+            let paragraphs: Vec<&str> = trimmed.split("\n\n").collect();
+            let mut current_text = String::new();
+            for para in paragraphs {
+                if !current_text.is_empty() && current_text.len() + para.len() + 2 > max_chunk_size {
+                    raw_pieces.push(RawPiece {
+                        text: current_text.clone(),
+                        heading_path: current_heading_path.clone(),
+                        page_number,
+                    });
+                    current_text.clear();
+                }
+                if !current_text.is_empty() {
+                    current_text.push_str("\n\n");
+                }
+                current_text.push_str(para);
+            }
+            if !current_text.is_empty() {
+                raw_pieces.push(RawPiece {
+                    text: current_text,
+                    heading_path: current_heading_path.clone(),
+                    page_number,
+                });
+            }
+        }
+    }
+
+    build_chunks_with_overlap(&raw_pieces, chunk_overlap, text)
+}
+
+// ── Semantic ──────────────────────────────────────────────────────────
+
+/// Compute word-overlap similarity between two text segments (Jaccard-like).
+/// Returns a value between 0.0 (no overlap) and 1.0 (identical word sets).
+fn text_similarity(a: &str, b: &str) -> f32 {
+    let words_a: std::collections::HashSet<&str> = a.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| w.len() > 2) // skip short words like "a", "to", "is"
+        .collect();
+    let words_b: std::collections::HashSet<&str> = b.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| w.len() > 2)
+        .collect();
+
+    if words_a.is_empty() || words_b.is_empty() {
+        return 0.0;
+    }
+
+    let intersection = words_a.intersection(&words_b).count();
+    let union = words_a.union(&words_b).count();
+
+    if union == 0 { 0.0 } else { intersection as f32 / union as f32 }
+}
+
+fn chunk_semantic(
+    text: &str,
+    max_chunk_size: usize,
+    similarity_threshold: f32,
+    window_size: usize,
+) -> Vec<TextChunk> {
+    // Split into sentences first.
+    let sentences = split_sentences(text);
+    if sentences.is_empty() {
+        return Vec::new();
+    }
+
+    // Compare consecutive windows of sentences. When similarity drops below
+    // threshold, insert a split point.
+    let window_size = window_size.max(1);
+    let mut split_points: Vec<usize> = Vec::new(); // indices into sentences where splits occur
+
+    for i in window_size..sentences.len() {
+        // Window before: sentences[i-window_size..i]
+        let before: String = sentences[i.saturating_sub(window_size)..i].join(" ");
+        // Window after: sentences[i..i+window_size]
+        let after_end = (i + window_size).min(sentences.len());
+        let after: String = sentences[i..after_end].join(" ");
+
+        let sim = text_similarity(&before, &after);
+        if sim < similarity_threshold {
+            // Check we don't split too close to previous split.
+            let last_split = split_points.last().copied().unwrap_or(0);
+            if i - last_split >= window_size {
+                split_points.push(i);
+            }
+        }
+    }
+
+    // Build chunks from split points.
+    let mut chunks = Vec::new();
+    let mut start_idx = 0;
+    let mut offset = 0;
+
+    let mut all_points = split_points.clone();
+    all_points.push(sentences.len()); // sentinel
+
+    for &end_idx in &all_points {
+        let chunk_text: String = sentences[start_idx..end_idx].join("");
+
+        if chunk_text.trim().is_empty() {
+            start_idx = end_idx;
+            continue;
+        }
+
+        // If chunk exceeds max, sub-split with fixed-size.
+        if chunk_text.len() > max_chunk_size {
+            let sub_chunks = chunk_fixed_size(&chunk_text, max_chunk_size, max_chunk_size / 7);
+            for mut sc in sub_chunks {
+                sc.index = chunks.len();
+                sc.start_offset += offset;
+                sc.end_offset += offset;
+                chunks.push(sc);
+            }
+        } else {
+            chunks.push(TextChunk {
+                text: chunk_text.clone(),
+                index: chunks.len(),
+                start_offset: offset,
+                end_offset: offset + chunk_text.len(),
+                heading_path: Vec::new(),
+                page_number: None,
+                content_types: detect_content_types(&chunk_text),
+            });
+        }
+
+        offset += chunk_text.len();
+        start_idx = end_idx;
+    }
+
+    chunks
 }
 
 // ── MarkdownRecursive ──────────────────────────────────────────────────

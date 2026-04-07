@@ -232,3 +232,167 @@ fn page_number_tracking_in_markdown_recursive() {
     // First chunk should be page 1.
     assert_eq!(chunks[0].page_number, Some(1));
 }
+
+// ── MarkdownHeading Tests ─────────────────────────────────────────────
+
+#[test]
+fn markdown_heading_level_1_splits_on_h1() {
+    let text = "# Chapter 1\n\nSome content about chapter one.\n\n# Chapter 2\n\nSome content about chapter two.";
+    let chunks = chunk_markdown(
+        text,
+        &ChunkingStrategy::MarkdownHeading {
+            level: 1,
+            max_chunk_size: 5000,
+            chunk_overlap: 0,
+        },
+    );
+    assert!(chunks.len() >= 2, "Should split on H1 headings, got {} chunks", chunks.len());
+    assert!(chunks[0].text.contains("Chapter 1") || chunks[0].text.contains("chapter one"));
+}
+
+#[test]
+fn markdown_heading_level_2_splits_on_h1_and_h2() {
+    let text = "# Title\n\n## Section A\n\nContent A.\n\n## Section B\n\nContent B.";
+    let chunks = chunk_markdown(
+        text,
+        &ChunkingStrategy::MarkdownHeading {
+            level: 2,
+            max_chunk_size: 5000,
+            chunk_overlap: 0,
+        },
+    );
+    assert!(chunks.len() >= 2, "Should split on H1/H2, got {} chunks", chunks.len());
+}
+
+#[test]
+fn markdown_heading_level_3_splits_on_all_headings() {
+    let text = "# H1\n\n## H2\n\nContent.\n\n### H3a\n\nSub content a.\n\n### H3b\n\nSub content b.";
+    let chunks = chunk_markdown(
+        text,
+        &ChunkingStrategy::MarkdownHeading {
+            level: 3,
+            max_chunk_size: 5000,
+            chunk_overlap: 0,
+        },
+    );
+    assert!(chunks.len() >= 3, "Should split on H1/H2/H3, got {} chunks", chunks.len());
+}
+
+#[test]
+fn markdown_heading_subsplits_large_sections() {
+    let mut text = "# Big Section\n\n".to_string();
+    for i in 0..50 {
+        text.push_str(&format!("Paragraph {} with enough content to make it sizeable. ", i));
+        text.push_str("This is additional text to bulk up the paragraph.\n\n");
+    }
+    let chunks = chunk_markdown(
+        &text,
+        &ChunkingStrategy::MarkdownHeading {
+            level: 1,
+            max_chunk_size: 500,
+            chunk_overlap: 0,
+        },
+    );
+    assert!(chunks.len() > 1, "Large section should be sub-split by paragraphs");
+    for chunk in &chunks {
+        // Allow some tolerance (paragraphs may not split exactly at boundary).
+        assert!(chunk.text.len() <= 600, "Chunk too large: {} chars", chunk.text.len());
+    }
+}
+
+#[test]
+fn markdown_heading_preserves_heading_path() {
+    let text = "# Chapter\n\n## Section\n\nContent under section.";
+    let chunks = chunk_markdown(
+        text,
+        &ChunkingStrategy::MarkdownHeading {
+            level: 2,
+            max_chunk_size: 5000,
+            chunk_overlap: 0,
+        },
+    );
+    let has_path = chunks.iter().any(|c| !c.heading_path.is_empty());
+    assert!(has_path, "Should track heading path");
+}
+
+// ── Semantic Chunking Tests ───────────────────────────────────────────
+
+#[test]
+fn semantic_splits_on_topic_change() {
+    // Two clearly different topics with distinct vocabulary.
+    let text = "The cat sat on the mat. The cat played with yarn. The cat slept by the fire. \
+                The stock market crashed today. Investors lost billions. The economy is in recession. \
+                Financial markets are volatile. Trading was halted on multiple exchanges.";
+    let chunks = chunk_markdown(
+        text,
+        &ChunkingStrategy::Semantic {
+            max_chunk_size: 2000,
+            similarity_threshold: 0.3,
+            window_size: 2,
+        },
+    );
+    assert!(chunks.len() >= 2, "Should split between cats and finance topics, got {} chunks", chunks.len());
+}
+
+#[test]
+fn semantic_keeps_similar_content_together() {
+    // All about the same topic — should produce fewer splits.
+    let text = "Machine learning is a subset of artificial intelligence. \
+                Deep learning uses neural networks with many layers. \
+                Convolutional neural networks are used for image recognition. \
+                Recurrent neural networks are used for sequential data. \
+                Transformer models have revolutionized natural language processing.";
+    let chunks = chunk_markdown(
+        text,
+        &ChunkingStrategy::Semantic {
+            max_chunk_size: 2000,
+            similarity_threshold: 0.3,
+            window_size: 2,
+        },
+    );
+    // Similar topic should have few or no splits.
+    assert!(chunks.len() <= 3, "Similar content should stay together, got {} chunks", chunks.len());
+}
+
+#[test]
+fn semantic_respects_max_chunk_size() {
+    let text = "Word. ".repeat(500);
+    let chunks = chunk_markdown(
+        &text,
+        &ChunkingStrategy::Semantic {
+            max_chunk_size: 200,
+            similarity_threshold: 0.5,
+            window_size: 2,
+        },
+    );
+    for chunk in &chunks {
+        // Allow some tolerance for sub-splitting.
+        assert!(chunk.text.len() <= 250, "Chunk exceeds max: {} chars", chunk.text.len());
+    }
+}
+
+#[test]
+fn semantic_empty_input() {
+    let chunks = chunk_markdown(
+        "",
+        &ChunkingStrategy::Semantic {
+            max_chunk_size: 2000,
+            similarity_threshold: 0.5,
+            window_size: 3,
+        },
+    );
+    assert!(chunks.is_empty());
+}
+
+#[test]
+fn semantic_single_sentence() {
+    let chunks = chunk_markdown(
+        "Just one sentence here.",
+        &ChunkingStrategy::Semantic {
+            max_chunk_size: 2000,
+            similarity_threshold: 0.5,
+            window_size: 3,
+        },
+    );
+    assert_eq!(chunks.len(), 1);
+}
