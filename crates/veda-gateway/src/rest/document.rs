@@ -84,8 +84,8 @@ pub async fn process_document(
     // Extract file from multipart upload.
     let mut file_data: Option<Vec<u8>> = None;
     let mut file_name: Option<String> = None;
-    let mut _skip_captions = false;
-    let mut _dpi: Option<u32> = None;
+    let mut skip_captions = false;
+    let mut dpi: Option<u32> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().unwrap_or("").to_owned();
@@ -97,13 +97,13 @@ pub async fn process_document(
             "skip_captions" => {
                 if let Ok(bytes) = field.bytes().await {
                     let val = String::from_utf8_lossy(&bytes);
-                    _skip_captions = val == "true" || val == "1";
+                    skip_captions = val == "true" || val == "1";
                 }
             }
             "dpi" => {
                 if let Ok(bytes) = field.bytes().await {
                     let val = String::from_utf8_lossy(&bytes);
-                    _dpi = val.parse().ok();
+                    dpi = val.parse().ok();
                 }
             }
             _ => {}
@@ -135,6 +135,17 @@ pub async fn process_document(
         .mime_str("application/octet-stream")
         .unwrap();
     let form = reqwest::multipart::Form::new().part("file", part);
+
+    let form = if skip_captions {
+        form.text("skip_captions", "true")
+    } else {
+        form
+    };
+    let form = if let Some(dpi_val) = dpi {
+        form.text("dpi", dpi_val.to_string())
+    } else {
+        form
+    };
 
     let url = format!("{}/api/v1/pdf/process", endpoint);
     let resp = client.post(&url).multipart(form).send().await.map_err(|e| {
