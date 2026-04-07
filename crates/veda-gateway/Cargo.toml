@@ -7,3 +7,19 @@ license.workspace = true
 [dependencies]
 veda-core = { workspace = true }
 veda-query = { workspace = true }
+veda-storage = { workspace = true }
+veda-index = { workspace = true }
+veda-coordinator = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+axum = { version = "0.8", features = ["json"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "0.12", features = ["json"] }

@@ -1,1 +1,2 @@
-// veda-gateway: REST/gRPC/SSE API server
+pub mod rest;
+pub mod server;
