@@ -31,6 +31,8 @@
 - **Multi-vector fusion** -- RRF, WeightedSum, and Intersection strategies for cross-modal retrieval
 - **Pattern search** -- suffix array-backed substring and fuzzy matching on text fields
 - **Built-in blob storage** -- store raw files alongside embeddings via MinIO/S3-compatible backends
+- **7 chunking strategies** -- MarkdownRecursive, MarkdownHeading (3 levels), Semantic, Sentence, FixedSize, Page, None
+- **FlashParse OCR integration** -- end-to-end document processing with configurable chunking
 - **Auto-embedding pipeline** -- automatic embedding generation with modality validation
 - **Niriksha dashboard** -- built-in visualization and exploration UI for multimodal vector data
 - **JWT authentication + RBAC** -- Admin, Editor, and Viewer roles with token-based auth
@@ -208,7 +210,21 @@ for hit in results:
 
 Veda provides **end-to-end document processing**: upload a document and Veda handles the entire pipeline -- OCR, chunking, embedding, and insertion into your collection. This is powered by [FlashParse](https://github.com/kshitij2605/FlashParse), which converts PDFs, DOCX, PPTX, images, and other document formats into structured markdown with extracted images.
 
-**Pipeline:** Document upload --> FlashParse OCR --> markdown + images --> chunk by headings --> embed (optional) --> insert into collection
+**Pipeline:** Document upload --> FlashParse OCR --> markdown + images --> chunk (configurable strategy) --> embed (optional) --> insert into collection
+
+### Chunking Strategies
+
+| Strategy | Description | Default Size | Default Overlap |
+|---|---|---|---|
+| `markdown_recursive` | Recursively splits markdown by structure (default) | 2000 chars | 300 |
+| `heading_1` | Splits on H1 headings | -- | -- |
+| `heading_2` | Splits on H2 headings | -- | -- |
+| `heading_3` | Splits on H3 headings | -- | -- |
+| `semantic` | Word-overlap Jaccard similarity; splits on topic change | 2000 chars | 300 |
+| `sentence` | Splits on sentence boundaries | 2000 chars | 300 |
+| `fixed_size` | Fixed character count chunks | 2000 chars | 300 |
+| `page` | Splits on page separators | -- | -- |
+| `none` | No chunking; entire document as one chunk | -- | -- |
 
 ### Setup
 
@@ -250,8 +266,20 @@ curl -X POST http://localhost:6340/v1/collections -d '{
 }'
 
 # 2. Process a document (end-to-end: OCR -> chunk -> embed -> insert)
+# Default (markdown-recursive chunking)
 curl -X POST http://localhost:6340/v1/collections/my-docs/process-document \
   -F "file=@report.pdf"
+
+# Semantic chunking
+curl -X POST http://localhost:6340/v1/collections/my-docs/process-document \
+  -F "file=@report.pdf" \
+  -F "chunking_strategy=semantic"
+
+# Split by H2 headings with custom chunk size
+curl -X POST http://localhost:6340/v1/collections/my-docs/process-document \
+  -F "file=@report.pdf" \
+  -F "chunking_strategy=heading_2" \
+  -F "chunk_size=3000"
 
 # 3. Search the processed content
 curl -X POST http://localhost:6340/v1/collections/my-docs/search -d '{
@@ -261,6 +289,9 @@ curl -X POST http://localhost:6340/v1/collections/my-docs/search -d '{
 ```
 
 **Options:**
+- `chunking_strategy=<strategy>` -- chunking strategy (default: `markdown_recursive`)
+- `chunk_size=<chars>` -- maximum chunk size in characters (default: 2000)
+- `chunk_overlap=<chars>` -- overlap between chunks in characters (default: 300)
 - `skip_captions=true` -- skip VLM-based image captioning (faster processing)
 - `dpi=300` -- set DPI for PDF rasterization (default: automatic)
 

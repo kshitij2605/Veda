@@ -161,3 +161,19 @@ Implement the Python SDK as a pure Python package (`veda-client`) that communica
 ### Consequences
 - **Positive:** Simple to install (`pip install veda-client`), no compilation step or Rust toolchain required for users, easy to distribute across all platforms, straightforward to maintain and debug.
 - **Negative:** All operations go through HTTP, so there is no option for in-process embedding or direct index access. Latency is bounded by network round-trips. This is the correct tradeoff for a client SDK -- users who need in-process access can use the Rust crates directly.
+
+---
+
+## ADR-011: MarkdownRecursive as Default Chunking Strategy
+
+**Status:** Accepted
+
+### Context
+The document processing pipeline needs to chunk OCR output into pieces suitable for embedding and vector search. Many chunking strategies exist, ranging from simple fixed-size splitting to model-dependent semantic chunking. The choice of default strategy affects retrieval quality, processing cost, and operational complexity.
+
+### Decision
+Use MarkdownRecursive as the default chunking strategy with 512 tokens (~2000 characters) chunk size and 15% overlap (~300 characters). Research shows that recursive markdown splitting outperforms semantic chunking in end-to-end RAG benchmarks while being approximately 10x cheaper, since it requires no embedding model calls during the chunking phase.
+
+### Consequences
+- **Positive:** Simple, fast, and deterministic. No model dependency during chunking. Respects document structure (headings, paragraphs) for natural break points. Works well with markdown output from FlashParse OCR.
+- **Negative:** May miss some topic boundaries that semantic chunking catches, particularly in unstructured text without clear markdown formatting. Users can switch to semantic chunking via the `chunking_strategy` parameter when needed.

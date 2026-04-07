@@ -264,6 +264,35 @@ A mock embedding client that produces deterministic vectors for testing without 
 3. Map each u32 output to `[-1.0, 1.0]` range
 4. L2-normalize the resulting vector
 
+### 3.10 Chunking Module
+
+**File:** `chunking.rs`
+
+Provides 7 configurable strategies for splitting document text into chunks suitable for embedding and vector search.
+
+**`ChunkingStrategy`** -- 7 variants:
+
+| Strategy | Description |
+|---|---|
+| `MarkdownRecursive` | Recursively splits markdown by structure (headings, paragraphs, sentences). Default strategy with 2000-char chunks and 300-char overlap. |
+| `MarkdownHeading(1)` | Splits on H1 (`#`) headings. Each section becomes one chunk. |
+| `MarkdownHeading(2)` | Splits on H2 (`##`) headings. |
+| `MarkdownHeading(3)` | Splits on H3 (`###`) headings. |
+| `Semantic` | Computes word-overlap Jaccard similarity between adjacent windows. Splits where similarity drops below a threshold, indicating a topic change. |
+| `Sentence` | Splits on sentence boundaries (`.`, `!`, `?`) respecting chunk size limits. |
+| `FixedSize` | Fixed character count chunks with configurable overlap. |
+| `Page` | Splits on page separator markers (e.g., `---` or form feed characters). |
+| `None` | No chunking; the entire document is returned as a single chunk. |
+
+**Semantic chunking algorithm:**
+1. Tokenize text into words
+2. Create sliding windows of consecutive words
+3. For each pair of adjacent windows, compute Jaccard similarity: `|intersection| / |union|` of the word sets
+4. Where similarity drops below the threshold, insert a chunk boundary
+5. Merge small chunks that fall below the minimum size
+
+**Default parameters:** `chunk_size = 2000` characters, `chunk_overlap = 300` characters (~15% overlap).
+
 ---
 
 ## 4. veda-storage -- Storage Engine
@@ -1388,7 +1417,7 @@ Veda provides end-to-end document processing: upload a document and the system h
 1. Client uploads a document (PDF, DOCX, image, etc.) to `POST /v1/collections/{name}/process-document`
 2. Gateway forwards the file to FlashParse at `http://flashparse:8000/api/v1/pdf/process`
 3. FlashParse processes the document using its VLM-based OCR pipeline and returns a ZIP containing structured markdown, extracted images, and metadata
-4. Gateway extracts the ZIP, chunks the markdown by headings and page separators
+4. Gateway extracts the ZIP, chunks the markdown using the configured chunking strategy (default: MarkdownRecursive)
 5. For each text chunk: creates a `Record` with `content`, `source_file`, and `chunk_index` fields, routes to the correct shard via hash-based routing, and inserts via `SegmentManager::insert()`
 6. For each extracted image: creates a `Record` with an `image_blob` BlobRef field and metadata
 7. After all inserts: seals growing segments and rebuilds `DistributedQueryExecutor` (same as the insert endpoint)

@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - WAL abstraction with in-memory backend
 - Niriksha dashboard with 7 pages (React + TypeScript)
 - Python SDK (veda-client)
+- 7 configurable chunking strategies: MarkdownRecursive (default), MarkdownHeading (levels 1/2/3), Semantic, Sentence, FixedSize, Page, None
+- Semantic chunking strategy with word-overlap Jaccard similarity for topic-based splitting
+- Markdown heading-level chunking (split on H1, H2, or H3 depth)
+- FlashParse OCR integration with Docker Compose profiles (`docker compose --profile ocr up`)
+- End-to-end document processing pipeline (parse, chunk, embed, insert) via `/v1/collections/{name}/process-document` and `/v1/collections/{name}/process-documents`
+- `.env.example` configuration template for VLM and service settings
 - Docker and Docker Compose deployment
 - ANN benchmark suite
 - Comprehensive integration and stress tests

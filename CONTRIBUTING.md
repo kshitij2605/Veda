@@ -156,13 +156,26 @@ A checklist of how the change was tested:
 
 | Crate | Description |
 |---|---|
-| `veda-core` | Shared types, distance functions (SIMD + scalar), filter expression parser and evaluator, error types |
+| `veda-core` | Shared types, distance functions (SIMD + scalar), filter expression parser and evaluator, chunking strategies, error types |
 | `veda-index` | ANN indexes (HNSW, DiskANN, IVF-PQ, Flat), scalar indexes (inverted, range, bitmap), quantization (RaBitQ, SQ8) |
 | `veda-storage` | mmap-backed vector storage, blob storage (MinIO/local), WAL abstraction, segment management |
 | `veda-query` | Query planning, multi-vector fusion (RRF, WeightedSum, Intersection), distributed shard fan-out and merge |
 | `veda-gateway` | REST API handlers (axum), JWT authentication, RBAC middleware, Prometheus metrics endpoint |
 | `veda-coordinator` | Shard assignment, cluster topology, segment compaction, channel-based coordination |
 | `veda-server` | Binary entry point, configuration loading, service startup and shutdown |
+
+## Adding a New Chunking Strategy
+
+1. **Add a variant** to `ChunkingStrategy` in `crates/veda-core/src/chunking.rs`.
+
+2. **Implement the chunking logic** in the `chunk()` method's match arm. Your strategy receives the full document text and configuration (chunk_size, chunk_overlap) and returns a `Vec<String>` of chunks.
+
+3. **Add unit tests** in the same module. At minimum, test:
+   - Empty input returns an empty or single-element result
+   - Output chunks are within the configured size limits
+   - Overlap between consecutive chunks matches the configured overlap (if applicable)
+
+4. **Register the strategy name** in the `FromStr` implementation so it can be selected via the `chunking_strategy` form parameter in the document processing endpoints.
 
 ## Adding a New Index Type
 
