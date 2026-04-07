@@ -1353,17 +1353,18 @@ Veda connects to MinIO and NATS via environment variables. MinIO has a health ch
 
 ### 14.3 FlashParse OCR (Optional Sidecar)
 
-Veda integrates with FlashParse for document processing (OCR). FlashParse is deployed as an optional Docker Compose service using the `ocr` profile, meaning it only starts when explicitly requested.
+Veda provides end-to-end document processing: upload a document and the system handles OCR, chunking, and insertion into the target collection. This is powered by FlashParse, deployed as an optional Docker Compose service using the `ocr` profile.
 
 ```
                 ┌──────────────────────────┐
                 │      Client Layer        │
                 │  POST /process-document  │
+                │  POST /process-documents │
                 └──────────┬───────────────┘
                            │ HTTP :6340
                 ┌──────────▼───────────────┐
                 │     veda-gateway         │
-                │   document::process_doc  │
+                │   document.rs handler    │
                 └──────────┬───────────────┘
                            │ HTTP :8000 (internal)
                 ┌──────────▼───────────────┐
@@ -1374,7 +1375,11 @@ Veda integrates with FlashParse for document processing (OCR). FlashParse is dep
                            │ ZIP (markdown + images)
                 ┌──────────▼───────────────┐
                 │     veda-gateway         │
-                │   chunk → embed → insert │
+                │   extract ZIP            │
+                │   chunk markdown         │
+                │   build Record objects   │
+                │   shard-route + insert   │
+                │   seal + rebuild indexes │
                 └──────────────────────────┘
 ```
 
@@ -1383,8 +1388,20 @@ Veda integrates with FlashParse for document processing (OCR). FlashParse is dep
 1. Client uploads a document (PDF, DOCX, image, etc.) to `POST /v1/collections/{name}/process-document`
 2. Gateway forwards the file to FlashParse at `http://flashparse:8000/api/v1/pdf/process`
 3. FlashParse processes the document using its VLM-based OCR pipeline and returns a ZIP containing structured markdown, extracted images, and metadata
-4. Gateway extracts the ZIP, chunks the markdown by headings and page separators, and creates records for each chunk and image
-5. Records are inserted into the specified collection
+4. Gateway extracts the ZIP, chunks the markdown by headings and page separators
+5. For each text chunk: creates a `Record` with `content`, `source_file`, and `chunk_index` fields, routes to the correct shard via hash-based routing, and inserts via `SegmentManager::insert()`
+6. For each extracted image: creates a `Record` with an `image_blob` BlobRef field and metadata
+7. After all inserts: seals growing segments and rebuilds `DistributedQueryExecutor` (same as the insert endpoint)
+8. Returns response with actual inserted record IDs
+
+**Endpoints:**
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/v1/collections/{name}/process-document` | Process a single document end-to-end |
+| POST | `/v1/collections/{name}/process-documents` | Batch process multiple documents |
+
+The batch endpoint (`process-documents`) accepts multiple files in the multipart form, processes each through FlashParse sequentially, inserts all resulting chunks and images, and returns aggregate stats with per-file results.
 
 **Docker Compose profile mechanism:**
 
@@ -1397,6 +1414,7 @@ Veda integrates with FlashParse for document processing (OCR). FlashParse is dep
 
 - `VEDA_FLASHPARSE_ENDPOINT` environment variable overrides the default endpoint (`http://flashparse:8000`)
 - FlashParse requires `VLM_ENDPOINT`, `VLM_API_KEY`, and `VLM_MODEL` for the vision-language model backend
+- See `.env.example` at the project root for all configuration options
 
 ### 14.4 Kubernetes (Planned)
 

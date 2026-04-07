@@ -206,35 +206,100 @@ for hit in results:
 
 ## Document Processing
 
-Veda integrates with [FlashParse](https://github.com/kshitij2605/FlashParse) for OCR-based document processing. FlashParse converts PDFs, DOCX, PPTX, images, and other document formats into structured markdown with extracted images, which Veda then chunks and indexes for vector search.
+Veda provides **end-to-end document processing**: upload a document and Veda handles the entire pipeline -- OCR, chunking, embedding, and insertion into your collection. This is powered by [FlashParse](https://github.com/kshitij2605/FlashParse), which converts PDFs, DOCX, PPTX, images, and other document formats into structured markdown with extracted images.
 
-### Enable Document Processing
+**Pipeline:** Document upload --> FlashParse OCR --> markdown + images --> chunk by headings --> embed (optional) --> insert into collection
 
-FlashParse runs as an optional Docker Compose service under the `ocr` profile:
+### Setup
+
+1. Copy `.env.example` to `.env` and configure your VLM backend:
 
 ```bash
-# Start Veda with document processing enabled
-docker compose --profile ocr up
-
-# Or start only FlashParse alongside an already-running Veda
-docker compose --profile ocr up flashparse
+cp .env.example .env
+# Edit .env to set VLM_ENDPOINT, VLM_API_KEY, and VLM_MODEL
 ```
 
-**GPU requirement:** FlashParse uses a vision-language model for OCR and requires an NVIDIA GPU. Set `VLM_ENDPOINT`, `VLM_API_KEY`, and `VLM_MODEL` environment variables to configure the VLM backend.
+2. Start Veda with FlashParse enabled:
+
+```bash
+docker compose --profile ocr up
+```
+
+**VLM configuration:** FlashParse uses a vision-language model for OCR. Set these environment variables to point to any OpenAI-compatible API (vLLM, SGLang, OpenAI, Together AI, etc.):
+- `VLM_ENDPOINT` -- e.g., `http://host.docker.internal:8008/v1/chat/completions`
+- `VLM_API_KEY` -- your API key (leave empty for local models)
+- `VLM_MODEL` -- the model name to use
 
 ### Supported Formats
 
 PDF, DOCX, PPTX, images (PNG, JPG, TIFF, BMP), and other formats supported by FlashParse.
 
-### Usage
+### Single Document Processing
+
+```bash
+# 1. Create a collection for documents
+curl -X POST http://localhost:6340/v1/collections -d '{
+  "name": "my-docs",
+  "fields": [
+    {"name": "content", "field_type": "string", "filterable": true},
+    {"name": "content_embedding", "field_type": "vector", "dimension": 768, "metric": "cosine"},
+    {"name": "source_file", "field_type": "string", "filterable": true},
+    {"name": "chunk_index", "field_type": "integer"},
+    {"name": "image_blob", "field_type": "blob"}
+  ]
+}'
+
+# 2. Process a document (end-to-end: OCR -> chunk -> embed -> insert)
+curl -X POST http://localhost:6340/v1/collections/my-docs/process-document \
+  -F "file=@report.pdf"
+
+# 3. Search the processed content
+curl -X POST http://localhost:6340/v1/collections/my-docs/search -d '{
+  "query": {"vector": {"field": "content_embedding", "values": [...]}},
+  "limit": 5
+}'
+```
+
+**Options:**
+- `skip_captions=true` -- skip VLM-based image captioning (faster processing)
+- `dpi=300` -- set DPI for PDF rasterization (default: automatic)
 
 ```bash
 curl -X POST http://localhost:6340/v1/collections/my-docs/process-document \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "file=@document.pdf"
+  -F "file=@report.pdf" \
+  -F "skip_captions=true" \
+  -F "dpi=300"
 ```
 
-The endpoint extracts text and images from the document, chunks the content, and inserts the resulting records into the specified collection. If FlashParse is not running, the endpoint returns a clear error with setup instructions.
+### Batch / Multiple File Processing
+
+Process multiple documents in a single request:
+
+```bash
+curl -X POST http://localhost:6340/v1/collections/my-docs/process-documents \
+  -F "files=@report1.pdf" \
+  -F "files=@report2.pdf" \
+  -F "files=@slides.pptx"
+```
+
+Returns aggregate stats with per-file results.
+
+### Python SDK
+
+```python
+from veda_client import VedaClient
+
+client = VedaClient("http://localhost:6340")
+
+# Process a single document
+with open("report.pdf", "rb") as f:
+    result = client.process_document("my-docs", f)
+    print(f"Inserted {result['records_inserted']} records")
+    for chunk in result['chunks']:
+        print(f"  [{chunk['type']}] {chunk['id']}: {chunk['preview'][:60]}")
+```
+
+If FlashParse is not running, the endpoint returns a clear error with setup instructions.
 
 ## Niriksha Dashboard
 

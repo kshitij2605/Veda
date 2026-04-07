@@ -56,6 +56,10 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/collections/{name}/process-document",
             post(document::process_document),
         )
+        .route(
+            "/v1/collections/{name}/process-documents",
+            post(document::process_documents_batch),
+        )
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             auth::auth_middleware,
