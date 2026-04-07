@@ -4,6 +4,7 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
+use veda_core::chunking::{chunk_markdown, ChunkingStrategy};
 use veda_core::embedding::Modality;
 use veda_core::embedding_client::EmbeddingClient;
 use veda_core::record::{FieldValue, Record};
@@ -101,6 +102,9 @@ pub async fn process_document(
     let mut file_name: Option<String> = None;
     let mut skip_captions = false;
     let mut dpi: Option<u32> = None;
+    let mut chunking_strategy_name: Option<String> = None;
+    let mut chunk_size: Option<usize> = None;
+    let mut chunk_overlap: Option<usize> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().unwrap_or("").to_owned();
@@ -119,6 +123,21 @@ pub async fn process_document(
                 if let Ok(bytes) = field.bytes().await {
                     let val = String::from_utf8_lossy(&bytes);
                     dpi = val.parse().ok();
+                }
+            }
+            "chunking_strategy" => {
+                if let Ok(bytes) = field.bytes().await {
+                    chunking_strategy_name = Some(String::from_utf8_lossy(&bytes).to_string());
+                }
+            }
+            "chunk_size" => {
+                if let Ok(bytes) = field.bytes().await {
+                    chunk_size = String::from_utf8_lossy(&bytes).parse().ok();
+                }
+            }
+            "chunk_overlap" => {
+                if let Ok(bytes) = field.bytes().await {
+                    chunk_overlap = String::from_utf8_lossy(&bytes).parse().ok();
                 }
             }
             _ => {}
@@ -142,8 +161,9 @@ pub async fn process_document(
     };
 
     let fname = file_name.unwrap_or_else(|| "document".to_owned());
+    let strategy = parse_chunking_strategy(chunking_strategy_name.as_deref(), chunk_size, chunk_overlap);
 
-    let result = process_single_file(&state, &name, &schema, &endpoint, file_data, &fname, skip_captions, dpi).await?;
+    let result = process_single_file(&state, &name, &schema, &endpoint, file_data, &fname, skip_captions, dpi, &strategy).await?;
 
     Ok((StatusCode::CREATED, Json(result)))
 }
@@ -191,6 +211,9 @@ pub async fn process_documents_batch(
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     let mut skip_captions = false;
     let mut dpi: Option<u32> = None;
+    let mut chunking_strategy_name: Option<String> = None;
+    let mut chunk_size: Option<usize> = None;
+    let mut chunk_overlap: Option<usize> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().unwrap_or("").to_owned();
@@ -216,9 +239,26 @@ pub async fn process_documents_batch(
                     dpi = val.parse().ok();
                 }
             }
+            "chunking_strategy" => {
+                if let Ok(bytes) = field.bytes().await {
+                    chunking_strategy_name = Some(String::from_utf8_lossy(&bytes).to_string());
+                }
+            }
+            "chunk_size" => {
+                if let Ok(bytes) = field.bytes().await {
+                    chunk_size = String::from_utf8_lossy(&bytes).parse().ok();
+                }
+            }
+            "chunk_overlap" => {
+                if let Ok(bytes) = field.bytes().await {
+                    chunk_overlap = String::from_utf8_lossy(&bytes).parse().ok();
+                }
+            }
             _ => {}
         }
     }
+
+    let strategy = parse_chunking_strategy(chunking_strategy_name.as_deref(), chunk_size, chunk_overlap);
 
     if files.is_empty() {
         return Err((
@@ -237,7 +277,7 @@ pub async fn process_documents_batch(
     let mut total_inserted = 0usize;
 
     for (fname, data) in files {
-        let result = process_single_file(&state, &name, &schema, &endpoint, data, &fname, skip_captions, dpi).await?;
+        let result = process_single_file(&state, &name, &schema, &endpoint, data, &fname, skip_captions, dpi, &strategy).await?;
         total_inserted += result.records_inserted;
         results.push(result);
     }
@@ -254,6 +294,30 @@ pub async fn process_documents_batch(
 }
 
 /// Process a single file through FlashParse and insert results into the collection.
+/// Parse chunking strategy from multipart form parameters.
+fn parse_chunking_strategy(
+    name: Option<&str>,
+    size: Option<usize>,
+    overlap: Option<usize>,
+) -> ChunkingStrategy {
+    match name {
+        Some("fixed_size") | Some("fixed") => ChunkingStrategy::FixedSize {
+            chunk_size: size.unwrap_or(2000),
+            chunk_overlap: overlap.unwrap_or(300),
+        },
+        Some("sentence") => ChunkingStrategy::Sentence {
+            max_chunk_size: size.unwrap_or(2000),
+            chunk_overlap: overlap.unwrap_or(300),
+        },
+        Some("page") => ChunkingStrategy::Page,
+        Some("none") => ChunkingStrategy::None,
+        _ => ChunkingStrategy::MarkdownRecursive {
+            max_chunk_size: size.unwrap_or(2000),
+            chunk_overlap: overlap.unwrap_or(300),
+        },
+    }
+}
+
 async fn process_single_file(
     state: &AppState,
     collection_name: &str,
@@ -263,6 +327,7 @@ async fn process_single_file(
     file_name: &str,
     skip_captions: bool,
     dpi: Option<u32>,
+    chunking_strategy: &ChunkingStrategy,
 ) -> Result<ProcessDocumentResponse, (StatusCode, Json<OcrErrorResponse>)> {
     // Forward file to FlashParse.
     let client = reqwest::Client::new();
@@ -385,24 +450,8 @@ async fn process_single_file(
         }
     }
 
-    // Chunk markdown by headings or page separators.
-    let chunks: Vec<String> = if markdown_content.is_empty() {
-        Vec::new()
-    } else {
-        markdown_content
-            .split("\n---\n")
-            .flat_map(|section| {
-                let parts: Vec<&str> = section.split("\n## ").collect();
-                if parts.len() > 1 {
-                    parts
-                } else {
-                    section.split("\n# ").collect()
-                }
-            })
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.to_owned())
-            .collect()
-    };
+    // Chunk markdown using the configured strategy.
+    let text_chunks = chunk_markdown(&markdown_content, chunking_strategy);
 
     // Count tables (simple heuristic: lines with | pipes).
     let tables_extracted = markdown_content
@@ -473,21 +522,21 @@ async fn process_single_file(
             ocr_err("no segment managers for collection".into())
         })?;
 
-        for (idx, chunk_text) in chunks.iter().enumerate() {
+        for chunk in &text_chunks {
             let mut record = Record::new();
             if has_content_field {
-                record.set("content", FieldValue::String(chunk_text.clone()));
+                record.set("content", FieldValue::String(chunk.text.clone()));
             }
             if has_source_file_field {
                 record.set("source_file", FieldValue::String(file_name.to_owned()));
             }
             if has_chunk_index_field {
-                record.set("chunk_index", FieldValue::Int32(idx as i32));
+                record.set("chunk_index", FieldValue::Int32(chunk.index as i32));
             }
 
             // Embed text content into vector fields.
             for (target_field, client) in &text_embed_targets {
-                if let Ok(vector) = client.embed_text(chunk_text) {
+                if let Ok(vector) = client.embed_text(&chunk.text) {
                     record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
                 }
             }
@@ -500,10 +549,10 @@ async fn process_single_file(
             })?;
             sm.insert(record).map_err(|e| ocr_err(format!("insert failed: {e}")))?;
 
-            let preview = if chunk_text.len() > 100 {
-                format!("{}...", &chunk_text[..100])
+            let preview = if chunk.text.len() > 100 {
+                format!("{}...", &chunk.text[..100])
             } else {
-                chunk_text.clone()
+                chunk.text.clone()
             };
             response_chunks.push(ChunkSummary {
                 id: record_id.clone(),
@@ -570,7 +619,7 @@ async fn process_single_file(
         )
     })?;
 
-    let pages = chunks.len().max(1);
+    let pages = text_chunks.len().max(1);
 
     Ok(ProcessDocumentResponse {
         status: "processed".to_owned(),

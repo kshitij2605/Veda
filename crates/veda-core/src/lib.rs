@@ -1,3 +1,4 @@
+pub mod chunking;
 pub mod embedding;
 pub mod embedding_client;
 pub mod error;
