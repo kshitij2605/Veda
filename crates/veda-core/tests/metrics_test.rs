@@ -1,7 +1,7 @@
 use veda_core::metrics;
 
 #[test]
-fn test_metric_names_are_valid_prometheus_names() {
+fn test_metrics_names_are_valid_prometheus_format() {
     let names = [
         metrics::REQUESTS_TOTAL,
         metrics::REQUEST_DURATION,
