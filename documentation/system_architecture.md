@@ -212,19 +212,28 @@ All use a shared `hsum_avx` helper that horizontally sums a `__m256` to a scalar
 
 **File:** `metrics.rs`
 
-A global singleton (`static GLOBAL_METRICS`) using `AtomicU64` counters with `Ordering::Relaxed`.
+Defines 16 metric name constants used with the `metrics` crate (`metrics::counter!()`, `metrics::histogram!()`, `metrics::gauge!()`). The actual recording and Prometheus exposition are handled by a `metrics_exporter_prometheus` recorder installed in `veda-gateway`.
 
-**Counters:** `query_count`, `query_latency_sum_us`, `insert_count`, `insert_latency_sum_us`, `error_count`.
+**Constants (16):**
 
-**Methods:**
-- `Metrics::global()` -- returns `&'static Metrics`
-- `record_query(latency: Duration)` -- increments `query_count`, adds `latency.as_micros()` to sum
-- `record_insert(latency: Duration)` -- same pattern for inserts
-- `record_error()` -- increments `error_count`
-- `export_prometheus()` -- generates Prometheus text exposition format with metrics:
-  - `veda_query_total`, `veda_query_latency_microseconds_total`
-  - `veda_insert_total`, `veda_insert_latency_microseconds_total`
-  - `veda_errors_total`
+| Constant | Metric name | Type |
+|---|---|---|
+| `REQUESTS_TOTAL` | `veda_requests_total` | counter |
+| `REQUEST_DURATION` | `veda_request_duration_seconds` | histogram |
+| `SEARCH_DURATION` | `veda_search_duration_seconds` | histogram |
+| `INSERT_TOTAL` | `veda_insert_total` | counter |
+| `INSERT_DURATION` | `veda_insert_duration_seconds` | histogram |
+| `EMBEDDING_DURATION` | `veda_embedding_duration_seconds` | histogram |
+| `BLOB_OP_DURATION` | `veda_blob_operation_duration_seconds` | histogram |
+| `SEGMENTS_TOTAL` | `veda_segments_total` | gauge |
+| `INDEX_BUILD_DURATION` | `veda_index_build_duration_seconds` | histogram |
+| `COMPACTION_DURATION` | `veda_compaction_duration_seconds` | histogram |
+| `ERRORS_TOTAL` | `veda_errors_total` | counter |
+| `ACTIVE_COLLECTIONS` | `veda_active_collections` | gauge |
+| `RECORDS_TOTAL` | `veda_records_total` | gauge |
+| `COMPACTION_IN_PROGRESS` | `veda_compaction_in_progress` | gauge |
+| `INDEX_REBUILD_IN_PROGRESS` | `veda_index_rebuild_in_progress` | gauge |
+| `SEAL_DURATION` | `veda_seal_duration_seconds` | histogram |
 
 ### 3.8 Embedding
 
@@ -1067,7 +1076,8 @@ Per-action middleware functions: `require_admin`, `require_search`, `require_ins
 
 | Method | Path | Handler | Description |
 |---|---|---|---|
-| GET | `/v1/admin/health` | `admin::health` | Health check, returns `{"status":"healthy","version":"0.1.0"}` |
+| GET | `/v1/admin/health` | `admin::health` | Health check with dependency status (always 200) |
+| GET | `/v1/admin/readiness` | `admin::readiness` | Readiness probe (503 if unhealthy) |
 | POST | `/v1/auth/login` | `admin::login` | Authenticate, returns JWT token |
 
 **Protected routes** (auth middleware when enabled):
@@ -1130,7 +1140,7 @@ Error format: `{"error": "description string"}`
 
 The `veda-server` binary:
 
-1. **Tracing initialization** -- `tracing_subscriber::fmt()` with JSON format and `RUST_LOG` environment variable filter (defaults to `info`)
+1. **Tracing initialization** -- loads `.env` if present, then builds a `tracing_subscriber` registry with JSON format and `RUST_LOG` filter (defaults to `info`). If `OTEL_EXPORTER_OTLP_ENDPOINT` is set, additionally initializes OpenTelemetry trace and log exporters (OTLP/gRPC via `opentelemetry_otlp` + `tracing_opentelemetry`), using `OTEL_SERVICE_NAME` (defaults to `"veda"`). When the env var is unset, only the local JSON fmt layer is active -- no OTel dependencies are loaded.
 2. **CLI argument parsing** (positional, no clap):
    - `args[1]` -- data directory (default: `./veda-data`)
    - `args[2]` -- listen address (default: `0.0.0.0:6340`)
@@ -1492,3 +1502,119 @@ A Helm chart is planned for Kubernetes deployment with:
 - ConfigMap for `veda.toml`
 - Service for load balancing
 - Optional MinIO and NATS sub-charts
+
+---
+
+## 15. Observability
+
+Veda follows an OpenTelemetry-first approach to observability. All telemetry -- metrics, traces, and logs -- flows through a standard OTel pipeline. When running without OTel, Veda still exposes Prometheus metrics and structured JSON logs.
+
+### 15.1 Architecture Overview
+
+```
+veda-server
+  ├── metrics::counter!()/histogram!()/gauge!()  ──►  Prometheus exporter (:6340/v1/admin/metrics)
+  ├── tracing #[instrument] spans                 ──►  OTel trace exporter (OTLP/gRPC, conditional)
+  └── tracing::info!/warn!/error! events          ──►  OTel log exporter (OTLP/gRPC, conditional)
+                                                            │
+                                                   ┌────────▼────────┐
+                                                   │  OTel Collector  │  (:4317)
+                                                   └──┬──────┬──────┬┘
+                                                      │      │      │
+                                                ┌─────▼┐  ┌──▼──┐  ┌▼────┐
+                                                │ Mimir │  │Tempo│  │Loki │
+                                                │:9009  │  │:3200│  │:3100│
+                                                └──┬────┘  └──┬──┘  └──┬──┘
+                                                   └──────┬────┘───────┘
+                                                    ┌─────▼─────┐
+                                                    │  Grafana   │  (:3000)
+                                                    └────────────┘
+```
+
+### 15.2 Metrics
+
+**Crate:** `veda-core::metrics` (16 constants) + `metrics_exporter_prometheus` recorder in `veda-gateway`.
+
+Metrics are recorded throughout the codebase using the `metrics` crate macros (`counter!()`, `histogram!()`, `gauge!()`), referencing the constants defined in `veda_core::metrics` (see Section 3.7). The Prometheus exporter renders all registered metrics at `GET /v1/admin/metrics` in Prometheus text exposition format.
+
+Key metric categories:
+- **HTTP:** `veda_requests_total` (counter, labelled by method/path/status), `veda_request_duration_seconds` (histogram)
+- **Search:** `veda_search_duration_seconds` (histogram)
+- **Writes:** `veda_insert_total` (counter), `veda_insert_duration_seconds` (histogram)
+- **Embedding:** `veda_embedding_duration_seconds` (histogram)
+- **Blob storage:** `veda_blob_operation_duration_seconds` (histogram)
+- **Segments:** `veda_segments_total` (gauge), `veda_seal_duration_seconds` (histogram)
+- **Indexes:** `veda_index_build_duration_seconds` (histogram), `veda_index_rebuild_in_progress` (gauge)
+- **Compaction:** `veda_compaction_duration_seconds` (histogram), `veda_compaction_in_progress` (gauge)
+- **Gauges:** `veda_active_collections`, `veda_records_total`
+- **Errors:** `veda_errors_total` (counter)
+
+### 15.3 Distributed Tracing
+
+Tracing is built on `tracing` + `tracing_opentelemetry`. The OTel trace and log layers are **conditional** -- they are only initialized if `OTEL_EXPORTER_OTLP_ENDPOINT` is set at startup (see Section 9).
+
+Handler functions and key internal operations are annotated with `#[instrument]` to create spans automatically. This includes:
+- REST handlers (search, insert, embed-insert, collection operations)
+- Embedding client methods (`embed_text`, `embed_bytes`)
+- Blob store operations
+
+When OTel is active, spans are exported via OTLP/gRPC to the configured collector. When OTel is inactive, `#[instrument]` spans are still visible in the structured JSON log output.
+
+### 15.4 Health Checks
+
+**Endpoints:**
+- `GET /v1/admin/health` -- liveness probe, always returns HTTP 200
+- `GET /v1/admin/readiness` -- readiness probe, returns HTTP 503 if status is `unhealthy`
+
+Both return a `HealthResponse` with `status`, `version`, and `checks` map.
+
+**Dependency checks:** MinIO (HTTP health endpoint), NATS (TCP connect), embedding service (HTTP `/health`), multimodal embedding service (HTTP `/health`). Each check has a 2-second timeout.
+
+**Three-tier status:**
+- `healthy` -- all configured dependencies are reachable
+- `degraded` -- a non-critical dependency (embedding) is unavailable, but MinIO and NATS are healthy
+- `unhealthy` -- MinIO or NATS is unreachable (returns 503 from readiness endpoint)
+
+Unconfigured dependencies (empty endpoint env var) are reported as `"unconfigured"` and do not affect status.
+
+### 15.5 Query Explain
+
+When a search request includes `"explain": true`, the response contains an `explain` object with per-phase timing in milliseconds:
+
+```json
+{
+  "results": [...],
+  "explain": {
+    "filter_ms": 0.12,
+    "ann_search_ms": 1.45,
+    "scoring_ms": 0.03,
+    "fusion_ms": 0.0,
+    "total_ms": 1.60
+  }
+}
+```
+
+This is useful for diagnosing slow queries. The `fusion_ms` field is non-zero only for multi-vector fusion searches.
+
+### 15.6 HTTP Request Logging Middleware
+
+**File:** `veda-gateway/src/rest/metrics_middleware.rs`
+
+An Axum middleware that records per-request metrics (`veda_requests_total`, `veda_request_duration_seconds`) with labels for HTTP method, path, and response status code. Applied globally to all routes via `axum::middleware::from_fn`. Additionally, `tower_http::trace::TraceLayer` provides structured request/response logging.
+
+### 15.7 Docker Compose Monitoring Stack
+
+Six services defined under `profiles: ["monitoring"]` in `docker-compose.yml`:
+
+| Service | Image | Port | Role |
+|---|---|---|---|
+| `otel-collector` | `otel/opentelemetry-collector-contrib` | `:4317` | OTLP receiver, routes to Mimir/Tempo/Loki |
+| `prometheus` | `prom/prometheus` | `:9090` | Scrapes Veda `/v1/admin/metrics` |
+| `mimir` | `grafana/mimir` | `:9009` | Long-term metrics storage (Prometheus remote-write target) |
+| `tempo` | `grafana/tempo` | `:3200` | Trace storage |
+| `loki` | `grafana/loki` | `:3100` | Log aggregation |
+| `grafana` | `grafana/grafana` | `:3000` | Visualization (pre-provisioned datasources + dashboard) |
+
+Configuration files live in `config/monitoring/`. Grafana is pre-provisioned with Mimir, Tempo, and Loki datasources and includes a pre-built Veda dashboard.
+
+Start with: `docker compose --profile monitoring up`

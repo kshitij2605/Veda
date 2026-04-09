@@ -11,6 +11,7 @@
   <a href="#python-sdk">Python SDK</a> |
   <a href="#niriksha-dashboard">Niriksha</a> |
   <a href="#benchmarks">Benchmarks</a> |
+  <a href="#monitoring--observability">Monitoring</a> |
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
@@ -31,7 +32,7 @@
 - **Auto-embedding pipeline** -- automatic embedding generation with modality validation
 - **Niriksha dashboard** -- built-in visualization and exploration UI for multimodal vector data
 - **JWT authentication + RBAC** -- Admin, Editor, and Viewer roles with token-based auth
-- **Prometheus metrics** -- operational observability out of the box
+- **Full observability stack** -- Prometheus metrics, OpenTelemetry tracing, query explain, health checks, and a pre-built Grafana dashboard
 - **Python SDK** -- `veda-client` package for idiomatic Python access
 
 ## Quick Start
@@ -68,6 +69,7 @@ This starts the Veda server, MinIO blob storage, and NATS message queue.
 | `embedding` | HuggingFace TEI + Multimodal Embedding (vLLM) | CPU + ~10GB | Text embedding (BGE-M3) + multimodal embedding (Qwen3-VL) |
 | `ocr` | FlashParse + GLM-OCR | ~8GB | Text/table/formula OCR from documents |
 | `ocr-vlm` | VLM (Qwen3.5-35B-A3B) | ~48GB | Image captioning and classification (use with `ocr`) |
+| `monitoring` | OTel Collector, Prometheus, Mimir, Tempo, Loki, Grafana | CPU | Metrics, tracing, and log aggregation |
 
 ### Build from source
 
@@ -461,6 +463,83 @@ project-mdb/
 | `VEDA_BLOB_REGION` | `us-east-1` | AWS region (for S3 mode) |
 
 If `VEDA_BLOB_BACKEND` is unset, Veda falls back to local filesystem blob storage.
+
+## Monitoring & Observability
+
+### Starting the monitoring stack
+
+```bash
+docker compose --profile monitoring up
+```
+
+This starts six services alongside Veda:
+
+| Service | Port | Purpose |
+|---|---|---|
+| OTel Collector | `:4317` (gRPC) | Receives traces, metrics, and logs via OTLP |
+| Prometheus | `:9090` | Scrapes Veda's `/v1/admin/metrics` endpoint |
+| Mimir | `:9009` | Long-term metrics storage (Prometheus remote-write) |
+| Tempo | `:3200` | Distributed trace storage |
+| Loki | `:3100` | Log aggregation |
+| Grafana | `:3000` | Dashboards and exploration (pre-provisioned datasources and dashboard) |
+
+### OpenTelemetry configuration
+
+Veda exports traces and logs via OTLP when the following environment variable is set:
+
+| Variable | Default | Description |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | OTLP gRPC endpoint (e.g. `http://otel-collector:4317`). OTel export is disabled when unset. |
+| `OTEL_SERVICE_NAME` | `veda` | Service name attached to all telemetry |
+
+When running with `--profile monitoring`, these are pre-configured in `docker-compose.yml`.
+
+### Prometheus metrics
+
+Veda exposes Prometheus metrics at `GET /v1/admin/metrics`. Metrics include request counts and durations, search latency, insert counts, embedding and blob operation durations, segment and compaction gauges, and error totals.
+
+### Health checks
+
+```bash
+# Liveness -- always returns 200
+curl http://localhost:6340/v1/admin/health
+
+# Readiness -- returns 503 if unhealthy
+curl http://localhost:6340/v1/admin/readiness
+```
+
+Both endpoints return:
+
+```json
+{
+  "status": "healthy",
+  "version": "0.1.0",
+  "checks": {
+    "minio": "healthy",
+    "nats": "healthy",
+    "embedding": "unconfigured",
+    "multimodal_embedding": "unconfigured"
+  }
+}
+```
+
+Status is one of `healthy`, `degraded` (non-critical service down), or `unhealthy` (MinIO or NATS down). The readiness endpoint returns HTTP 503 when unhealthy.
+
+### Query explain
+
+Add `"explain": true` to any search request to get per-phase timing:
+
+```bash
+curl -X POST http://localhost:6340/v1/collections/products/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": {"vector": {"field": "embedding", "values": [0.15, 0.22, ...]}},
+    "limit": 10,
+    "explain": true
+  }'
+```
+
+The response includes an `explain` object with `filter_ms`, `ann_search_ms`, `scoring_ms`, `fusion_ms`, and `total_ms` fields.
 
 ## Contributing
 
