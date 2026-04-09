@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -6,6 +7,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use veda_core::embedding::Modality;
 use veda_core::embedding_client::EmbeddingClient;
+use veda_core::metrics as m;
 use veda_core::record::{FieldValue, Record};
 use veda_core::types::FieldType;
 use veda_core::vector::DenseVector;
@@ -48,6 +50,7 @@ pub async fn embed_insert(
     Path(name): Path<String>,
     Json(req): Json<EmbedInsertRequest>,
 ) -> Result<(StatusCode, Json<EmbedInsertResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let start = Instant::now();
     let schema = {
         let schemas = state.inner.schemas.read().await;
         schemas.get(&name).cloned().ok_or_else(|| {
@@ -297,6 +300,11 @@ pub async fn embed_insert(
     drop(managers);
     drop(registry);
     rebuild_executors(&state, &name).await?;
+
+    metrics::histogram!(m::INSERT_DURATION, "collection" => name.clone())
+        .record(start.elapsed().as_secs_f64());
+    metrics::counter!(m::INSERT_TOTAL, "collection" => name.clone())
+        .increment(inserted as u64);
 
     Ok((
         StatusCode::CREATED,

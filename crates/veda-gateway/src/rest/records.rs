@@ -1,8 +1,11 @@
+use std::time::Instant;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use veda_core::metrics as m;
 use veda_core::record::{FieldValue, Record};
 use veda_core::types::FieldType;
 use veda_core::vector::DenseVector;
@@ -50,6 +53,7 @@ pub async fn insert(
     Path(name): Path<String>,
     Json(req): Json<InsertRequest>,
 ) -> Result<(StatusCode, Json<InsertResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let start = Instant::now();
     let schema = {
         let schemas = state.inner.schemas.read().await;
         schemas.get(&name).cloned().ok_or_else(|| {
@@ -135,6 +139,11 @@ pub async fn insert(
 
     drop(managers);
     rebuild_executors(&state, &name).await?;
+
+    metrics::histogram!(m::INSERT_DURATION, "collection" => name.clone())
+        .record(start.elapsed().as_secs_f64());
+    metrics::counter!(m::INSERT_TOTAL, "collection" => name.clone())
+        .increment(inserted as u64);
 
     Ok((StatusCode::CREATED, Json(InsertResponse { inserted })))
 }
