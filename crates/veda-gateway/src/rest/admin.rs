@@ -85,9 +85,13 @@ pub async fn login(
     Ok(Json(LoginResponse { token }))
 }
 
-// TODO: Task 3 will replace this with PrometheusHandle.render()
-pub async fn metrics() -> (StatusCode, [(axum::http::header::HeaderName, &'static str); 1], String) {
-    let body = String::new();
+pub async fn metrics(
+    State(state): State<AppState>,
+) -> (StatusCode, [(axum::http::header::HeaderName, &'static str); 1], String) {
+    let body = match &state.inner.prometheus_handle {
+        Some(handle) => handle.render(),
+        None => String::from("# metrics recorder not installed\n"),
+    };
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],

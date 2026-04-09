@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 opentelemetry = { workspace = true }
 veda-core = { workspace = true }
 veda-query = { workspace = true }

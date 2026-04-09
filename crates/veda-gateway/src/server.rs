@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use metrics_exporter_prometheus::PrometheusBuilder;
+
 use crate::rest::{build_router, state::AppState};
 
 /// Configuration for the Veda API server.
@@ -10,7 +12,12 @@ pub struct ServerConfig {
 
 /// Start the HTTP server and block until shutdown.
 pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
-    let app_state = AppState::new(&config.data_dir);
+    // Install Prometheus metrics recorder (global).
+    let prometheus_handle = PrometheusBuilder::new()
+        .install_recorder()
+        .expect("failed to install Prometheus recorder");
+
+    let app_state = AppState::with_prometheus(&config.data_dir, prometheus_handle);
     app_state.load_embedding_from_env().await;
     app_state.load_blob_store_from_env().await;
     let router = build_router(app_state);

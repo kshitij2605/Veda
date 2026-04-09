@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 use veda_core::embedding::{EmbeddingModelConfig, EmbeddingModelRegistry, Modality};
 use veda_core::schema::CollectionSchema;
 use veda_query::distributed::DistributedQueryExecutor;
+use metrics_exporter_prometheus::PrometheusHandle;
 use veda_storage::blob_store::{BlobStore, LocalBlobStore, ObjectBlobStore, ObjectStoreConfig};
 use veda_storage::segment_manager::SegmentManager;
 
@@ -45,6 +46,8 @@ pub struct AppStateInner {
     pub users: HashMap<String, UserRecord>,
     /// Blob storage backend.
     pub blob_store: RwLock<Arc<dyn BlobStore>>,
+    /// Prometheus metrics handle (None when recorder is not installed).
+    pub prometheus_handle: Option<PrometheusHandle>,
 }
 
 impl AppState {
@@ -64,6 +67,7 @@ impl AppState {
                 blob_store: RwLock::new(Arc::new(
                     LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
                 )),
+                prometheus_handle: None,
             }),
         }
     }
@@ -92,6 +96,7 @@ impl AppState {
                 blob_store: RwLock::new(Arc::new(
                     LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
                 )),
+                prometheus_handle: None,
             }),
         }
     }
@@ -116,6 +121,28 @@ impl AppState {
                 blob_store: RwLock::new(Arc::new(
                     LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
                 )),
+                prometheus_handle: None,
+            }),
+        }
+    }
+
+    /// Create a new AppState with a Prometheus handle.
+    pub fn with_prometheus(data_dir: &Path, prometheus_handle: PrometheusHandle) -> Self {
+        Self {
+            inner: Arc::new(AppStateInner {
+                schemas: RwLock::new(HashMap::new()),
+                segment_managers: RwLock::new(HashMap::new()),
+                query_executors: RwLock::new(HashMap::new()),
+                embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
+                data_dir: data_dir.to_owned(),
+                flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
+                auth_enabled: false,
+                jwt_secret: "default-test-secret".to_owned(),
+                users: HashMap::new(),
+                blob_store: RwLock::new(Arc::new(
+                    LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
+                )),
+                prometheus_handle: Some(prometheus_handle),
             }),
         }
     }

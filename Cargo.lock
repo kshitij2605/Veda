@@ -2869,6 +2869,7 @@ dependencies = [
  "axum 0.8.8",
  "jsonwebtoken",
  "metrics",
+ "metrics-exporter-prometheus",
  "opentelemetry",
  "reqwest",
  "serde",
