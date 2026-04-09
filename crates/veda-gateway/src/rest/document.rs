@@ -450,7 +450,7 @@ async fn process_single_file(
         })?;
 
         let entry_name = file.name().to_owned();
-        if entry_name.ends_with(".md") || entry_name.ends_with(".markdown") {
+        if entry_name.ends_with(".md") || entry_name.ends_with(".markdown") || entry_name.ends_with(".mmd") {
             let mut content = String::new();
             file.read_to_string(&mut content).ok();
             if !markdown_content.is_empty() {
@@ -571,8 +571,13 @@ async fn process_single_file(
 
             // Embed text content into vector fields.
             for (target_field, client) in &text_embed_targets {
-                if let Ok(vector) = client.embed_text(&chunk.text) {
-                    record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
+                match client.embed_text(&chunk.text) {
+                    Ok(vector) => {
+                        record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
+                    }
+                    Err(e) => {
+                        tracing::warn!(field = %target_field, error = %e, "text embedding failed, skipping vector field");
+                    }
                 }
             }
 
@@ -584,8 +589,9 @@ async fn process_single_file(
             })?;
             sm.insert(record).map_err(|e| ocr_err(format!("insert failed: {e}")))?;
 
-            let preview = if chunk.text.len() > 100 {
-                format!("{}...", &chunk.text[..100])
+            let preview = if chunk.text.chars().count() > 100 {
+                let end = chunk.text.char_indices().nth(100).map(|(i, _)| i).unwrap_or(chunk.text.len());
+                format!("{}...", &chunk.text[..end])
             } else {
                 chunk.text.clone()
             };
@@ -600,8 +606,9 @@ async fn process_single_file(
         // Get blob store for storing extracted images.
         let blob_store = state.inner.blob_store.read().await.clone();
 
-        // Insert image records.
-        for (img_name, img_data) in &images {
+        // Insert image records only if the schema has image-related fields (blob or embedding).
+        let should_insert_images = has_image_blob_field || !image_embed_targets.is_empty();
+        for (img_name, img_data) in images.iter().filter(|_| should_insert_images) {
             let mut record = Record::new();
             if has_image_blob_field {
                 let blob_key = format!("{}/{}/{}", collection_name, record.id(), img_name);
@@ -620,8 +627,13 @@ async fn process_single_file(
 
             // Embed image data into vector fields.
             for (target_field, client) in &image_embed_targets {
-                if let Ok(vector) = client.embed_bytes(img_data, Modality::Image) {
-                    record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
+                match client.embed_bytes(img_data, Modality::Image) {
+                    Ok(vector) => {
+                        record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
+                    }
+                    Err(e) => {
+                        tracing::warn!(field = %target_field, error = %e, "image embedding failed, skipping vector field");
+                    }
                 }
             }
 
