@@ -2,8 +2,6 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use veda_core::metrics::Metrics;
-
 use crate::auth;
 
 use super::state::AppState;
@@ -87,8 +85,9 @@ pub async fn login(
     Ok(Json(LoginResponse { token }))
 }
 
+// TODO: Task 3 will replace this with PrometheusHandle.render()
 pub async fn metrics() -> (StatusCode, [(axum::http::header::HeaderName, &'static str); 1], String) {
-    let body = Metrics::global().export_prometheus();
+    let body = String::new();
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
