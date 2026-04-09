@@ -241,6 +241,13 @@ services:
     ports:
       - "4317:4317"
       - "4318:4318"
+    environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
     volumes:
       - ./config/monitoring/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
     depends_on:
@@ -251,7 +258,14 @@ services:
     profiles: ["monitoring"]
     image: prom/prometheus:latest
     ports:
-      - "9090:9090"
+      - "9190:9090"
+    environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
     volumes:
       - ./config/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -262,13 +276,19 @@ services:
     profiles: ["monitoring"]
     image: grafana/mimir:latest
     ports:
-      - "9009:9009"
+      - "9109:9009"
     volumes:
       - ./config/monitoring/mimir.yml:/etc/mimir/config.yaml:ro
       - mimir-data:/data
     environment:
       MINIO_USER: ${MINIO_USER:-veda}
       MINIO_PASSWORD: ${MINIO_PASSWORD:-vedapassword}
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
     command: ["-config.file=/etc/mimir/config.yaml", "-config.expand-env=true"]
     depends_on:
       minio:
@@ -276,9 +296,16 @@ services:
 
   tempo:
     profiles: ["monitoring"]
-    image: grafana/tempo:latest
+    image: grafana/tempo:2.7.0
     ports:
       - "3200:3200"
+    environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
     volumes:
       - ./config/monitoring/tempo.yml:/etc/tempo/config.yaml:ro
       - tempo-data:/var/tempo
@@ -289,6 +316,13 @@ services:
     image: grafana/loki:latest
     ports:
       - "3100:3100"
+    environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
     volumes:
       - ./config/monitoring/loki.yml:/etc/loki/config.yaml:ro
       - loki-data:/loki
@@ -298,11 +332,17 @@ services:
     profiles: ["monitoring"]
     image: grafana/grafana:latest
     ports:
-      - "3000:3000"
+      - "3010:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-vedagrafana}
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
     volumes:
       - grafana-data:/var/lib/grafana
       - ./config/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
