@@ -2,6 +2,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::{delete, get, post};
 use axum::Router;
+use tower_http::trace::TraceLayer;
 
 use crate::auth;
 
@@ -9,6 +10,7 @@ pub mod admin;
 pub mod collections;
 pub mod document;
 pub mod embed_insert;
+pub mod metrics_middleware;
 pub mod records;
 pub mod search;
 pub mod state;
@@ -18,6 +20,7 @@ pub fn build_router(app_state: state::AppState) -> Router {
     // Public routes — no auth required.
     let public = Router::new()
         .route("/v1/admin/health", get(admin::health))
+        .route("/v1/admin/readiness", get(admin::readiness))
         .route("/v1/auth/login", post(admin::login));
 
     // Protected routes — auth middleware applied when auth_enabled=true.
@@ -68,6 +71,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
 
     public
         .merge(protected)
+        .layer(axum::middleware::from_fn(metrics_middleware::request_metrics))
+        .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(256 * 1024 * 1024)) // 256MB max body
         .with_state(app_state)
 }
