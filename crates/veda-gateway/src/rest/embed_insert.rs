@@ -25,7 +25,7 @@ pub struct EmbedInsertRequest {
 #[derive(Debug, Deserialize)]
 pub struct AutoEmbedMapping {
     pub source_field: String,
-    pub model: String,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,23 +62,43 @@ pub async fn embed_insert(
 
     let registry = state.inner.embedding_registry.read().await;
 
-    // Validate all auto_embed mappings up front.
+    // Validate all auto_embed mappings up front and resolve model names.
+    let mut resolved_models: HashMap<String, String> = HashMap::new();
     for (target_field, mapping) in &req.auto_embed {
+        // Detect modality from source field name.
+        let modality = Modality::from_field_name(&mapping.source_field).unwrap_or(Modality::Text);
+
+        // Resolve model name: use explicit model or auto-select by modality.
+        let model_name = match &mapping.model {
+            Some(name) => name.clone(),
+            None => {
+                let candidates = registry.find_by_modality(modality);
+                if candidates.is_empty() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "no model registered for modality '{modality}'. Register one via EMBEDDING_* or MULTIMODAL_EMBEDDING_* env vars"
+                            ),
+                        }),
+                    ));
+                }
+                candidates[0].name.clone()
+            }
+        };
+
         // Validate model exists.
-        let model = registry.get(&mapping.model).ok_or_else(|| {
+        let model = registry.get(&model_name).ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    error: format!("model '{}' not found in registry", mapping.model),
+                    error: format!("model '{}' not found in registry", model_name),
                 }),
             )
         })?;
 
-        // Detect modality from source field name.
-        let modality = Modality::from_field_name(&mapping.source_field).unwrap_or(Modality::Text);
-
         // Validate model supports the modality.
-        registry.validate_modality(&mapping.model, modality).map_err(|e| {
+        registry.validate_modality(&model_name, modality).map_err(|e| {
             (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(ErrorResponse {
@@ -104,7 +124,7 @@ pub async fn embed_insert(
                         Json(ErrorResponse {
                             error: format!(
                                 "model '{}' output dimension {} does not match field '{}' dimension {}",
-                                mapping.model, model.output_dimension, target_field, dimension
+                                model_name, model.output_dimension, target_field, dimension
                             ),
                         }),
                     ));
@@ -119,6 +139,8 @@ pub async fn embed_insert(
                 ));
             }
         }
+
+        resolved_models.insert(target_field.clone(), model_name);
     }
 
     // Process each record: generate embeddings, then insert.
@@ -156,7 +178,8 @@ pub async fn embed_insert(
                 }
             };
 
-            let model_config = registry.get(&mapping.model).unwrap();
+            let model_name = resolved_models.get(target_field).unwrap();
+            let model_config = registry.get(model_name).unwrap();
             let client = EmbeddingClient::new(model_config.clone());
             let modality = Modality::from_field_name(&mapping.source_field).unwrap_or(Modality::Text);
 
