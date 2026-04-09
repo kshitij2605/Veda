@@ -113,16 +113,128 @@ fn collect_files(
     Ok(())
 }
 
-/// Placeholder for S3/MinIO blob store (requires async + real credentials).
-pub struct S3BlobStore {
-    _bucket: String,
+/// Configuration for S3-compatible object storage (MinIO or AWS S3).
+#[derive(Debug, Clone)]
+pub struct ObjectStoreConfig {
+    /// Backend type: "minio" (default) or "s3".
+    pub backend: String,
+    /// Endpoint URL, e.g. "http://minio:9000".
+    pub endpoint: String,
+    /// Bucket name, e.g. "veda-blobs".
+    pub bucket: String,
+    /// AWS access key ID.
+    pub access_key: String,
+    /// AWS secret access key.
+    pub secret_key: String,
+    /// AWS region, default "us-east-1".
+    pub region: String,
 }
 
-impl S3BlobStore {
-    #[allow(dead_code)]
-    pub fn new(_bucket: &str, _endpoint: &str, _region: &str) -> Result<Self> {
-        Err(VedaError::Storage(
-            "S3BlobStore is not yet implemented".to_string(),
-        ))
+/// Object storage blob store backed by MinIO or AWS S3.
+pub struct ObjectBlobStore {
+    bucket: Box<s3::Bucket>,
+}
+
+impl ObjectBlobStore {
+    pub fn new(config: &ObjectStoreConfig) -> Result<Self> {
+        let credentials = s3::creds::Credentials {
+            access_key: Some(config.access_key.clone()),
+            secret_key: Some(config.secret_key.clone()),
+            security_token: None,
+            session_token: None,
+            expiration: None,
+        };
+
+        let region = if config.backend == "minio" {
+            s3::Region::Custom {
+                region: config.region.clone(),
+                endpoint: config.endpoint.clone(),
+            }
+        } else {
+            config
+                .region
+                .parse()
+                .map_err(|e| VedaError::Storage(format!("invalid S3 region: {e}")))?
+        };
+
+        let bucket = if config.backend == "minio" {
+            // Try to create the bucket (ignore AlreadyExists / errors).
+            let _ = s3::Bucket::create_with_path_style(
+                &config.bucket,
+                region.clone(),
+                credentials.clone(),
+                s3::BucketConfiguration::default(),
+            );
+            s3::Bucket::new(&config.bucket, region, credentials)
+                .map_err(|e| VedaError::Storage(format!("failed to create bucket handle: {e}")))?
+                .with_path_style()
+        } else {
+            let _ = s3::Bucket::create(
+                &config.bucket,
+                region.clone(),
+                credentials.clone(),
+                s3::BucketConfiguration::default(),
+            );
+            s3::Bucket::new(&config.bucket, region, credentials)
+                .map_err(|e| VedaError::Storage(format!("failed to create bucket handle: {e}")))?
+        };
+
+        Ok(Self { bucket })
+    }
+}
+
+impl BlobStore for ObjectBlobStore {
+    fn put(&self, key: &str, data: &[u8]) -> Result<()> {
+        let resp = self
+            .bucket
+            .put_object(key, data)
+            .map_err(|e| VedaError::Storage(format!("S3 put failed: {e}")))?;
+        let code = resp.status_code();
+        if code != 200 {
+            return Err(VedaError::Storage(format!(
+                "S3 put returned status {code}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn get(&self, key: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .bucket
+            .get_object(key)
+            .map_err(|e| VedaError::Storage(format!("S3 get failed: {e}")))?;
+        if resp.status_code() == 404 {
+            return Err(VedaError::Storage(format!("Blob not found: {key}")));
+        }
+        Ok(resp.to_vec())
+    }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        self.bucket
+            .delete_object(key)
+            .map_err(|e| VedaError::Storage(format!("S3 delete failed: {e}")))?;
+        Ok(())
+    }
+
+    fn exists(&self, key: &str) -> Result<bool> {
+        match self.bucket.head_object(key) {
+            Ok((_head, code)) => Ok(code == 200),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        let results = self
+            .bucket
+            .list(prefix.to_string(), None)
+            .map_err(|e| VedaError::Storage(format!("S3 list failed: {e}")))?;
+        let mut keys = Vec::new();
+        for result in &results {
+            for obj in &result.contents {
+                keys.push(obj.key.clone());
+            }
+        }
+        keys.sort();
+        Ok(keys)
     }
 }

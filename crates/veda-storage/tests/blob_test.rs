@@ -5,7 +5,7 @@ use veda_core::record::{FieldValue, Record};
 use veda_core::schema::{CollectionSchema, FieldDefinition};
 use veda_core::types::{DistanceMetric, FieldType};
 use veda_storage::blob_manager::BlobManager;
-use veda_storage::blob_store::{BlobStore, LocalBlobStore};
+use veda_storage::blob_store::{BlobStore, LocalBlobStore, ObjectStoreConfig};
 
 fn make_store(tmp: &TempDir) -> LocalBlobStore {
     LocalBlobStore::new(tmp.path()).unwrap()
@@ -189,4 +189,56 @@ fn non_blob_fields_untouched() {
 
     // Image should be a BlobRef
     assert!(matches!(record.get("image").unwrap(), FieldValue::BlobRef(_)));
+}
+
+// --- ObjectStoreConfig tests ---
+
+#[test]
+fn object_store_config_minio_defaults() {
+    let config = ObjectStoreConfig {
+        backend: "minio".to_string(),
+        endpoint: "http://minio:9000".to_string(),
+        bucket: "veda-blobs".to_string(),
+        access_key: "minioadmin".to_string(),
+        secret_key: "minioadmin".to_string(),
+        region: "us-east-1".to_string(),
+    };
+    assert_eq!(config.backend, "minio");
+    assert_eq!(config.endpoint, "http://minio:9000");
+    assert_eq!(config.bucket, "veda-blobs");
+    assert_eq!(config.region, "us-east-1");
+}
+
+#[test]
+fn object_store_config_s3_defaults() {
+    let config = ObjectStoreConfig {
+        backend: "s3".to_string(),
+        endpoint: String::new(),
+        bucket: "my-s3-bucket".to_string(),
+        access_key: "AKIAIOSFODNN7EXAMPLE".to_string(),
+        secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+        region: "us-west-2".to_string(),
+    };
+    assert_eq!(config.backend, "s3");
+    assert_eq!(config.bucket, "my-s3-bucket");
+    assert_eq!(config.region, "us-west-2");
+}
+
+#[test]
+fn object_store_config_clone() {
+    let config = ObjectStoreConfig {
+        backend: "minio".to_string(),
+        endpoint: "http://localhost:9000".to_string(),
+        bucket: "test".to_string(),
+        access_key: "key".to_string(),
+        secret_key: "secret".to_string(),
+        region: "us-east-1".to_string(),
+    };
+    let cloned = config.clone();
+    assert_eq!(config.backend, cloned.backend);
+    assert_eq!(config.endpoint, cloned.endpoint);
+    assert_eq!(config.bucket, cloned.bucket);
+    assert_eq!(config.access_key, cloned.access_key);
+    assert_eq!(config.secret_key, cloned.secret_key);
+    assert_eq!(config.region, cloned.region);
 }
