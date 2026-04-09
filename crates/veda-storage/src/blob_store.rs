@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use veda_core::error::{Result, VedaError};
 
@@ -207,6 +208,7 @@ impl ObjectBlobStore {
 
 impl BlobStore for ObjectBlobStore {
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
+        let start = Instant::now();
         let resp = self
             .bucket
             .put_object(key, data)
@@ -217,10 +219,13 @@ impl BlobStore for ObjectBlobStore {
                 "object store put returned status {code}"
             )));
         }
+        metrics::histogram!(veda_core::metrics::BLOB_OP_DURATION, "operation" => "put")
+            .record(start.elapsed().as_secs_f64());
         Ok(())
     }
 
     fn get(&self, key: &str) -> Result<Vec<u8>> {
+        let start = Instant::now();
         let resp = self
             .bucket
             .get_object(key)
@@ -228,13 +233,19 @@ impl BlobStore for ObjectBlobStore {
         if resp.status_code() == 404 {
             return Err(VedaError::Storage(format!("Blob not found: {key}")));
         }
-        Ok(resp.to_vec())
+        let data = resp.to_vec();
+        metrics::histogram!(veda_core::metrics::BLOB_OP_DURATION, "operation" => "get")
+            .record(start.elapsed().as_secs_f64());
+        Ok(data)
     }
 
     fn delete(&self, key: &str) -> Result<()> {
+        let start = Instant::now();
         self.bucket
             .delete_object(key)
             .map_err(|e| VedaError::Storage(format!("object store delete failed: {e}")))?;
+        metrics::histogram!(veda_core::metrics::BLOB_OP_DURATION, "operation" => "delete")
+            .record(start.elapsed().as_secs_f64());
         Ok(())
     }
 

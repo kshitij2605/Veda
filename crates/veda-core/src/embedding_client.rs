@@ -1,7 +1,10 @@
+use std::time::Instant;
+
 use base64::prelude::*;
 
 use crate::embedding::{EmbeddingModelConfig, Modality};
 use crate::error::{Result, VedaError};
+use crate::metrics as m;
 
 /// Client for calling embedding model endpoints.
 ///
@@ -102,6 +105,7 @@ impl EmbeddingClient {
     }
 
     fn embed_bytes_http(&self, data: &[u8], modality: Modality) -> Result<Vec<f32>> {
+        let start = Instant::now();
         let client = reqwest::blocking::Client::new();
         let body = self.build_multimodal_payload(data, modality)?;
 
@@ -138,10 +142,14 @@ impl EmbeddingClient {
             .map(|v| v.as_f64().unwrap_or(0.0) as f32)
             .collect();
 
+        metrics::histogram!(m::EMBEDDING_DURATION, "model" => self.config.name.clone(), "modality" => format!("{:?}", modality))
+            .record(start.elapsed().as_secs_f64());
+
         Ok(embedding)
     }
 
     fn embed_text_http(&self, text: &str) -> Result<Vec<f32>> {
+        let start = Instant::now();
         let client = reqwest::blocking::Client::new();
         let body = serde_json::json!({
             "model": self.config.name,
@@ -181,6 +189,9 @@ impl EmbeddingClient {
             .iter()
             .map(|v| v.as_f64().unwrap_or(0.0) as f32)
             .collect();
+
+        metrics::histogram!(m::EMBEDDING_DURATION, "model" => self.config.name.clone(), "modality" => "text")
+            .record(start.elapsed().as_secs_f64());
 
         Ok(embedding)
     }
