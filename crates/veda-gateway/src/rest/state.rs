@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 use veda_core::embedding::{EmbeddingModelConfig, EmbeddingModelRegistry, Modality};
 use veda_core::schema::CollectionSchema;
 use veda_query::distributed::DistributedQueryExecutor;
+use veda_storage::blob_store::{BlobStore, LocalBlobStore, ObjectBlobStore, ObjectStoreConfig};
 use veda_storage::segment_manager::SegmentManager;
 
 use crate::auth::Role;
@@ -42,6 +43,8 @@ pub struct AppStateInner {
     pub jwt_secret: String,
     /// In-memory user store: username -> UserRecord.
     pub users: HashMap<String, UserRecord>,
+    /// Blob storage backend.
+    pub blob_store: RwLock<Arc<dyn BlobStore>>,
 }
 
 impl AppState {
@@ -58,6 +61,9 @@ impl AppState {
                 auth_enabled: false,
                 jwt_secret: "default-test-secret".to_owned(),
                 users: HashMap::new(),
+                blob_store: RwLock::new(Arc::new(
+                    LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
+                )),
             }),
         }
     }
@@ -83,6 +89,9 @@ impl AppState {
                 auth_enabled: true,
                 jwt_secret: jwt_secret.to_owned(),
                 users,
+                blob_store: RwLock::new(Arc::new(
+                    LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
+                )),
             }),
         }
     }
@@ -104,6 +113,9 @@ impl AppState {
                 auth_enabled: true,
                 jwt_secret: jwt_secret.to_owned(),
                 users,
+                blob_store: RwLock::new(Arc::new(
+                    LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
+                )),
             }),
         }
     }
@@ -185,6 +197,48 @@ impl AppState {
                 batch_size: 8,
             });
             tracing::info!(model = %model, endpoint = %endpoint, dimension = dim, "registered multimodal embedding model from environment");
+        }
+    }
+
+    /// Load blob store configuration from environment variables.
+    ///
+    /// If `VEDA_BLOB_BACKEND` is set, creates an `ObjectBlobStore` and swaps it
+    /// into the RwLock (replacing the default `LocalBlobStore`).
+    pub async fn load_blob_store_from_env(&self) {
+        let backend = match std::env::var("VEDA_BLOB_BACKEND").ok().filter(|s| !s.is_empty()) {
+            Some(b) => b,
+            None => {
+                tracing::info!("VEDA_BLOB_BACKEND not set, keeping local blob store");
+                return;
+            }
+        };
+
+        let config = ObjectStoreConfig {
+            backend,
+            endpoint: std::env::var("VEDA_BLOB_ENDPOINT")
+                .unwrap_or_else(|_| "http://minio:9000".to_owned()),
+            bucket: std::env::var("VEDA_BLOB_BUCKET")
+                .unwrap_or_else(|_| "veda-blobs".to_owned()),
+            access_key: std::env::var("VEDA_BLOB_ACCESS_KEY").unwrap_or_default(),
+            secret_key: std::env::var("VEDA_BLOB_SECRET_KEY").unwrap_or_default(),
+            region: std::env::var("VEDA_BLOB_REGION")
+                .unwrap_or_else(|_| "us-east-1".to_owned()),
+        };
+
+        match ObjectBlobStore::new(&config) {
+            Ok(store) => {
+                let mut guard = self.inner.blob_store.write().await;
+                *guard = Arc::new(store);
+                tracing::info!(
+                    backend = %config.backend,
+                    endpoint = %config.endpoint,
+                    bucket = %config.bucket,
+                    "switched to object blob store"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to create object blob store, keeping local");
+            }
         }
     }
 }

@@ -12,6 +12,7 @@ pub struct ServerConfig {
 pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let app_state = AppState::new(&config.data_dir);
     app_state.load_embedding_from_env().await;
+    app_state.load_blob_store_from_env().await;
     let router = build_router(app_state);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
