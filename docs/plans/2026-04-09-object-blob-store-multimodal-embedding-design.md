@@ -106,11 +106,10 @@ Users deploy their own models by changing these env vars. Veda makes no assumpti
 **3b. Selection logic (in `embed-insert` and `process-document`):**
 
 1. User specifies `"model": "my-model"` → use that model (explicit override).
-2. User omits model → auto-select:
-   - Detect modality from field name or content.
-   - `registry.find_by_modality(modality)` → pick first match.
-   - For `Text` → BGE-M3 (registered first, CPU, cheaper).
-   - For `Image`/`Video` → Qwen3-VL (only model supporting those modalities).
+2. User omits model → auto-select with **unified vector space** rule:
+   - If ANY auto-selected mapping in the request targets a non-text modality (image, video), use the **multimodal model for ALL** auto-selected mappings. This ensures all embeddings share the same vector space (e.g. 2048-dim Qwen3-VL) so they are comparable and fusable.
+   - If all mappings are text-only → use the text model (BGE-M3, cheaper, CPU).
+   - `process-document`: if the document contains extracted images, use multimodal model for text chunks too.
 3. No model supports required modality → error listing available models.
 
 **3c. Docker Compose — new `multimodal-embedding` service:**

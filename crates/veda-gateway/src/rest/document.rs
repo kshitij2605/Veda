@@ -505,33 +505,43 @@ async fn process_single_file(
     };
 
     // Discover vector fields and find embedding models for auto-embedding.
-    // For each vector field in the schema, try to find a matching model in the registry.
+    // If document has images, use the multimodal model for ALL embeddings (unified vector space).
     let registry = state.inner.embedding_registry.read().await;
+    let has_images = !images.is_empty();
+
+    // Pick the model: if images present, use multimodal model for everything.
+    let multimodal_models = registry.find_by_modality(Modality::Image);
+    let text_only_models = registry.find_by_modality(Modality::Text);
+
     let mut text_embed_targets: Vec<(String, EmbeddingClient)> = Vec::new();
     let mut image_embed_targets: Vec<(String, EmbeddingClient)> = Vec::new();
 
     for field_def in schema.fields() {
         if let FieldType::Vector { .. } = field_def.field_type() {
-            // Try to find a model that supports the appropriate modality.
-            // Convention: fields named "*_embedding" auto-embed from the corresponding content.
             let field_name = field_def.name();
 
-            // Check for text embedding models.
-            let text_models = registry.find_by_modality(Modality::Text);
-            if !text_models.is_empty() && (field_name.contains("text") || field_name.contains("content")) {
-                text_embed_targets.push((
-                    field_name.to_owned(),
-                    EmbeddingClient::new(text_models[0].clone()),
-                ));
+            if field_name.contains("text") || field_name.contains("content") {
+                // Use multimodal model for text when images are present, otherwise text-only model.
+                let models = if has_images && !multimodal_models.is_empty() {
+                    &multimodal_models
+                } else {
+                    &text_only_models
+                };
+                if !models.is_empty() {
+                    text_embed_targets.push((
+                        field_name.to_owned(),
+                        EmbeddingClient::new(models[0].clone()),
+                    ));
+                }
             }
 
-            // Check for image embedding models.
-            let image_models = registry.find_by_modality(Modality::Image);
-            if !image_models.is_empty() && field_name.contains("image") {
-                image_embed_targets.push((
-                    field_name.to_owned(),
-                    EmbeddingClient::new(image_models[0].clone()),
-                ));
+            if field_name.contains("image") {
+                if !multimodal_models.is_empty() {
+                    image_embed_targets.push((
+                        field_name.to_owned(),
+                        EmbeddingClient::new(multimodal_models[0].clone()),
+                    ));
+                }
             }
         }
     }

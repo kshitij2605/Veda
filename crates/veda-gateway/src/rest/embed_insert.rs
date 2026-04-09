@@ -62,24 +62,37 @@ pub async fn embed_insert(
 
     let registry = state.inner.embedding_registry.read().await;
 
-    // Validate all auto_embed mappings up front and resolve model names.
+    // Two-pass model resolution:
+    // Pass 1: detect if ANY auto-select mapping targets a non-text modality.
+    // If so, use the multimodal model for ALL auto-selected mappings (unified vector space).
+    let has_multimodal = req.auto_embed.values().any(|m| {
+        m.model.is_none()
+            && !matches!(
+                Modality::from_field_name(&m.source_field).unwrap_or(Modality::Text),
+                Modality::Text
+            )
+    });
+
+    // Pass 2: resolve model names.
     let mut resolved_models: HashMap<String, String> = HashMap::new();
     for (target_field, mapping) in &req.auto_embed {
-        // Detect modality from source field name.
         let modality = Modality::from_field_name(&mapping.source_field).unwrap_or(Modality::Text);
 
-        // Resolve model name: use explicit model or auto-select by modality.
         let model_name = match &mapping.model {
+            // Explicit override — always respected.
             Some(name) => name.clone(),
             None => {
-                let candidates = registry.find_by_modality(modality);
+                // If multimodal data is present, use multimodal model for everything
+                // so all embeddings share the same vector space.
+                let lookup_modality = if has_multimodal { Modality::Image } else { modality };
+                let candidates = registry.find_by_modality(lookup_modality);
                 if candidates.is_empty() {
                     let available: Vec<&str> = registry.list().iter().map(|c| c.name.as_str()).collect();
                     return Err((
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse {
                             error: format!(
-                                "no model registered for modality '{modality}'. Available models: {available:?}. Register one via EMBEDDING_* or MULTIMODAL_EMBEDDING_* env vars"
+                                "no model registered for modality '{lookup_modality}'. Available models: {available:?}. Register one via EMBEDDING_* or MULTIMODAL_EMBEDDING_* env vars"
                             ),
                         }),
                     ));
