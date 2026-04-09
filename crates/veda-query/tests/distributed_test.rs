@@ -9,7 +9,7 @@ use veda_core::types::{DistanceMetric, FieldType};
 use veda_core::vector::DenseVector;
 use veda_query::distributed::{DistributedQueryExecutor, ShardSearcher};
 use veda_query::fusion::{FusionStrategy, MultiVectorQuery, FieldQuery};
-use veda_query::search::{ScoredRecord, VectorSearchRequest};
+use veda_query::search::{ScoredRecord, SearchTimings, VectorSearchRequest};
 
 const DIM: u32 = 32;
 
@@ -93,7 +93,7 @@ impl ShardSearcher for MockShardSearcher {
         &self,
         _shard_id: u32,
         request: &VectorSearchRequest,
-    ) -> Result<Vec<ScoredRecord>> {
+    ) -> Result<(Vec<ScoredRecord>, SearchTimings)> {
         // Apply simple category filter if present.
         let filter_category = request.filter.as_ref().and_then(|f| {
             // Very simple parser: "category = 'X'" -> X
@@ -133,7 +133,7 @@ impl ShardSearcher for MockShardSearcher {
         });
         results.truncate(request.k);
 
-        Ok(results)
+        Ok((results, SearchTimings::default()))
     }
 }
 
@@ -170,7 +170,7 @@ fn test_single_shard_search() {
         filter: None,
     };
 
-    let response = executor.search(&request).unwrap();
+    let (response, _timings) = executor.search(&request).unwrap();
 
     assert_eq!(response.results.len(), 10);
 
@@ -210,7 +210,7 @@ fn test_multi_shard_fanout() {
         filter: None,
     };
 
-    let response = executor.search(&request).unwrap();
+    let (response, _timings) = executor.search(&request).unwrap();
 
     assert_eq!(response.results.len(), 10);
 
@@ -260,7 +260,7 @@ fn test_multi_shard_with_filter() {
         filter: Some("category = 'electronics'".into()),
     };
 
-    let response = executor.search(&request).unwrap();
+    let (response, _timings) = executor.search(&request).unwrap();
 
     // Should return at most 10 results.
     assert!(response.results.len() <= 10);
@@ -353,7 +353,7 @@ fn test_empty_shard() {
         filter: None,
     };
 
-    let response = executor.search(&request).unwrap();
+    let (response, _timings) = executor.search(&request).unwrap();
 
     assert_eq!(response.results.len(), 10);
 
@@ -385,7 +385,7 @@ fn test_k_larger_than_total() {
         filter: None,
     };
 
-    let response = executor.search(&request).unwrap();
+    let (response, _timings) = executor.search(&request).unwrap();
 
     // Each shard returns min(100, 1000) = 100 results.
     // Total = 300. k=1000 > 300, so we get all 300.
@@ -451,7 +451,7 @@ fn test_local_shard_searcher_growing_segment() {
         filter: None,
     };
 
-    let results = searcher.search_shard(0, &request).unwrap();
+    let (results, _timings) = searcher.search_shard(0, &request).unwrap();
     assert_eq!(results.len(), 10);
 
     for window in results.windows(2) {
@@ -501,7 +501,7 @@ fn test_local_shard_searcher_with_sealed_segments() {
         filter: None,
     };
 
-    let results = searcher.search_shard(0, &request).unwrap();
+    let (results, _timings) = searcher.search_shard(0, &request).unwrap();
     assert_eq!(results.len(), 20);
 
     for window in results.windows(2) {
@@ -562,7 +562,7 @@ fn test_distributed_with_local_shards() {
         filter: None,
     };
 
-    let response = executor.search(&request).unwrap();
+    let (response, _timings) = executor.search(&request).unwrap();
 
     assert_eq!(response.results.len(), 10);
     for window in response.results.windows(2) {

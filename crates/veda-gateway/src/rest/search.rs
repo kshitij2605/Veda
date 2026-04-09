@@ -9,7 +9,7 @@ use veda_core::metrics as m;
 use veda_core::types::DistanceMetric;
 use veda_query::distributed::DistributedQueryExecutor;
 use veda_query::fusion::{FieldQuery, FusionStrategy, MultiVectorQuery};
-use veda_query::search::VectorSearchRequest;
+use veda_query::search::{SearchTimings, VectorSearchRequest};
 
 use super::collections::ErrorResponse;
 use super::state::AppState;
@@ -130,21 +130,18 @@ pub async fn search(
     let results = if let Some(ref vec_query) = req.query.vector {
         // Single-vector search
         let metric = resolve_metric(&schema, &vec_query.field);
+        let (hits, timings) = execute_single_vector(executor, vec_query, &req, metric)?;
         if req.explain {
-            let phase_start = Instant::now();
-            let hits = execute_single_vector(executor, vec_query, &req, metric)?;
-            let ann_ms = phase_start.elapsed().as_secs_f64() * 1000.0;
+            let total = timings.filter_ms + timings.ann_search_ms + timings.scoring_ms;
             explain_timing = Some(ExplainTiming {
-                filter_ms: 0.0,
-                ann_search_ms: ann_ms,
-                scoring_ms: 0.0,
+                filter_ms: timings.filter_ms,
+                ann_search_ms: timings.ann_search_ms,
+                scoring_ms: timings.scoring_ms,
                 fusion_ms: 0.0,
-                total_ms: ann_ms,
+                total_ms: total,
             });
-            hits
-        } else {
-            execute_single_vector(executor, vec_query, &req, metric)?
         }
+        hits
     } else if let Some(ref multi) = req.query.multi_vector {
         // Multi-vector fusion search
         let fusion_field = multi.first().map(|m| m.field.as_str()).unwrap_or("");
@@ -191,7 +188,7 @@ fn execute_single_vector(
     vec_query: &SingleVectorQuery,
     req: &SearchRequest,
     metric: DistanceMetric,
-) -> Result<Vec<SearchHit>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(Vec<SearchHit>, SearchTimings), (StatusCode, Json<ErrorResponse>)> {
     let request = VectorSearchRequest {
         field: vec_query.field.clone(),
         query_vector: vec_query.values.clone(),
@@ -200,7 +197,7 @@ fn execute_single_vector(
         filter: req.filter.clone(),
     };
 
-    let response = executor.search(&request).map_err(|e| {
+    let (response, timings) = executor.search(&request).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -209,7 +206,7 @@ fn execute_single_vector(
         )
     })?;
 
-    Ok(response
+    let hits = response
         .results
         .into_iter()
         .map(|r| SearchHit {
@@ -217,7 +214,9 @@ fn execute_single_vector(
             distance: r.distance,
             fields: serde_json::Map::new(),
         })
-        .collect())
+        .collect();
+
+    Ok((hits, timings))
 }
 
 fn execute_multi_vector(

@@ -712,20 +712,11 @@ opentelemetry-appender-tracing = "0.27"
 
 ---
 
-## 13. Known Limitations and Future Work
+## 13. Resolved Limitations
 
-### 13.1 Unrecorded Metrics
+All 16 metric constants defined in `veda-core::metrics` are now recorded at their corresponding call sites:
+- `SEGMENTS_TOTAL` is updated after seal and compaction in insert handlers.
+- `COMPACTION_DURATION` and `COMPACTION_IN_PROGRESS` are recorded when `SegmentManager::compact_if_needed()` runs after segment sealing.
+- Compaction is triggered automatically after seal in insert and embed-insert handlers using `CompactionConfig::default()`.
 
-Three metric constants are defined but not yet recorded at any call site:
-
-| Metric | Reason |
-|---|---|
-| `veda_segments_total` | Segment lifecycle does not update this gauge (requires deeper internal changes) |
-| `veda_compaction_duration_seconds` | Compaction is not yet triggered in the codebase |
-| `veda_compaction_in_progress` | Compaction is not yet triggered in the codebase |
-
-These are defined to reserve the metric names and will be wired when the corresponding code paths are implemented.
-
-### 13.2 Query Explain Granularity
-
-The current explain implementation measures the entire search execution as a single phase (`ann_search_ms` for single-vector, `fusion_ms` for multi-vector). Per-sub-phase timing (filter evaluation, ANN traversal, scoring, fusion separately) requires changes to the `SearchExecutor` interface to expose internal timing.
+Query explain now returns per-phase timing (`filter_ms`, `ann_search_ms`, `scoring_ms`) from `SearchTimings` produced by `SearchExecutor::search()`, rather than timing the outer boundary call.

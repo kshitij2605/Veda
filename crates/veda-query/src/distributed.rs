@@ -4,7 +4,7 @@ use veda_core::error::{Result, VedaError};
 use veda_core::types::DistanceMetric;
 
 use crate::fusion::{fuse_results, FusedResult, MultiVectorQuery};
-use crate::search::{ScoredRecord, SearchResponse, VectorSearchRequest};
+use crate::search::{ScoredRecord, SearchTimings, SearchResponse, VectorSearchRequest};
 
 /// Trait for executing search on a single shard.
 /// Implemented by local shard executor (in-process) or remote gRPC client.
@@ -13,7 +13,7 @@ pub trait ShardSearcher: Send + Sync {
         &self,
         shard_id: u32,
         request: &VectorSearchRequest,
-    ) -> Result<Vec<ScoredRecord>>;
+    ) -> Result<(Vec<ScoredRecord>, SearchTimings)>;
 }
 
 /// Distributed query coordinator.
@@ -45,32 +45,40 @@ impl DistributedQueryExecutor {
     /// Execute a single-vector search across all registered shards.
     ///
     /// Fans out to each shard, merges results, returns global top-k.
-    pub fn search(&self, request: &VectorSearchRequest) -> Result<SearchResponse> {
+    pub fn search(&self, request: &VectorSearchRequest) -> Result<(SearchResponse, SearchTimings)> {
         if self.shard_searchers.is_empty() {
             return Err(VedaError::Query("no shards registered".into()));
         }
 
         let mut all_results: Vec<ScoredRecord> = Vec::new();
         let mut total_candidates: usize = 0;
+        let mut agg_timings = SearchTimings::default();
 
         for (&shard_id, searcher) in &self.shard_searchers {
-            let shard_results = searcher.search_shard(shard_id, request)?;
+            let (shard_results, timings) = searcher.search_shard(shard_id, request)?;
             total_candidates += shard_results.len();
             all_results.extend(shard_results);
+            agg_timings.filter_ms += timings.filter_ms;
+            agg_timings.ann_search_ms += timings.ann_search_ms;
+            agg_timings.scoring_ms += timings.scoring_ms;
         }
 
-        // Sort by distance ascending, take top-k.
+        let scoring_start = std::time::Instant::now();
         all_results.sort_by(|a, b| {
             a.distance
                 .partial_cmp(&b.distance)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         all_results.truncate(request.k);
+        agg_timings.scoring_ms += scoring_start.elapsed().as_secs_f64() * 1000.0;
 
-        Ok(SearchResponse {
-            results: all_results,
-            total_candidates,
-        })
+        Ok((
+            SearchResponse {
+                results: all_results,
+                total_candidates,
+            },
+            agg_timings,
+        ))
     }
 
     /// Execute a multi-vector fusion search across all registered shards.
@@ -101,7 +109,7 @@ impl DistributedQueryExecutor {
 
             let mut merged: Vec<ScoredRecord> = Vec::new();
             for (&shard_id, searcher) in &self.shard_searchers {
-                let shard_results = searcher.search_shard(shard_id, &request)?;
+                let (shard_results, _timings) = searcher.search_shard(shard_id, &request)?;
                 merged.extend(shard_results);
             }
 

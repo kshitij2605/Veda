@@ -82,7 +82,7 @@ fn test_unfiltered_search() {
         filter: None,
     };
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     // Should return exactly 10 results.
@@ -120,7 +120,7 @@ fn test_filtered_search_category() {
         filter: Some("category = 'electronics'".into()),
     };
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     // All results must have category = 'electronics'.
@@ -162,7 +162,7 @@ fn test_filtered_search_range() {
         filter: Some("price BETWEEN 100 AND 200".into()),
     };
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     for scored in &response.results {
@@ -200,7 +200,7 @@ fn test_combined_filter() {
         filter: Some("category = 'electronics' AND price < 200".into()),
     };
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     for scored in &response.results {
@@ -266,7 +266,7 @@ fn test_sealed_segment_search() {
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
         vec![(reader, Box::new(flat_index))];
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, None, &sealed_segments).unwrap();
 
     assert_eq!(response.results.len(), 10);
@@ -317,7 +317,7 @@ fn test_sealed_segment_filtered_search() {
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
         vec![(reader, Box::new(flat_index))];
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, None, &sealed_segments).unwrap();
 
     assert!(!response.results.is_empty());
@@ -382,7 +382,7 @@ fn test_multi_segment_merge() {
         filter: None,
     };
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, Some(&gs_b), &sealed_segments).unwrap();
 
     // Should return exactly 10 results.
@@ -433,7 +433,7 @@ fn test_k_zero_returns_empty() {
         filter: None,
     };
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     assert!(response.results.is_empty());
@@ -457,7 +457,7 @@ fn test_k_larger_than_matching() {
         filter: None,
     };
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     // Only 5 records exist, so at most 5 results.
@@ -483,7 +483,7 @@ fn test_no_segments_empty_result() {
         filter: None,
     };
 
-    let response: veda_query::search::SearchResponse =
+    let (response, _timings): (veda_query::search::SearchResponse, _) =
         SearchExecutor::search(&request, None, &[]).unwrap();
 
     assert!(response.results.is_empty());
@@ -525,7 +525,7 @@ fn test_sealed_segment_range_filter() {
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
         vec![(reader, Box::new(flat_index))];
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, None, &sealed_segments).unwrap();
 
     assert!(!response.results.is_empty());
@@ -561,7 +561,7 @@ fn test_filter_matches_nothing() {
         filter: Some("category = 'nonexistent'".into()),
     };
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     assert!(response.results.is_empty());
@@ -585,7 +585,7 @@ fn test_record_eval_ne_filter() {
         filter: Some("category != 'electronics'".into()),
     };
 
-    let response =
+    let (response, _timings) =
         SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     for scored in &response.results {

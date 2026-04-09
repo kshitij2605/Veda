@@ -8,6 +8,7 @@ use veda_core::record::Record;
 use veda_core::schema::CollectionSchema;
 use veda_core::types::SegmentId;
 
+use crate::compaction::{CompactionConfig, compact_segments, select_segments_for_compaction};
 use crate::growing_segment::GrowingSegment;
 use crate::segment::{SegmentMetadata, SegmentReader};
 
@@ -206,5 +207,53 @@ impl SegmentManager {
         }
 
         Ok(loaded)
+    }
+
+    /// Run compaction if segment selection criteria are met.
+    ///
+    /// Returns the number of segments removed (0 if no compaction needed).
+    pub fn compact_if_needed(&mut self, config: &CompactionConfig) -> Result<usize> {
+        let segment_pairs: Vec<_> = self
+            .sealed_segments
+            .iter()
+            .map(|h| (h.metadata.clone(), &h.reader))
+            .collect();
+
+        let selected = select_segments_for_compaction(&segment_pairs, config);
+        if selected.is_empty() {
+            return Ok(0);
+        }
+
+        let readers: Vec<&SegmentReader> = selected.iter().map(|&i| &self.sealed_segments[i].reader).collect();
+        let output_dir = self.base_dir.join(format!("segment_{}", Uuid::new_v4()));
+
+        let result = compact_segments(&readers, &self.schema, &output_dir)?;
+
+        // Remove merged segments.
+        let merged_ids: std::collections::HashSet<Uuid> = result.merged_segment_ids.iter().copied().collect();
+        let removed_count = merged_ids.len();
+
+        // Remove old segment directories.
+        let old_dirs: Vec<PathBuf> = self
+            .sealed_segments
+            .iter()
+            .filter(|h| merged_ids.contains(&h.metadata.id))
+            .map(|h| h.dir.clone())
+            .collect();
+        for dir in &old_dirs {
+            let _ = fs::remove_dir_all(dir);
+        }
+
+        self.sealed_segments.retain(|h| !merged_ids.contains(&h.metadata.id));
+
+        // Add the new merged segment.
+        let new_reader = SegmentReader::open(&output_dir)?;
+        self.sealed_segments.push(SealedSegmentHandle {
+            metadata: result.new_segment,
+            reader: new_reader,
+            dir: output_dir,
+        });
+
+        Ok(removed_count)
     }
 }

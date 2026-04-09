@@ -30,6 +30,14 @@ pub struct SearchResponse {
     pub total_candidates: usize,
 }
 
+/// Per-phase timing breakdown for search explain.
+#[derive(Debug, Clone, Default)]
+pub struct SearchTimings {
+    pub filter_ms: f64,
+    pub ann_search_ms: f64,
+    pub scoring_ms: f64,
+}
+
 /// A result with score and record identifier.
 #[derive(Debug, Clone)]
 pub struct ScoredRecord {
@@ -59,17 +67,22 @@ impl SearchExecutor {
         request: &VectorSearchRequest,
         growing_segment: Option<&GrowingSegment>,
         sealed_segments: &[(SegmentReader, Box<dyn VectorIndex>)],
-    ) -> Result<SearchResponse> {
-        // 1. Parse the filter expression (if provided).
+    ) -> Result<(SearchResponse, SearchTimings)> {
+        use std::time::Instant;
+
+        // 1. Parse filter expression.
+        let filter_start = Instant::now();
         let filter_expr: Option<FilterExpr> = match &request.filter {
             Some(filter_str) => Some(FilterParser::parse(filter_str)?),
             None => None,
         };
+        let filter_ms = filter_start.elapsed().as_secs_f64() * 1000.0;
 
         let mut all_results: Vec<ScoredRecord> = Vec::new();
         let mut total_candidates: usize = 0;
 
-        // 2. Search the growing segment (if any).
+        // 2. Search segments (filter eval + ANN).
+        let ann_start = Instant::now();
         if let Some(gs) = growing_segment {
             let (results, candidates) =
                 search_growing_segment(gs, request, filter_expr.as_ref())?;
@@ -77,26 +90,37 @@ impl SearchExecutor {
             all_results.extend(results);
         }
 
-        // 3. Search each sealed segment.
         for (reader, index) in sealed_segments {
             let (results, candidates) =
                 search_sealed_segment(reader, index.as_ref(), request, filter_expr.as_ref())?;
             total_candidates += candidates;
             all_results.extend(results);
         }
+        let ann_ms = ann_start.elapsed().as_secs_f64() * 1000.0;
 
-        // 4. Merge: sort by distance ascending, take top-k.
+        // 3. Merge: sort by distance ascending, take top-k.
+        let scoring_start = Instant::now();
         all_results.sort_by(|a, b| {
             a.distance
                 .partial_cmp(&b.distance)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         all_results.truncate(request.k);
+        let scoring_ms = scoring_start.elapsed().as_secs_f64() * 1000.0;
 
-        Ok(SearchResponse {
-            results: all_results,
-            total_candidates,
-        })
+        let timings = SearchTimings {
+            filter_ms,
+            ann_search_ms: ann_ms,
+            scoring_ms,
+        };
+
+        Ok((
+            SearchResponse {
+                results: all_results,
+                total_candidates,
+            },
+            timings,
+        ))
     }
 }
 

@@ -8,7 +8,7 @@ use veda_index::traits::VectorIndex;
 use veda_storage::segment_manager::SegmentManager;
 
 use crate::distributed::ShardSearcher;
-use crate::search::{SearchExecutor, ScoredRecord, VectorSearchRequest};
+use crate::search::{SearchExecutor, SearchTimings, ScoredRecord, VectorSearchRequest};
 
 /// Searches a local shard (in-process, no network).
 ///
@@ -68,7 +68,7 @@ impl ShardSearcher for LocalShardSearcher {
         &self,
         _shard_id: u32,
         request: &VectorSearchRequest,
-    ) -> Result<Vec<ScoredRecord>> {
+    ) -> Result<(Vec<ScoredRecord>, SearchTimings)> {
         // Collect sealed segments paired with the appropriate vector index
         // for the requested field.
         let mut sealed_pairs: Vec<(&veda_storage::segment::SegmentReader, &dyn VectorIndex)> =
@@ -87,28 +87,36 @@ impl ShardSearcher for LocalShardSearcher {
         let has_growing = growing.count() > 0;
 
         let mut all_results: Vec<ScoredRecord> = Vec::new();
+        let mut agg_timings = SearchTimings::default();
 
         // Search growing segment.
         if has_growing {
-            let response = SearchExecutor::search(request, Some(growing), &[])?;
+            let (response, timings) = SearchExecutor::search(request, Some(growing), &[])?;
             all_results.extend(response.results);
+            agg_timings.filter_ms += timings.filter_ms;
+            agg_timings.ann_search_ms += timings.ann_search_ms;
+            agg_timings.scoring_ms += timings.scoring_ms;
         }
 
         // Search each sealed segment individually.
+        let sealed_start = std::time::Instant::now();
         for (reader, index) in &sealed_pairs {
             let results = search_sealed_segment_ref(reader, *index, request)?;
             all_results.extend(results);
         }
+        agg_timings.ann_search_ms += sealed_start.elapsed().as_secs_f64() * 1000.0;
 
         // Sort by distance ascending, take top-k.
+        let scoring_start = std::time::Instant::now();
         all_results.sort_by(|a, b| {
             a.distance
                 .partial_cmp(&b.distance)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         all_results.truncate(request.k);
+        agg_timings.scoring_ms += scoring_start.elapsed().as_secs_f64() * 1000.0;
 
-        Ok(all_results)
+        Ok((all_results, agg_timings))
     }
 }
 

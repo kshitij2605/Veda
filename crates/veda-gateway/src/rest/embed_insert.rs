@@ -302,6 +302,30 @@ pub async fn embed_insert(
             .record(seal_start.elapsed().as_secs_f64());
     }
 
+    // Run compaction if needed.
+    {
+        let config = veda_storage::compaction::CompactionConfig::default();
+        for sm in shard_map.values_mut() {
+            metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => name.clone()).set(1.0);
+            let compact_start = std::time::Instant::now();
+            match sm.compact_if_needed(&config) {
+                Ok(removed) if removed > 0 => {
+                    metrics::histogram!(m::COMPACTION_DURATION, "collection" => name.clone())
+                        .record(compact_start.elapsed().as_secs_f64());
+                    tracing::info!(removed_segments = removed, "compaction completed");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "compaction failed");
+                }
+            }
+            metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => name.clone()).set(0.0);
+        }
+        // Update segment count after compaction.
+        let total_segments: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
+        metrics::gauge!(m::SEGMENTS_TOTAL, "collection" => name.clone()).set(total_segments as f64);
+    }
+
     drop(managers);
     drop(registry);
     metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => name.clone()).set(1.0);
