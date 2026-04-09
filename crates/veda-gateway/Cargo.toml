@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+metrics = { workspace = true }
+opentelemetry = { workspace = true }
 veda-core = { workspace = true }
 veda-query = { workspace = true }
 veda-storage = { workspace = true }
