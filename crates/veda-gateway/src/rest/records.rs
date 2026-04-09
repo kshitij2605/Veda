@@ -9,6 +9,9 @@ use veda_core::vector::DenseVector;
 use veda_query::distributed::DistributedQueryExecutor;
 use veda_query::local_shard::LocalShardSearcher;
 
+use veda_storage::blob_manager::BlobManager;
+use veda_storage::blob_store::ArcBlobStore;
+
 use super::collections::ErrorResponse;
 use super::state::AppState;
 
@@ -72,13 +75,28 @@ pub async fn insert(
 
     let shard_count = schema.shard_count();
 
+    // Get blob store for processing blob fields
+    let blob_store = state.inner.blob_store.read().await.clone();
+
     for raw in &req.records {
-        let record = parse_record(raw, &schema).map_err(|e| {
+        let mut record = parse_record(raw, &schema).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse { error: e }),
             )
         })?;
+
+        if !schema.blob_fields().is_empty() {
+            let blob_manager = BlobManager::new(Box::new(ArcBlobStore(blob_store.clone())), &name);
+            blob_manager.process_insert(&mut record, &schema).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("blob processing failed: {e}"),
+                    }),
+                )
+            })?;
+        }
 
         // Simple hash-based shard routing
         let shard_id = record.id().as_u128() as u32 % shard_count;

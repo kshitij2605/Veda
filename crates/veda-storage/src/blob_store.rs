@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use veda_core::error::{Result, VedaError};
 
@@ -19,6 +20,27 @@ pub trait BlobStore: Send + Sync {
 
     /// List blobs with a given prefix.
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
+}
+
+/// Wrapper to use an `Arc<dyn BlobStore>` as a `Box<dyn BlobStore>`.
+pub struct ArcBlobStore(pub Arc<dyn BlobStore>);
+
+impl BlobStore for ArcBlobStore {
+    fn put(&self, key: &str, data: &[u8]) -> Result<()> {
+        self.0.put(key, data)
+    }
+    fn get(&self, key: &str) -> Result<Vec<u8>> {
+        self.0.get(key)
+    }
+    fn delete(&self, key: &str) -> Result<()> {
+        self.0.delete(key)
+    }
+    fn exists(&self, key: &str) -> Result<bool> {
+        self.0.exists(key)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.0.list(prefix)
+    }
 }
 
 /// Local filesystem blob store (for standalone/dev mode).

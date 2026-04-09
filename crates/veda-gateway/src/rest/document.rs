@@ -11,6 +11,8 @@ use veda_core::record::{FieldValue, Record};
 use veda_core::types::FieldType;
 use veda_core::vector::DenseVector;
 
+use veda_storage::blob_store::{ArcBlobStore, BlobStore};
+
 use super::records::rebuild_executors;
 use super::state::AppState;
 
@@ -582,11 +584,18 @@ async fn process_single_file(
             inserted_ids.push(record_id);
         }
 
+        // Get blob store for storing extracted images.
+        let blob_store = state.inner.blob_store.read().await.clone();
+
         // Insert image records.
         for (img_name, img_data) in &images {
             let mut record = Record::new();
             if has_image_blob_field {
                 let blob_key = format!("{}/{}/{}", collection_name, record.id(), img_name);
+                let store = ArcBlobStore(blob_store.clone());
+                store.put(&blob_key, img_data).map_err(|e| {
+                    ocr_err(format!("failed to store image blob: {e}"))
+                })?;
                 record.set("image_blob", FieldValue::BlobRef(blob_key));
             }
             if has_content_field {
