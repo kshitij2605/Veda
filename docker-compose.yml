@@ -46,6 +46,14 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
       VEDA_FLASHPARSE_ENDPOINT: ${VEDA_FLASHPARSE_ENDPOINT:-http://flashparse:8000}
+      VEDA_BLOB_BACKEND: minio
+      VEDA_BLOB_ENDPOINT: http://minio:9000
+      VEDA_BLOB_BUCKET: veda-blobs
+      VEDA_BLOB_ACCESS_KEY: veda
+      VEDA_BLOB_SECRET_KEY: ${MINIO_PASSWORD:-vedapassword}
+      MULTIMODAL_EMBEDDING_ENDPOINT: ${MULTIMODAL_EMBEDDING_ENDPOINT:-http://multimodal-embedding:8000}
+      MULTIMODAL_EMBEDDING_MODEL: ${MULTIMODAL_EMBEDDING_MODEL:-Qwen/Qwen3-VL-Embedding-2B}
+      MULTIMODAL_EMBEDDING_DIMENSION: ${MULTIMODAL_EMBEDDING_DIMENSION:-2048}
     depends_on:
       minio:
         condition: service_healthy
@@ -90,6 +98,50 @@ services:
     volumes:
       - embedding-model-cache:/data
     command: ["--model-id", "${EMBEDDING_MODEL:-BAAI/bge-m3}", "--port", "80"]
+
+  # --- Multimodal Embedding Service (optional, enabled with --profile embedding) ---
+  # Qwen3-VL-Embedding-2B served via vLLM for image/video embedding.
+  # Default: Qwen/Qwen3-VL-Embedding-2B (~4GB GPU VRAM).
+  # Users can substitute any vLLM-compatible multimodal embedding model.
+  multimodal-embedding:
+    profiles: ["embedding"]
+    image: vllm/vllm-openai:nightly
+    ports:
+      - "8094:8000"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      NVIDIA_VISIBLE_DEVICES: ${MULTIMODAL_EMBEDDING_GPU:-3}
+      NO_PROXY: localhost,127.0.0.1,glm-ocr,vlm,minio,nats,veda,flashparse,embedding,multimodal-embedding
+      no_proxy: localhost,127.0.0.1,glm-ocr,vlm,minio,nats,veda,flashparse,embedding,multimodal-embedding
+    volumes:
+      - multimodal-embedding-model-cache:/root/.cache/huggingface
+    command:
+      - "--model"
+      - "${MULTIMODAL_EMBEDDING_MODEL:-Qwen/Qwen3-VL-Embedding-2B}"
+      - "--runner"
+      - "pooling"
+      - "--port"
+      - "8000"
+      - "--served-model-name"
+      - "${MULTIMODAL_EMBEDDING_MODEL:-Qwen/Qwen3-VL-Embedding-2B}"
+      - "--gpu-memory-utilization"
+      - "0.50"
+      - "--trust-remote-code"
+      - "--max-model-len"
+      - "8192"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${MULTIMODAL_EMBEDDING_GPU:-3}"]
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
 
   # --- VLM Service (starts with --profile ocr-vlm) ---
   # Used by FlashParse for image captioning and classification.
@@ -186,3 +238,4 @@ volumes:
   embedding-model-cache:
   vlm-model-cache:
   glm-ocr-model-cache:
+  multimodal-embedding-model-cache:
