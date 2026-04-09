@@ -1,5 +1,5 @@
 # Stage 1: Build Rust binary
-FROM rust:latest AS rust-builder
+FROM rust:bookworm AS rust-builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
