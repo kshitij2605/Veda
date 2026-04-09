@@ -129,6 +129,7 @@ pub async fn insert(
 
     // Seal growing segments so data is on disk, then rebuild search executors
     for sm in shard_map.values_mut() {
+        let seal_start = Instant::now();
         sm.seal_growing().map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -137,10 +138,17 @@ pub async fn insert(
                 }),
             )
         })?;
+        metrics::histogram!(m::SEAL_DURATION, "collection" => name.clone())
+            .record(seal_start.elapsed().as_secs_f64());
     }
 
     drop(managers);
+    metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => name.clone()).set(1.0);
+    let rebuild_start = Instant::now();
     rebuild_executors(&state, &name).await?;
+    metrics::histogram!(m::INDEX_BUILD_DURATION, "collection" => name.clone(), "index_type" => "rebuild")
+        .record(rebuild_start.elapsed().as_secs_f64());
+    metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => name.clone()).set(0.0);
 
     metrics::histogram!(m::INSERT_DURATION, "collection" => name.clone())
         .record(start.elapsed().as_secs_f64());

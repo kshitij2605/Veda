@@ -289,6 +289,7 @@ pub async fn embed_insert(
 
     // Seal growing segments.
     for sm in shard_map.values_mut() {
+        let seal_start = std::time::Instant::now();
         sm.seal_growing().map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -297,11 +298,18 @@ pub async fn embed_insert(
                 }),
             )
         })?;
+        metrics::histogram!(m::SEAL_DURATION, "collection" => name.clone())
+            .record(seal_start.elapsed().as_secs_f64());
     }
 
     drop(managers);
     drop(registry);
+    metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => name.clone()).set(1.0);
+    let rebuild_start = std::time::Instant::now();
     rebuild_executors(&state, &name).await?;
+    metrics::histogram!(m::INDEX_BUILD_DURATION, "collection" => name.clone(), "index_type" => "rebuild")
+        .record(rebuild_start.elapsed().as_secs_f64());
+    metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => name.clone()).set(0.0);
 
     metrics::histogram!(m::INSERT_DURATION, "collection" => name.clone())
         .record(start.elapsed().as_secs_f64());
