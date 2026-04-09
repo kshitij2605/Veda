@@ -5,8 +5,8 @@ services:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9200:9000"
+      - "9201:9001"
     volumes:
       - minio-data:/data
     environment:
@@ -36,11 +36,16 @@ services:
     volumes:
       - veda-data:/var/veda/data
     environment:
-      RUST_LOG: info
+      RUST_LOG: ${RUST_LOG:-info}
       VEDA_STORAGE_ENDPOINT: minio:9000
       VEDA_STORAGE_ACCESS_KEY: veda
       VEDA_STORAGE_SECRET_KEY: ${MINIO_PASSWORD:-vedapassword}
       VEDA_MQ_ENDPOINT: nats:4222
+      EMBEDDING_ENDPOINT: ${EMBEDDING_ENDPOINT:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+      VEDA_FLASHPARSE_ENDPOINT: ${VEDA_FLASHPARSE_ENDPOINT:-http://flashparse:8000}
     depends_on:
       minio:
         condition: service_healthy
@@ -59,31 +64,27 @@ services:
     environment:
       VLM_ENDPOINT: ${VLM_ENDPOINT:-http://vlm:8008/v1/chat/completions}
       VLM_API_KEY: ${VLM_API_KEY:-}
-      VLM_MODEL: ${VLM_MODEL:-Qwen/Qwen3.5-35B-A3B-FP8}
+      VLM_MODEL: ${VLM_MODEL:-Qwen/Qwen3.5-2B}
       GLMOCR_CONFIG_PATH: /app/glmocr_config.yaml
       GLMOCR_API_HOST: ${GLMOCR_API_HOST:-glm-ocr}
       GLMOCR_API_PORT: ${GLMOCR_API_PORT:-8080}
+      NO_PROXY: localhost,127.0.0.1,glm-ocr,vlm,minio,nats,veda,flashparse
+      no_proxy: localhost,127.0.0.1,glm-ocr,vlm,minio,nats,veda,flashparse
     volumes:
       - flashparse-data:/tmp/flashparse
+      - ./config/glmocr_config.yaml:/app/glmocr_config.yaml:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "--noproxy", "*", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 5
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
 
   # --- Embedding Service (optional, enabled with --profile embedding) ---
   embedding:
     profiles: ["embedding"]
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
     ports:
-      - "8090:80"
+      - "8092:80"
     environment:
       MODEL_ID: ${EMBEDDING_MODEL:-BAAI/bge-m3}
     volumes:
@@ -92,29 +93,30 @@ services:
 
   # --- VLM Service (starts with --profile ocr-vlm) ---
   # Used by FlashParse for image captioning and classification.
-  # Default: Qwen/Qwen3.5-35B-A3B-FP8 on vLLM with MTP-1 speculative decoding.
-  # Requires ~48GB GPU VRAM.
+  # Default: Qwen/Qwen3.5-2B (natively multimodal, ~4GB VRAM).
+  # Production: Qwen/Qwen3.5-35B-A3B-FP8 (~48GB GPU VRAM).
   # Not needed for text-only OCR — only for image understanding.
   vlm:
     profiles: ["ocr-vlm"]
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:nightly
     ports:
       - "8008:8008"
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
+      NVIDIA_VISIBLE_DEVICES: ${VLM_GPU:-2}
+      NO_PROXY: localhost,127.0.0.1,glm-ocr,vlm,minio,nats,veda,flashparse
+      no_proxy: localhost,127.0.0.1,glm-ocr,vlm,minio,nats,veda,flashparse
     volumes:
       - vlm-model-cache:/root/.cache/huggingface
     command:
       - "--model"
-      - "${VLM_MODEL:-Qwen/Qwen3.5-35B-A3B-FP8}"
+      - "${VLM_MODEL:-Qwen/Qwen3.5-2B}"
       - "--port"
       - "8008"
       - "--served-model-name"
-      - "${VLM_MODEL:-Qwen/Qwen3.5-35B-A3B-FP8}"
-      - "--speculative-config"
-      - '{"method": "mtp", "num_speculative_tokens": 1}'
+      - "${VLM_MODEL:-Qwen/Qwen3.5-2B}"
       - "--gpu-memory-utilization"
-      - "0.90"
+      - "0.50"
       - "--trust-remote-code"
       - "--max-model-len"
       - "8192"
@@ -123,26 +125,29 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: ["${VLM_GPU:-2}"]
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8008/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 120s
+      test: ["CMD", "curl", "--noproxy", "*", "-f", "http://localhost:8008/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
 
   # --- GLM-OCR Service (starts with --profile ocr) ---
-  # Used by FlashParse for text/table/formula OCR.
-  # Default: GLM-OCR 0.9B on vLLM with MTP-1.
-  # Requires ~8GB GPU VRAM.
+  # GLM-OCR 0.9B served via vLLM nightly with MTP speculative decoding.
+  # Requires vLLM nightly (glm_ocr architecture + transformers >= 5.0).
+  # ~8GB GPU VRAM.
   glm-ocr:
     profiles: ["ocr"]
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:glm51
     ports:
-      - "8080:8080"
+      - "8082:8080"
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
+      NVIDIA_VISIBLE_DEVICES: ${GLM_OCR_GPU:-1}
+      NO_PROXY: localhost,127.0.0.1,glm-ocr,vlm,minio,nats,veda,flashparse
+      no_proxy: localhost,127.0.0.1,glm-ocr,vlm,minio,nats,veda,flashparse
     volumes:
       - glm-ocr-model-cache:/root/.cache/huggingface
     command:
@@ -152,25 +157,26 @@ services:
       - "8080"
       - "--served-model-name"
       - "glm-ocr"
-      - "--speculative-config"
-      - '{"method": "mtp", "num_speculative_tokens": 1}'
       - "--gpu-memory-utilization"
-      - "0.90"
-      - "--allowed-local-media-path"
-      - "/"
+      - "0.50"
+      - "--trust-remote-code"
+      - "--speculative-config.method"
+      - "mtp"
+      - "--speculative-config.num_speculative_tokens"
+      - "1"
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: ["${GLM_OCR_GPU:-1}"]
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 120s
+      test: ["CMD", "curl", "--noproxy", "*", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
 
 volumes:
   minio-data:
