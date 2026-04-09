@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+remote_write:
+  - url: http://mimir:9009/api/v1/push
+
+scrape_configs:
+  - job_name: "veda"
+    metrics_path: "/v1/admin/metrics"
+    static_configs:
+      - targets: ["veda:6340"]

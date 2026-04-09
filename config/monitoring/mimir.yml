@@ -1,0 +1,32 @@
+multitenancy_enabled: false
+
+blocks_storage:
+  backend: s3
+  s3:
+    endpoint: minio:9000
+    bucket_name: veda-mimir
+    access_key_id: veda
+    secret_access_key: vedapassword
+    insecure: true
+  tsdb:
+    dir: /data/tsdb
+
+compactor:
+  data_dir: /data/compactor
+  sharding_ring:
+    kvstore:
+      store: memberlist
+
+ingester:
+  ring:
+    kvstore:
+      store: memberlist
+    replication_factor: 1
+
+store_gateway:
+  sharding_ring:
+    kvstore:
+      store: memberlist
+
+server:
+  http_listen_port: 9009
