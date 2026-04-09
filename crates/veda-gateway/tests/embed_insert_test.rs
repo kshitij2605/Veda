@@ -16,7 +16,7 @@ async fn start_test_server_with_models() -> (String, tempfile::TempDir) {
         let mut registry = app_state.embedding_registry().write().await;
         registry.register(EmbeddingModelConfig {
             name: "clip-vit-l-14".into(),
-            endpoint: "http://localhost:8080/embed".into(),
+            endpoint: "http://mock:8080/embed".into(),
             api_key: String::new(),
             supported_modalities: vec![Modality::Image, Modality::Text],
             output_dimension: 4,
@@ -26,7 +26,7 @@ async fn start_test_server_with_models() -> (String, tempfile::TempDir) {
         });
         registry.register(EmbeddingModelConfig {
             name: "text-only-model".into(),
-            endpoint: "http://localhost:8081/embed".into(),
+            endpoint: "http://mock:8081/embed".into(),
             api_key: String::new(),
             supported_modalities: vec![Modality::Text],
             output_dimension: 4,
