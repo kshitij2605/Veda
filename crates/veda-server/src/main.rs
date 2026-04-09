@@ -69,6 +69,11 @@ async fn main() {
             .with(otel_log_layer)
             .init();
 
+        // Enable W3C Trace Context propagation for incoming traceparent headers.
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+
         eprintln!("OpenTelemetry export enabled to {endpoint}");
     } else {
         use tracing_subscriber::layer::SubscriberExt;

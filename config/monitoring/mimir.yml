@@ -5,8 +5,8 @@ blocks_storage:
   s3:
     endpoint: minio:9000
     bucket_name: veda-mimir
-    access_key_id: veda
-    secret_access_key: vedapassword
+    access_key_id: ${MINIO_USER}
+    secret_access_key: ${MINIO_PASSWORD}
     insecure: true
   tsdb:
     dir: /data/tsdb

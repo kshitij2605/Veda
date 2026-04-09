@@ -4,6 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use veda_core::metrics as m;
 use veda_core::schema::{CollectionSchema, FieldDefinition};
 use veda_core::types::{DistanceMetric, FieldType};
 use veda_query::distributed::DistributedQueryExecutor;
@@ -182,6 +183,13 @@ pub async fn create_collection(
         executors.insert(req.name.clone(), executor);
     }
 
+    // Update active collections gauge.
+    let collection_count = {
+        let schemas = state.inner.schemas.read().await;
+        schemas.len()
+    };
+    metrics::gauge!(m::ACTIVE_COLLECTIONS).set(collection_count as f64);
+
     Ok((
         StatusCode::CREATED,
         Json(CreateCollectionResponse {
@@ -262,6 +270,13 @@ pub async fn drop_collection(
         let mut executors = state.inner.query_executors.write().await;
         executors.remove(&name);
     }
+
+    // Update active collections gauge.
+    let collection_count = {
+        let schemas = state.inner.schemas.read().await;
+        schemas.len()
+    };
+    metrics::gauge!(m::ACTIVE_COLLECTIONS).set(collection_count as f64);
 
     Ok(Json(DropCollectionResponse {
         name,

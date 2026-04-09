@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use tracing::instrument;
 use uuid::Uuid;
 use veda_core::error::{Result, VedaError};
 use veda_core::record::Record;
@@ -59,6 +60,7 @@ impl SegmentManager {
     ///
     /// If the growing segment has reached the seal threshold, it is sealed first
     /// and a new growing segment is created before inserting.
+    #[instrument(name = "segment_insert", skip(self, record), fields(shard_id = self.shard_id))]
     pub fn insert(&mut self, record: Record) -> Result<()> {
         if self.growing.should_seal() {
             self.seal_growing()?;
@@ -71,6 +73,7 @@ impl SegmentManager {
     ///
     /// Returns the metadata of the newly sealed segment, or `None` if the
     /// growing segment was empty (no empty segments are created).
+    #[instrument(name = "seal_growing", skip(self), fields(shard_id = self.shard_id))]
     pub fn seal_growing(&mut self) -> Result<Option<SegmentMetadata>> {
         if self.growing.count() == 0 {
             return Ok(None);

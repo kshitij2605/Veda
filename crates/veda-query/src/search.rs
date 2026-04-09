@@ -1,4 +1,5 @@
 use roaring::RoaringBitmap;
+use tracing::instrument;
 use uuid::Uuid;
 use veda_core::error::Result;
 use veda_core::types::DistanceMetric;
@@ -53,6 +54,7 @@ impl SearchExecutor {
     ///
     /// Searches the optional growing segment and all sealed segments,
     /// then merges results and returns the top-k by distance.
+    #[instrument(name = "execute_search", skip(request, growing_segment, sealed_segments), fields(field = %request.field, k = request.k, has_filter = request.filter.is_some()))]
     pub fn search(
         request: &VectorSearchRequest,
         growing_segment: Option<&GrowingSegment>,

@@ -155,6 +155,15 @@ pub async fn insert(
     metrics::counter!(m::INSERT_TOTAL, "collection" => name.clone())
         .increment(inserted as u64);
 
+    // Update record count gauge from segment managers.
+    {
+        let managers = state.inner.segment_managers.read().await;
+        if let Some(shard_managers) = managers.get(&name) {
+            let total: u64 = shard_managers.values().map(|sm| sm.total_records()).sum();
+            metrics::gauge!(m::RECORDS_TOTAL, "collection" => name.clone()).set(total as f64);
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(InsertResponse { inserted })))
 }
 
@@ -408,6 +417,7 @@ fn field_value_to_json(fv: &FieldValue) -> serde_json::Value {
 ///
 /// Creates new LocalShardSearcher instances that load sealed segments from
 /// disk, then builds vector indexes so search can find the data.
+#[instrument(name = "rebuild_executors", skip(state), fields(collection = %collection_name))]
 pub async fn rebuild_executors(
     state: &AppState,
     collection_name: &str,
