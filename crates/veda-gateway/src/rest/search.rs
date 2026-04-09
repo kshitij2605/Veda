@@ -4,6 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use veda_core::metrics as m;
 use veda_core::types::DistanceMetric;
 use veda_query::distributed::DistributedQueryExecutor;
 use veda_query::fusion::{FieldQuery, FusionStrategy, MultiVectorQuery};
@@ -128,6 +129,8 @@ pub async fn search(
     };
 
     let took_ms = start.elapsed().as_millis() as u64;
+    metrics::histogram!(m::SEARCH_DURATION, "collection" => name.clone())
+        .record(start.elapsed().as_secs_f64());
     let count = results.len();
 
     Ok(Json(SearchResponse {
