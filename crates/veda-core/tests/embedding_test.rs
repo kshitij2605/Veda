@@ -10,7 +10,7 @@ use veda_core::types::DistanceMetric;
 fn clip_model() -> EmbeddingModelConfig {
     EmbeddingModelConfig {
         name: "clip-vit-l-14".into(),
-        endpoint: "http://localhost:8080/embed".into(),
+        endpoint: "http://mock:8080/embed".into(),
         api_key: String::new(),
         supported_modalities: vec![Modality::Image, Modality::Text],
         output_dimension: 768,
@@ -23,7 +23,7 @@ fn clip_model() -> EmbeddingModelConfig {
 fn text_only_model() -> EmbeddingModelConfig {
     EmbeddingModelConfig {
         name: "bge-large".into(),
-        endpoint: "http://localhost:8081/embed".into(),
+        endpoint: "http://mock:8081/embed".into(),
         api_key: String::new(),
         supported_modalities: vec![Modality::Text],
         output_dimension: 1024,
@@ -146,7 +146,7 @@ fn test_validate_input_rejects_wrong_modality() {
 fn test_validate_input_rejects_oversized() {
     let config = EmbeddingModelConfig {
         name: "tiny".into(),
-        endpoint: "http://localhost/embed".into(),
+        endpoint: "http://mock/embed".into(),
         api_key: String::new(),
         supported_modalities: vec![Modality::Text],
         output_dimension: 4,

@@ -10,6 +10,7 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
+base64 = "0.22"
 
 [[bench]]
 name = "distance_bench"
