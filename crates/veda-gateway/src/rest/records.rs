@@ -338,8 +338,10 @@ fn json_to_field_value(
             Ok(FieldValue::Timestamp(n))
         }
         FieldType::Blob => {
-            let s = value.as_str().ok_or("expected string for blob ref")?;
-            Ok(FieldValue::BlobRef(s.to_owned()))
+            // User sends base64 data as a string; store as String so BlobManager
+            // can detect it, decode it, store the bytes, and replace with BlobRef.
+            let s = value.as_str().ok_or("expected base64 string for blob field")?;
+            Ok(FieldValue::String(s.to_owned()))
         }
         FieldType::Json => Ok(FieldValue::Json(value.clone())),
         FieldType::Uuid => {
