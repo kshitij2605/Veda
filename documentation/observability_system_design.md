@@ -706,7 +706,8 @@ opentelemetry-appender-tracing = "0.27"
 |---|---|
 | `veda-core` | `metrics`, `tracing` |
 | `veda-storage` | `metrics`, `tracing` |
-| `veda-gateway` | `metrics`, `metrics-exporter-prometheus`, `opentelemetry` |
+| `veda-gateway` | `metrics`, `metrics-exporter-prometheus`, `opentelemetry`, `tracing-opentelemetry` |
+| `veda-query` | `tracing` |
 | `veda-server` | `metrics`, `metrics-exporter-prometheus`, `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry`, `opentelemetry-appender-tracing` |
 
 ---
@@ -715,41 +716,16 @@ opentelemetry-appender-tracing = "0.27"
 
 ### 13.1 Unrecorded Metrics
 
-Six metric constants are defined but not yet recorded at any call site:
+Three metric constants are defined but not yet recorded at any call site:
 
 | Metric | Reason |
 |---|---|
-| `veda_errors_total` | Error response paths do not yet record this counter |
-| `veda_active_collections` | Collection create/drop handlers do not update this gauge |
-| `veda_records_total` | No per-collection record count tracking |
-| `veda_segments_total` | Segment lifecycle does not update this gauge |
-| `veda_compaction_duration_seconds` | Compaction is not yet instrumented |
-| `veda_compaction_in_progress` | Compaction is not yet instrumented |
+| `veda_segments_total` | Segment lifecycle does not update this gauge (requires deeper internal changes) |
+| `veda_compaction_duration_seconds` | Compaction is not yet triggered in the codebase |
+| `veda_compaction_in_progress` | Compaction is not yet triggered in the codebase |
 
-These are defined to reserve the metric names and will be wired when the corresponding code paths are instrumented.
+These are defined to reserve the metric names and will be wired when the corresponding code paths are implemented.
 
-### 13.2 Missing Trace Context Propagation
-
-W3C `traceparent` header extraction from incoming HTTP requests is not yet implemented. Incoming distributed traces from external callers will not correlate with Veda's internal spans. This requires adding `opentelemetry::propagation::TextMapPropagator` extraction to the middleware stack.
-
-### 13.3 Query Explain Granularity
+### 13.2 Query Explain Granularity
 
 The current explain implementation measures the entire search execution as a single phase (`ann_search_ms` for single-vector, `fusion_ms` for multi-vector). Per-sub-phase timing (filter evaluation, ANN traversal, scoring, fusion separately) requires changes to the `SearchExecutor` interface to expose internal timing.
-
-### 13.4 Mimir Credentials
-
-The Mimir config (`config/monitoring/mimir.yml`) has hardcoded MinIO credentials. If `MINIO_PASSWORD` is changed, the config file must be manually updated.
-
-### 13.5 OTEL Endpoint Not Auto-Configured
-
-Docker Compose profiles cannot conditionally inject environment variables into other services. Users must manually set `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317` in `.env` when using the monitoring profile.
-
-### 13.6 Deep Internal Spans
-
-Some internal functions listed in the design doc are not yet instrumented:
-- `SegmentManager::insert()` (in `veda-storage`)
-- `SearchExecutor::execute()` (in `veda-query`)
-- `seal_growing()` (in `veda-storage`)
-- `rebuild_executors()` (in `veda-gateway`)
-
-Handler-level spans exist, but deeper drill-down tracing into segment operations requires these annotations.
