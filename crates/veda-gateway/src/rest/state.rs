@@ -126,25 +126,26 @@ impl AppState {
         }
     }
 
-    /// Create a new AppState with a Prometheus handle.
+    /// Create a new AppState with a Prometheus handle (auth disabled, for backwards compat).
     pub fn with_prometheus(data_dir: &Path, prometheus_handle: PrometheusHandle) -> Self {
-        Self {
-            inner: Arc::new(AppStateInner {
-                schemas: RwLock::new(HashMap::new()),
-                segment_managers: RwLock::new(HashMap::new()),
-                query_executors: RwLock::new(HashMap::new()),
-                embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
-                data_dir: data_dir.to_owned(),
-                flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
-                auth_enabled: false,
-                jwt_secret: "default-test-secret".to_owned(),
-                users: HashMap::new(),
-                blob_store: RwLock::new(Arc::new(
-                    LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
-                )),
-                prometheus_handle: Some(prometheus_handle),
-            }),
-        }
+        let mut state = Self::new(data_dir);
+        Arc::get_mut(&mut state.inner)
+            .expect("no other references to AppStateInner")
+            .prometheus_handle = Some(prometheus_handle);
+        state
+    }
+
+    /// Create a new AppState with auth enabled and a Prometheus handle.
+    pub fn with_auth_and_prometheus(
+        data_dir: &Path,
+        jwt_secret: &str,
+        prometheus_handle: PrometheusHandle,
+    ) -> Self {
+        let mut state = Self::with_auth(data_dir, jwt_secret);
+        Arc::get_mut(&mut state.inner)
+            .expect("no other references to AppStateInner")
+            .prometheus_handle = Some(prometheus_handle);
+        state
     }
 
     /// Get a reference to the embedding model registry for configuration.

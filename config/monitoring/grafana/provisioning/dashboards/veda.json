@@ -61,7 +61,7 @@
       "targets": [
         {
           "expr": "rate(veda_errors_total[5m])",
-          "legendFormat": "{{method}} {{endpoint}}",
+          "legendFormat": "{{type}}",
           "refId": "A"
         }
       ]
