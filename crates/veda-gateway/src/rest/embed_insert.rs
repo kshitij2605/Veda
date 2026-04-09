@@ -74,11 +74,12 @@ pub async fn embed_insert(
             None => {
                 let candidates = registry.find_by_modality(modality);
                 if candidates.is_empty() {
+                    let available: Vec<&str> = registry.list().iter().map(|c| c.name.as_str()).collect();
                     return Err((
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse {
                             error: format!(
-                                "no model registered for modality '{modality}'. Register one via EMBEDDING_* or MULTIMODAL_EMBEDDING_* env vars"
+                                "no model registered for modality '{modality}'. Available models: {available:?}. Register one via EMBEDDING_* or MULTIMODAL_EMBEDDING_* env vars"
                             ),
                         }),
                     ));

@@ -210,11 +210,11 @@ impl BlobStore for ObjectBlobStore {
         let resp = self
             .bucket
             .put_object(key, data)
-            .map_err(|e| VedaError::Storage(format!("S3 put failed: {e}")))?;
+            .map_err(|e| VedaError::Storage(format!("object store put failed: {e}")))?;
         let code = resp.status_code();
         if code != 200 {
             return Err(VedaError::Storage(format!(
-                "S3 put returned status {code}"
+                "object store put returned status {code}"
             )));
         }
         Ok(())
@@ -224,7 +224,7 @@ impl BlobStore for ObjectBlobStore {
         let resp = self
             .bucket
             .get_object(key)
-            .map_err(|e| VedaError::Storage(format!("S3 get failed: {e}")))?;
+            .map_err(|e| VedaError::Storage(format!("object store get failed: {e}")))?;
         if resp.status_code() == 404 {
             return Err(VedaError::Storage(format!("Blob not found: {key}")));
         }
@@ -234,7 +234,7 @@ impl BlobStore for ObjectBlobStore {
     fn delete(&self, key: &str) -> Result<()> {
         self.bucket
             .delete_object(key)
-            .map_err(|e| VedaError::Storage(format!("S3 delete failed: {e}")))?;
+            .map_err(|e| VedaError::Storage(format!("object store delete failed: {e}")))?;
         Ok(())
     }
 
@@ -249,7 +249,7 @@ impl BlobStore for ObjectBlobStore {
         let results = self
             .bucket
             .list(prefix.to_string(), None)
-            .map_err(|e| VedaError::Storage(format!("S3 list failed: {e}")))?;
+            .map_err(|e| VedaError::Storage(format!("object store list failed: {e}")))?;
         let mut keys = Vec::new();
         for result in &results {
             for obj in &result.contents {

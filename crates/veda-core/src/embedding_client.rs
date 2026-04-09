@@ -62,36 +62,48 @@ impl EmbeddingClient {
         self.config.endpoint.starts_with("http") && !self.config.endpoint.contains("mock")
     }
 
-    fn build_multimodal_payload(&self, data: &[u8], modality: Modality) -> serde_json::Value {
+    fn build_multimodal_payload(&self, data: &[u8], modality: Modality) -> Result<serde_json::Value> {
         let b64 = BASE64_STANDARD.encode(data);
-        let content_part = match modality {
-            Modality::Image => serde_json::json!({
-                "type": "image_url",
-                "image_url": { "url": format!("data:image/jpeg;base64,{b64}") }
-            }),
-            Modality::Video => serde_json::json!({
-                "type": "video_url",
-                "video_url": { "url": format!("data:video/mp4;base64,{b64}") }
-            }),
-            _ => serde_json::json!({
-                "type": "image_url",
-                "image_url": { "url": format!("data:application/octet-stream;base64,{b64}") }
-            }),
+        let (media_part, instruction) = match modality {
+            Modality::Image => (
+                serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:image/jpeg;base64,{b64}") }
+                }),
+                "Represent the given image.",
+            ),
+            Modality::Video => (
+                serde_json::json!({
+                    "type": "video_url",
+                    "video_url": { "url": format!("data:video/mp4;base64,{b64}") }
+                }),
+                "Represent the given video.",
+            ),
+            Modality::Pdf => {
+                return Err(VedaError::Storage(
+                    "PDF modality cannot be embedded directly; use OCR to extract text/images first".into(),
+                ));
+            }
+            _ => {
+                return Err(VedaError::Storage(format!(
+                    "unsupported modality for multimodal embedding: {modality:?}"
+                )));
+            }
         };
 
-        serde_json::json!({
+        Ok(serde_json::json!({
             "model": self.config.name,
             "messages": [{
                 "role": "user",
-                "content": [content_part]
+                "content": [media_part, {"type": "text", "text": instruction}]
             }],
             "encoding_format": "float"
-        })
+        }))
     }
 
     fn embed_bytes_http(&self, data: &[u8], modality: Modality) -> Result<Vec<f32>> {
         let client = reqwest::blocking::Client::new();
-        let body = self.build_multimodal_payload(data, modality);
+        let body = self.build_multimodal_payload(data, modality)?;
 
         let url = format!("{}/v1/embeddings", self.config.endpoint.trim_end_matches('/'));
         let mut request = client
@@ -242,7 +254,7 @@ mod tests {
     fn test_build_multimodal_payload_image() {
         let client = EmbeddingClient::new(mock_config());
         let data = b"fake-image-bytes";
-        let payload = client.build_multimodal_payload(data, Modality::Image);
+        let payload = client.build_multimodal_payload(data, Modality::Image).unwrap();
 
         // Verify top-level structure
         assert_eq!(payload["model"], "test-vlm");
@@ -253,10 +265,11 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
 
-        // Verify content contains image_url
+        // Verify content contains image_url + text instruction
         let content = messages[0]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 1);
+        assert_eq!(content.len(), 2);
         assert_eq!(content[0]["type"], "image_url");
+        assert_eq!(content[1]["type"], "text");
 
         let url = content[0]["image_url"]["url"].as_str().unwrap();
         assert!(url.starts_with("data:image/jpeg;base64,"));
