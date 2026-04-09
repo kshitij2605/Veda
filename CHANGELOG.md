@@ -24,9 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suffix array pattern search with fuzzy matching
 - REST API gateway (axum) with full CRUD
 - Auto-embedding service with modality validation
-- Blob storage with local filesystem backend
+- Blob storage with MinIO/S3-compatible and local filesystem backends
 - JWT authentication and RBAC (Admin/Editor/Viewer)
-- Prometheus metrics and structured JSON logging
+- Full observability stack: Prometheus metrics (16 metric types), OpenTelemetry tracing and log export, health/readiness endpoints, query explain with per-phase timing
+- Pre-built Grafana dashboard with provisioned datasources (Mimir, Tempo, Loki)
+- Docker Compose `monitoring` profile (OTel Collector, Prometheus, Mimir, Tempo, Loki, Grafana)
+- W3C Trace Context propagation for incoming traceparent headers
+- HTTP request metrics middleware with automatic error counting
+- `#[instrument]` tracing spans on handlers, embedding client, blob store, segment manager, and search executor
 - Cluster coordination with shard routing
 - WAL abstraction with in-memory backend
 - Niriksha dashboard with 7 pages (React + TypeScript)

@@ -164,7 +164,28 @@ Implement the Python SDK as a pure Python package (`veda-client`) that communica
 
 ---
 
-## ADR-011: MarkdownRecursive as Default Chunking Strategy
+## ADR-011: OpenTelemetry-First Observability
+
+**Status:** Accepted
+
+### Context
+A vector database needs comprehensive observability: metrics for capacity planning, distributed tracing for latency diagnosis, and structured logs for debugging. We evaluated several approaches: custom metrics libraries, StatsD, Prometheus client libraries directly, and the OpenTelemetry ecosystem.
+
+### Decision
+Adopt an OpenTelemetry-first observability architecture with three pillars:
+1. **Metrics:** Use the `metrics` crate (v0.24) as a facade with `metrics-exporter-prometheus` for Prometheus exposition at `/v1/admin/metrics`. 16 metric constants defined centrally in `veda-core::metrics`.
+2. **Tracing:** Use `tracing` + `tracing-opentelemetry` for distributed tracing. OTel trace and log export is conditional on `OTEL_EXPORTER_OTLP_ENDPOINT` being set. W3C Trace Context propagation for incoming `traceparent` headers.
+3. **Logs:** Use `opentelemetry-appender-tracing` to bridge `tracing` events to OTel log records. Structured JSON format via `tracing-subscriber`.
+
+The monitoring stack runs as a Docker Compose profile (`monitoring`) with OTel Collector, Prometheus, Mimir, Tempo, Loki, and Grafana with pre-provisioned datasources and dashboard.
+
+### Consequences
+- **Positive:** Standard OTel protocol means any OTel-compatible backend works. Conditional initialization means zero overhead when monitoring is disabled. The `metrics` crate facade decouples metric recording from the exporter. Pre-built Grafana dashboard provides immediate visibility.
+- **Negative:** Six additional Docker services for the monitoring stack. OTel dependency adds compile time. Mimir requires MinIO for long-term storage, adding another dependency to the monitoring profile.
+
+---
+
+## ADR-012: MarkdownRecursive as Default Chunking Strategy
 
 **Status:** Accepted
 
