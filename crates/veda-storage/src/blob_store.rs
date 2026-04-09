@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use tracing::instrument;
 use veda_core::error::{Result, VedaError};
 
 /// Trait for blob storage backends.
@@ -207,6 +208,7 @@ impl ObjectBlobStore {
 }
 
 impl BlobStore for ObjectBlobStore {
+    #[instrument(name = "blob_put", skip(self, data), fields(key = %key, size = data.len()))]
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
         let start = Instant::now();
         let resp = self
@@ -224,6 +226,7 @@ impl BlobStore for ObjectBlobStore {
         Ok(())
     }
 
+    #[instrument(name = "blob_get", skip(self), fields(key = %key))]
     fn get(&self, key: &str) -> Result<Vec<u8>> {
         let start = Instant::now();
         let resp = self
@@ -239,6 +242,7 @@ impl BlobStore for ObjectBlobStore {
         Ok(data)
     }
 
+    #[instrument(name = "blob_delete", skip(self), fields(key = %key))]
     fn delete(&self, key: &str) -> Result<()> {
         let start = Instant::now();
         self.bucket

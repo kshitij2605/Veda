@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use base64::prelude::*;
+use tracing::instrument;
 
 use crate::embedding::{EmbeddingModelConfig, Modality};
 use crate::error::{Result, VedaError};
@@ -20,6 +21,7 @@ impl EmbeddingClient {
     }
 
     /// Embed a text string. Uses HTTP for real endpoints, mock otherwise.
+    #[instrument(name = "embed_text", skip(self, text), fields(model = %self.config.name, input_len = text.len()))]
     pub fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
         self.validate_input(text.as_bytes(), Modality::Text)?;
         if self.is_real_endpoint() {
@@ -31,6 +33,7 @@ impl EmbeddingClient {
 
     /// Embed raw bytes (image, audio, video, pdf).
     /// Uses HTTP for real endpoints, mock otherwise.
+    #[instrument(name = "embed_bytes", skip(self, data), fields(model = %self.config.name, modality = %modality, input_size = data.len()))]
     pub fn embed_bytes(&self, data: &[u8], modality: Modality) -> Result<Vec<f32>> {
         self.validate_input(data, modality)?;
         if self.is_real_endpoint() {
