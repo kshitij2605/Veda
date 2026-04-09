@@ -116,34 +116,75 @@ impl AppState {
     }
 
     /// Load embedding model configuration from environment variables and register it.
+    ///
+    /// Registers two models when configured:
+    /// 1. Text model from `EMBEDDING_*` env vars (registered first so `find_by_modality(Text)` returns it first)
+    /// 2. Multimodal model from `MULTIMODAL_EMBEDDING_*` env vars
     pub async fn load_embedding_from_env(&self) {
-        let endpoint = match std::env::var("EMBEDDING_ENDPOINT").ok() {
-            Some(ep) if !ep.is_empty() => ep,
-            _ => return,
+        // --- Text embedding model (EMBEDDING_*) ---
+        let text_config = match (
+            std::env::var("EMBEDDING_ENDPOINT").ok().filter(|s| !s.is_empty()),
+            std::env::var("EMBEDDING_MODEL").ok().filter(|s| !s.is_empty()),
+        ) {
+            (Some(endpoint), Some(model)) => {
+                let api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_default();
+                let dim = std::env::var("EMBEDDING_DIMENSION")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1024);
+                Some((endpoint, model, api_key, dim))
+            }
+            _ => None,
         };
-        let model = match std::env::var("EMBEDDING_MODEL").ok() {
-            Some(m) if !m.is_empty() => m,
-            _ => return,
-        };
-        let api_key = std::env::var("EMBEDDING_API_KEY").unwrap_or_default();
-        let dim = std::env::var("EMBEDDING_DIMENSION")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1024);
 
-        let config = EmbeddingModelConfig {
-            name: model.clone(),
-            endpoint: endpoint.clone(),
-            api_key,
-            supported_modalities: vec![Modality::Text],
-            output_dimension: dim,
-            max_input_size_bytes: 32768,
-            timeout_seconds: 30,
-            batch_size: 32,
+        // --- Multimodal embedding model (MULTIMODAL_EMBEDDING_*) ---
+        let mm_config = match (
+            std::env::var("MULTIMODAL_EMBEDDING_ENDPOINT").ok().filter(|s| !s.is_empty()),
+            std::env::var("MULTIMODAL_EMBEDDING_MODEL").ok().filter(|s| !s.is_empty()),
+        ) {
+            (Some(endpoint), Some(model)) => {
+                let api_key = std::env::var("MULTIMODAL_EMBEDDING_API_KEY").unwrap_or_default();
+                let dim = std::env::var("MULTIMODAL_EMBEDDING_DIMENSION")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(2048);
+                Some((endpoint, model, api_key, dim))
+            }
+            _ => None,
         };
+
+        if text_config.is_none() && mm_config.is_none() {
+            return;
+        }
 
         let mut registry = self.inner.embedding_registry.write().await;
-        registry.register(config);
-        tracing::info!(model = %model, endpoint = %endpoint, dimension = dim, "registered embedding model from environment");
+
+        if let Some((endpoint, model, api_key, dim)) = text_config {
+            registry.register(EmbeddingModelConfig {
+                name: model.clone(),
+                endpoint: endpoint.clone(),
+                api_key,
+                supported_modalities: vec![Modality::Text],
+                output_dimension: dim,
+                max_input_size_bytes: 32768,
+                timeout_seconds: 30,
+                batch_size: 32,
+            });
+            tracing::info!(model = %model, endpoint = %endpoint, dimension = dim, "registered text embedding model from environment");
+        }
+
+        if let Some((endpoint, model, api_key, dim)) = mm_config {
+            registry.register(EmbeddingModelConfig {
+                name: model.clone(),
+                endpoint: endpoint.clone(),
+                api_key,
+                supported_modalities: vec![Modality::Text, Modality::Image, Modality::Video],
+                output_dimension: dim,
+                max_input_size_bytes: 20 * 1024 * 1024,
+                timeout_seconds: 60,
+                batch_size: 8,
+            });
+            tracing::info!(model = %model, endpoint = %endpoint, dimension = dim, "registered multimodal embedding model from environment");
+        }
     }
 }
