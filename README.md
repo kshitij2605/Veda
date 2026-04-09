@@ -65,7 +65,7 @@ This starts the Veda server, MinIO blob storage, and NATS message queue.
 
 | Profile | Services | GPU VRAM | Purpose |
 |---|---|---|---|
-| `embedding` | HuggingFace TEI | CPU | Auto-embedding with BGE-M3 (or custom model) |
+| `embedding` | HuggingFace TEI + Multimodal Embedding (vLLM) | CPU + ~10GB | Text embedding (BGE-M3) + multimodal embedding (Qwen3-VL) |
 | `ocr` | FlashParse + GLM-OCR | ~8GB | Text/table/formula OCR from documents |
 | `ocr-vlm` | VLM (Qwen3.5-35B-A3B) | ~48GB | Image captioning and classification (use with `ocr`) |
 
@@ -159,6 +159,35 @@ curl -X POST http://localhost:6340/v1/collections/products/insert \
     ]
   }'
 ```
+
+### Embed + Insert (auto-embedding)
+
+Let Veda generate embeddings automatically. The `auto_embed` map specifies which source fields to embed into which vector fields. Omit `model` to let Veda auto-select based on data modality.
+
+```bash
+curl -X POST http://localhost:6340/v1/collections/products/embed-insert \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "records": [
+      {
+        "description": "Wireless headphones with noise cancellation",
+        "category": "electronics",
+        "price": 299.99
+      }
+    ],
+    "auto_embed": {
+      "embedding": {
+        "source_field": "description"
+      }
+    }
+  }'
+```
+
+**Auto-selection rules:**
+- Text-only data uses the text model (BGE-M3, CPU-friendly)
+- If any field is non-text (image, video), **all** auto-selected mappings use the multimodal model (Qwen3-VL) to keep embeddings in a unified vector space
+- Specify `"model": "model-name"` in any mapping to override auto-selection
 
 ### Search
 
@@ -406,6 +435,32 @@ project-mdb/
   documentation/        # Architecture docs and ADRs
   research/             # Research notes and analysis
 ```
+
+## Configuration
+
+### Embedding Models
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBEDDING_ENDPOINT` | `http://embedding:80` | Text embedding endpoint (OpenAI-compatible) |
+| `EMBEDDING_MODEL` | `BAAI/bge-m3` | Text embedding model name |
+| `EMBEDDING_DIMENSION` | `1024` | Text embedding output dimension |
+| `MULTIMODAL_EMBEDDING_ENDPOINT` | `http://multimodal-embedding:8000` | Multimodal embedding endpoint |
+| `MULTIMODAL_EMBEDDING_MODEL` | `Qwen/Qwen3-VL-Embedding-2B` | Multimodal embedding model name |
+| `MULTIMODAL_EMBEDDING_DIMENSION` | `2048` | Multimodal embedding output dimension |
+
+### Blob Storage
+
+| Variable | Default | Description |
+|---|---|---|
+| `VEDA_BLOB_BACKEND` | `minio` | `"minio"` (path-style, auto-create bucket) or `"s3"` (virtual-hosted, TLS) |
+| `VEDA_BLOB_ENDPOINT` | `http://minio:9000` | Object store endpoint |
+| `VEDA_BLOB_BUCKET` | `veda-blobs` | Bucket name |
+| `VEDA_BLOB_ACCESS_KEY` | — | Access key |
+| `VEDA_BLOB_SECRET_KEY` | — | Secret key |
+| `VEDA_BLOB_REGION` | `us-east-1` | AWS region (for S3 mode) |
+
+If `VEDA_BLOB_BACKEND` is unset, Veda falls back to local filesystem blob storage.
 
 ## Contributing
 

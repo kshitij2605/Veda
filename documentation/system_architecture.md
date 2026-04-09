@@ -66,7 +66,7 @@ veda-core          (no internal deps)
 | Crate | Key third-party deps |
 |---|---|
 | `veda-core` | `serde`, `serde_json`, `uuid`, `thiserror` |
-| `veda-storage` | `memmap2`, `roaring`, `base64` |
+| `veda-storage` | `memmap2`, `roaring`, `base64`, `rust-s3` |
 | `veda-index` | `rand`, `roaring` |
 | `veda-query` | `roaring`, `uuid` |
 | `veda-coordinator` | `tokio`, `tracing`, `uuid` |
@@ -250,15 +250,25 @@ A global singleton (`static GLOBAL_METRICS`) using `AtomicU64` counters with `Or
 
 **File:** `embedding_client.rs`
 
-A mock embedding client that produces deterministic vectors for testing without external model services.
+Embedding client that calls real HTTP endpoints for text and multimodal (image/video) embedding, with a deterministic mock fallback for testing.
 
 **`EmbeddingClient`** methods:
 - `new(config: EmbeddingModelConfig)` -- stores the config
-- `embed_text(text: &str)` -- validates input, returns deterministic vector
-- `embed_bytes(data: &[u8], modality: Modality)` -- validates input, returns deterministic vector
+- `embed_text(text: &str)` -- validates input; calls `embed_text_http()` for real endpoints, mock otherwise
+- `embed_bytes(data: &[u8], modality: Modality)` -- validates input; calls `embed_bytes_http()` for real endpoints, mock otherwise
 - `validate_input(data, modality)` -- checks modality is supported and input size is within `max_input_size_bytes`
+- `is_real_endpoint()` -- returns `true` if endpoint starts with `"http"` and does not contain `"mock"`
 
-**Deterministic vector generation** via `deterministic_vector(data, dimension)`:
+**HTTP embedding (real endpoints):**
+- `embed_text_http(text)` -- standard OpenAI-compatible request: `{"model": "...", "input": "text"}` to `/v1/embeddings`
+- `embed_bytes_http(data, modality)` -- builds a multimodal chat-messages payload via `build_multimodal_payload()` and posts to `/v1/embeddings`
+- `build_multimodal_payload(data, modality)` -- encodes bytes as base64 data URI, returns vLLM-compatible chat payload:
+  - Image: `data:image/jpeg;base64,...` in `image_url` content part + text instruction
+  - Video: `data:video/mp4;base64,...` in `video_url` content part + text instruction
+  - PDF: returns error (PDFs go through OCR first)
+- Supports `api_key` (bearer auth) and configurable `timeout_seconds`
+
+**Deterministic vector generation (mock fallback)** via `deterministic_vector(data, dimension)`:
 1. Hash input bytes with FNV-1a-like `simple_hash` (seed `2166136261`, multiplier `16777619`)
 2. Feed hash as seed to `xorshift32` PRNG (`state ^= state << 13; state ^= state >> 17; state ^= state << 5`)
 3. Map each u32 output to `[-1.0, 1.0]` range
@@ -500,7 +510,17 @@ Manages the lifecycle of segments for a single shard.
 - `get` -- reads file, returns `VedaError::Storage` if not found
 - `list` -- recursively walks directory, returns keys matching prefix
 
-**`S3BlobStore`** -- placeholder, returns `VedaError::Storage("not yet implemented")`.
+**`ObjectBlobStore`** -- S3-compatible object storage implementation (MinIO or AWS S3) backed by the `rust-s3` crate:
+- `new(config: ObjectStoreConfig)` -- creates credentials, configures region (path-style for MinIO, virtual-hosted for S3), auto-creates bucket, returns bucket handle
+- `put` -- `bucket.put_object(key, data)`, checks for status 200
+- `get` -- `bucket.get_object(key)`, returns 404 as `VedaError::Storage("Blob not found")`
+- `delete` -- `bucket.delete_object(key)`
+- `exists` -- `bucket.head_object(key)`, returns `true` if status 200
+- `list` -- `bucket.list(prefix)`, collects and sorts object keys
+
+**`ObjectStoreConfig`** -- configuration struct: `backend` (`"minio"` or `"s3"`), `endpoint`, `bucket`, `access_key`, `secret_key`, `region`.
+
+**`ArcBlobStore`** -- wrapper that delegates `BlobStore` trait methods from `Arc<dyn BlobStore>` to `Box<dyn BlobStore>`.
 
 ### 4.11 BlobManager
 
@@ -997,6 +1017,7 @@ HTTP API server built on `axum`.
 - `segment_managers: RwLock<HashMap<String, HashMap<u32, SegmentManager>>>` -- keyed by (collection_name, shard_id)
 - `query_executors: RwLock<HashMap<String, DistributedQueryExecutor>>`
 - `embedding_registry: RwLock<EmbeddingModelRegistry>`
+- `blob_store: RwLock<Arc<dyn BlobStore>>` -- shared blob storage backend (ObjectBlobStore for MinIO/S3, LocalBlobStore for dev)
 - `data_dir: PathBuf`
 - `auth_enabled: bool`
 - `jwt_secret: String`
@@ -1365,7 +1386,8 @@ Creates the data directory, starts the HTTP server. Auth is disabled by default.
 
 | Profile | Service | Port | GPU VRAM | Description |
 |---|---|---|---|---|
-| `embedding` | HuggingFace TEI | 8090 | CPU | Embedding model server (default: BAAI/bge-m3) |
+| `embedding` | HuggingFace TEI | 8090 | CPU | Text embedding model server (default: BAAI/bge-m3) |
+| `embedding` | Multimodal Embedding (vLLM) | 8000 | ~10GB | Multimodal embedding (default: Qwen/Qwen3-VL-Embedding-2B) |
 | `ocr` | FlashParse | 8000 | ~1GB | Document OCR orchestrator |
 | `ocr` | GLM-OCR (vLLM) | 8080 | ~8GB | Text/table/formula OCR model |
 | `ocr-vlm` | VLM (vLLM) | 8008 | ~48GB | Image captioning VLM (default: Qwen/Qwen3.5-35B-A3B-FP8) |
@@ -1376,9 +1398,24 @@ Usage:
 - `docker compose --profile ocr up` -- core + text OCR
 - `docker compose --profile ocr --profile ocr-vlm up` -- core + full OCR pipeline with VLM
 
-Named volumes: `minio-data`, `nats-data`, `veda-data`, `embedding-model-cache`, `vlm-model-cache`, `glm-ocr-model-cache`, `flashparse-data`.
+Named volumes: `minio-data`, `nats-data`, `veda-data`, `embedding-model-cache`, `multimodal-embedding-model-cache`, `vlm-model-cache`, `glm-ocr-model-cache`, `flashparse-data`.
 
 Veda connects to MinIO and NATS via environment variables. MinIO has a health check; Veda depends on MinIO being healthy and NATS being started.
+
+**Embedding model auto-selection:**
+
+Veda registers two embedding models from environment variables at startup:
+- Text model: `EMBEDDING_ENDPOINT`, `EMBEDDING_MODEL` (default: BAAI/bge-m3, 1024-dim), supports `[Text]`
+- Multimodal model: `MULTIMODAL_EMBEDDING_ENDPOINT`, `MULTIMODAL_EMBEDDING_MODEL` (default: Qwen/Qwen3-VL-Embedding-2B, 2048-dim), supports `[Text, Image, Video]`
+
+When the user omits `model` in an `embed-insert` or `process-document` request, Veda auto-selects:
+- If any auto-selected mapping targets a non-text modality (image, video), the **multimodal model is used for all** auto-selected mappings (unified vector space).
+- If all mappings are text-only, the text model is used (cheaper, CPU).
+- Explicit `"model": "name"` overrides always take precedence.
+
+**Blob storage configuration:**
+
+ObjectBlobStore is constructed from `VEDA_BLOB_*` environment variables. If `VEDA_BLOB_BACKEND` is unset, Veda falls back to `LocalBlobStore` for development.
 
 ### 14.3 FlashParse OCR (Optional Sidecar)
 
