@@ -5,6 +5,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 use veda_core::embedding::Modality;
 use veda_core::embedding_client::EmbeddingClient;
 use veda_core::metrics as m;
@@ -45,6 +46,7 @@ pub struct RecordError {
 
 // ── Handler ──────────────────────────────────────────────────────────────
 
+#[instrument(name = "embed_insert", skip(state, req), fields(collection = %name, record_count = req.records.len()))]
 pub async fn embed_insert(
     State(state): State<AppState>,
     Path(name): Path<String>,

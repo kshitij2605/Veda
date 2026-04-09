@@ -4,6 +4,7 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
+use tracing::instrument;
 use veda_core::chunking::{chunk_markdown, ChunkingStrategy};
 use veda_core::embedding::Modality;
 use veda_core::embedding_client::EmbeddingClient;
@@ -60,6 +61,7 @@ pub struct OcrError {
 
 // ── Handler ─────────────────────────────────────────────────────────────
 
+#[instrument(name = "process_document", skip(state, multipart), fields(collection = %name))]
 pub async fn process_document(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -171,6 +173,7 @@ pub async fn process_document(
 }
 
 /// Batch document processing: accepts multiple files and processes each through FlashParse.
+#[instrument(name = "process_documents_batch", skip(state, multipart), fields(collection = %name))]
 pub async fn process_documents_batch(
     State(state): State<AppState>,
     Path(name): Path<String>,

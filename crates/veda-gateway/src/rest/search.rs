@@ -4,6 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 use veda_core::metrics as m;
 use veda_core::types::DistanceMetric;
 use veda_query::distributed::DistributedQueryExecutor;
@@ -80,6 +81,7 @@ pub struct SearchHit {
 
 // ── Handler ──────────────────────────────────────────────────────────────
 
+#[instrument(name = "search", skip(state, req), fields(collection = %name, top_k = req.limit, has_filter = req.filter.is_some()))]
 pub async fn search(
     State(state): State<AppState>,
     Path(name): Path<String>,

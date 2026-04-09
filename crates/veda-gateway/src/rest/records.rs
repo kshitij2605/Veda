@@ -4,6 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 use uuid::Uuid;
 use veda_core::metrics as m;
 use veda_core::record::{FieldValue, Record};
@@ -48,6 +49,7 @@ pub struct DeleteRecordsResponse {
 
 // ── Handlers ─────────────────────────────────────────────────────────────
 
+#[instrument(name = "insert", skip(state, req), fields(collection = %name, record_count = req.records.len()))]
 pub async fn insert(
     State(state): State<AppState>,
     Path(name): Path<String>,
