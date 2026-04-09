@@ -22,6 +22,8 @@ pub struct SearchRequest {
     pub filter: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    #[serde(default)]
+    pub explain: bool,
 }
 
 fn default_limit() -> usize {
@@ -66,10 +68,21 @@ pub struct FusionParams {
 // ── Response types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
+pub struct ExplainTiming {
+    pub filter_ms: f64,
+    pub ann_search_ms: f64,
+    pub scoring_ms: f64,
+    pub fusion_ms: f64,
+    pub total_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct SearchResponse {
     pub results: Vec<SearchHit>,
     pub count: usize,
     pub took_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<ExplainTiming>,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,15 +125,45 @@ pub async fn search(
         )
     })?;
 
+    let mut explain_timing: Option<ExplainTiming> = None;
+
     let results = if let Some(ref vec_query) = req.query.vector {
         // Single-vector search
         let metric = resolve_metric(&schema, &vec_query.field);
-        execute_single_vector(executor, vec_query, &req, metric)?
+        if req.explain {
+            let phase_start = Instant::now();
+            let hits = execute_single_vector(executor, vec_query, &req, metric)?;
+            let ann_ms = phase_start.elapsed().as_secs_f64() * 1000.0;
+            explain_timing = Some(ExplainTiming {
+                filter_ms: 0.0,
+                ann_search_ms: ann_ms,
+                scoring_ms: 0.0,
+                fusion_ms: 0.0,
+                total_ms: ann_ms,
+            });
+            hits
+        } else {
+            execute_single_vector(executor, vec_query, &req, metric)?
+        }
     } else if let Some(ref multi) = req.query.multi_vector {
         // Multi-vector fusion search
         let fusion_field = multi.first().map(|m| m.field.as_str()).unwrap_or("");
         let metric = resolve_metric(&schema, fusion_field);
-        execute_multi_vector(executor, multi, &req, metric)?
+        if req.explain {
+            let phase_start = Instant::now();
+            let hits = execute_multi_vector(executor, multi, &req, metric)?;
+            let fusion_ms = phase_start.elapsed().as_secs_f64() * 1000.0;
+            explain_timing = Some(ExplainTiming {
+                filter_ms: 0.0,
+                ann_search_ms: 0.0,
+                scoring_ms: 0.0,
+                fusion_ms,
+                total_ms: fusion_ms,
+            });
+            hits
+        } else {
+            execute_multi_vector(executor, multi, &req, metric)?
+        }
     } else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -139,6 +182,7 @@ pub async fn search(
         results,
         count,
         took_ms,
+        explain: explain_timing,
     }))
 }
 
