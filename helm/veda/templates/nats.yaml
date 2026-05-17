@@ -1,0 +1,60 @@
+{{- if .Values.nats.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "veda.fullname" . }}-nats
+  labels:
+    {{- include "veda.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  serviceName: {{ include "veda.fullname" . }}-nats
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "veda.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: nats
+  template:
+    metadata:
+      labels:
+        {{- include "veda.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: nats
+    spec:
+      containers:
+        - name: nats
+          image: nats:latest
+          args: ["--jetstream", "--store_dir=/data"]
+          ports:
+            - containerPort: 4222
+              name: client
+            - containerPort: 8222
+              name: monitor
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.nats.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "veda.fullname" . }}-nats
+  labels:
+    {{- include "veda.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  clusterIP: None
+  ports:
+    - port: 4222
+      name: client
+    - port: 8222
+      name: monitor
+  selector:
+    {{- include "veda.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+{{- end }}

@@ -1,0 +1,76 @@
+{{- if .Values.minio.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "veda.fullname" . }}-minio
+  labels:
+    {{- include "veda.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  serviceName: {{ include "veda.fullname" . }}-minio
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "veda.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        {{- include "veda.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          args: ["server", "/data", "--console-address", ":9001"]
+          ports:
+            - containerPort: 9000
+              name: s3
+            - containerPort: 9001
+              name: console
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "veda.fullname" . }}-minio
+                  key: root_user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "veda.fullname" . }}-minio
+                  key: root_password
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.minio.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "veda.fullname" . }}-minio
+  labels:
+    {{- include "veda.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  clusterIP: None
+  ports:
+    - port: 9000
+      name: s3
+    - port: 9001
+      name: console
+  selector:
+    {{- include "veda.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+{{- end }}

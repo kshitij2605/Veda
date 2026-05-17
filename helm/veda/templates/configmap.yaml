@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "veda.fullname" . }}-config
+  labels:
+    {{- include "veda.labels" . | nindent 4 }}
+data:
+  RUST_LOG: {{ .Values.env.RUST_LOG | quote }}
+  VEDA_BLOB_BACKEND: {{ .Values.env.VEDA_BLOB_BACKEND | quote }}
+  VEDA_BLOB_ENDPOINT: {{ include "veda.blobEndpoint" . | quote }}
+  VEDA_BLOB_BUCKET: {{ .Values.env.VEDA_BLOB_BUCKET | quote }}
+  VEDA_BLOB_REGION: {{ .Values.env.VEDA_BLOB_REGION | quote }}
+  VEDA_MQ_ENDPOINT: {{ include "veda.natsEndpoint" . | quote }}
+  EMBEDDING_ENDPOINT: {{ .Values.env.EMBEDDING_ENDPOINT | quote }}
+  EMBEDDING_MODEL: {{ .Values.env.EMBEDDING_MODEL | quote }}
+  EMBEDDING_DIMENSION: {{ .Values.env.EMBEDDING_DIMENSION | quote }}
+  MULTIMODAL_EMBEDDING_ENDPOINT: {{ .Values.env.MULTIMODAL_EMBEDDING_ENDPOINT | quote }}
+  MULTIMODAL_EMBEDDING_MODEL: {{ .Values.env.MULTIMODAL_EMBEDDING_MODEL | quote }}
+  MULTIMODAL_EMBEDDING_DIMENSION: {{ .Values.env.MULTIMODAL_EMBEDDING_DIMENSION | quote }}
+  VEDA_FLASHPARSE_ENDPOINT: {{ .Values.env.VEDA_FLASHPARSE_ENDPOINT | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.env.OTEL_EXPORTER_OTLP_ENDPOINT | quote }}
+  OTEL_SERVICE_NAME: {{ .Values.env.OTEL_SERVICE_NAME | quote }}

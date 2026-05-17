@@ -1,0 +1,91 @@
+# Default values for the Veda Helm chart.
+
+image:
+  repository: ghcr.io/kshitij2605/veda
+  tag: ""           # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+# Number of veda replicas. With the current single-leader coordinator (Raft is
+# not yet wired up — see veda-coordinator/network.rs), running >1 replica only
+# makes sense for read scale-out behind a shared object store.
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 6340
+
+# Persistent storage for veda-server's local data directory. Sealed segments
+# live here even when blob storage is offloaded to MinIO/S3.
+persistence:
+  enabled: true
+  size: 50Gi
+  storageClassName: ""   # defaults to cluster default
+
+resources:
+  limits:
+    cpu: 4
+    memory: 8Gi
+  requests:
+    cpu: 1
+    memory: 2Gi
+
+# Environment-driven runtime config. Maps 1:1 with docker-compose.yml.
+env:
+  RUST_LOG: info
+
+  # Blob storage — points at the in-chart MinIO sub-deployment by default.
+  VEDA_BLOB_BACKEND: minio
+  VEDA_BLOB_ENDPOINT: ""        # auto-set from minio.enabled below
+  VEDA_BLOB_BUCKET: veda-blobs
+  VEDA_BLOB_REGION: us-east-1
+
+  # NATS — set if you use NATS WAL or streaming ingestion.
+  VEDA_MQ_ENDPOINT: ""          # auto-set from nats.enabled below
+
+  # Embedding / OCR — point at external services if you have them.
+  EMBEDDING_ENDPOINT: ""
+  EMBEDDING_MODEL: ""
+  EMBEDDING_DIMENSION: "1024"
+  MULTIMODAL_EMBEDDING_ENDPOINT: ""
+  MULTIMODAL_EMBEDDING_MODEL: ""
+  MULTIMODAL_EMBEDDING_DIMENSION: "2048"
+  VEDA_FLASHPARSE_ENDPOINT: ""
+
+  # Observability — set to your OTel collector URL to enable export.
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  OTEL_SERVICE_NAME: veda
+
+# JWT auth. Disabled by default to match docker-compose behaviour. Enable for
+# production and set a real secret (helm `--set auth.jwtSecret=...` or sealed-
+# secrets).
+auth:
+  enabled: false
+  jwtSecret: ""
+  adminPassword: admin
+
+# Toggleable infra dependencies. Set enabled: false to bring your own.
+minio:
+  enabled: true
+  rootUser: veda
+  rootPassword: vedapassword
+  persistence:
+    size: 100Gi
+
+nats:
+  enabled: true
+  persistence:
+    size: 10Gi
+
+# Pod-level overrides.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podSecurityContext: {}
+
+# Optional ServiceAccount.
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""

@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "veda.fullname" . }}
+  labels:
+    {{- include "veda.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "veda.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "veda.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "veda.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "veda.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: veda
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - /var/veda/data
+            - 0.0.0.0:6340
+          ports:
+            - name: http
+              containerPort: 6340
+          envFrom:
+            - configMapRef:
+                name: {{ include "veda.fullname" . }}-config
+          {{- if .Values.auth.enabled }}
+          env:
+            - name: VEDA_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "veda.fullname" . }}-auth
+                  key: jwt_secret
+            - name: VEDA_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "veda.fullname" . }}-auth
+                  key: admin_password
+          {{- end }}
+          {{- if .Values.minio.enabled }}
+          env:
+            - name: VEDA_BLOB_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "veda.fullname" . }}-minio
+                  key: root_user
+            - name: VEDA_BLOB_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "veda.fullname" . }}-minio
+                  key: root_password
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/veda/data
+          livenessProbe:
+            httpGet:
+              path: /v1/admin/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /v1/admin/readiness
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}
