@@ -13,6 +13,16 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 base64 = "0.22"
+# Cross-platform SIMD distance kernels (AVX-512, NEON, SVE). Veda's own
+# AVX2+FMA + scalar implementations remain the default; enabling this
+# feature provides a richer set of architectures.
+simsimd = { version = "6", optional = true }
+
+[features]
+default = []
+# Use SimSIMD for distance computation when available. Adds a build-time
+# dependency on the SimSIMD C library.
+simsimd = ["dep:simsimd"]
 
 [[bench]]
 name = "distance_bench"

@@ -6,6 +6,8 @@ pub mod metrics;
 pub mod record;
 pub mod schema;
 pub mod simd;
+#[cfg(feature = "simsimd")]
+pub mod simd_simsimd;
 pub mod sparse;
 pub mod types;
 pub mod vector;
