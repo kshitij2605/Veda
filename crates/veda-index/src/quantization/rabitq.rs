@@ -201,6 +201,14 @@ impl RaBitQuantizer {
         self.binary_codes.is_empty()
     }
 
+    pub fn dimension(&self) -> u32 {
+        self.dimension
+    }
+
+    pub fn metric(&self) -> DistanceMetric {
+        self.metric
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         let data = RaBitQuantizerData {
             dimension: self.dimension,
