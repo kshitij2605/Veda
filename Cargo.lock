@@ -3213,7 +3213,9 @@ dependencies = [
 name = "veda-gateway"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "axum 0.8.8",
+ "futures",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",

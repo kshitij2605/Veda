@@ -409,6 +409,15 @@ pub async fn delete_records(
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+/// Public wrapper exposing the record-parsing logic to other gateway modules
+/// (notably `streaming`). Internal callers should keep using `parse_record`.
+pub fn parse_record_public(
+    raw: &serde_json::Map<String, serde_json::Value>,
+    schema: &veda_core::schema::CollectionSchema,
+) -> Result<Record, String> {
+    parse_record(raw, schema)
+}
+
 fn parse_record(
     raw: &serde_json::Map<String, serde_json::Value>,
     schema: &veda_core::schema::CollectionSchema,

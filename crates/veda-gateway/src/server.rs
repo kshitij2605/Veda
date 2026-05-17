@@ -20,6 +20,21 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let app_state = AppState::with_prometheus(&config.data_dir, prometheus_handle);
     app_state.load_embedding_from_env().await;
     app_state.load_blob_store_from_env().await;
+
+    // Optional NATS streaming ingestion worker.
+    if let Ok(url) = std::env::var("VEDA_STREAMING_NATS")
+        && !url.is_empty()
+    {
+        match crate::streaming::spawn_ingestion_worker(app_state.clone(), url.clone()).await {
+            Ok(()) => tracing::info!(url = %url, "streaming ingestion worker started"),
+            Err(e) => tracing::error!(
+                url = %url,
+                error = %e,
+                "streaming ingestion worker failed to start"
+            ),
+        }
+    }
+
     let router = build_router(app_state);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
