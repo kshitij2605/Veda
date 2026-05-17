@@ -130,6 +130,30 @@ impl SegmentManager {
         ids
     }
 
+    /// O(1) record lookup by record UUID across this shard's growing +
+    /// sealed segments. Used by the gateway's search-field hydration so
+    /// every hit returned by ANN search can be materialized without
+    /// walking the entire collection. Returns `None` if the record isn't
+    /// in this manager's segments (e.g. it lives in another shard).
+    pub fn lookup_record(&self, id: uuid::Uuid) -> Option<Record> {
+        if let Some(doc_id) = self.growing.doc_id_for_uuid(&id)
+            && let Some(rec) = self.growing.get_record(doc_id)
+        {
+            return Some(rec.clone());
+        }
+        for handle in &self.sealed_segments {
+            if let Some(doc_id) = handle.reader.doc_id_for_uuid(&id) {
+                if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                    return None;
+                }
+                if let Ok(rec) = handle.reader.get_record(doc_id) {
+                    return Some(rec);
+                }
+            }
+        }
+        None
+    }
+
     /// Move a sealed segment to a new storage tier. Hot ↔ Warm transitions
     /// only affect index-build behaviour at the next executor rebuild —
     /// no data is moved. Returns `true` if the segment was found and updated.
