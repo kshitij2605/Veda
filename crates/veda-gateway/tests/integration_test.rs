@@ -1603,6 +1603,108 @@ async fn test_collection_records_declared_model() {
     assert!(emb.get("model").is_none() || emb["model"].is_null());
 }
 
+// ── MCP server ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_mcp_initialize_and_list_tools() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    // initialize
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 1);
+    assert!(body["result"]["serverInfo"]["name"] == "veda");
+    assert!(body["result"]["protocolVersion"].as_str().is_some());
+
+    // tools/list
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let tools = body["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"list_collections"));
+    assert!(names.contains(&"describe_collection"));
+    assert!(names.contains(&"search"));
+    assert!(names.contains(&"upsert_record"));
+}
+
+#[tokio::test]
+async fn test_mcp_list_collections_tool() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    // Create a collection first.
+    c.post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "mcp_test",
+            "fields": [{ "name": "embedding", "type": "vector", "dimension": 4, "metric": "cosine" }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Call the tool via MCP.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "list_collections",
+                "arguments": {}
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let content = body["result"]["content"].as_array().unwrap();
+    let text = content[0]["text"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    let names = parsed["collections"].as_array().unwrap();
+    assert!(names.iter().any(|n| n.as_str() == Some("mcp_test")));
+}
+
+#[tokio::test]
+async fn test_mcp_unknown_method_returns_error() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "nonsense"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32601);
+}
+
 // ── Array fields ───────────────────────────────────────────────────────────
 
 #[tokio::test]

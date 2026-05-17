@@ -11,6 +11,7 @@ pub mod collections;
 pub mod document;
 pub mod embed_insert;
 pub mod evaluate;
+pub mod mcp;
 pub mod metrics_middleware;
 pub mod records;
 pub mod rerank;
@@ -67,6 +68,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/collections/{name}/rerank",
             post(rerank::rerank),
         )
+        // Model Context Protocol (MCP) for AI agents
+        .route("/v1/mcp", post(mcp::handle_mcp))
         // Document processing (OCR)
         .route(
             "/v1/collections/{name}/process-document",
