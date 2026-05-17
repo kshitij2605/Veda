@@ -48,6 +48,10 @@ pub struct FieldDef {
     /// Maximum number of vectors per record for multi-vector fields.
     /// 0 / absent = unbounded.
     pub max_vectors: Option<u32>,
+    /// Matryoshka truncation ladder. When set, per-dim HNSW indexes are
+    /// built so search with `truncate_to=N` (for N in this list) hits a
+    /// real ANN index instead of brute-force scanning.
+    pub mrl_dims: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -307,12 +311,15 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
                 "manhattan" => DistanceMetric::Manhattan,
                 other => return Err(format!("field '{}': unknown metric '{other}'", f.name)),
             };
-            let fd = match &f.model {
+            let mut fd = match &f.model {
                 Some(m) if !m.is_empty() => {
                     FieldDefinition::vector_with_model(&f.name, dim, metric, m)
                 }
                 _ => FieldDefinition::vector(&f.name, dim, metric),
             };
+            if let Some(dims) = &f.mrl_dims {
+                fd = fd.with_mrl_dims(dims.clone());
+            }
             Ok(fd.with_filterable(f.filterable))
         }
         "multi_vector" | "multivector" => {

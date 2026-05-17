@@ -62,6 +62,11 @@ pub struct LocalShardSearcher {
     /// PLAID candidate-pruning indexes for multi-vector fields, keyed by
     /// segment_id then field name.
     plaid_indexes: HashMap<Uuid, HashMap<String, crate::plaid::PlaidIndex>>,
+    /// Matryoshka per-dimension indexes: `seg_id -> field -> dim ->
+    /// truncated-vector HNSW`. Built when a vector field declares
+    /// `mrl_dims`; queried when search includes `truncate_to`.
+    mrl_indexes:
+        HashMap<Uuid, HashMap<String, HashMap<u32, Box<dyn VectorIndex>>>>,
 }
 
 impl LocalShardSearcher {
@@ -70,6 +75,7 @@ impl LocalShardSearcher {
             segment_manager,
             indexes: HashMap::new(),
             plaid_indexes: HashMap::new(),
+            mrl_indexes: HashMap::new(),
         }
     }
 
@@ -90,24 +96,61 @@ impl LocalShardSearcher {
 
             let mut field_indexes: HashMap<String, Box<dyn VectorIndex>> = HashMap::new();
 
+            // Per-field MRL indexes for this segment. Built only when the
+            // field declared mrl_dims.
+            let mut field_mrl: HashMap<String, HashMap<u32, Box<dyn VectorIndex>>> =
+                HashMap::new();
+
             for field_def in schema.vector_fields() {
-                if let FieldType::Vector { dimension, metric, .. } = field_def.field_type() {
+                if let FieldType::Vector { dimension, metric, mrl_dims, .. } =
+                    field_def.field_type()
+                {
                     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(row_count as usize);
                     for doc_id in 0..row_count {
                         let vec = reader.get_vector(field_def.name(), doc_id)?;
                         vectors.push(vec.to_vec());
                     }
+
+                    // Full-dim primary index.
                     let index = build_vector_index(
                         field_def.index_type(),
                         *metric,
                         *dimension,
-                        vectors,
+                        vectors.clone(),
                     )?;
                     field_indexes.insert(field_def.name().to_owned(), index);
+
+                    // Truncated indexes for each declared MRL ladder rung.
+                    if let Some(dims) = mrl_dims {
+                        let mut per_dim: HashMap<u32, Box<dyn VectorIndex>> = HashMap::new();
+                        for &d in dims {
+                            if d == 0 || d >= *dimension {
+                                continue;
+                            }
+                            let dim_usize = d as usize;
+                            let truncated: Vec<Vec<f32>> = vectors
+                                .iter()
+                                .map(|v| v[..dim_usize.min(v.len())].to_vec())
+                                .collect();
+                            let idx = build_vector_index(
+                                veda_core::types::IndexType::Hnsw,
+                                *metric,
+                                d,
+                                truncated,
+                            )?;
+                            per_dim.insert(d, idx);
+                        }
+                        if !per_dim.is_empty() {
+                            field_mrl.insert(field_def.name().to_owned(), per_dim);
+                        }
+                    }
                 }
             }
 
             self.indexes.insert(seg_id, field_indexes);
+            if !field_mrl.is_empty() {
+                self.mrl_indexes.insert(seg_id, field_mrl);
+            }
 
             // Build PLAID indexes for each multi-vector field in this segment.
             let mut plaid_field: HashMap<String, crate::plaid::PlaidIndex> = HashMap::new();
@@ -139,20 +182,6 @@ impl ShardSearcher for LocalShardSearcher {
         _shard_id: u32,
         request: &VectorSearchRequest,
     ) -> Result<(Vec<ScoredRecord>, SearchTimings)> {
-        // Collect sealed segments paired with the appropriate vector index
-        // for the requested field.
-        let mut sealed_pairs: Vec<(&veda_storage::segment::SegmentReader, &dyn VectorIndex)> =
-            Vec::new();
-
-        for handle in self.segment_manager.sealed_segments() {
-            let seg_id = handle.metadata.id;
-            if let Some(field_indexes) = self.indexes.get(&seg_id)
-                && let Some(index) = field_indexes.get(&request.field)
-            {
-                sealed_pairs.push((&handle.reader, index.as_ref()));
-            }
-        }
-
         let growing = self.segment_manager.growing_segment();
         let has_growing = growing.count() > 0;
 
@@ -170,9 +199,49 @@ impl ShardSearcher for LocalShardSearcher {
 
         // Search each sealed segment individually.
         let sealed_start = std::time::Instant::now();
-        for (reader, index) in &sealed_pairs {
-            let results = search_sealed_segment_ref(reader, *index, request)?;
-            all_results.extend(results);
+        for handle in self.segment_manager.sealed_segments() {
+            let seg_id = handle.metadata.id;
+            let reader = &handle.reader;
+
+            // If a truncate_to is set AND we have a pre-built MRL index at
+            // exactly that dim, use it (real ANN search at truncated dim
+            // rather than brute-force scan).
+            if let Some(trunc) = request.truncate_to
+                && let Some(mrl_index) = self
+                    .mrl_indexes
+                    .get(&seg_id)
+                    .and_then(|m| m.get(&request.field))
+                    .and_then(|m| m.get(&trunc))
+            {
+                let truncated_query: Vec<f32> = request
+                    .query_vector
+                    .iter()
+                    .take(trunc as usize)
+                    .copied()
+                    .collect();
+                let trunc_req = VectorSearchRequest {
+                    field: request.field.clone(),
+                    query_vector: truncated_query,
+                    k: request.k,
+                    metric: request.metric,
+                    filter: request.filter.clone(),
+                    truncate_to: None, // already truncated
+                };
+                let results =
+                    search_sealed_segment_ref(reader, mrl_index.as_ref(), &trunc_req)?;
+                all_results.extend(results);
+                continue;
+            }
+
+            // Otherwise: use full-dim primary index. If the caller set
+            // truncate_to without a matching MRL index, search_sealed_segment_ref
+            // will fall through to brute-force at truncated dim.
+            if let Some(field_indexes) = self.indexes.get(&seg_id)
+                && let Some(index) = field_indexes.get(&request.field)
+            {
+                let results = search_sealed_segment_ref(reader, index.as_ref(), request)?;
+                all_results.extend(results);
+            }
         }
         agg_timings.ann_search_ms += sealed_start.elapsed().as_secs_f64() * 1000.0;
 

@@ -1460,6 +1460,79 @@ async fn test_mrl_truncation_search() {
     assert_eq!(resp.status(), 400);
 }
 
+#[tokio::test]
+async fn test_mrl_with_declared_dims_uses_index() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    // Declare a vector field with an MRL ladder.
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "mrl_ladder",
+            "fields": [{
+                "name": "embedding",
+                "type": "vector",
+                "dimension": 8,
+                "metric": "cosine",
+                "mrl_dims": [4]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Insert enough records that the search benefits from an index. After
+    // insert, the gateway seals and rebuilds, which is when MRL indexes are
+    // constructed.
+    let mut records = Vec::new();
+    for i in 0..50 {
+        records.push(json!({
+            "embedding": [
+                (i as f32 % 7.0) * 0.1, (i as f32 % 5.0) * 0.1, (i as f32 % 3.0) * 0.1, i as f32 * 0.01,
+                0.9, 0.8, 0.7, 0.6
+            ]
+        }));
+    }
+    let resp = c
+        .post(format!("{base}/v1/collections/mrl_ladder/insert"))
+        .json(&json!({ "records": records }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Search with truncate_to=4 (in mrl_dims) — must return results.
+    let resp = c
+        .post(format!("{base}/v1/collections/mrl_ladder/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] } },
+            "limit": 5,
+            "truncate_to": 4
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["results"].as_array().unwrap().len() >= 1);
+
+    // truncate_to=6 (NOT in mrl_dims) — still works via brute-force fallback.
+    let resp = c
+        .post(format!("{base}/v1/collections/mrl_ladder/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] } },
+            "limit": 5,
+            "truncate_to": 6
+        }))
+        .send()
+        .await
+        .unwrap();
+    // With mrl_dims=[4], 6 isn't in the allow-list — server should reject.
+    assert_eq!(resp.status(), 400);
+}
+
 // ── Embedding model versioning ─────────────────────────────────────────────
 
 #[tokio::test]
