@@ -100,7 +100,7 @@ impl LogStore {
 /// of the cluster state. In a full Raft deployment every node runs the same
 /// sequence of commands through the same state machine logic, so all nodes
 /// converge to identical state.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClusterStateMachine {
     /// Index of the last applied log entry.
     last_applied: u64,

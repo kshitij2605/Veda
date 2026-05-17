@@ -20,6 +20,8 @@
 
 pub mod network;
 pub mod raft;
+pub mod raft_network;
+pub mod raft_storage;
 pub mod raft_types;
 pub mod shard_router;
 pub mod store;

@@ -13,7 +13,9 @@ distributed Raft consensus layer backed by [openraft](https://github.com/datafus
 | `LogStore` | In-memory append-only log |
 | `Coordinator` / `CoordinatorHandle` (channel-based) | Working for single-node |
 | `ChannelNetwork` | Placeholder, multi-node transport stub |
-| `raft` module (openraft scaffolding) | Type config + aliases declared; trait impls TODO |
+| `raft` module (openraft scaffolding) | Type config + aliases declared |
+| `raft_storage` module | `MemLogState` + `MemStateMachine` data structures, snapshot round-trip tested. `RaftLogStorage` / `RaftStateMachine` *trait* impls deferred — see "Phase 2 friction" below. |
+| `raft_network` module | `NodeAddressBook` + `InProcessNetwork` channel-based transport. `RaftNetwork` trait impl deferred. |
 
 The async traits and types in `crates/veda-coordinator/src/raft.rs` exist so
 the rest of the codebase can refer to a real Raft type and so the migration
@@ -47,6 +49,22 @@ our existing types:
 - Add persistent vote storage (currently in-memory; needs durable file or
   the WAL).
 - Implement snapshot creation: serialise `ClusterStateMachine` via bincode.
+
+#### Phase 2 friction (discovered in commits adding `raft_storage.rs`)
+
+openraft 0.9 split the legacy `RaftStorage` trait into `RaftLogStorage` +
+`RaftStateMachine`. **Both are sealed** — only implementable via the
+`openraft::storage::Adaptor<C, S>` wrapper around the v1 `RaftStorage`
+trait. So the actual path is:
+
+1. Implement v1 `RaftStorage<VedaTypeConfig>` (12+ methods, single combined trait).
+2. Wrap with `Adaptor::new(your_storage)` to get the v2 traits.
+3. Pass to `openraft::Raft::new(...)`.
+
+The structural state needed for the impl already lives in
+`MemLogState` + `MemStateMachine`. The remaining work is purely
+trait-method-to-plain-method translation, plus careful review against
+the `examples/raft-kv-memstore` reference. Estimated 1-2 focused days.
 
 ### Phase 3 — Network transport
 
