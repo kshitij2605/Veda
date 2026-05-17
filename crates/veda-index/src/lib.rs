@@ -1,6 +1,8 @@
 pub mod diskann;
 pub mod distance;
 pub mod flat;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod hnsw;
 pub mod ivfpq;
 pub mod quantization;
