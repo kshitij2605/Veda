@@ -336,6 +336,15 @@ fn parse_chunking_strategy(
         },
         Some("page") => ChunkingStrategy::Page,
         Some("none") => ChunkingStrategy::None,
+        Some("hierarchical") => ChunkingStrategy::Hierarchical {
+            coarse_size: size.unwrap_or(4000),
+            fine_size: size.map(|s| s / 4).unwrap_or(1000),
+            fine_overlap: overlap.unwrap_or(150),
+        },
+        Some("late") | Some("late_chunking") => ChunkingStrategy::LateChunking {
+            max_chunk_size: size.unwrap_or(2000),
+            chunk_overlap: overlap.unwrap_or(300),
+        },
         _ => ChunkingStrategy::MarkdownRecursive {
             max_chunk_size: size.unwrap_or(2000),
             chunk_overlap: overlap.unwrap_or(300),

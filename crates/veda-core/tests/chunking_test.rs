@@ -396,3 +396,56 @@ fn semantic_single_sentence() {
     );
     assert_eq!(chunks.len(), 1);
 }
+
+#[test]
+fn hierarchical_produces_coarse_and_fine() {
+    let text = "Paragraph one. ".repeat(100);
+    let chunks = chunk_markdown(
+        &text,
+        &ChunkingStrategy::Hierarchical {
+            coarse_size: 400,
+            fine_size: 100,
+            fine_overlap: 0,
+        },
+    );
+
+    let coarse: Vec<_> = chunks
+        .iter()
+        .filter(|c| c.content_types.iter().any(|t| t == "coarse"))
+        .collect();
+    let fine: Vec<_> = chunks
+        .iter()
+        .filter(|c| c.content_types.iter().any(|t| t == "fine"))
+        .collect();
+
+    assert!(!coarse.is_empty(), "expected coarse chunks");
+    assert!(!fine.is_empty(), "expected fine chunks");
+    assert!(fine.len() > coarse.len(), "fine chunks should outnumber coarse");
+    for w in chunks.windows(2) {
+        assert!(w[0].index < w[1].index);
+    }
+}
+
+#[test]
+fn late_chunking_matches_markdown_recursive_at_text_layer() {
+    let text = "# Heading\n\nFirst paragraph. ".repeat(50);
+    let mr = chunk_markdown(
+        &text,
+        &ChunkingStrategy::MarkdownRecursive {
+            max_chunk_size: 200,
+            chunk_overlap: 30,
+        },
+    );
+    let lc = chunk_markdown(
+        &text,
+        &ChunkingStrategy::LateChunking {
+            max_chunk_size: 200,
+            chunk_overlap: 30,
+        },
+    );
+    assert_eq!(mr.len(), lc.len());
+    for (a, b) in mr.iter().zip(lc.iter()) {
+        assert_eq!(a.start_offset, b.start_offset);
+        assert_eq!(a.end_offset, b.end_offset);
+    }
+}

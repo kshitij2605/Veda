@@ -39,6 +39,31 @@ pub enum ChunkingStrategy {
         similarity_threshold: f32, // 0.0-1.0, split when similarity drops below (default 0.5)
         window_size: usize,        // sentences per comparison window (default 3)
     },
+    /// Hierarchical chunking: emits BOTH coarse (doc-section) chunks and
+    /// fine (paragraph/sentence) chunks for the same document.
+    ///
+    /// Each fine chunk is tagged with `content_types = ["fine"]` and the
+    /// corresponding coarse chunk's text is its parent. Coarse chunks are
+    /// tagged `content_types = ["coarse"]`. Useful for retrieval pipelines
+    /// that retrieve coarse-grained candidates first then refine.
+    Hierarchical {
+        coarse_size: usize, // characters per coarse chunk
+        fine_size: usize,   // characters per fine chunk
+        fine_overlap: usize,
+    },
+    /// Late chunking (Jina, Sept 2024): produce chunk boundaries identical
+    /// to MarkdownRecursive at this layer, but the embed-insert path should
+    /// embed the FULL document through a long-context model first and then
+    /// mean-pool each chunk's token window.
+    ///
+    /// NOTE: at the pure-text chunking layer this is identical to
+    /// MarkdownRecursive — the late-chunking semantics require the embedding
+    /// service to support full-document encoding plus pooling, which is wired
+    /// up in the embed-insert flow.
+    LateChunking {
+        max_chunk_size: usize,
+        chunk_overlap: usize,
+    },
     /// No chunking — entire document is one chunk.
     None,
 }
@@ -93,8 +118,50 @@ pub fn chunk_markdown(text: &str, strategy: &ChunkingStrategy) -> Vec<TextChunk>
             window_size,
         } => chunk_semantic(text, *max_chunk_size, *similarity_threshold, *window_size),
         ChunkingStrategy::Page => chunk_by_page(text),
+        ChunkingStrategy::Hierarchical {
+            coarse_size,
+            fine_size,
+            fine_overlap,
+        } => chunk_hierarchical(text, *coarse_size, *fine_size, *fine_overlap),
+        ChunkingStrategy::LateChunking {
+            max_chunk_size,
+            chunk_overlap,
+        } => chunk_markdown_recursive(text, *max_chunk_size, *chunk_overlap),
         ChunkingStrategy::None => chunk_none(text),
     }
+}
+
+// ── Hierarchical ──────────────────────────────────────────────────────────
+
+/// Produce coarse + fine chunks for the same document. Coarse chunks come
+/// first (each tagged `content_types = ["coarse"]`), followed by all fine
+/// chunks (each tagged `content_types = ["fine"]`).
+///
+/// Indices are renumbered globally so that downstream consumers can treat
+/// the output as a flat list. Use the `content_types` tag to filter.
+fn chunk_hierarchical(
+    text: &str,
+    coarse_size: usize,
+    fine_size: usize,
+    fine_overlap: usize,
+) -> Vec<TextChunk> {
+    let coarse_chunks = chunk_fixed_size(text, coarse_size, 0);
+    let fine_chunks = chunk_fixed_size(text, fine_size, fine_overlap);
+
+    let mut out: Vec<TextChunk> =
+        Vec::with_capacity(coarse_chunks.len() + fine_chunks.len());
+
+    for mut c in coarse_chunks {
+        c.index = out.len();
+        c.content_types = vec!["coarse".to_owned()];
+        out.push(c);
+    }
+    for mut c in fine_chunks {
+        c.index = out.len();
+        c.content_types = vec!["fine".to_owned()];
+        out.push(c);
+    }
+    out
 }
 
 // ── Content-type detection ─────────────────────────────────────────────
