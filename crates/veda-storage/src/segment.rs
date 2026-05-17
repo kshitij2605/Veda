@@ -14,11 +14,14 @@ use crate::bitmap_index::BitmapIndex;
 use crate::delete_bitmap::DeleteBitmap;
 use crate::inverted_index::InvertedIndex;
 use crate::range_index::RangeIndex;
+use crate::sparse_storage::{SparseVectorStorageReader, SparseVectorStorageWriter};
 use crate::vector_storage::{VectorStorageReader, VectorStorageWriter};
+use veda_core::sparse::SparseVec;
 
 // ── Directory / file name conventions ──────────────────────────────────────
 
 const VECTORS_DIR: &str = "vectors";
+const SPARSE_DIR: &str = "sparse";
 const SCALARS_DIR: &str = "scalars";
 const DELETE_BITMAP_FILE: &str = "delete_bitmap.bin";
 const METADATA_FILE: &str = "metadata.json";
@@ -27,6 +30,10 @@ const RECORDS_FILE: &str = "records.jsonl";
 
 fn vector_file(name: &str) -> String {
     format!("{name}.vec")
+}
+
+fn sparse_file(name: &str) -> String {
+    format!("{name}.spr")
 }
 
 fn inverted_file(name: &str) -> String {
@@ -113,6 +120,9 @@ pub struct SegmentWriter {
     // Vector writers keyed by field name.
     vector_writers: HashMap<String, VectorStorageWriter>,
 
+    // Sparse vector writers keyed by field name.
+    sparse_writers: HashMap<String, SparseVectorStorageWriter>,
+
     // Scalar indexes keyed by field name.
     inverted_indexes: HashMap<String, InvertedIndex>,
     range_indexes: HashMap<String, RangeIndex>,
@@ -135,8 +145,10 @@ impl SegmentWriter {
 
         // Create directory structure.
         let vectors_dir = dir.join(VECTORS_DIR);
+        let sparse_dir = dir.join(SPARSE_DIR);
         let scalars_dir = dir.join(SCALARS_DIR);
         fs::create_dir_all(&vectors_dir)?;
+        fs::create_dir_all(&sparse_dir)?;
         fs::create_dir_all(&scalars_dir)?;
 
         // Initialize vector writers.
@@ -147,6 +159,12 @@ impl SegmentWriter {
                 let writer = VectorStorageWriter::create(&path, *dimension)?;
                 vector_writers.insert(field.name().to_owned(), writer);
             }
+        }
+
+        // Initialize sparse vector writers.
+        let mut sparse_writers = HashMap::new();
+        for field in schema.sparse_vector_fields() {
+            sparse_writers.insert(field.name().to_owned(), SparseVectorStorageWriter::create());
         }
 
         // Initialize scalar indexes.
@@ -178,6 +196,7 @@ impl SegmentWriter {
             schema: schema.clone(),
             row_count: 0,
             vector_writers,
+            sparse_writers,
             inverted_indexes,
             range_indexes,
             bitmap_indexes,
@@ -214,6 +233,24 @@ impl SegmentWriter {
                         "record missing required vector field '{name}'"
                     )));
                 }
+            }
+        }
+
+        // 1b. Write sparse vector fields. Missing values get an empty SparseVec.
+        for field_def in self.schema.sparse_vector_fields() {
+            let name = field_def.name();
+            let sv = match record.get(name) {
+                Some(FieldValue::SparseVector(sv)) => sv.clone(),
+                Some(_) => {
+                    return Err(VedaError::Storage(format!(
+                        "field '{name}' expected SparseVector, got different type"
+                    )));
+                }
+                None => SparseVec::new(Vec::new(), Vec::new())
+                    .expect("empty sparse vector is always valid"),
+            };
+            if let Some(w) = self.sparse_writers.get_mut(name) {
+                w.append(sv);
             }
         }
 
@@ -300,6 +337,12 @@ impl SegmentWriter {
             writer.close()?;
         }
 
+        // 1b. Close all sparse vector writers.
+        let sparse_dir = self.dir.join(SPARSE_DIR);
+        for (name, writer) in self.sparse_writers {
+            writer.close(&sparse_dir.join(sparse_file(&name)))?;
+        }
+
         // 2. Flush JSONL writer.
         self.record_writer.flush()?;
 
@@ -366,6 +409,9 @@ pub struct SegmentReader {
     // Vector readers keyed by field name.
     vector_readers: HashMap<String, VectorStorageReader>,
 
+    // Sparse vector readers keyed by field name.
+    sparse_readers: HashMap<String, SparseVectorStorageReader>,
+
     // Scalar indexes keyed by field name.
     inverted_indexes: HashMap<String, InvertedIndex>,
     range_indexes: HashMap<String, RangeIndex>,
@@ -402,6 +448,18 @@ impl SegmentReader {
             let path = vectors_dir.join(vector_file(field.name()));
             let reader = VectorStorageReader::open(&path)?;
             vector_readers.insert(field.name().to_owned(), reader);
+        }
+
+        // Open sparse vector readers. Sparse dir may not exist on segments
+        // sealed before sparse support was added.
+        let sparse_dir = dir.join(SPARSE_DIR);
+        let mut sparse_readers = HashMap::new();
+        for field in schema.sparse_vector_fields() {
+            let path = sparse_dir.join(sparse_file(field.name()));
+            if path.exists() {
+                let reader = SparseVectorStorageReader::open(&path)?;
+                sparse_readers.insert(field.name().to_owned(), reader);
+            }
         }
 
         // Load scalar indexes.
@@ -448,6 +506,7 @@ impl SegmentReader {
             metadata,
             schema,
             vector_readers,
+            sparse_readers,
             inverted_indexes,
             range_indexes,
             bitmap_indexes,
@@ -466,6 +525,23 @@ impl SegmentReader {
             VedaError::FieldNotFound(format!("vector field '{field}' not found in segment"))
         })?;
         reader.get(doc_id)
+    }
+
+    /// Get a sparse vector by field name and doc_id.
+    pub fn get_sparse_vector(&self, field: &str, doc_id: u32) -> Result<&SparseVec> {
+        let reader = self.sparse_readers.get(field).ok_or_else(|| {
+            VedaError::FieldNotFound(format!("sparse field '{field}' not found in segment"))
+        })?;
+        reader.get(doc_id)
+    }
+
+    /// Iterate `(doc_id, &SparseVec)` for a sparse field, or `None` if the
+    /// field has no sparse reader (e.g., legacy segment).
+    pub fn iter_sparse(
+        &self,
+        field: &str,
+    ) -> Option<impl Iterator<Item = (u32, &SparseVec)>> {
+        self.sparse_readers.get(field).map(|r| r.iter())
     }
 
     /// Reconstruct a full [`Record`] for the given doc_id from stored JSONL data.
@@ -522,6 +598,17 @@ impl SegmentReader {
                 let slice = reader.get(doc_id)?;
                 let dense = veda_core::vector::DenseVector::new(slice.to_vec());
                 record.set(name, FieldValue::Vector(dense));
+            }
+        }
+
+        // Restore sparse vector fields (skip empty placeholders).
+        for field_def in self.schema.sparse_vector_fields() {
+            let name = field_def.name();
+            if let Some(reader) = self.sparse_readers.get(name)
+                && let Ok(sv) = reader.get(doc_id)
+                && sv.nnz() > 0
+            {
+                record.set(name, FieldValue::SparseVector(sv.clone()));
             }
         }
 
