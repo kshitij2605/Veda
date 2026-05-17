@@ -51,16 +51,36 @@ pub enum ChunkingStrategy {
         fine_size: usize,   // characters per fine chunk
         fine_overlap: usize,
     },
-    /// Late chunking (Jina, Sept 2024): produce chunk boundaries identical
-    /// to MarkdownRecursive at this layer, but the embed-insert path should
-    /// embed the FULL document through a long-context model first and then
-    /// mean-pool each chunk's token window.
+    /// Late chunking (Jina, Sept 2024) / voyage-context-3 (July 2025): the
+    /// chunk boundaries are produced here, but actual *contextual*
+    /// embedding happens in the embedding service:
+    /// 1. Embed the FULL document through a long-context model.
+    /// 2. For each chunk's `(start_offset, end_offset)`, mean-pool the
+    ///    token embeddings within that window.
+    /// 3. Each chunk vector inherits global document context.
     ///
-    /// NOTE: at the pure-text chunking layer this is identical to
-    /// MarkdownRecursive — the late-chunking semantics require the embedding
-    /// service to support full-document encoding plus pooling, which is wired
-    /// up in the embed-insert flow.
+    /// At the chunking layer we still emit MarkdownRecursive-style chunks
+    /// (so downstream metadata works), and tag each chunk with
+    /// `content_types = ["late_chunked"]` so the embedding service knows
+    /// to apply the late-pooling path.
+    ///
+    /// The user is responsible for pointing `EMBEDDING_ENDPOINT` at a
+    /// model that supports this (voyage-context-3, jina-embeddings-v3,
+    /// or a custom long-context model + mean-pool helper).
     LateChunking {
+        max_chunk_size: usize,
+        chunk_overlap: usize,
+    },
+    /// Anthropic-style contextual retrieval (Sept 2024). For each chunk,
+    /// call an LLM with the full document + chunk; the LLM emits a 1-2
+    /// sentence context summary which is **prepended** to the chunk text
+    /// before embedding. Reduces retrieval failures by ~49% solo, ~67%
+    /// paired with reranking (Anthropic benchmark).
+    ///
+    /// Requires `CONTEXTUAL_LLM_ENDPOINT` env var pointing at an
+    /// OpenAI-compatible chat-completions endpoint. Slow at ingest time
+    /// (one LLM call per chunk); prompt caching is essential at scale.
+    ContextualChunking {
         max_chunk_size: usize,
         chunk_overlap: usize,
     },
@@ -171,9 +191,106 @@ pub fn chunk_markdown(text: &str, strategy: &ChunkingStrategy) -> Vec<TextChunk>
         ChunkingStrategy::LateChunking {
             max_chunk_size,
             chunk_overlap,
-        } => chunk_markdown_recursive(text, *max_chunk_size, *chunk_overlap),
+        } => {
+            let mut chunks = chunk_markdown_recursive(text, *max_chunk_size, *chunk_overlap);
+            for c in &mut chunks {
+                if !c.content_types.iter().any(|t| t == "late_chunked") {
+                    c.content_types.push("late_chunked".to_owned());
+                }
+            }
+            chunks
+        }
+        ChunkingStrategy::ContextualChunking {
+            max_chunk_size,
+            chunk_overlap,
+        } => {
+            // Chunk normally; an external orchestrator should call the
+            // LLM-context helper [`contextualize_chunks`] on the result
+            // before passing chunks to the embedding service.
+            let mut chunks = chunk_markdown_recursive(text, *max_chunk_size, *chunk_overlap);
+            for c in &mut chunks {
+                if !c.content_types.iter().any(|t| t == "contextual_pending") {
+                    c.content_types.push("contextual_pending".to_owned());
+                }
+            }
+            chunks
+        }
         ChunkingStrategy::None => chunk_none(text),
     }
+}
+
+/// Anthropic-style contextual retrieval helper. For each chunk, prepend
+/// a 1-2 sentence document-level context produced by an LLM.
+///
+/// Synchronous, sequential, slow: one LLM call per chunk. Production
+/// callers should batch and cache the document-level prompt prefix.
+///
+/// Returns chunks with their `text` field rewritten as
+/// `"<context>\n\n<original chunk text>"`. If `llm_endpoint` is empty or
+/// the call fails, the chunk is returned unchanged.
+pub fn contextualize_chunks(
+    document: &str,
+    chunks: Vec<TextChunk>,
+    llm_endpoint: &str,
+    llm_model: &str,
+    llm_api_key: Option<&str>,
+) -> Vec<TextChunk> {
+    if llm_endpoint.is_empty() || chunks.is_empty() {
+        return chunks;
+    }
+    let client = reqwest::blocking::Client::new();
+    chunks
+        .into_iter()
+        .map(|mut chunk| {
+            let prompt = format!(
+                "<document>\n{document}\n</document>\n\n\
+                Here is the chunk we want to situate within the whole document:\n\
+                <chunk>\n{chunk_text}\n</chunk>\n\n\
+                Provide a short (1-2 sentence) succinct context to situate this chunk \
+                within the overall document for the purposes of improving search retrieval \
+                of the chunk. Answer only with the succinct context and nothing else.",
+                chunk_text = chunk.text
+            );
+            let body = serde_json::json!({
+                "model": llm_model,
+                "messages": [{ "role": "user", "content": prompt }],
+                "max_tokens": 200,
+                "temperature": 0.0,
+            });
+            let url = format!("{}/v1/chat/completions", llm_endpoint.trim_end_matches('/'));
+            let mut req = client
+                .post(&url)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(30));
+            if let Some(key) = llm_api_key
+                && !key.is_empty()
+            {
+                req = req.bearer_auth(key);
+            }
+            let context = req
+                .send()
+                .ok()
+                .and_then(|r| r.json::<serde_json::Value>().ok())
+                .and_then(|j| {
+                    j["choices"][0]["message"]["content"]
+                        .as_str()
+                        .map(|s| s.trim().to_owned())
+                });
+            if let Some(ctx) = context
+                && !ctx.is_empty()
+            {
+                chunk.text = format!("{ctx}\n\n{}", chunk.text);
+                // Replace placeholder tag with completed marker.
+                chunk
+                    .content_types
+                    .retain(|t| t != "contextual_pending");
+                if !chunk.content_types.iter().any(|t| t == "contextualised") {
+                    chunk.content_types.push("contextualised".to_owned());
+                }
+            }
+            chunk
+        })
+        .collect()
 }
 
 // ── Hierarchical ──────────────────────────────────────────────────────────

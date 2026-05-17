@@ -345,6 +345,10 @@ fn parse_chunking_strategy(
             max_chunk_size: size.unwrap_or(2000),
             chunk_overlap: overlap.unwrap_or(300),
         },
+        Some("contextual") | Some("contextual_chunking") => ChunkingStrategy::ContextualChunking {
+            max_chunk_size: size.unwrap_or(2000),
+            chunk_overlap: overlap.unwrap_or(300),
+        },
         _ => ChunkingStrategy::MarkdownRecursive {
             max_chunk_size: size.unwrap_or(2000),
             chunk_overlap: overlap.unwrap_or(300),
