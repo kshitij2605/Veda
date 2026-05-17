@@ -49,10 +49,36 @@ pub struct QueryBody {
     pub colpali: Option<MultiVectorColpaliQuery>,
     /// Multi-vector fusion query (combines results across multiple dense fields).
     pub multi_vector: Option<Vec<MultiVectorField>>,
+    /// Built-in BM25 full-text query against a `bm25 = true` string field.
+    pub bm25: Option<Bm25Query>,
+    /// Hybrid query: combines a dense vector leg and a BM25 leg with RRF.
+    /// Use this instead of multi_vector when you want dense + BM25 fusion.
+    pub hybrid: Option<HybridQuery>,
     /// Fusion strategy name (for multi_vector).
     pub fusion: Option<String>,
     /// Fusion-specific parameters.
     pub fusion_params: Option<FusionParams>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Bm25Query {
+    /// String field with `bm25 = true` in the schema.
+    pub field: String,
+    /// Raw user-facing query text.
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HybridQuery {
+    pub dense: SingleVectorQuery,
+    pub bm25: Bm25Query,
+    /// Weight on the dense leg (0..1). Default 0.5 = balanced.
+    #[serde(default = "default_dense_weight")]
+    pub dense_weight: f32,
+}
+
+fn default_dense_weight() -> f32 {
+    0.5
 }
 
 #[derive(Debug, Deserialize)]
@@ -291,11 +317,31 @@ pub async fn search(
         } else {
             execute_multi_vector(executor, multi, &req, metric)?
         }
+    } else if let Some(ref bm25_query) = req.query.bm25 {
+        // Built-in BM25 full-text search against a string field with
+        // `bm25 = true` in the schema. Runs the same tokenizer at ingest
+        // and query time; no Lucene/Tantivy bundling required.
+        execute_bm25(&state, &name, bm25_query, req.limit).await?
+    } else if let Some(ref hybrid_query) = req.query.hybrid {
+        // Dense + BM25 hybrid via Reciprocal Rank Fusion. Each leg is
+        // scored independently; RRF folds the rankings into one set.
+        // dense_weight in [0, 1] biases the RRF weighting.
+        let metric = resolve_metric(&schema, &hybrid_query.dense.field);
+        execute_hybrid_dense_bm25(
+            &state,
+            &name,
+            executor,
+            hybrid_query,
+            &req,
+            metric,
+            req.limit,
+        )
+        .await?
     } else {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "query must contain 'vector', 'sparse_vector', 'colpali', or 'multi_vector'".into(),
+                error: "query must contain 'vector', 'sparse_vector', 'colpali', 'multi_vector', 'bm25', or 'hybrid'".into(),
             }),
         ));
     };
@@ -493,6 +539,114 @@ fn execute_single_vector(
         .collect();
 
     Ok((hits, timings))
+}
+
+/// Run a BM25 full-text search across all sealed segments of every shard
+/// in the collection. Each segment scores independently; we merge the
+/// per-segment top-k by raw BM25 score (no further normalization) and
+/// take the global top-k. Returns hits with `distance = -bm25_score`
+/// so that lower-is-better stays consistent across query types.
+async fn execute_bm25(
+    state: &AppState,
+    collection: &str,
+    query: &Bm25Query,
+    k: usize,
+) -> Result<Vec<SearchHit>, (StatusCode, Json<ErrorResponse>)> {
+    let managers = state.inner.segment_managers.read().await;
+    let Some(shard_map) = managers.get(collection) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("collection '{collection}' not found"),
+            }),
+        ));
+    };
+
+    // (record_uuid, bm25_score) merged across shards/segments. We do not
+    // currently score against growing segments — the growing-segment BM25
+    // story is a follow-up; sealed segments cover the post-ingest steady
+    // state which is what the benchmark measures.
+    let mut merged: Vec<(uuid::Uuid, f32)> = Vec::new();
+    for sm in shard_map.values() {
+        for handle in sm.sealed_segments() {
+            let Some(idx) = handle.reader.bm25_index(&query.field) else {
+                continue;
+            };
+            let scored = idx.search(&query.query, k.max(1));
+            for (doc_id, score) in scored {
+                if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                    continue;
+                }
+                if let Ok(rec) = handle.reader.get_record(doc_id) {
+                    merged.push((rec.id(), score));
+                }
+            }
+        }
+    }
+    drop(managers);
+
+    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    merged.truncate(k);
+    let hits: Vec<SearchHit> = merged
+        .into_iter()
+        .map(|(id, s)| SearchHit {
+            id: id.to_string(),
+            distance: -s,
+            fields: serde_json::Map::new(),
+        })
+        .collect();
+    Ok(hits)
+}
+
+/// Dense + BM25 hybrid via Reciprocal Rank Fusion. Each leg runs the
+/// full top-`k` retrieval; results are folded together via
+/// `RRF(d) = sum_l (w_l / (k_rrf + rank_l(d)))` with `k_rrf = 60`.
+/// Returns at most `k` hits.
+async fn execute_hybrid_dense_bm25(
+    state: &AppState,
+    collection: &str,
+    executor: &DistributedQueryExecutor,
+    hybrid: &HybridQuery,
+    req: &SearchRequest,
+    metric: DistanceMetric,
+    k: usize,
+) -> Result<Vec<SearchHit>, (StatusCode, Json<ErrorResponse>)> {
+    const K_RRF: f32 = 60.0;
+    let dense_w = hybrid.dense_weight.clamp(0.0, 1.0);
+    let bm25_w = 1.0 - dense_w;
+
+    let (dense_hits, _t) = execute_single_vector(
+        executor,
+        &hybrid.dense,
+        req,
+        metric,
+    )?;
+    let bm25_hits = execute_bm25(state, collection, &hybrid.bm25, k.max(req.limit)).await?;
+
+    // RRF: rank ids in each list, sum weighted reciprocal-rank.
+    let mut scores: std::collections::HashMap<String, f32> =
+        std::collections::HashMap::with_capacity(dense_hits.len() + bm25_hits.len());
+    for (rank, h) in dense_hits.iter().enumerate() {
+        let s = dense_w / (K_RRF + (rank + 1) as f32);
+        *scores.entry(h.id.clone()).or_insert(0.0) += s;
+    }
+    for (rank, h) in bm25_hits.iter().enumerate() {
+        let s = bm25_w / (K_RRF + (rank + 1) as f32);
+        *scores.entry(h.id.clone()).or_insert(0.0) += s;
+    }
+
+    let mut ranked: Vec<(String, f32)> = scores.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(k);
+    let hits: Vec<SearchHit> = ranked
+        .into_iter()
+        .map(|(id, s)| SearchHit {
+            id,
+            distance: -s, // lower = better
+            fields: serde_json::Map::new(),
+        })
+        .collect();
+    Ok(hits)
 }
 
 fn execute_multi_vector(

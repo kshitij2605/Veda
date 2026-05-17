@@ -58,6 +58,11 @@ pub struct FieldDef {
     /// embedder for this vector field instead of the name-based
     /// heuristic.
     pub auto_embed: Option<veda_core::types::AutoEmbedConfig>,
+    /// Build a full-text BM25 index for this field. Only meaningful for
+    /// `string` fields. When true, the schema exposes a `bm25` query
+    /// type and the `hybrid` (dense + BM25) query type.
+    #[serde(default)]
+    pub bm25: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -411,7 +416,9 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
         }
         "blob" => Ok(FieldDefinition::blob(&f.name).with_filterable(f.filterable)),
         "string" => Ok(
-            FieldDefinition::new(&f.name, FieldType::String).with_filterable(f.filterable),
+            FieldDefinition::new(&f.name, FieldType::String)
+                .with_filterable(f.filterable)
+                .with_bm25(f.bm25),
         ),
         "int32" => Ok(
             FieldDefinition::new(&f.name, FieldType::Int32).with_filterable(f.filterable),
