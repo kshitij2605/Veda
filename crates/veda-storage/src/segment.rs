@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use veda_core::error::{Result, VedaError};
@@ -35,28 +33,6 @@ const RECORDS_FILE: &str = "records.jsonl";
 
 fn vector_file(name: &str) -> String {
     format!("{name}.vec")
-}
-
-/// Parse just the `__record_id__` UUID out of a JSONL line without
-/// deserializing the whole record. Used at SegmentReader::open() time to
-/// build the uuid → doc_id index on a cold start.
-///
-/// Records are stored with `FieldValue`'s tagged-enum serde form, so the
-/// id field reads as `"__record_id__":{"String":"<uuid>"}`. Use a
-/// minimal `serde_json::Value` lookup rather than a full Record parse
-/// to keep cold-start cheap.
-fn extract_record_id(line: &[u8]) -> Result<Uuid> {
-    let v: serde_json::Value = serde_json::from_slice(line)
-        .map_err(|e| VedaError::Storage(format!("extract_record_id: {e}")))?;
-    let id_str = v
-        .get("__record_id__")
-        .and_then(|tagged| tagged.get("String"))
-        .and_then(|s| s.as_str())
-        .or_else(|| v.get("__record_id__").and_then(|s| s.as_str()))
-        .ok_or_else(|| VedaError::Storage("extract_record_id: __record_id__ missing".into()))?;
-    id_str
-        .parse()
-        .map_err(|e| VedaError::Storage(format!("extract_record_id: invalid uuid: {e}")))
 }
 
 fn sparse_file(name: &str) -> String {
@@ -562,16 +538,9 @@ pub struct SegmentReader {
     // Delete bitmap.
     delete_bitmap: DeleteBitmap,
 
-    // mmap'd records.jsonl + per-row byte offsets so `get_record(doc_id)` is
-    // a single slice lookup + JSON parse instead of opening the file and
-    // walking `lines().nth(doc_id)` every time. `record_offsets[i]` is the
-    // start byte of row i and `record_offsets[i+1]` is the start byte of
-    // row i+1 (or the file length for the last row).
-    records_mmap: Arc<Mmap>,
-    record_offsets: Vec<u64>,
-
-    // UUID → doc_id for O(1) lookup by record id. Built once at open time.
-    uuid_to_doc_id: HashMap<Uuid, u32>,
+    // Per-row scalar/blob data, abstracted behind a single owner. Today
+    // this is the JSONL-backed impl; the columnar impl drops in here.
+    stored_fields: crate::stored_fields::JsonlStoredFields,
 }
 
 impl SegmentReader {
@@ -679,43 +648,10 @@ impl SegmentReader {
             DeleteBitmap::new()
         };
 
-        // mmap records.jsonl + build per-row offset table in one pass. This
-        // turns get_record(doc_id) from O(N) (open file + lines().nth()) into
-        // O(1) (slice lookup + serde parse), and gives us a UUID → doc_id
-        // index for free.
-        let records_path = dir.join(RECORDS_FILE);
-        let records_file = fs::File::open(&records_path).map_err(|e| {
-            VedaError::Storage(format!("failed to open {records_path:?}: {e}"))
-        })?;
-        let records_mmap = unsafe { Mmap::map(&records_file)? };
-        let mut record_offsets: Vec<u64> = Vec::with_capacity(metadata.row_count as usize + 1);
-        let mut uuid_to_doc_id: HashMap<Uuid, u32> =
-            HashMap::with_capacity(metadata.row_count as usize);
-        record_offsets.push(0);
-        let bytes: &[u8] = &records_mmap[..];
-        let mut line_start: usize = 0;
-        let mut doc_id: u32 = 0;
-        for (i, b) in bytes.iter().enumerate() {
-            if *b == b'\n' {
-                let line = &bytes[line_start..i];
-                if !line.is_empty()
-                    && let Ok(id) = extract_record_id(line)
-                {
-                    uuid_to_doc_id.insert(id, doc_id);
-                }
-                doc_id += 1;
-                record_offsets.push((i + 1) as u64);
-                line_start = i + 1;
-            }
-        }
-        // Handle a final line without trailing newline.
-        if line_start < bytes.len() {
-            let line = &bytes[line_start..];
-            if let Ok(id) = extract_record_id(line) {
-                uuid_to_doc_id.insert(id, doc_id);
-            }
-            record_offsets.push(bytes.len() as u64);
-        }
+        // Per-row scalar/blob data, mmap'd once + offset table + UUID
+        // index. See `crates/veda-storage/src/stored_fields.rs`.
+        let stored_fields =
+            crate::stored_fields::JsonlStoredFields::open(dir, metadata.row_count)?;
 
         Ok(Self {
             dir: dir.to_owned(),
@@ -729,9 +665,7 @@ impl SegmentReader {
             bitmap_indexes,
             bm25_indexes,
             delete_bitmap,
-            records_mmap: Arc::new(records_mmap),
-            record_offsets,
-            uuid_to_doc_id,
+            stored_fields,
         })
     }
 
@@ -742,30 +676,19 @@ impl SegmentReader {
 
     /// O(1) lookup: doc_id by record UUID, or `None` if not in this segment.
     pub fn doc_id_for_uuid(&self, id: &Uuid) -> Option<u32> {
-        self.uuid_to_doc_id.get(id).copied()
+        self.stored_fields.doc_id_for_uuid(id)
     }
 
     /// Iterate the (uuid, doc_id) pairs in this segment — used for building
     /// per-collection reverse indexes at recovery time.
     pub fn iter_uuid_doc_ids(&self) -> impl Iterator<Item = (Uuid, u32)> + '_ {
-        self.uuid_to_doc_id.iter().map(|(u, d)| (*u, *d))
+        self.stored_fields.iter_uuid_doc_ids()
     }
 
     /// Return the raw bytes of the JSONL line for the given doc_id, or
     /// `None` if `doc_id` is out of range. Strips the trailing newline.
     fn record_line_bytes(&self, doc_id: u32) -> Option<&[u8]> {
-        let i = doc_id as usize;
-        let start = *self.record_offsets.get(i)? as usize;
-        let end = self
-            .record_offsets
-            .get(i + 1)
-            .copied()
-            .unwrap_or(self.records_mmap.len() as u64) as usize;
-        let mut slice = &self.records_mmap[start..end];
-        if slice.last() == Some(&b'\n') {
-            slice = &slice[..slice.len() - 1];
-        }
-        Some(slice)
+        self.stored_fields.get_line_bytes(doc_id)
     }
 
     /// Get segment metadata.
