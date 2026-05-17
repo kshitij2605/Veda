@@ -23,6 +23,14 @@ pub struct CreateCollectionRequest {
     pub shard_count: u32,
     #[serde(default = "default_replication_factor")]
     pub replication_factor: u32,
+    /// Default physical layout for the stored-fields data of new
+    /// sealed segments. `"jsonl"` (default — legacy + small records)
+    /// or `"columnar"` (per-field column files, projection-friendly).
+    /// Per-segment metadata still records the format that was
+    /// actually written, so this can be changed later for new
+    /// segments without rewriting existing ones.
+    #[serde(default)]
+    pub stored_format: Option<String>,
 }
 
 fn default_shard_count() -> u32 {
@@ -168,6 +176,21 @@ pub async fn create_collection(
     let mut builder = CollectionSchema::builder(&req.name)
         .shard_count(req.shard_count)
         .replication_factor(req.replication_factor);
+    if let Some(fmt) = req.stored_format.as_deref() {
+        match fmt.to_lowercase().as_str() {
+            "jsonl" | "columnar" => builder = builder.stored_format(fmt.to_lowercase()),
+            other => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "stored_format must be \"jsonl\" or \"columnar\", got {other:?}"
+                        ),
+                    }),
+                ));
+            }
+        }
+    }
 
     for f in &req.fields {
         let field_def = parse_field_def(f).map_err(|e| {

@@ -266,6 +266,48 @@ impl ColumnarWriter {
         Ok(())
     }
 
+    /// Push a row by reading the record's scalar / blob fields against
+    /// the provided schema. Vector / sparse / multi-vector / json /
+    /// array fields are skipped — they live in their own storage.
+    /// Returns the doc_id assigned to this row.
+    pub fn push_record(
+        &mut self,
+        id: uuid::Uuid,
+        record: &veda_core::record::Record,
+        schema: &veda_core::schema::CollectionSchema,
+    ) -> Result<u32> {
+        use veda_core::record::FieldValue;
+        use veda_core::types::FieldType;
+
+        let mut fields: HashMap<String, (ColumnType, FieldValue)> = HashMap::new();
+        for field_def in schema.fields() {
+            let name = field_def.name();
+            let ft = field_def.field_type();
+            let ct = match ft {
+                FieldType::String => ColumnType::String,
+                FieldType::Int32 => ColumnType::Int32,
+                FieldType::Int64 => ColumnType::Int64,
+                FieldType::Float32 => ColumnType::Float32,
+                FieldType::Float64 => ColumnType::Float64,
+                FieldType::Bool => ColumnType::Bool,
+                FieldType::Timestamp => ColumnType::Timestamp,
+                FieldType::Uuid => ColumnType::Uuid,
+                FieldType::Blob => ColumnType::BlobRef,
+                // Vector / sparse / multi-vector / json / array live elsewhere.
+                _ => continue,
+            };
+            if let Some(v) = record.get(name) {
+                if matches!(v, FieldValue::Null) {
+                    continue;
+                }
+                fields.insert(name.to_owned(), (ct, v.clone()));
+            }
+        }
+        let doc_id = self.ids.len() as u32;
+        self.push(id, &fields)?;
+        Ok(doc_id)
+    }
+
     /// Finalize: write all column files + the UUID column + the format
     /// marker. After this the writer is consumed.
     pub fn seal(self) -> Result<()> {

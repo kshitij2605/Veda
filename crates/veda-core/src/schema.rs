@@ -214,6 +214,14 @@ pub struct CollectionSchema {
     fields: Vec<FieldDefinition>,
     shard_count: u32,
     replication_factor: u32,
+    /// Default stored-fields physical layout for new segments. Values:
+    /// `"jsonl"` (default, all legacy + most current segments) or
+    /// `"columnar"` (per-field column files). Per-segment metadata
+    /// still records the format that was actually written, so a
+    /// collection can mix formats across segments if the schema flag
+    /// changed after some had already sealed.
+    #[serde(default)]
+    stored_format: Option<String>,
 }
 
 impl CollectionSchema {
@@ -224,6 +232,7 @@ impl CollectionSchema {
             fields: Vec::new(),
             shard_count: 1,
             replication_factor: 1,
+            stored_format: None,
         }
     }
 
@@ -233,6 +242,13 @@ impl CollectionSchema {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Return the requested stored-fields format string, if the schema
+    /// declared one. The veda-storage segment writer maps unrecognized
+    /// values to the JSONL default.
+    pub fn stored_format(&self) -> Option<&str> {
+        self.stored_format.as_deref()
     }
 
     pub fn fields(&self) -> &[FieldDefinition] {
@@ -307,6 +323,7 @@ pub struct CollectionSchemaBuilder {
     fields: Vec<FieldDefinition>,
     shard_count: u32,
     replication_factor: u32,
+    stored_format: Option<String>,
 }
 
 impl CollectionSchemaBuilder {
@@ -325,6 +342,14 @@ impl CollectionSchemaBuilder {
     /// Set the replication factor for this collection.
     pub fn replication_factor(mut self, factor: u32) -> Self {
         self.replication_factor = factor;
+        self
+    }
+
+    /// Select the default physical layout for stored-fields data when
+    /// new segments seal. `"jsonl"` (default) or `"columnar"`. Unknown
+    /// values fall back to JSONL at segment-write time.
+    pub fn stored_format(mut self, fmt: impl Into<String>) -> Self {
+        self.stored_format = Some(fmt.into());
         self
     }
 
@@ -378,6 +403,7 @@ impl CollectionSchemaBuilder {
             fields: self.fields,
             shard_count: self.shard_count,
             replication_factor: self.replication_factor,
+            stored_format: self.stored_format,
         })
     }
 }
