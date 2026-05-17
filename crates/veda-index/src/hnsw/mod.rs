@@ -311,10 +311,12 @@ impl VectorIndex for HnswIndex {
     }
 
     fn save(&self, path: &Path) -> Result<()> {
-        // Serialize the graph via a round-trip so we can embed it in HnswIndexData
+        // Round-trip the graph via bincode so we can embed it in HnswIndexData
         // without requiring HnswGraph: Clone.
-        let graph_json = serde_json::to_string(&self.graph)?;
-        let graph_copy: HnswGraph = serde_json::from_str(&graph_json)?;
+        let graph_bytes = bincode::serialize(&self.graph)
+            .map_err(|e| VedaError::Index(format!("bincode serialize failed: {e}")))?;
+        let graph_copy: HnswGraph = bincode::deserialize(&graph_bytes)
+            .map_err(|e| VedaError::Index(format!("bincode deserialize failed: {e}")))?;
 
         let data = HnswIndexData {
             graph: graph_copy,
@@ -328,8 +330,9 @@ impl VectorIndex for HnswIndex {
             ml: self.ml,
             deleted: self.deleted.iter().copied().collect(),
         };
-        let json = serde_json::to_string(&data)?;
-        fs::write(path, json)?;
+        let bytes = bincode::serialize(&data)
+            .map_err(|e| VedaError::Index(format!("bincode serialize failed: {e}")))?;
+        fs::write(path, bytes)?;
         Ok(())
     }
 
@@ -337,8 +340,9 @@ impl VectorIndex for HnswIndex {
     where
         Self: Sized,
     {
-        let json = fs::read_to_string(path)?;
-        let data: HnswIndexData = serde_json::from_str(&json)?;
+        let bytes = fs::read(path)?;
+        let data: HnswIndexData = bincode::deserialize(&bytes)
+            .map_err(|e| VedaError::Index(format!("bincode deserialize failed: {e}")))?;
 
         if data.metric != metric {
             return Err(VedaError::Index(format!(

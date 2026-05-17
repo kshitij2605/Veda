@@ -210,14 +210,15 @@ impl RaBitQuantizer {
             mean_abs_component: self.mean_abs_component,
             metric: self.metric,
         };
-        let json = serde_json::to_string(&data)?;
-        fs::write(path, json)?;
+        let bytes = bincode::serialize(&data)
+            .map_err(|e| VedaError::Index(format!("bincode serialize failed: {e}")))?;
+        fs::write(path, bytes)?;
         Ok(())
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let json = fs::read_to_string(path)?;
-        let data: RaBitQuantizerData = serde_json::from_str(&json).map_err(|e| {
+        let bytes = fs::read(path)?;
+        let data: RaBitQuantizerData = bincode::deserialize(&bytes).map_err(|e| {
             VedaError::Index(format!("Failed to deserialize RaBitQuantizer: {e}"))
         })?;
         Ok(Self {

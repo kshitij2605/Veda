@@ -518,8 +518,9 @@ impl VectorIndex for IvfPqIndex {
             dimension: self.dimension,
             deleted: self.deleted.iter().copied().collect(),
         };
-        let json = serde_json::to_string(&data)?;
-        fs::write(path, json)?;
+        let bytes = bincode::serialize(&data)
+            .map_err(|e| VedaError::Index(format!("bincode serialize failed: {e}")))?;
+        fs::write(path, bytes)?;
         Ok(())
     }
 
@@ -527,8 +528,9 @@ impl VectorIndex for IvfPqIndex {
     where
         Self: Sized,
     {
-        let json = fs::read_to_string(path)?;
-        let data: IvfPqIndexData = serde_json::from_str(&json)?;
+        let bytes = fs::read(path)?;
+        let data: IvfPqIndexData = bincode::deserialize(&bytes)
+            .map_err(|e| VedaError::Index(format!("bincode deserialize failed: {e}")))?;
 
         if data.metric != metric {
             return Err(VedaError::Index(format!(

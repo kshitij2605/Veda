@@ -181,14 +181,16 @@ impl VectorIndex for FlatIndex {
             metric: self.metric,
             dimension: self.dimension,
         };
-        let json = serde_json::to_string(&data)?;
-        fs::write(path, json)?;
+        let bytes = bincode::serialize(&data)
+            .map_err(|e| VedaError::Index(format!("bincode serialize failed: {e}")))?;
+        fs::write(path, bytes)?;
         Ok(())
     }
 
     fn load(path: &Path, metric: DistanceMetric, dimension: u32) -> Result<Self> {
-        let json = fs::read_to_string(path)?;
-        let data: FlatIndexData = serde_json::from_str(&json)?;
+        let bytes = fs::read(path)?;
+        let data: FlatIndexData = bincode::deserialize(&bytes)
+            .map_err(|e| VedaError::Index(format!("bincode deserialize failed: {e}")))?;
 
         // Validate that the loaded data matches the expected parameters.
         if data.metric != metric {

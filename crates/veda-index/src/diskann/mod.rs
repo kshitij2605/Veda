@@ -184,8 +184,10 @@ impl VectorIndex for DiskAnnIndex {
     }
 
     fn save(&self, path: &Path) -> Result<()> {
-        let graph_json = serde_json::to_string(&self.graph)?;
-        let graph_copy: graph::VamanaGraph = serde_json::from_str(&graph_json)?;
+        let graph_bytes = bincode::serialize(&self.graph)
+            .map_err(|e| VedaError::Index(format!("bincode serialize failed: {e}")))?;
+        let graph_copy: graph::VamanaGraph = bincode::deserialize(&graph_bytes)
+            .map_err(|e| VedaError::Index(format!("bincode deserialize failed: {e}")))?;
 
         let data = DiskAnnIndexData {
             graph: graph_copy,
@@ -198,8 +200,9 @@ impl VectorIndex for DiskAnnIndex {
             l_search: self.l_search,
             deleted: self.deleted.iter().copied().collect(),
         };
-        let json = serde_json::to_string(&data)?;
-        fs::write(path, json)?;
+        let bytes = bincode::serialize(&data)
+            .map_err(|e| VedaError::Index(format!("bincode serialize failed: {e}")))?;
+        fs::write(path, bytes)?;
         Ok(())
     }
 
@@ -207,8 +210,9 @@ impl VectorIndex for DiskAnnIndex {
     where
         Self: Sized,
     {
-        let json = fs::read_to_string(path)?;
-        let data: DiskAnnIndexData = serde_json::from_str(&json)?;
+        let bytes = fs::read(path)?;
+        let data: DiskAnnIndexData = bincode::deserialize(&bytes)
+            .map_err(|e| VedaError::Index(format!("bincode deserialize failed: {e}")))?;
 
         if data.metric != metric {
             return Err(VedaError::Index(format!(
