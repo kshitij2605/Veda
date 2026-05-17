@@ -30,6 +30,13 @@ pub enum FieldType {
         /// spaces when an upstream model is swapped.
         #[serde(default)]
         model_id: Option<String>,
+        /// Valid Matryoshka truncation lengths (e.g. `[256, 512, 1024, 2048]`).
+        /// Stored vectors are always full-dimension; at search time the
+        /// caller may pass `truncate_to=N` where N is in this list, and
+        /// distances are computed on the first N components only.
+        /// When `None`, any truncation up to `dimension` is permitted.
+        #[serde(default)]
+        mrl_dims: Option<Vec<u32>>,
     },
     /// High-dimensional, sparse f32 vector (e.g. SPLADE, BM25).
     /// `dimension` is the vocabulary / index upper bound. Indices in stored

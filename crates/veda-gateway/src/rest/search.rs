@@ -24,6 +24,11 @@ pub struct SearchRequest {
     pub limit: usize,
     #[serde(default)]
     pub explain: bool,
+    /// Matryoshka truncation length. When set, computes distances on the
+    /// first N components only. Must be ≤ the field's dimension and (if the
+    /// field declared `mrl_dims`) one of the declared lengths. Bypasses
+    /// pre-built ANN indexes, so latency is higher.
+    pub truncate_to: Option<u32>,
 }
 
 fn default_limit() -> usize {
@@ -137,7 +142,50 @@ pub async fn search(
     let mut explain_timing: Option<ExplainTiming> = None;
 
     let results = if let Some(ref vec_query) = req.query.vector {
-        // Single-vector search
+        // Single-vector search.
+        // If truncate_to is set, validate against the field's declared MRL
+        // ladder (if any) and dimension.
+        if let Some(n) = req.truncate_to {
+            let field = schema.get_field(&vec_query.field).ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("field '{}' not found", vec_query.field),
+                    }),
+                )
+            })?;
+            if let veda_core::types::FieldType::Vector { dimension, mrl_dims, .. } = field.field_type() {
+                if n > *dimension {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "truncate_to={n} exceeds field dimension {dimension}"
+                            ),
+                        }),
+                    ));
+                }
+                if let Some(allowed) = mrl_dims
+                    && !allowed.contains(&n)
+                {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "truncate_to={n} is not in field's declared mrl_dims {allowed:?}"
+                            ),
+                        }),
+                    ));
+                }
+            } else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "truncate_to only applies to dense vector fields".into(),
+                    }),
+                ));
+            }
+        }
         let metric = resolve_metric(&schema, &vec_query.field);
         let (hits, timings) = execute_single_vector(executor, vec_query, &req, metric)?;
         if req.explain {
@@ -219,6 +267,7 @@ fn execute_single_vector(
         k: req.limit,
         metric,
         filter: req.filter.clone(),
+        truncate_to: req.truncate_to,
     };
 
     let (response, timings) = executor.search(&request).map_err(|e| {

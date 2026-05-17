@@ -197,6 +197,7 @@ pub async fn evaluate(
                 k: 2,
                 metric,
                 filter: None,
+                truncate_to: None,
             };
             let Ok((resp, _)) = executor.search(&request) else {
                 continue;

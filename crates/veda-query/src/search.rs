@@ -22,6 +22,11 @@ pub struct VectorSearchRequest {
     pub metric: DistanceMetric,
     /// Optional SQL-like filter expression string.
     pub filter: Option<String>,
+    /// Matryoshka truncation length. When set, distance computation uses only
+    /// the first N components of both query and stored vectors. Bypasses the
+    /// pre-built ANN indexes (those were built on full-dim vectors) and falls
+    /// back to brute-force scan — opt-in, slower, correct.
+    pub truncate_to: Option<u32>,
 }
 
 /// A search request for a single sparse vector field.
@@ -329,12 +334,13 @@ fn search_growing_segment(
         None => None,
     };
 
-    let raw_results = gs.search(
+    let raw_results = gs.search_truncated(
         &request.field,
         &request.query_vector,
         request.k,
         request.metric,
         filter_bitmap.as_ref(),
+        request.truncate_to,
     )?;
 
     let segment_id = gs.id();
@@ -366,6 +372,19 @@ fn search_sealed_segment(
 ) -> Result<(Vec<ScoredRecord>, usize)> {
     let row_count = reader.row_count() as u32;
     let segment_id = reader.metadata().id;
+
+    // MRL truncation: bypass the ANN index (which was built on full-dim
+    // vectors) and brute-force scan reader vectors with truncated distance.
+    if let Some(trunc) = request.truncate_to {
+        return search_sealed_segment_truncated(
+            reader,
+            request,
+            filter_expr,
+            trunc as usize,
+            segment_id,
+            row_count,
+        );
+    }
 
     let raw_results: Vec<SearchResult> = match filter_expr {
         Some(expr) => {
@@ -423,6 +442,95 @@ fn search_sealed_segment(
                 segment_id,
                 doc_id: sr.id,
                 distance: sr.distance,
+            }
+        })
+        .collect();
+
+    Ok((results, row_count as usize))
+}
+
+/// Brute-force sealed-segment scan with MRL truncation. Bypasses the
+/// pre-built vector index since it was constructed on full-dim distances.
+fn search_sealed_segment_truncated(
+    reader: &SegmentReader,
+    request: &VectorSearchRequest,
+    filter_expr: Option<&FilterExpr>,
+    trunc: usize,
+    segment_id: Uuid,
+    row_count: u32,
+) -> Result<(Vec<ScoredRecord>, usize)> {
+    use veda_core::simd;
+    use veda_core::types::DistanceMetric;
+
+    // Compute allowed bitmap (filter + delete tombstones).
+    let allowed: Option<RoaringBitmap> = match filter_expr {
+        Some(expr) => {
+            let mut ctx = FilterContext::new(row_count);
+            let mut fields = Vec::new();
+            collect_filter_fields(expr, &mut fields);
+            for f in &fields {
+                register_field_index(&mut ctx, reader, f);
+            }
+            let mut bm = ctx.evaluate(expr)?;
+            let delete_bm = reader.delete_bitmap();
+            for doc_id in 0..row_count {
+                if delete_bm.is_deleted(doc_id) {
+                    bm.remove(doc_id);
+                }
+            }
+            Some(bm)
+        }
+        None => None,
+    };
+
+    let q = &request.query_vector;
+    let qlim = trunc.min(q.len());
+    let distance_fn: fn(&[f32], &[f32]) -> f32 = match request.metric {
+        DistanceMetric::Cosine => simd::cosine_distance,
+        DistanceMetric::Euclidean => simd::euclidean_distance,
+        DistanceMetric::DotProduct => |a, b| -simd::dot_product(a, b),
+        DistanceMetric::Manhattan => simd::manhattan_distance,
+        _ => simd::euclidean_distance,
+    };
+
+    let mut local: Vec<(u32, f32)> = Vec::with_capacity(request.k * 2);
+    let delete_bm = reader.delete_bitmap();
+    for doc_id in 0..row_count {
+        if delete_bm.is_deleted(doc_id) {
+            continue;
+        }
+        if let Some(bm) = allowed.as_ref()
+            && !bm.contains(doc_id)
+        {
+            continue;
+        }
+        let Ok(stored) = reader.get_vector(&request.field, doc_id) else {
+            continue;
+        };
+        let limit = qlim.min(stored.len());
+        let dist = distance_fn(&q[..limit], &stored[..limit]);
+        local.push((doc_id, dist));
+        if local.len() > request.k * 4 {
+            local.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            local.truncate(request.k);
+        }
+    }
+    local.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    local.truncate(request.k);
+
+    let results: Vec<ScoredRecord> = local
+        .into_iter()
+        .map(|(doc_id, distance)| {
+            let record_id = reader
+                .get_record(doc_id)
+                .ok()
+                .map(|r| r.id())
+                .unwrap_or_else(Uuid::new_v4);
+            ScoredRecord {
+                id: record_id,
+                segment_id,
+                doc_id,
+                distance,
             }
         })
         .collect();

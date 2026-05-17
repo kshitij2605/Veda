@@ -159,6 +159,7 @@ impl DistributedQueryExecutor {
                 k: query.limit,
                 metric,
                 filter: filter.map(|s| s.to_owned()),
+            truncate_to: None,
             };
 
             let mut merged: Vec<ScoredRecord> = Vec::new();

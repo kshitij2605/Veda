@@ -34,6 +34,7 @@ impl FieldDefinition {
                 dimension,
                 metric,
                 model_id: None,
+                mrl_dims: None,
             },
             filterable: false,
             index_type: IndexType::Hnsw,
@@ -54,10 +55,20 @@ impl FieldDefinition {
                 dimension,
                 metric,
                 model_id: Some(model_id.into()),
+                mrl_dims: None,
             },
             filterable: false,
             index_type: IndexType::Hnsw,
         }
+    }
+
+    /// Set the valid MRL truncation lengths for a vector field.
+    /// Has no effect on non-vector fields.
+    pub fn with_mrl_dims(mut self, dims: Vec<u32>) -> Self {
+        if let FieldType::Vector { mrl_dims, .. } = &mut self.field_type {
+            *mrl_dims = Some(dims);
+        }
+        self
     }
 
     /// Create a sparse vector field definition.

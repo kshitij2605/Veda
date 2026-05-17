@@ -207,6 +207,19 @@ fn search_sealed_segment_ref(
         None => None,
     };
 
+    // MRL truncation: brute-force at truncated dim instead of using the
+    // full-dim ANN index.
+    if let Some(trunc) = request.truncate_to {
+        return search_sealed_brute_truncated(
+            reader,
+            request,
+            filter_expr.as_ref(),
+            trunc as usize,
+            segment_id,
+            row_count,
+        );
+    }
+
     let raw_results = match &filter_expr {
         Some(expr) => {
             use crate::filter::evaluator::FilterContext;
@@ -300,4 +313,97 @@ fn collect_filter_fields(expr: &crate::filter::FilterExpr, fields: &mut Vec<Stri
             collect_filter_fields(inner, fields);
         }
     }
+}
+
+fn search_sealed_brute_truncated(
+    reader: &veda_storage::segment::SegmentReader,
+    request: &VectorSearchRequest,
+    filter_expr: Option<&crate::filter::FilterExpr>,
+    trunc: usize,
+    segment_id: Uuid,
+    row_count: u32,
+) -> Result<Vec<ScoredRecord>> {
+    use crate::filter::evaluator::FilterContext;
+    use roaring::RoaringBitmap;
+    use veda_core::simd;
+
+    let allowed: Option<RoaringBitmap> = match filter_expr {
+        Some(expr) => {
+            let mut ctx = FilterContext::new(row_count);
+            let mut fields = Vec::new();
+            collect_filter_fields(expr, &mut fields);
+            for field_name in &fields {
+                if let Some(idx) = reader.inverted_index(field_name) {
+                    ctx.add_inverted(field_name, idx);
+                }
+                if let Some(idx) = reader.range_index(field_name) {
+                    ctx.add_range(field_name, idx);
+                }
+                if let Some(idx) = reader.bitmap_index(field_name) {
+                    ctx.add_bitmap(field_name, idx);
+                }
+            }
+            let mut bm = ctx.evaluate(expr)?;
+            let delete_bm = reader.delete_bitmap();
+            for doc_id in 0..row_count {
+                if delete_bm.is_deleted(doc_id) {
+                    bm.remove(doc_id);
+                }
+            }
+            Some(bm)
+        }
+        None => None,
+    };
+
+    let q = &request.query_vector;
+    let qlim = trunc.min(q.len());
+    let distance_fn: fn(&[f32], &[f32]) -> f32 = match request.metric {
+        DistanceMetric::Cosine => simd::cosine_distance,
+        DistanceMetric::Euclidean => simd::euclidean_distance,
+        DistanceMetric::DotProduct => |a, b| -simd::dot_product(a, b),
+        DistanceMetric::Manhattan => simd::manhattan_distance,
+        _ => simd::euclidean_distance,
+    };
+
+    let mut local: Vec<(u32, f32)> = Vec::with_capacity(request.k * 2);
+    let delete_bm = reader.delete_bitmap();
+    for doc_id in 0..row_count {
+        if delete_bm.is_deleted(doc_id) {
+            continue;
+        }
+        if let Some(bm) = allowed.as_ref()
+            && !bm.contains(doc_id)
+        {
+            continue;
+        }
+        let Ok(stored) = reader.get_vector(&request.field, doc_id) else {
+            continue;
+        };
+        let limit = qlim.min(stored.len());
+        let dist = distance_fn(&q[..limit], &stored[..limit]);
+        local.push((doc_id, dist));
+        if local.len() > request.k * 4 {
+            local.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            local.truncate(request.k);
+        }
+    }
+    local.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    local.truncate(request.k);
+
+    Ok(local
+        .into_iter()
+        .map(|(doc_id, distance)| {
+            let record_id = reader
+                .get_record(doc_id)
+                .ok()
+                .map(|r| r.id())
+                .unwrap_or_else(Uuid::new_v4);
+            ScoredRecord {
+                id: record_id,
+                segment_id,
+                doc_id,
+                distance,
+            }
+        })
+        .collect())
 }

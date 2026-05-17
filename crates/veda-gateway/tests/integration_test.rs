@@ -1327,6 +1327,67 @@ async fn test_sparse_vector_end_to_end() {
     assert_eq!(resp.status(), 400);
 }
 
+// ── MRL truncation ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_mrl_truncation_search() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    c.post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "mrl_col",
+            "fields": [
+                { "name": "embedding", "type": "vector", "dimension": 8, "metric": "cosine" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Three records with vectors that differ mostly in the trailing dims.
+    c.post(format!("{base}/v1/collections/mrl_col/insert"))
+        .json(&json!({
+            "records": [
+                { "embedding": [1.0, 0.0, 0.0, 0.0, 9.0, 9.0, 9.0, 9.0] },
+                { "embedding": [0.0, 1.0, 0.0, 0.0, 9.0, 9.0, 9.0, 9.0] },
+                { "embedding": [0.0, 0.0, 1.0, 0.0, 9.0, 9.0, 9.0, 9.0] }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // truncate_to=4: only the first 4 components matter; record 0 should match.
+    let resp = c
+        .post(format!("{base}/v1/collections/mrl_col/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] } },
+            "limit": 3,
+            "truncate_to": 4
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+    assert!(!results.is_empty());
+
+    // truncate_to bigger than dimension → 400.
+    let resp = c
+        .post(format!("{base}/v1/collections/mrl_col/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0] } },
+            "limit": 1,
+            "truncate_to": 16
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
 // ── Embedding model versioning ─────────────────────────────────────────────
 
 #[tokio::test]

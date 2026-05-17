@@ -168,6 +168,7 @@ fn test_single_shard_search() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
+    truncate_to: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -208,6 +209,7 @@ fn test_multi_shard_fanout() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
+    truncate_to: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -258,6 +260,7 @@ fn test_multi_shard_with_filter() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: Some("category = 'electronics'".into()),
+    truncate_to: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -351,6 +354,7 @@ fn test_empty_shard() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
+    truncate_to: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -383,6 +387,7 @@ fn test_k_larger_than_total() {
         k: 1000,
         metric: DistanceMetric::Euclidean,
         filter: None,
+    truncate_to: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -449,6 +454,7 @@ fn test_local_shard_searcher_growing_segment() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
+    truncate_to: None,
     };
 
     let (results, _timings) = searcher.search_shard(0, &request).unwrap();
@@ -499,6 +505,7 @@ fn test_local_shard_searcher_with_sealed_segments() {
         k: 20,
         metric: DistanceMetric::Euclidean,
         filter: None,
+    truncate_to: None,
     };
 
     let (results, _timings) = searcher.search_shard(0, &request).unwrap();
@@ -560,6 +567,7 @@ fn test_distributed_with_local_shards() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
+    truncate_to: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();

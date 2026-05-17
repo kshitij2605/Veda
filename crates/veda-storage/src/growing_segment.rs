@@ -242,6 +242,54 @@ impl GrowingSegment {
         Ok(results)
     }
 
+    /// Brute-force scan with optional Matryoshka truncation. When `truncate`
+    /// is `Some(n)`, distances are computed using only the first n components
+    /// of both query and stored vectors.
+    pub fn search_truncated(
+        &self,
+        field: &str,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        filter: Option<&RoaringBitmap>,
+        truncate: Option<u32>,
+    ) -> Result<Vec<(u32, f32)>> {
+        let vecs = self.vectors.get(field).ok_or_else(|| {
+            VedaError::FieldNotFound(format!("vector field '{field}' not found"))
+        })?;
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let n = truncate.map(|t| t as usize).unwrap_or(query.len()).min(query.len());
+        let distance_fn = select_distance_fn(metric);
+        let mut heap: BinaryHeap<OrdF32Entry> = BinaryHeap::new();
+        for (doc_id, vec) in vecs.iter().enumerate() {
+            let doc_id = doc_id as u32;
+            if self.delete_bitmap.is_deleted(doc_id) {
+                continue;
+            }
+            if let Some(bm) = filter
+                && !bm.contains(doc_id)
+            {
+                continue;
+            }
+            let limit = n.min(vec.len());
+            let dist = distance_fn(&query[..limit], &vec[..limit]);
+            if heap.len() < k {
+                heap.push(OrdF32Entry { dist, doc_id });
+            } else if let Some(top) = heap.peek()
+                && dist < top.dist
+            {
+                heap.pop();
+                heap.push(OrdF32Entry { dist, doc_id });
+            }
+        }
+        let mut results: Vec<(u32, f32)> =
+            heap.into_iter().map(|e| (e.doc_id, e.dist)).collect();
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(results)
+    }
+
     /// Brute-force scan: find top-k nearest vectors for a given query on a specific field.
     ///
     /// If `filter` is provided, only doc_ids present in the bitmap are considered.

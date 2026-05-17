@@ -377,7 +377,7 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
 
 fn field_to_info(f: &FieldDefinition) -> FieldInfo {
     let (type_str, dimension, metric, model) = match f.field_type() {
-        FieldType::Vector { dimension, metric, model_id } => {
+        FieldType::Vector { dimension, metric, model_id, .. } => {
             let m = match metric {
                 DistanceMetric::Cosine => "cosine",
                 DistanceMetric::Euclidean => "euclidean",
