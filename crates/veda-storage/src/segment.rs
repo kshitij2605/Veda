@@ -260,9 +260,14 @@ impl SegmentWriter {
             }
             // BM25 is orthogonal to the inverted/range/bitmap routing: a
             // string field may want both a filterable Inverted index and
-            // a full-text BM25 index. Track them in a separate map.
+            // a full-text BM25 index. Tokenizer choice comes from the
+            // schema; unknown names fall back to the default.
             if field.bm25() && matches!(field.field_type(), FieldType::String) {
-                bm25_indexes.insert(field.name().to_owned(), Bm25Index::new());
+                let tok = field
+                    .bm25_tokenizer()
+                    .and_then(crate::bm25_index::TokenizerKind::from_name)
+                    .unwrap_or_default();
+                bm25_indexes.insert(field.name().to_owned(), Bm25Index::with_tokenizer(tok));
             }
         }
 

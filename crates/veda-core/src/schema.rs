@@ -18,6 +18,12 @@ pub struct FieldDefinition {
     /// search API accepts a `bm25` query against this field.
     #[serde(default)]
     bm25: bool,
+    /// Tokenizer name for the BM25 index. Recognized values:
+    /// `"cjk_bigram"` (default), `"whitespace"`. Parsed by
+    /// `TokenizerKind::from_name` in veda-storage; unknown names fall
+    /// back to the default.
+    #[serde(default)]
+    bm25_tokenizer: Option<String>,
 }
 
 impl FieldDefinition {
@@ -28,6 +34,7 @@ impl FieldDefinition {
             field_type,
             filterable: false,
             bm25: false,
+            bm25_tokenizer: None,
             index_type: IndexType::None,
         }
     }
@@ -46,6 +53,7 @@ impl FieldDefinition {
             },
             filterable: false,
             bm25: false,
+            bm25_tokenizer: None,
             index_type: IndexType::Hnsw,
         }
     }
@@ -69,6 +77,7 @@ impl FieldDefinition {
             },
             filterable: false,
             bm25: false,
+            bm25_tokenizer: None,
             index_type: IndexType::Hnsw,
         }
     }
@@ -103,6 +112,7 @@ impl FieldDefinition {
             field_type: FieldType::SparseVector { dimension, metric },
             filterable: false,
             bm25: false,
+            bm25_tokenizer: None,
             index_type: IndexType::None,
         }
     }
@@ -124,6 +134,7 @@ impl FieldDefinition {
             },
             filterable: false,
             bm25: false,
+            bm25_tokenizer: None,
             index_type: IndexType::None,
         }
     }
@@ -135,6 +146,7 @@ impl FieldDefinition {
             field_type: FieldType::Blob,
             filterable: false,
             bm25: false,
+            bm25_tokenizer: None,
             index_type: IndexType::None,
         }
     }
@@ -158,6 +170,13 @@ impl FieldDefinition {
         self
     }
 
+    /// Choose the BM25 tokenizer by name. Recognized: `cjk_bigram`
+    /// (default), `whitespace`. Pass `None` to use the default.
+    pub fn with_bm25_tokenizer(mut self, name: Option<impl Into<String>>) -> Self {
+        self.bm25_tokenizer = name.map(Into::into);
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -177,6 +196,13 @@ impl FieldDefinition {
     /// Whether this field should have a BM25 inverted index built.
     pub fn bm25(&self) -> bool {
         self.bm25
+    }
+
+    /// Optional BM25 tokenizer name (set via the `bm25_tokenizer` JSON
+    /// field on collection create). When `None` the segment uses the
+    /// default tokenizer.
+    pub fn bm25_tokenizer(&self) -> Option<&str> {
+        self.bm25_tokenizer.as_deref()
     }
 }
 
