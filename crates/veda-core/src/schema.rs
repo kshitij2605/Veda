@@ -36,6 +36,18 @@ impl FieldDefinition {
         }
     }
 
+    /// Create a sparse vector field definition.
+    /// `dimension` is the vocabulary / index upper bound.
+    /// Sparse fields do not use any of the dense ANN indexes.
+    pub fn sparse_vector(name: impl Into<String>, dimension: u32, metric: DistanceMetric) -> Self {
+        Self {
+            name: name.into(),
+            field_type: FieldType::SparseVector { dimension, metric },
+            filterable: false,
+            index_type: IndexType::None,
+        }
+    }
+
     /// Create a blob field definition.
     pub fn blob(name: impl Into<String>) -> Self {
         Self {
@@ -108,11 +120,19 @@ impl CollectionSchema {
         &self.fields
     }
 
-    /// Return only vector fields.
+    /// Return only dense vector fields.
     pub fn vector_fields(&self) -> Vec<&FieldDefinition> {
         self.fields
             .iter()
             .filter(|f| matches!(f.field_type, FieldType::Vector { .. }))
+            .collect()
+    }
+
+    /// Return only sparse vector fields.
+    pub fn sparse_vector_fields(&self) -> Vec<&FieldDefinition> {
+        self.fields
+            .iter()
+            .filter(|f| matches!(f.field_type, FieldType::SparseVector { .. }))
             .collect()
     }
 
@@ -123,7 +143,7 @@ impl CollectionSchema {
             .filter(|f| {
                 !matches!(
                     f.field_type,
-                    FieldType::Vector { .. } | FieldType::Blob | FieldType::SparseVector
+                    FieldType::Vector { .. } | FieldType::Blob | FieldType::SparseVector { .. }
                 )
             })
             .collect()
@@ -203,15 +223,22 @@ impl CollectionSchemaBuilder {
             }
         }
 
-        // Reject vector fields with dimension 0
+        // Reject vector / sparse-vector fields with dimension 0
         for field in &self.fields {
-            if let FieldType::Vector { dimension, .. } = &field.field_type
-                && *dimension == 0
-            {
-                return Err(VedaError::InvalidSchema(format!(
-                    "Vector field '{}' must have dimension > 0",
-                    field.name
-                )));
+            match &field.field_type {
+                FieldType::Vector { dimension, .. } if *dimension == 0 => {
+                    return Err(VedaError::InvalidSchema(format!(
+                        "Vector field '{}' must have dimension > 0",
+                        field.name
+                    )));
+                }
+                FieldType::SparseVector { dimension, .. } if *dimension == 0 => {
+                    return Err(VedaError::InvalidSchema(format!(
+                        "SparseVector field '{}' must have dimension > 0",
+                        field.name
+                    )));
+                }
+                _ => {}
             }
         }
 

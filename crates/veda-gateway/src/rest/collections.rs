@@ -301,6 +301,22 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
             };
             Ok(FieldDefinition::vector(&f.name, dim, metric).with_filterable(f.filterable))
         }
+        "sparse_vector" | "sparsevector" => {
+            let dim = f.dimension.ok_or_else(|| {
+                format!("field '{}': sparse_vector type requires 'dimension'", f.name)
+            })?;
+            let metric = match f.metric.as_deref().unwrap_or("cosine") {
+                "cosine" => DistanceMetric::Cosine,
+                "dot_product" | "dotproduct" => DistanceMetric::DotProduct,
+                other => {
+                    return Err(format!(
+                        "field '{}': sparse_vector supports only 'cosine' or 'dot_product', got '{other}'",
+                        f.name
+                    ));
+                }
+            };
+            Ok(FieldDefinition::sparse_vector(&f.name, dim, metric).with_filterable(f.filterable))
+        }
         "blob" => Ok(FieldDefinition::blob(&f.name).with_filterable(f.filterable)),
         "string" => Ok(
             FieldDefinition::new(&f.name, FieldType::String).with_filterable(f.filterable),
@@ -356,7 +372,14 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
         FieldType::Timestamp => ("timestamp", None, None),
         FieldType::Json => ("json", None, None),
         FieldType::Uuid => ("uuid", None, None),
-        FieldType::SparseVector => ("sparse_vector", None, None),
+        FieldType::SparseVector { dimension, metric } => {
+            let m = match metric {
+                DistanceMetric::Cosine => "cosine",
+                DistanceMetric::DotProduct => "dot_product",
+                _ => "cosine",
+            };
+            ("sparse_vector", Some(*dimension), Some(m.to_owned()))
+        }
         FieldType::Array(_) => ("array", None, None),
     };
 

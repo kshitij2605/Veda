@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::sparse::SparseVec;
 use crate::types::RecordId;
 use crate::vector::DenseVector;
 
@@ -18,6 +19,7 @@ pub enum FieldValue {
     /// Unix milliseconds timestamp.
     Timestamp(i64),
     Vector(DenseVector),
+    SparseVector(SparseVec),
     Json(serde_json::Value),
     /// URI pointing to object storage.
     BlobRef(String),

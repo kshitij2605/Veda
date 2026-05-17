@@ -6,5 +6,6 @@ pub mod metrics;
 pub mod record;
 pub mod schema;
 pub mod simd;
+pub mod sparse;
 pub mod types;
 pub mod vector;

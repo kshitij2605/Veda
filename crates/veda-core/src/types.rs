@@ -25,7 +25,13 @@ pub enum FieldType {
         dimension: u32,
         metric: DistanceMetric,
     },
-    SparseVector,
+    /// High-dimensional, sparse f32 vector (e.g. SPLADE, BM25).
+    /// `dimension` is the vocabulary / index upper bound. Indices in stored
+    /// values must be `< dimension`.
+    SparseVector {
+        dimension: u32,
+        metric: DistanceMetric,
+    },
     String,
     Int32,
     Int64,

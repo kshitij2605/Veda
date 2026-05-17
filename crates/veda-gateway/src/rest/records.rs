@@ -8,6 +8,7 @@ use tracing::instrument;
 use uuid::Uuid;
 use veda_core::metrics as m;
 use veda_core::record::{FieldValue, Record};
+use veda_core::sparse::SparseVec;
 use veda_core::types::FieldType;
 use veda_core::vector::DenseVector;
 use veda_query::distributed::DistributedQueryExecutor;
@@ -453,6 +454,12 @@ fn json_to_field_value(
                 .collect::<Result<_, _>>()?;
             Ok(FieldValue::Vector(DenseVector::new(floats)))
         }
+        FieldType::SparseVector { dimension, .. } => {
+            // Accept either { "indices": [...], "values": [...] } or
+            // { "<idx>": <val>, ... } (object form).
+            let sparse = parse_sparse_value(value, *dimension)?;
+            Ok(FieldValue::SparseVector(sparse))
+        }
         FieldType::String => {
             let s = value.as_str().ok_or("expected string")?;
             Ok(FieldValue::String(s.to_owned()))
@@ -497,6 +504,51 @@ fn json_to_field_value(
     }
 }
 
+/// Parse a sparse vector from either `{"indices":[..],"values":[..]}` or
+/// `{"42": 0.1, "100": 0.5}` (string-keyed object) form. Validates that
+/// all indices are within the declared dimension.
+fn parse_sparse_value(value: &serde_json::Value, dimension: u32) -> Result<SparseVec, String> {
+    if let Some(obj) = value.as_object() {
+        // Two cases: indices/values arrays, or term:weight pairs.
+        if let (Some(idx_v), Some(val_v)) = (obj.get("indices"), obj.get("values")) {
+            let idx_arr = idx_v.as_array().ok_or("'indices' must be an array")?;
+            let val_arr = val_v.as_array().ok_or("'values' must be an array")?;
+            let indices: Vec<u32> = idx_arr
+                .iter()
+                .map(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or("indices must be non-negative integers fitting in u32"))
+                .collect::<Result<_, _>>()?;
+            let values: Vec<f32> = val_arr
+                .iter()
+                .map(|v| v.as_f64().map(|f| f as f32).ok_or("values must be numbers"))
+                .collect::<Result<_, _>>()?;
+            for &i in &indices {
+                if i >= dimension {
+                    return Err(format!(
+                        "sparse vector index {i} out of range (dimension={dimension})"
+                    ));
+                }
+            }
+            SparseVec::new(indices, values).map_err(|e| e.to_string())
+        } else {
+            // term:weight object.
+            let mut pairs: Vec<(u32, f32)> = Vec::with_capacity(obj.len());
+            for (k, v) in obj {
+                let idx: u32 = k.parse().map_err(|_| format!("sparse vector key '{k}' must be a u32 index"))?;
+                if idx >= dimension {
+                    return Err(format!(
+                        "sparse vector index {idx} out of range (dimension={dimension})"
+                    ));
+                }
+                let val = v.as_f64().ok_or_else(|| format!("sparse vector value at '{k}' must be a number"))?;
+                pairs.push((idx, val as f32));
+            }
+            SparseVec::from_pairs(pairs).map_err(|e| e.to_string())
+        }
+    } else {
+        Err("expected object for sparse_vector field".into())
+    }
+}
+
 fn record_to_response(rec: &Record) -> GetRecordResponse {
     let mut fields = serde_json::Map::new();
     for (key, value) in rec.fields() {
@@ -519,6 +571,10 @@ fn field_value_to_json(fv: &FieldValue) -> serde_json::Value {
         FieldValue::Bool(b) => serde_json::Value::Bool(*b),
         FieldValue::Timestamp(t) => serde_json::json!(*t),
         FieldValue::Vector(v) => serde_json::json!(v.as_slice()),
+        FieldValue::SparseVector(sv) => serde_json::json!({
+            "indices": sv.indices(),
+            "values": sv.values(),
+        }),
         FieldValue::Json(j) => j.clone(),
         FieldValue::BlobRef(s) => serde_json::Value::String(s.clone()),
         FieldValue::Uuid(u) => serde_json::Value::String(u.to_string()),
