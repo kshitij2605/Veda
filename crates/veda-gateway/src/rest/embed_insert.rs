@@ -287,10 +287,11 @@ pub async fn embed_insert(
         inserted += 1;
     }
 
-    // Seal growing segments.
+    // Seal growing segments. Track whether any shard actually sealed.
+    let mut any_sealed = false;
     for sm in shard_map.values_mut() {
         let seal_start = std::time::Instant::now();
-        sm.seal_growing().map_err(|e| {
+        let sealed = sm.seal_growing().map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -298,12 +299,14 @@ pub async fn embed_insert(
                 }),
             )
         })?;
-        metrics::histogram!(m::SEAL_DURATION, "collection" => name.clone())
-            .record(seal_start.elapsed().as_secs_f64());
+        if sealed.is_some() {
+            any_sealed = true;
+            metrics::histogram!(m::SEAL_DURATION, "collection" => name.clone())
+                .record(seal_start.elapsed().as_secs_f64());
+        }
     }
 
-    // Run compaction if needed.
-    {
+    if any_sealed {
         let config = veda_storage::compaction::CompactionConfig::default();
         for sm in shard_map.values_mut() {
             metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => name.clone()).set(1.0);
@@ -321,19 +324,21 @@ pub async fn embed_insert(
             }
             metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => name.clone()).set(0.0);
         }
-        // Update segment count after compaction.
         let total_segments: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
         metrics::gauge!(m::SEGMENTS_TOTAL, "collection" => name.clone()).set(total_segments as f64);
     }
 
     drop(managers);
     drop(registry);
-    metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => name.clone()).set(1.0);
-    let rebuild_start = std::time::Instant::now();
-    rebuild_executors(&state, &name).await?;
-    metrics::histogram!(m::INDEX_BUILD_DURATION, "collection" => name.clone(), "index_type" => "rebuild")
-        .record(rebuild_start.elapsed().as_secs_f64());
-    metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => name.clone()).set(0.0);
+
+    if any_sealed {
+        metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => name.clone()).set(1.0);
+        let rebuild_start = std::time::Instant::now();
+        rebuild_executors(&state, &name).await?;
+        metrics::histogram!(m::INDEX_BUILD_DURATION, "collection" => name.clone(), "index_type" => "rebuild")
+            .record(rebuild_start.elapsed().as_secs_f64());
+        metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => name.clone()).set(0.0);
+    }
 
     metrics::histogram!(m::INSERT_DURATION, "collection" => name.clone())
         .record(start.elapsed().as_secs_f64());
