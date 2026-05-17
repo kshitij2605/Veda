@@ -450,6 +450,36 @@ fn time_window_no_overlap() {
 }
 
 #[test]
+fn scene_aligned_windows_respects_cuts() {
+    let plan = TimeWindowPlan { window_ms: 15_000, overlap_ms: 0 };
+    // 60s video with cuts at 12s, 27s, 50s → scenes [0,12], [12,27], [27,50], [50,60]
+    let out = plan.scene_aligned_windows(&[12_000, 27_000, 50_000], 60_000);
+    // Each scene should map to at least one (start, end) range.
+    assert!(out.contains(&(0, 12_000)));
+    assert!(out.contains(&(12_000, 27_000)));
+}
+
+#[test]
+fn scene_aligned_short_scenes_merge() {
+    let plan = TimeWindowPlan { window_ms: 15_000, overlap_ms: 0 };
+    // Cuts at 2s and 4s — both scenes are <7.5s (min_len = 7500), so they
+    // merge with the next.
+    let out = plan.scene_aligned_windows(&[2_000, 4_000], 30_000);
+    // First emitted range should span from 0 well past 4_000 because of merging.
+    assert!(out[0].0 == 0);
+    assert!(out[0].1 > 4_000);
+}
+
+#[test]
+fn scene_aligned_long_scenes_subdivide() {
+    let plan = TimeWindowPlan { window_ms: 15_000, overlap_ms: 0 };
+    // No cuts in a 60s video — the whole thing is one scene, longer than
+    // 22.5s, so it should be subdivided into ~4 windows.
+    let out = plan.scene_aligned_windows(&[], 60_000);
+    assert!(out.len() >= 4, "expected subdivision, got {} windows", out.len());
+}
+
+#[test]
 fn late_chunking_matches_markdown_recursive_at_text_layer() {
     let text = "# Heading\n\nFirst paragraph. ".repeat(50);
     let mr = chunk_markdown(

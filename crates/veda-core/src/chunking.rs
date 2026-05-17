@@ -131,6 +131,68 @@ impl TimeWindowPlan {
         }
         out
     }
+
+    /// Emit windows aligned to externally-detected scene boundaries.
+    ///
+    /// `scene_cuts_ms` is a sorted list of cut timestamps (boundaries
+    /// between scenes). Scenes shorter than `window_ms / 2` are merged
+    /// with the next scene; scenes longer than `window_ms * 3 / 2` are
+    /// subdivided with a regular [`Self::windows`] plan inside the scene.
+    ///
+    /// Veda does **not** detect scenes itself — feed this output from
+    /// PySceneDetect / ffmpeg-scenedetect / a VLM-based detector.
+    pub fn scene_aligned_windows(
+        &self,
+        scene_cuts_ms: &[u64],
+        total_ms: u64,
+    ) -> Vec<(u64, u64)> {
+        if total_ms == 0 {
+            return Vec::new();
+        }
+        // Build raw scene spans from sorted cuts.
+        let mut boundaries: Vec<u64> = Vec::with_capacity(scene_cuts_ms.len() + 2);
+        boundaries.push(0);
+        for &c in scene_cuts_ms {
+            if c > 0 && c < total_ms {
+                boundaries.push(c);
+            }
+        }
+        boundaries.push(total_ms);
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        let min_len = self.window_ms / 2;
+        let max_len = self.window_ms * 3 / 2;
+
+        // Merge very-short scenes into the next.
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        let mut i = 0;
+        while i + 1 < boundaries.len() {
+            let start = boundaries[i];
+            let mut end = boundaries[i + 1];
+            while (end - start) < min_len && i + 2 < boundaries.len() {
+                i += 1;
+                end = boundaries[i + 1];
+            }
+            merged.push((start, end));
+            i += 1;
+        }
+
+        // Subdivide long scenes.
+        let mut out = Vec::new();
+        for (start, end) in merged {
+            let len = end - start;
+            if len <= max_len {
+                out.push((start, end));
+            } else {
+                // Plan inside the scene; offset by `start`.
+                for (a, b) in self.windows(len) {
+                    out.push((start + a, start + b));
+                }
+            }
+        }
+        out
+    }
 }
 
 impl Default for ChunkingStrategy {
