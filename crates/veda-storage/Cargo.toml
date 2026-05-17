@@ -21,10 +21,14 @@ async-nats = "0.38"
 tokio = { workspace = true }
 futures = "0.3"
 # Optional: lindera (Kuromoji-compatible) tokenizer for BM25 on
-# Japanese corpora. Heavy build (~50MB dict, several minutes of
-# compile time) so it's opt-in. Builds without this feature still
-# recognise the `lindera` schema flag at the type level but fall back
-# to cjk_bigram at runtime with a one-shot warning.
+# Japanese corpora. Opt-in. The `ipadic` feature pulls the lindera
+# tokenizer / dictionary modules into scope; that path also triggers
+# a build-time fetch of the IPADIC dict tarball from
+# lindera.s3.ap-northeast-1.amazonaws.com — builds in offline
+# environments need to vendor it (LINDERA_IPADIC_TARBALL env var
+# accepted by the lindera build script). At runtime the operator
+# can override the bundled dict with VEDA_LINDERA_DICT_PATH; without
+# that, the tokenizer falls back to cjk_bigram with a one-shot warn.
 lindera = { version = "0.32", optional = true, default-features = false, features = ["ipadic"] }
 
 [features]

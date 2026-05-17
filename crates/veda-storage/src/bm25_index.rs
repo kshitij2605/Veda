@@ -214,30 +214,55 @@ fn run_tokenizer(kind: TokenizerKind, text: &str) -> Vec<String> {
 
 /// Lindera-backed morphological tokenizer.
 ///
-/// When the `lindera_tokenizer` feature is enabled, this calls into the
-/// lindera crate with IPADIC. Otherwise it logs a one-time warning and
-/// falls back to the CJK-bigram tokenizer — so segments built or
-/// queried by a binary without the feature stay readable.
+/// Two-layer activation:
+/// 1. The `lindera_tokenizer` cargo feature pulls the lindera crate
+///    into the binary. Without it, this function is a one-line stub
+///    that warns and falls back to `tokenize_cjk_bigram`.
+/// 2. Even with the feature on, the operator must supply a dict by
+///    setting `VEDA_LINDERA_DICT_PATH` to a directory containing a
+///    pre-built IPADIC / UniDic / etc. lindera dictionary. We
+///    deliberately do not bundle one — auto-downloading dicts at
+///    build time breaks sandboxed builds.
+///
+/// When neither layer is satisfied, the fallback path keeps segments
+/// built or queried by feature-off binaries readable.
 #[cfg(feature = "lindera_tokenizer")]
 fn tokenize_lindera(text: &str) -> Vec<String> {
     use std::sync::OnceLock;
-    static TOK: OnceLock<lindera::tokenizer::Tokenizer> = OnceLock::new();
-    let tok = TOK.get_or_init(|| {
-        // IPADIC dict + Normal mode. Errors here mean the binary was
-        // built with the feature but the dict wasn't shipped — fail
-        // loudly so the operator notices.
-        lindera::tokenizer::Tokenizer::from_config(
+    static TOK: OnceLock<Option<lindera::tokenizer::Tokenizer>> = OnceLock::new();
+    let tok_opt = TOK.get_or_init(|| {
+        let path = match std::env::var("VEDA_LINDERA_DICT_PATH") {
+            Ok(p) if !p.is_empty() => std::path::PathBuf::from(p),
+            _ => {
+                tracing::warn!(
+                    "lindera_tokenizer feature is on but VEDA_LINDERA_DICT_PATH is unset; \
+                     falling back to cjk_bigram. Point it at a lindera-compatible dict \
+                     directory (e.g. IPADIC extracted from \
+                     https://lindera.s3.ap-northeast-1.amazonaws.com/mecab-ipadic-2.7.0-20070801.tar.gz)."
+                );
+                return None;
+            }
+        };
+        match lindera::tokenizer::Tokenizer::from_config(
             lindera::tokenizer::TokenizerConfig {
                 dictionary: lindera::dictionary::DictionaryConfig {
-                    kind: Some(lindera::DictionaryKind::IPADIC),
-                    path: None,
+                    kind: None,
+                    path: Some(path),
                 },
                 user_dictionary: None,
                 mode: lindera::mode::Mode::Normal,
             },
-        )
-        .expect("lindera_tokenizer feature is on but IPADIC dict failed to load")
+        ) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::error!(error = %e, "lindera dict load failed; falling back to cjk_bigram");
+                None
+            }
+        }
     });
+    let Some(tok) = tok_opt else {
+        return tokenize_cjk_bigram(text);
+    };
     match tok.tokenize(text) {
         Ok(toks) => toks
             .into_iter()
