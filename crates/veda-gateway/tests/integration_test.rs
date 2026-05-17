@@ -1234,3 +1234,95 @@ async fn test_list_records_pagination() {
         .unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+// ── Sparse vector end-to-end ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_sparse_vector_end_to_end() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    // Create collection with a sparse vector field.
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "sparse_col",
+            "fields": [
+                { "name": "sparse_emb", "type": "sparse_vector", "dimension": 1000, "metric": "cosine" },
+                { "name": "title", "type": "string", "filterable": true }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Insert three records with distinguishable sparse vectors.
+    let resp = c
+        .post(format!("{base}/v1/collections/sparse_col/insert"))
+        .json(&json!({
+            "records": [
+                {
+                    "sparse_emb": { "indices": [10, 20, 30], "values": [0.5, 0.5, 0.5] },
+                    "title": "doc-a"
+                },
+                {
+                    "sparse_emb": { "indices": [10, 20, 100], "values": [0.5, 0.5, 0.5] },
+                    "title": "doc-b"
+                },
+                {
+                    "sparse_emb": { "indices": [500, 600, 700], "values": [1.0, 1.0, 1.0] },
+                    "title": "doc-c"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["inserted"], 3);
+
+    // Sparse search: query matches doc-a most closely, then doc-b.
+    let resp = c
+        .post(format!("{base}/v1/collections/sparse_col/search"))
+        .json(&json!({
+            "query": {
+                "sparse_vector": {
+                    "field": "sparse_emb",
+                    "indices": [10, 20, 30],
+                    "values": [0.5, 0.5, 0.5]
+                }
+            },
+            "limit": 3
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3, "expected 3 results, got {}", results.len());
+    // First result should be the most similar (cosine ~ 0 for identical).
+    let top_distance = results[0]["distance"].as_f64().unwrap();
+    assert!(
+        top_distance < 0.01,
+        "top result should have near-zero distance, got {top_distance}"
+    );
+
+    // Empty / invalid index out of range should 400.
+    let resp = c
+        .post(format!("{base}/v1/collections/sparse_col/insert"))
+        .json(&json!({
+            "records": [
+                {
+                    "sparse_emb": { "indices": [9999], "values": [0.5] },
+                    "title": "doc-bad"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}

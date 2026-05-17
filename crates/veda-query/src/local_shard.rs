@@ -11,7 +11,9 @@ use veda_index::traits::VectorIndex;
 use veda_storage::segment_manager::SegmentManager;
 
 use crate::distributed::ShardSearcher;
-use crate::search::{SearchExecutor, SearchTimings, ScoredRecord, VectorSearchRequest};
+use crate::search::{
+    ScoredRecord, SearchExecutor, SearchTimings, SparseSearchRequest, VectorSearchRequest,
+};
 
 /// Build a vector index of the declared type, populated from `vectors`.
 ///
@@ -161,6 +163,26 @@ impl ShardSearcher for LocalShardSearcher {
         agg_timings.scoring_ms += scoring_start.elapsed().as_secs_f64() * 1000.0;
 
         Ok((all_results, agg_timings))
+    }
+
+    fn search_shard_sparse(
+        &self,
+        _shard_id: u32,
+        request: &SparseSearchRequest,
+    ) -> Result<(Vec<ScoredRecord>, SearchTimings)> {
+        let growing = self.segment_manager.growing_segment();
+        let growing_opt = if growing.count() > 0 { Some(growing) } else { None };
+
+        let sealed_refs: Vec<&veda_storage::segment::SegmentReader> = self
+            .segment_manager
+            .sealed_segments()
+            .iter()
+            .map(|h| &h.reader)
+            .collect();
+
+        let (response, timings) =
+            SearchExecutor::search_sparse(request, growing_opt, &sealed_refs)?;
+        Ok((response.results, timings))
     }
 }
 

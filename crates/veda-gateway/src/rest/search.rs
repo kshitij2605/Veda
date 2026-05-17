@@ -32,8 +32,10 @@ fn default_limit() -> usize {
 
 #[derive(Debug, Deserialize)]
 pub struct QueryBody {
-    /// Single-vector query.
+    /// Single dense-vector query.
     pub vector: Option<SingleVectorQuery>,
+    /// Sparse-vector query.
+    pub sparse_vector: Option<SparseVectorQuery>,
     /// Multi-vector fusion query.
     pub multi_vector: Option<Vec<MultiVectorField>>,
     /// Fusion strategy name (for multi_vector).
@@ -45,6 +47,13 @@ pub struct QueryBody {
 #[derive(Debug, Deserialize)]
 pub struct SingleVectorQuery {
     pub field: String,
+    pub values: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SparseVectorQuery {
+    pub field: String,
+    pub indices: Vec<u32>,
     pub values: Vec<f32>,
 }
 
@@ -142,6 +151,21 @@ pub async fn search(
             });
         }
         hits
+    } else if let Some(ref sparse_query) = req.query.sparse_vector {
+        // Sparse-vector search.
+        let metric = resolve_sparse_metric(&schema, &sparse_query.field);
+        let (hits, timings) = execute_sparse_vector(executor, sparse_query, &req, metric)?;
+        if req.explain {
+            let total = timings.filter_ms + timings.ann_search_ms + timings.scoring_ms;
+            explain_timing = Some(ExplainTiming {
+                filter_ms: timings.filter_ms,
+                ann_search_ms: timings.ann_search_ms,
+                scoring_ms: timings.scoring_ms,
+                fusion_ms: 0.0,
+                total_ms: total,
+            });
+        }
+        hits
     } else if let Some(ref multi) = req.query.multi_vector {
         // Multi-vector fusion search
         let fusion_field = multi.first().map(|m| m.field.as_str()).unwrap_or("");
@@ -165,7 +189,7 @@ pub async fn search(
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "query must contain 'vector' or 'multi_vector'".into(),
+                error: "query must contain 'vector', 'sparse_vector', or 'multi_vector'".into(),
             }),
         ));
     };
@@ -281,6 +305,69 @@ fn execute_multi_vector(
             fields: serde_json::Map::new(),
         })
         .collect())
+}
+
+fn execute_sparse_vector(
+    executor: &DistributedQueryExecutor,
+    sparse_query: &SparseVectorQuery,
+    req: &SearchRequest,
+    metric: DistanceMetric,
+) -> Result<(Vec<SearchHit>, veda_query::search::SearchTimings), (StatusCode, Json<ErrorResponse>)>
+{
+    let sv = veda_core::sparse::SparseVec::new(
+        sparse_query.indices.clone(),
+        sparse_query.values.clone(),
+    )
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("invalid sparse query: {e}"),
+            }),
+        )
+    })?;
+
+    let request = veda_query::search::SparseSearchRequest {
+        field: sparse_query.field.clone(),
+        query: sv,
+        k: req.limit,
+        metric,
+        filter: req.filter.clone(),
+    };
+
+    let (response, timings) = executor.search_sparse(&request).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("sparse search failed: {e}"),
+            }),
+        )
+    })?;
+
+    let hits = response
+        .results
+        .into_iter()
+        .map(|r| SearchHit {
+            id: r.id.to_string(),
+            distance: r.distance,
+            fields: serde_json::Map::new(),
+        })
+        .collect();
+    Ok((hits, timings))
+}
+
+/// Resolve the distance metric for a sparse field, defaulting to Cosine.
+fn resolve_sparse_metric(
+    schema: &veda_core::schema::CollectionSchema,
+    field_name: &str,
+) -> DistanceMetric {
+    schema
+        .get_field(field_name)
+        .and_then(|f| match f.field_type() {
+            veda_core::types::FieldType::SparseVector { metric, .. } => Some(*metric),
+            _ => None,
+        })
+        .unwrap_or(DistanceMetric::Cosine)
 }
 
 /// Resolve the distance metric for a field from the schema, defaulting to Cosine.

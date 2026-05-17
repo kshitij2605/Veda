@@ -4,7 +4,9 @@ use veda_core::error::{Result, VedaError};
 use veda_core::types::DistanceMetric;
 
 use crate::fusion::{fuse_results, FusedResult, MultiVectorQuery};
-use crate::search::{ScoredRecord, SearchTimings, SearchResponse, VectorSearchRequest};
+use crate::search::{
+    ScoredRecord, SearchResponse, SearchTimings, SparseSearchRequest, VectorSearchRequest,
+};
 
 /// Trait for executing search on a single shard.
 /// Implemented by local shard executor (in-process) or remote gRPC client.
@@ -14,6 +16,18 @@ pub trait ShardSearcher: Send + Sync {
         shard_id: u32,
         request: &VectorSearchRequest,
     ) -> Result<(Vec<ScoredRecord>, SearchTimings)>;
+
+    /// Sparse-vector search. Default implementation returns an error so new
+    /// shard implementations are not forced to support sparse retrieval.
+    fn search_shard_sparse(
+        &self,
+        _shard_id: u32,
+        _request: &SparseSearchRequest,
+    ) -> Result<(Vec<ScoredRecord>, SearchTimings)> {
+        Err(VedaError::Query(
+            "sparse search not supported by this shard searcher".into(),
+        ))
+    }
 }
 
 /// Distributed query coordinator.
@@ -40,6 +54,46 @@ impl DistributedQueryExecutor {
     /// Register a shard searcher for a given shard ID.
     pub fn register_shard(&mut self, shard_id: u32, searcher: Box<dyn ShardSearcher>) {
         self.shard_searchers.insert(shard_id, searcher);
+    }
+
+    /// Execute a sparse-vector search across all registered shards.
+    pub fn search_sparse(
+        &self,
+        request: &SparseSearchRequest,
+    ) -> Result<(SearchResponse, SearchTimings)> {
+        if self.shard_searchers.is_empty() {
+            return Err(VedaError::Query("no shards registered".into()));
+        }
+
+        let mut all_results: Vec<ScoredRecord> = Vec::new();
+        let mut total_candidates: usize = 0;
+        let mut agg_timings = SearchTimings::default();
+
+        for (&shard_id, searcher) in &self.shard_searchers {
+            let (shard_results, timings) = searcher.search_shard_sparse(shard_id, request)?;
+            total_candidates += shard_results.len();
+            all_results.extend(shard_results);
+            agg_timings.filter_ms += timings.filter_ms;
+            agg_timings.ann_search_ms += timings.ann_search_ms;
+            agg_timings.scoring_ms += timings.scoring_ms;
+        }
+
+        let scoring_start = std::time::Instant::now();
+        all_results.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all_results.truncate(request.k);
+        agg_timings.scoring_ms += scoring_start.elapsed().as_secs_f64() * 1000.0;
+
+        Ok((
+            SearchResponse {
+                results: all_results,
+                total_candidates,
+            },
+            agg_timings,
+        ))
     }
 
     /// Execute a single-vector search across all registered shards.
