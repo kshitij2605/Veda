@@ -40,6 +40,8 @@ pub struct GrowingSegment {
     max_size_bytes: usize,
     /// Soft-delete tracking.
     delete_bitmap: DeleteBitmap,
+    /// UUID → doc_id index. Maintained on insert so lookups are O(1).
+    uuid_to_doc_id: HashMap<Uuid, u32>,
 }
 
 impl GrowingSegment {
@@ -73,7 +75,13 @@ impl GrowingSegment {
             size_bytes: 0,
             max_size_bytes,
             delete_bitmap: DeleteBitmap::new(),
+            uuid_to_doc_id: HashMap::new(),
         }
+    }
+
+    /// O(1) lookup: doc_id by record UUID, or `None` if not in this segment.
+    pub fn doc_id_for_uuid(&self, id: &Uuid) -> Option<u32> {
+        self.uuid_to_doc_id.get(id).copied()
     }
 
     /// Insert a record. Returns the 0-indexed doc_id.
@@ -193,6 +201,7 @@ impl GrowingSegment {
             }
         }
 
+        self.uuid_to_doc_id.insert(record.id(), doc_id);
         self.records.push(record);
         self.size_bytes += added_bytes;
 

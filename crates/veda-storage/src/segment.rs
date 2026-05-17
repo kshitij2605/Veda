@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use veda_core::error::{Result, VedaError};
@@ -32,6 +34,28 @@ const RECORDS_FILE: &str = "records.jsonl";
 
 fn vector_file(name: &str) -> String {
     format!("{name}.vec")
+}
+
+/// Parse just the `__record_id__` UUID out of a JSONL line without
+/// deserializing the whole record. Used at SegmentReader::open() time to
+/// build the uuid → doc_id index on a cold start.
+///
+/// Records are stored with `FieldValue`'s tagged-enum serde form, so the
+/// id field reads as `"__record_id__":{"String":"<uuid>"}`. Use a
+/// minimal `serde_json::Value` lookup rather than a full Record parse
+/// to keep cold-start cheap.
+fn extract_record_id(line: &[u8]) -> Result<Uuid> {
+    let v: serde_json::Value = serde_json::from_slice(line)
+        .map_err(|e| VedaError::Storage(format!("extract_record_id: {e}")))?;
+    let id_str = v
+        .get("__record_id__")
+        .and_then(|tagged| tagged.get("String"))
+        .and_then(|s| s.as_str())
+        .or_else(|| v.get("__record_id__").and_then(|s| s.as_str()))
+        .ok_or_else(|| VedaError::Storage("extract_record_id: __record_id__ missing".into()))?;
+    id_str
+        .parse()
+        .map_err(|e| VedaError::Storage(format!("extract_record_id: invalid uuid: {e}")))
 }
 
 fn sparse_file(name: &str) -> String {
@@ -499,6 +523,17 @@ pub struct SegmentReader {
 
     // Delete bitmap.
     delete_bitmap: DeleteBitmap,
+
+    // mmap'd records.jsonl + per-row byte offsets so `get_record(doc_id)` is
+    // a single slice lookup + JSON parse instead of opening the file and
+    // walking `lines().nth(doc_id)` every time. `record_offsets[i]` is the
+    // start byte of row i and `record_offsets[i+1]` is the start byte of
+    // row i+1 (or the file length for the last row).
+    records_mmap: Arc<Mmap>,
+    record_offsets: Vec<u64>,
+
+    // UUID → doc_id for O(1) lookup by record id. Built once at open time.
+    uuid_to_doc_id: HashMap<Uuid, u32>,
 }
 
 impl SegmentReader {
@@ -592,6 +627,44 @@ impl SegmentReader {
             DeleteBitmap::new()
         };
 
+        // mmap records.jsonl + build per-row offset table in one pass. This
+        // turns get_record(doc_id) from O(N) (open file + lines().nth()) into
+        // O(1) (slice lookup + serde parse), and gives us a UUID → doc_id
+        // index for free.
+        let records_path = dir.join(RECORDS_FILE);
+        let records_file = fs::File::open(&records_path).map_err(|e| {
+            VedaError::Storage(format!("failed to open {records_path:?}: {e}"))
+        })?;
+        let records_mmap = unsafe { Mmap::map(&records_file)? };
+        let mut record_offsets: Vec<u64> = Vec::with_capacity(metadata.row_count as usize + 1);
+        let mut uuid_to_doc_id: HashMap<Uuid, u32> =
+            HashMap::with_capacity(metadata.row_count as usize);
+        record_offsets.push(0);
+        let bytes: &[u8] = &records_mmap[..];
+        let mut line_start: usize = 0;
+        let mut doc_id: u32 = 0;
+        for (i, b) in bytes.iter().enumerate() {
+            if *b == b'\n' {
+                let line = &bytes[line_start..i];
+                if !line.is_empty()
+                    && let Ok(id) = extract_record_id(line)
+                {
+                    uuid_to_doc_id.insert(id, doc_id);
+                }
+                doc_id += 1;
+                record_offsets.push((i + 1) as u64);
+                line_start = i + 1;
+            }
+        }
+        // Handle a final line without trailing newline.
+        if line_start < bytes.len() {
+            let line = &bytes[line_start..];
+            if let Ok(id) = extract_record_id(line) {
+                uuid_to_doc_id.insert(id, doc_id);
+            }
+            record_offsets.push(bytes.len() as u64);
+        }
+
         Ok(Self {
             dir: dir.to_owned(),
             metadata,
@@ -603,7 +676,38 @@ impl SegmentReader {
             range_indexes,
             bitmap_indexes,
             delete_bitmap,
+            records_mmap: Arc::new(records_mmap),
+            record_offsets,
+            uuid_to_doc_id,
         })
+    }
+
+    /// O(1) lookup: doc_id by record UUID, or `None` if not in this segment.
+    pub fn doc_id_for_uuid(&self, id: &Uuid) -> Option<u32> {
+        self.uuid_to_doc_id.get(id).copied()
+    }
+
+    /// Iterate the (uuid, doc_id) pairs in this segment — used for building
+    /// per-collection reverse indexes at recovery time.
+    pub fn iter_uuid_doc_ids(&self) -> impl Iterator<Item = (Uuid, u32)> + '_ {
+        self.uuid_to_doc_id.iter().map(|(u, d)| (*u, *d))
+    }
+
+    /// Return the raw bytes of the JSONL line for the given doc_id, or
+    /// `None` if `doc_id` is out of range. Strips the trailing newline.
+    fn record_line_bytes(&self, doc_id: u32) -> Option<&[u8]> {
+        let i = doc_id as usize;
+        let start = *self.record_offsets.get(i)? as usize;
+        let end = self
+            .record_offsets
+            .get(i + 1)
+            .copied()
+            .unwrap_or(self.records_mmap.len() as u64) as usize;
+        let mut slice = &self.records_mmap[start..end];
+        if slice.last() == Some(&b'\n') {
+            slice = &slice[..slice.len() - 1];
+        }
+        Some(slice)
     }
 
     /// Get segment metadata.
@@ -655,6 +759,8 @@ impl SegmentReader {
     /// Reconstruct a full [`Record`] for the given doc_id from stored JSONL data.
     ///
     /// The record includes scalar fields, blob refs, and vector fields.
+    /// O(1) — looks up `doc_id`'s byte range in the offset table built at
+    /// `open()` time and parses that slice of the mmap.
     pub fn get_record(&self, doc_id: u32) -> Result<Record> {
         if doc_id as u64 >= self.metadata.row_count {
             return Err(VedaError::Storage(format!(
@@ -663,18 +769,11 @@ impl SegmentReader {
             )));
         }
 
-        // Read the JSONL line for this doc_id.
-        let file = fs::File::open(self.dir.join(RECORDS_FILE))?;
-        let reader = BufReader::new(file);
-        let line = reader
-            .lines()
-            .nth(doc_id as usize)
-            .ok_or_else(|| {
-                VedaError::Storage(format!("missing JSONL line for doc_id {doc_id}"))
-            })?
-            .map_err(|e| VedaError::Storage(format!("error reading JSONL: {e}")))?;
+        let line = self.record_line_bytes(doc_id).ok_or_else(|| {
+            VedaError::Storage(format!("missing JSONL line for doc_id {doc_id}"))
+        })?;
 
-        let scalar_data: HashMap<String, FieldValue> = serde_json::from_str(&line)?;
+        let scalar_data: HashMap<String, FieldValue> = serde_json::from_slice(line)?;
 
         // Reconstruct the record.
         let record_id_str = match scalar_data.get("__record_id__") {
