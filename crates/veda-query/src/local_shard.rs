@@ -51,6 +51,14 @@ fn build_vector_index(
             idx.build(&refs)?;
             Ok(Box::new(idx))
         }
+        IndexType::RaBitQRerank => {
+            // RaBitQ for coarse candidates, raw vectors for exact rerank.
+            // See `crates/veda-index/src/quantization/rabitq_rerank.rs`.
+            use veda_index::quantization::rabitq_rerank::RaBitQRerankIndex;
+            let mut idx = RaBitQRerankIndex::new(metric);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
         // Flat (or anything else that isn't a recognised vector index type).
         _ => {
             let mut idx = FlatIndex::new(metric, dimension);
