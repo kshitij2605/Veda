@@ -13,6 +13,7 @@ pub mod embed_insert;
 pub mod evaluate;
 pub mod metrics_middleware;
 pub mod records;
+pub mod rerank;
 pub mod search;
 pub mod state;
 
@@ -60,6 +61,11 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/collections/{name}/evaluate",
             get(evaluate::evaluate),
+        )
+        // Cross-encoder rerank
+        .route(
+            "/v1/collections/{name}/rerank",
+            post(rerank::rerank),
         )
         // Document processing (OCR)
         .route(

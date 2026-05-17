@@ -29,6 +29,10 @@ pub struct SearchRequest {
     /// field declared `mrl_dims`) one of the declared lengths. Bypasses
     /// pre-built ANN indexes, so latency is higher.
     pub truncate_to: Option<u32>,
+    /// Optional cross-encoder rerank stage. When set, the search retrieves
+    /// `limit * 4` candidates (oversampling), reranks them via the
+    /// configured `RERANK_ENDPOINT`, and returns the top `limit`.
+    pub rerank: Option<super::rerank::RerankConfig>,
 }
 
 fn default_limit() -> usize {
@@ -107,7 +111,7 @@ pub struct SearchResponse {
     pub explain: Option<ExplainTiming>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub id: String,
     pub distance: f32,
@@ -120,8 +124,15 @@ pub struct SearchHit {
 pub async fn search(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(req): Json<SearchRequest>,
+    Json(mut req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Cross-encoder rerank oversampling: if rerank is configured, fetch
+    // `limit * 4` initial candidates so the reranker has enough to choose from.
+    let final_limit = req.limit;
+    let rerank_cfg = req.rerank.clone();
+    if rerank_cfg.is_some() {
+        req.limit = (req.limit * 4).max(20);
+    }
     let start = Instant::now();
 
     // Look up the schema to get default metric
@@ -289,6 +300,13 @@ pub async fn search(
         ));
     };
 
+    // Optional rerank stage.
+    let results = if let Some(cfg) = rerank_cfg {
+        apply_rerank(&state, &name, &req, &cfg, results, final_limit).await?
+    } else {
+        results
+    };
+
     let took_ms = start.elapsed().as_millis() as u64;
     metrics::histogram!(m::SEARCH_DURATION, "collection" => name.clone())
         .record(start.elapsed().as_secs_f64());
@@ -300,6 +318,101 @@ pub async fn search(
         took_ms,
         explain: explain_timing,
     }))
+}
+
+/// Apply a cross-encoder rerank pass to search results.
+async fn apply_rerank(
+    state: &AppState,
+    collection: &str,
+    req: &SearchRequest,
+    cfg: &super::rerank::RerankConfig,
+    results: Vec<SearchHit>,
+    final_limit: usize,
+) -> Result<Vec<SearchHit>, (StatusCode, Json<ErrorResponse>)> {
+    use veda_core::record::FieldValue;
+
+    let query = cfg.query.clone();
+
+    // Look up each candidate's text field.
+    let managers = state.inner.segment_managers.read().await;
+    let shard_map = managers.get(collection).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("collection '{collection}' not found"),
+            }),
+        )
+    })?;
+    let mut texts: Vec<String> = Vec::with_capacity(results.len());
+    let mut keep_indices: Vec<usize> = Vec::with_capacity(results.len());
+    for (i, hit) in results.iter().enumerate() {
+        let id: uuid::Uuid = match hit.id.parse() {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+        let mut found = false;
+        'shard: for sm in shard_map.values() {
+            let gs = sm.growing_segment();
+            for doc_id in 0..gs.count() {
+                if let Some(rec) = gs.get_record(doc_id)
+                    && rec.id() == id
+                {
+                    if let Some(FieldValue::String(s)) = rec.get(&cfg.field) {
+                        texts.push(s.clone());
+                        keep_indices.push(i);
+                    }
+                    found = true;
+                    break 'shard;
+                }
+            }
+            for handle in sm.sealed_segments() {
+                for doc_id in 0..handle.metadata.row_count as u32 {
+                    if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                        continue;
+                    }
+                    if let Ok(rec) = handle.reader.get_record(doc_id)
+                        && rec.id() == id
+                    {
+                        if let Some(FieldValue::String(s)) = rec.get(&cfg.field) {
+                            texts.push(s.clone());
+                            keep_indices.push(i);
+                        }
+                        found = true;
+                        break 'shard;
+                    }
+                }
+            }
+        }
+        let _ = found;
+    }
+    drop(managers);
+
+    if texts.is_empty() {
+        let mut r = results;
+        r.truncate(final_limit);
+        return Ok(r);
+    }
+
+    let scored = super::rerank::call_reranker(
+        &query,
+        &texts,
+        cfg.top_k.min(final_limit),
+        cfg.model.as_deref(),
+    )
+    .await?;
+
+    // Map rerank indices (into texts/keep_indices) back to original SearchHits.
+    let mut out: Vec<SearchHit> = Vec::with_capacity(scored.len());
+    for (idx, score) in scored {
+        if let Some(&orig) = keep_indices.get(idx)
+            && let Some(h) = results.get(orig)
+        {
+            let mut hit = h.clone();
+            hit.distance = -score; // lower = better
+            out.push(hit);
+        }
+    }
+    Ok(out)
 }
 
 fn execute_single_vector(
