@@ -63,6 +63,11 @@ pub struct FieldDef {
     /// type and the `hybrid` (dense + BM25) query type.
     #[serde(default)]
     pub bm25: bool,
+    /// Tokenizer for BM25. Recognized: `"cjk_bigram"` (default, good
+    /// for mixed-script and CJK), `"whitespace"` (cheaper for
+    /// ASCII-only). Unknown names fall back to the default.
+    #[serde(default)]
+    pub bm25_tokenizer: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -418,7 +423,8 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
         "string" => Ok(
             FieldDefinition::new(&f.name, FieldType::String)
                 .with_filterable(f.filterable)
-                .with_bm25(f.bm25),
+                .with_bm25(f.bm25)
+                .with_bm25_tokenizer(f.bm25_tokenizer.clone()),
         ),
         "int32" => Ok(
             FieldDefinition::new(&f.name, FieldType::Int32).with_filterable(f.filterable),

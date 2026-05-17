@@ -22,6 +22,44 @@ pub const BM25_K1: f32 = 1.2;
 /// Lucene-default BM25 parameter b.
 pub const BM25_B: f32 = 0.75;
 
+/// Identifier for a tokenizer choice. Persisted with each index so a
+/// query at read time uses the same tokenizer that built the postings.
+///
+/// Adding a new variant requires updating [`run_tokenizer`] to dispatch
+/// to its implementation. External tokenizers (Kuromoji, Jieba,
+/// SentencePiece) can be slotted in here behind feature flags without
+/// touching the index format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenizerKind {
+    /// Built-in: lowercase ASCII word runs + unigrams and overlapping
+    /// bigrams for CJK characters. Good default for mixed-script and
+    /// Japanese / Chinese / Korean corpora without bundling Kuromoji.
+    #[default]
+    CjkBigram,
+    /// Pure whitespace + punctuation split, lowercased. Cheaper and
+    /// smaller postings; fine for ASCII / Latin-script workloads where
+    /// CJK is rare.
+    Whitespace,
+}
+
+impl TokenizerKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CjkBigram => "cjk_bigram",
+            Self::Whitespace => "whitespace",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "cjk_bigram" | "cjk-bigram" | "default" => Some(Self::CjkBigram),
+            "whitespace" | "ws" => Some(Self::Whitespace),
+            _ => None,
+        }
+    }
+}
+
 /// Per-segment BM25 inverted index.
 ///
 /// `postings` is `term → Vec<(doc_id, term_freq)>` sorted by doc_id at
@@ -35,6 +73,12 @@ pub struct Bm25Index {
     /// Sum of all `doc_lengths` entries, kept incrementally so `avg_dl`
     /// is O(1).
     total_tokens: u64,
+    /// Tokenizer used to build (and that must be used to query) this
+    /// index. Persisted so a sealed segment can answer queries with the
+    /// same tokenizer that built its postings even if the schema default
+    /// is later changed.
+    #[serde(default)]
+    tokenizer: TokenizerKind,
 }
 
 impl Bm25Index {
@@ -42,10 +86,23 @@ impl Bm25Index {
         Self::default()
     }
 
+    /// Construct with a specific tokenizer. Use this for fields whose
+    /// schema declares a non-default tokenizer.
+    pub fn with_tokenizer(tokenizer: TokenizerKind) -> Self {
+        Self {
+            tokenizer,
+            ..Self::default()
+        }
+    }
+
+    pub fn tokenizer(&self) -> TokenizerKind {
+        self.tokenizer
+    }
+
     /// Add `text` for `doc_id`. Caller is responsible for inserting in
     /// increasing doc_id order (the segment writer does this).
     pub fn insert(&mut self, doc_id: u32, text: &str) {
-        let tokens = tokenize(text);
+        let tokens = run_tokenizer(self.tokenizer, text);
         let len = tokens.len() as u32;
 
         // Aggregate term frequencies for this doc first.
@@ -85,7 +142,7 @@ impl Bm25Index {
             return Vec::new();
         }
         let avg_dl = self.avg_doc_length();
-        let q_tokens = tokenize(query);
+        let q_tokens = run_tokenizer(self.tokenizer, query);
 
         // Dedup query terms — repeated tokens don't add new evidence in
         // standard BM25 (we already sum across all matching docs).
@@ -135,13 +192,23 @@ impl Bm25Index {
     }
 }
 
-/// Tokenize text into BM25 tokens.
+/// Dispatch to the selected tokenizer implementation. New variants are
+/// plumbed by extending [`TokenizerKind`] and adding a branch here.
+fn run_tokenizer(kind: TokenizerKind, text: &str) -> Vec<String> {
+    match kind {
+        TokenizerKind::CjkBigram => tokenize_cjk_bigram(text),
+        TokenizerKind::Whitespace => tokenize_whitespace(text),
+    }
+}
+
+/// Built-in default: lowercase ASCII word runs + unigrams + overlapping
+/// 2-char bigrams for CJK runs.
 ///
 /// Two regimes mixed together:
 /// - Latin / digits: split on Unicode word boundaries, lowercase ASCII.
 /// - CJK (Hiragana, Katakana, CJK ideographs, Hangul): emit each
 ///   character as a unigram AND emit overlapping 2-char bigrams.
-fn tokenize(text: &str) -> Vec<String> {
+fn tokenize_cjk_bigram(text: &str) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut cjk_run: Vec<char> = Vec::new();
@@ -187,6 +254,26 @@ fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 
+/// Whitespace tokenizer: lowercase + split on Unicode word boundaries.
+/// Skips the CJK bigram augmentation — cheaper and produces smaller
+/// postings; recommended for ASCII / Latin-script workloads.
+fn tokenize_whitespace(text: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            current.push(c);
+        } else if !current.is_empty() {
+            tokens.push(current.to_lowercase());
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current.to_lowercase());
+    }
+    tokens
+}
+
 /// True for Hiragana, Katakana, CJK Unified Ideographs (basic + Ext A),
 /// CJK compatibility ideographs, and Hangul syllables. Caller-side
 /// tokenizers may extend this if exotic scripts matter.
@@ -206,13 +293,13 @@ mod tests {
 
     #[test]
     fn ascii_tokenization_lowercases_and_splits() {
-        let toks = tokenize("Hello, World! BM25 search.");
+        let toks = tokenize_cjk_bigram("Hello, World! BM25 search.");
         assert_eq!(toks, vec!["hello", "world", "bm25", "search"]);
     }
 
     #[test]
     fn cjk_emits_unigrams_and_bigrams() {
-        let toks = tokenize("ランサム");
+        let toks = tokenize_cjk_bigram("ランサム");
         // Unigrams: ラ, ン, サ, ム; bigrams: ラン, ンサ, サム
         assert_eq!(toks.len(), 7);
         assert!(toks.contains(&"ラ".to_owned()));
@@ -222,7 +309,7 @@ mod tests {
 
     #[test]
     fn mixed_script_runs_tokenize_independently() {
-        let toks = tokenize("Adobe Acrobat とPDF");
+        let toks = tokenize_cjk_bigram("Adobe Acrobat とPDF");
         assert!(toks.contains(&"adobe".to_owned()));
         assert!(toks.contains(&"acrobat".to_owned()));
         assert!(toks.contains(&"と".to_owned()));
@@ -253,6 +340,26 @@ mod tests {
         assert!(!hits.is_empty());
         // Doc 0 explicitly mentions ランサムウェア — should rank first.
         assert_eq!(hits[0].0, 0);
+    }
+
+    #[test]
+    fn whitespace_tokenizer_skips_cjk_bigrams() {
+        let toks = tokenize_whitespace("ランサム Adobe");
+        // Each CJK char becomes a unigram, but NO bigrams. Plus "adobe".
+        assert!(toks.contains(&"adobe".to_owned()));
+        // No bigrams like "ラン" should appear.
+        assert!(!toks.iter().any(|t| t.chars().filter(|c| is_cjk(*c)).count() == 2));
+    }
+
+    #[test]
+    fn tokenizer_choice_is_persisted_across_save_load() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        idx.insert(0, "Hello world");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bm25.idx");
+        idx.save(&path).unwrap();
+        let loaded = Bm25Index::load(&path).unwrap();
+        assert_eq!(loaded.tokenizer(), TokenizerKind::Whitespace);
     }
 
     #[test]

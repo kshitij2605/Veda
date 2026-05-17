@@ -73,9 +73,13 @@ impl GrowingSegment {
         let mut bm25_indexes = HashMap::new();
         for field in schema.scalar_fields() {
             if field.bm25() && matches!(field.field_type(), veda_core::types::FieldType::String) {
+                let tok = field
+                    .bm25_tokenizer()
+                    .and_then(crate::bm25_index::TokenizerKind::from_name)
+                    .unwrap_or_default();
                 bm25_indexes.insert(
                     field.name().to_owned(),
-                    crate::bm25_index::Bm25Index::new(),
+                    crate::bm25_index::Bm25Index::with_tokenizer(tok),
                 );
             }
         }
