@@ -2,13 +2,51 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 use veda_core::error::Result;
-use veda_core::types::FieldType;
+use veda_core::types::{DistanceMetric, FieldType, IndexType};
+use veda_index::diskann::DiskAnnIndex;
 use veda_index::flat::FlatIndex;
+use veda_index::hnsw::HnswIndex;
+use veda_index::ivfpq::IvfPqIndex;
 use veda_index::traits::VectorIndex;
 use veda_storage::segment_manager::SegmentManager;
 
 use crate::distributed::ShardSearcher;
 use crate::search::{SearchExecutor, SearchTimings, ScoredRecord, VectorSearchRequest};
+
+/// Build a vector index of the declared type, populated from `vectors`.
+///
+/// For unknown / non-vector index types, falls back to `Flat`.
+fn build_vector_index(
+    index_type: IndexType,
+    metric: DistanceMetric,
+    dimension: u32,
+    vectors: Vec<Vec<f32>>,
+) -> Result<Box<dyn VectorIndex>> {
+    let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
+    match index_type {
+        IndexType::Hnsw => {
+            let mut idx = HnswIndex::new(metric, dimension);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
+        IndexType::DiskAnn => {
+            let mut idx = DiskAnnIndex::new(metric, dimension);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
+        IndexType::IvfPq => {
+            let mut idx = IvfPqIndex::new(metric, dimension);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
+        // Flat (or anything else that isn't a recognised vector index type).
+        _ => {
+            let mut idx = FlatIndex::new(metric, dimension);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
+    }
+}
 
 /// Searches a local shard (in-process, no network).
 ///
@@ -28,10 +66,10 @@ impl LocalShardSearcher {
         }
     }
 
-    /// Build FlatIndex indexes for all sealed segments.
+    /// Build per-field vector indexes for all sealed segments.
     ///
-    /// Iterates sealed segments, and for each vector field in the schema builds
-    /// a `FlatIndex` from the stored vectors.
+    /// The index type is taken from the field definition's `index_type`
+    /// (HNSW / DiskANN / IVF-PQ / Flat). Unknown types fall back to Flat.
     pub fn build_indexes(&mut self) -> Result<()> {
         for handle in self.segment_manager.sealed_segments() {
             let seg_id = handle.metadata.id;
@@ -47,12 +85,18 @@ impl LocalShardSearcher {
 
             for field_def in schema.vector_fields() {
                 if let FieldType::Vector { dimension, metric } = field_def.field_type() {
-                    let mut index = FlatIndex::new(*metric, *dimension);
+                    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(row_count as usize);
                     for doc_id in 0..row_count {
                         let vec = reader.get_vector(field_def.name(), doc_id)?;
-                        index.insert(doc_id, vec)?;
+                        vectors.push(vec.to_vec());
                     }
-                    field_indexes.insert(field_def.name().to_owned(), Box::new(index));
+                    let index = build_vector_index(
+                        field_def.index_type(),
+                        *metric,
+                        *dimension,
+                        vectors,
+                    )?;
+                    field_indexes.insert(field_def.name().to_owned(), index);
                 }
             }
 
