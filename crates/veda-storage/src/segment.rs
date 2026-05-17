@@ -79,6 +79,25 @@ pub enum SegmentTier {
     Cold,
 }
 
+/// Physical layout of the per-row scalar / blob data inside a segment.
+///
+/// - `Jsonl` (default for legacy segments): one JSONL line per row,
+///   mmap'd via `JsonlStoredFields`. Compact wire format, fast for
+///   small rows, mediocre when the caller wants only one field of
+///   many.
+/// - `Columnar`: per-field column files under `segment_dir/columns/`,
+///   read via `ColumnarStoredFields`. Projection-friendly — `get_field`
+///   only touches the column file for the requested field.
+///
+/// Selection happens at segment-create time on the writer; the reader
+/// detects which to open from this metadata field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StoredFormat {
+    #[default]
+    Jsonl,
+    Columnar,
+}
+
 /// Metadata stored alongside a segment, persisted as `metadata.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentMetadata {
@@ -91,6 +110,10 @@ pub struct SegmentMetadata {
     /// as `Hot` (the serde default).
     #[serde(default)]
     pub tier: SegmentTier,
+    /// Stored-fields physical layout. Older segments without this field
+    /// load as `Jsonl` (the serde default).
+    #[serde(default)]
+    pub stored_format: StoredFormat,
 }
 
 // ── Scalar index type selector ─────────────────────────────────────────────
@@ -168,8 +191,19 @@ pub struct SegmentWriter {
     // marked `bm25 = true` in the schema).
     bm25_indexes: HashMap<String, Bm25Index>,
 
-    // JSONL writer for full record scalar data.
+    // JSONL writer for full record scalar data. Only used when
+    // `stored_format == Jsonl`. For columnar segments this holds an
+    // open file at `records.jsonl` that stays empty — keeping the
+    // field reduces the diff against the existing insert path.
     record_writer: BufWriter<fs::File>,
+
+    // Columnar accumulator for stored-fields data. `Some` only when
+    // `stored_format == Columnar`. Filled per insert, drained at seal.
+    columnar_writer: Option<crate::columnar_stored_fields::ColumnarWriter>,
+
+    // Which physical layout `seal` will materialize. Defaults to Jsonl
+    // for backwards compatibility; create_columnar() flips it.
+    stored_format: StoredFormat,
 
     // Blob refs: doc_id -> { field_name -> blob_ref_uri }
     blob_refs: Vec<HashMap<String, String>>,
@@ -264,8 +298,25 @@ impl SegmentWriter {
             bitmap_indexes,
             bm25_indexes,
             record_writer,
+            columnar_writer: None,
+            stored_format: StoredFormat::Jsonl,
             blob_refs: Vec::new(),
         })
+    }
+
+    /// Create a segment writer that materializes its scalar / blob
+    /// data in the columnar layout (per-field column files under
+    /// `<dir>/columns/`) instead of the legacy `records.jsonl`.
+    ///
+    /// Useful when the workload's records have many scalar fields and
+    /// the read side wants to project a subset cheaply. Wire-up of
+    /// schema-level format selection lives in the gateway create-
+    /// collection handler.
+    pub fn create_columnar(dir: &Path, schema: &CollectionSchema) -> Result<Self> {
+        let mut w = Self::create(dir, schema)?;
+        w.stored_format = StoredFormat::Columnar;
+        w.columnar_writer = Some(crate::columnar_stored_fields::ColumnarWriter::new(dir));
+        Ok(w)
     }
 
     /// Insert a record into the segment. Returns the internal 0-indexed doc_id.
@@ -392,29 +443,40 @@ impl SegmentWriter {
         }
         self.blob_refs.push(doc_blob_refs);
 
-        // 4. Write scalar field data as a JSONL line for record reconstruction.
-        //    We store the record id and all non-vector, non-blob fields.
-        let mut scalar_data: HashMap<String, FieldValue> = HashMap::new();
-        // Store the record id so we can reconstruct it later.
-        scalar_data.insert(
-            "__record_id__".to_owned(),
-            FieldValue::String(record.id().to_string()),
-        );
-        for field_def in self.schema.scalar_fields() {
-            let name = field_def.name();
-            if let Some(value) = record.get(name) {
-                scalar_data.insert(name.to_owned(), value.clone());
+        // 4. Persist scalar / blob field data.
+        //    Columnar: push the row into ColumnarWriter (the per-field
+        //    column files materialize at seal time). JSONL: write one
+        //    line with __record_id__ + all scalars + blob refs.
+        match self.stored_format {
+            StoredFormat::Columnar => {
+                let columnar = self
+                    .columnar_writer
+                    .as_mut()
+                    .expect("create_columnar wasn't called but stored_format is Columnar");
+                columnar.push_record(record.id(), record, &self.schema)?;
+            }
+            StoredFormat::Jsonl => {
+                let mut scalar_data: HashMap<String, FieldValue> = HashMap::new();
+                scalar_data.insert(
+                    "__record_id__".to_owned(),
+                    FieldValue::String(record.id().to_string()),
+                );
+                for field_def in self.schema.scalar_fields() {
+                    let name = field_def.name();
+                    if let Some(value) = record.get(name) {
+                        scalar_data.insert(name.to_owned(), value.clone());
+                    }
+                }
+                for field_def in self.schema.blob_fields() {
+                    let name = field_def.name();
+                    if let Some(value) = record.get(name) {
+                        scalar_data.insert(name.to_owned(), value.clone());
+                    }
+                }
+                let line = serde_json::to_string(&scalar_data)?;
+                writeln!(self.record_writer, "{line}")?;
             }
         }
-        // Also store blob refs in the JSONL for full reconstruction.
-        for field_def in self.schema.blob_fields() {
-            let name = field_def.name();
-            if let Some(value) = record.get(name) {
-                scalar_data.insert(name.to_owned(), value.clone());
-            }
-        }
-        let line = serde_json::to_string(&scalar_data)?;
-        writeln!(self.record_writer, "{line}")?;
 
         self.row_count += 1;
         Ok(doc_id)
@@ -447,8 +509,19 @@ impl SegmentWriter {
             writer.close(&multivec_dir.join(multivec_file(&name)))?;
         }
 
-        // 2. Flush JSONL writer.
+        // 2. Flush JSONL writer (always — empty for columnar segments)
+        //    or seal the columnar accumulator (writes per-field column
+        //    files + the __record_id__ column + storage_format.txt).
         self.record_writer.flush()?;
+        if let Some(columnar) = self.columnar_writer.take() {
+            columnar.seal()?;
+            // For columnar segments the JSONL stub is redundant. Leave
+            // the empty file in place so older Veda binaries don't
+            // panic on missing records.jsonl — they'll just see an
+            // empty mmap and a JsonlStoredFields with zero rows
+            // (caller still falls through to the columnar reader via
+            // the metadata.stored_format marker).
+        }
 
         // 3. Build and save range indexes.
         let scalars_dir = self.dir.join(SCALARS_DIR);
@@ -494,6 +567,7 @@ impl SegmentWriter {
             created_at: now,
             sealed: true,
             tier: SegmentTier::Hot,
+            stored_format: self.stored_format,
         };
         let meta_json = serde_json::to_vec_pretty(&metadata)?;
         fs::write(self.dir.join(METADATA_FILE), meta_json)?;
@@ -538,9 +612,37 @@ pub struct SegmentReader {
     // Delete bitmap.
     delete_bitmap: DeleteBitmap,
 
-    // Per-row scalar/blob data, abstracted behind a single owner. Today
-    // this is the JSONL-backed impl; the columnar impl drops in here.
-    stored_fields: crate::stored_fields::JsonlStoredFields,
+    // Per-row scalar/blob data. Dispatches on segment metadata's
+    // `stored_format`: legacy segments are Jsonl (mmap'd JSONL +
+    // offset table), new segments may be Columnar (per-field column
+    // files).
+    stored_fields: StoredFieldsBackend,
+}
+
+/// Runtime dispatch over the two stored-fields layouts. New layouts
+/// land as additional variants; the reader picks one at `open()` time
+/// from `metadata.stored_format`.
+pub enum StoredFieldsBackend {
+    Jsonl(crate::stored_fields::JsonlStoredFields),
+    Columnar(crate::columnar_stored_fields::ColumnarStoredFields),
+}
+
+impl StoredFieldsBackend {
+    pub fn doc_id_for_uuid(&self, id: &Uuid) -> Option<u32> {
+        match self {
+            Self::Jsonl(j) => j.doc_id_for_uuid(id),
+            Self::Columnar(c) => c.doc_id_for_uuid(id),
+        }
+    }
+
+    /// Iterate (uuid, doc_id) pairs. Boxed-dyn iterator keeps the
+    /// signature object-safe across variants.
+    pub fn iter_uuid_doc_ids(&self) -> Box<dyn Iterator<Item = (Uuid, u32)> + '_> {
+        match self {
+            Self::Jsonl(j) => Box::new(j.iter_uuid_doc_ids()),
+            Self::Columnar(c) => Box::new(c.iter_uuid_doc_ids()),
+        }
+    }
 }
 
 impl SegmentReader {
@@ -648,10 +750,17 @@ impl SegmentReader {
             DeleteBitmap::new()
         };
 
-        // Per-row scalar/blob data, mmap'd once + offset table + UUID
-        // index. See `crates/veda-storage/src/stored_fields.rs`.
-        let stored_fields =
-            crate::stored_fields::JsonlStoredFields::open(dir, metadata.row_count)?;
+        // Per-row scalar/blob data. The metadata's stored_format
+        // marker picks the backend; legacy segments without the field
+        // serde-default to Jsonl so they keep loading.
+        let stored_fields = match metadata.stored_format {
+            StoredFormat::Jsonl => StoredFieldsBackend::Jsonl(
+                crate::stored_fields::JsonlStoredFields::open(dir, metadata.row_count)?,
+            ),
+            StoredFormat::Columnar => StoredFieldsBackend::Columnar(
+                crate::columnar_stored_fields::ColumnarStoredFields::open(dir)?,
+            ),
+        };
 
         Ok(Self {
             dir: dir.to_owned(),
@@ -687,9 +796,6 @@ impl SegmentReader {
 
     /// Return the raw bytes of the JSONL line for the given doc_id, or
     /// `None` if `doc_id` is out of range. Strips the trailing newline.
-    fn record_line_bytes(&self, doc_id: u32) -> Option<&[u8]> {
-        self.stored_fields.get_line_bytes(doc_id)
-    }
 
     /// Get segment metadata.
     pub fn metadata(&self) -> &SegmentMetadata {
@@ -750,24 +856,33 @@ impl SegmentReader {
             )));
         }
 
-        let line = self.record_line_bytes(doc_id).ok_or_else(|| {
-            VedaError::Storage(format!("missing JSONL line for doc_id {doc_id}"))
-        })?;
-
-        let scalar_data: HashMap<String, FieldValue> = serde_json::from_slice(line)?;
-
-        // Reconstruct the record.
-        let record_id_str = match scalar_data.get("__record_id__") {
-            Some(FieldValue::String(s)) => s.clone(),
-            _ => {
-                return Err(VedaError::Storage(
-                    "missing __record_id__ in stored data".into(),
-                ))
+        let (record_id, scalar_data) = match &self.stored_fields {
+            StoredFieldsBackend::Jsonl(j) => {
+                let line = j.get_line_bytes(doc_id).ok_or_else(|| {
+                    VedaError::Storage(format!("missing JSONL line for doc_id {doc_id}"))
+                })?;
+                let scalar_data: HashMap<String, FieldValue> = serde_json::from_slice(line)?;
+                let record_id_str = match scalar_data.get("__record_id__") {
+                    Some(FieldValue::String(s)) => s.clone(),
+                    _ => {
+                        return Err(VedaError::Storage(
+                            "missing __record_id__ in stored data".into(),
+                        ))
+                    }
+                };
+                let id: uuid::Uuid = record_id_str.parse().map_err(|e| {
+                    VedaError::Storage(format!("invalid record id: {e}"))
+                })?;
+                (id, scalar_data)
+            }
+            StoredFieldsBackend::Columnar(c) => {
+                let id = c.record_id(doc_id).ok_or_else(|| {
+                    VedaError::Storage(format!("columnar: doc_id {doc_id} has no __record_id__"))
+                })?;
+                let scalar = c.get_scalar_map(doc_id)?;
+                (id, scalar)
             }
         };
-        let record_id: uuid::Uuid = record_id_str
-            .parse()
-            .map_err(|e| VedaError::Storage(format!("invalid record id: {e}")))?;
 
         let mut record = Record::with_id(record_id);
 

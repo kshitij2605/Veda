@@ -506,7 +506,13 @@ impl GrowingSegment {
     /// Consumes self, writes all non-deleted records to the given directory,
     /// and returns the resulting `SegmentMetadata`.
     pub fn seal(self, dir: &Path) -> Result<SegmentMetadata> {
-        let mut writer = SegmentWriter::create(dir, &self.schema)?;
+        // Pick the writer flavour from the schema's stored_format
+        // default. Unknown / missing values fall back to JSONL — that
+        // preserves behavior for every existing collection.
+        let mut writer = match self.schema.stored_format() {
+            Some("columnar") => SegmentWriter::create_columnar(dir, &self.schema)?,
+            _ => SegmentWriter::create(dir, &self.schema)?,
+        };
 
         for (doc_id, record) in self.records.iter().enumerate() {
             if self.delete_bitmap.is_deleted(doc_id as u32) {
