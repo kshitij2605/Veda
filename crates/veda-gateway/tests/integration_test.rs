@@ -1327,6 +1327,78 @@ async fn test_sparse_vector_end_to_end() {
     assert_eq!(resp.status(), 400);
 }
 
+// ── ColPali / multi-vector ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_colpali_multi_vector_search() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "colpali_col",
+            "fields": [
+                {
+                    "name": "tokens",
+                    "type": "multi_vector",
+                    "dimension": 4,
+                    "max_vectors": 8,
+                    "metric": "cosine"
+                },
+                { "name": "title", "type": "string", "filterable": true }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Three records with different token sequences.
+    let resp = c
+        .post(format!("{base}/v1/collections/colpali_col/insert"))
+        .json(&json!({
+            "records": [
+                {
+                    "tokens": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+                    "title": "doc-a"
+                },
+                {
+                    "tokens": [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+                    "title": "doc-b"
+                },
+                {
+                    "tokens": [[1.0, 1.0, 0.0, 0.0]],
+                    "title": "doc-c"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // ColPali search — query exactly matches doc-a's first token.
+    let resp = c
+        .post(format!("{base}/v1/collections/colpali_col/search"))
+        .json(&json!({
+            "query": {
+                "colpali": {
+                    "field": "tokens",
+                    "rows": [[1.0, 0.0, 0.0, 0.0]]
+                }
+            },
+            "limit": 3
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+    assert!(!results.is_empty());
+}
+
 // ── MRL truncation ─────────────────────────────────────────────────────────
 
 #[tokio::test]

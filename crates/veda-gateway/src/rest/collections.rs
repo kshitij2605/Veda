@@ -45,6 +45,9 @@ pub struct FieldDef {
     /// Optional embedding-model identifier for vector fields. When set,
     /// embed-insert calls must use the same model.
     pub model: Option<String>,
+    /// Maximum number of vectors per record for multi-vector fields.
+    /// 0 / absent = unbounded.
+    pub max_vectors: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -312,6 +315,26 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
             };
             Ok(fd.with_filterable(f.filterable))
         }
+        "multi_vector" | "multivector" => {
+            let dim = f.dimension.ok_or_else(|| {
+                format!("field '{}': multi_vector type requires 'dimension'", f.name)
+            })?;
+            let metric = match f.metric.as_deref().unwrap_or("cosine") {
+                "cosine" => DistanceMetric::Cosine,
+                "euclidean" => DistanceMetric::Euclidean,
+                "dot_product" | "dotproduct" => DistanceMetric::DotProduct,
+                other => {
+                    return Err(format!(
+                        "field '{}': multi_vector unsupported metric '{other}'",
+                        f.name
+                    ));
+                }
+            };
+            // max_vectors is optional; 0 = unbounded.
+            let max_vectors = f.max_vectors.unwrap_or(0);
+            Ok(FieldDefinition::multi_vector(&f.name, dim, max_vectors, metric)
+                .with_filterable(f.filterable))
+        }
         "sparse_vector" | "sparsevector" => {
             let dim = f.dimension.ok_or_else(|| {
                 format!("field '{}': sparse_vector type requires 'dimension'", f.name)
@@ -405,6 +428,15 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
                 _ => "cosine",
             };
             ("sparse_vector", Some(*dimension), Some(m.to_owned()), None)
+        }
+        FieldType::MultiVector { dimension, metric, .. } => {
+            let m = match metric {
+                DistanceMetric::Cosine => "cosine",
+                DistanceMetric::Euclidean => "euclidean",
+                DistanceMetric::DotProduct => "dot_product",
+                _ => "cosine",
+            };
+            ("multi_vector", Some(*dimension), Some(m.to_owned()), None)
         }
         FieldType::Array(_) => ("array", None, None, None),
     };

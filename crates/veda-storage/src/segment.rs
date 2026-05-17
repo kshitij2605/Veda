@@ -13,6 +13,7 @@ use veda_core::types::{FieldType, SegmentId};
 use crate::bitmap_index::BitmapIndex;
 use crate::delete_bitmap::DeleteBitmap;
 use crate::inverted_index::InvertedIndex;
+use crate::multivector_storage::{MultiVectorStorageReader, MultiVectorStorageWriter};
 use crate::range_index::RangeIndex;
 use crate::sparse_storage::{SparseVectorStorageReader, SparseVectorStorageWriter};
 use crate::vector_storage::{VectorStorageReader, VectorStorageWriter};
@@ -22,6 +23,7 @@ use veda_core::sparse::SparseVec;
 
 const VECTORS_DIR: &str = "vectors";
 const SPARSE_DIR: &str = "sparse";
+const MULTIVEC_DIR: &str = "multivec";
 const SCALARS_DIR: &str = "scalars";
 const DELETE_BITMAP_FILE: &str = "delete_bitmap.bin";
 const METADATA_FILE: &str = "metadata.json";
@@ -34,6 +36,10 @@ fn vector_file(name: &str) -> String {
 
 fn sparse_file(name: &str) -> String {
     format!("{name}.spr")
+}
+
+fn multivec_file(name: &str) -> String {
+    format!("{name}.mvec")
 }
 
 fn inverted_file(name: &str) -> String {
@@ -123,6 +129,9 @@ pub struct SegmentWriter {
     // Sparse vector writers keyed by field name.
     sparse_writers: HashMap<String, SparseVectorStorageWriter>,
 
+    // Multi-vector writers keyed by field name.
+    multivec_writers: HashMap<String, MultiVectorStorageWriter>,
+
     // Scalar indexes keyed by field name.
     inverted_indexes: HashMap<String, InvertedIndex>,
     range_indexes: HashMap<String, RangeIndex>,
@@ -167,6 +176,15 @@ impl SegmentWriter {
             sparse_writers.insert(field.name().to_owned(), SparseVectorStorageWriter::create());
         }
 
+        // Initialize multi-vector writers.
+        let mut multivec_writers = HashMap::new();
+        for field in schema.multi_vector_fields() {
+            multivec_writers
+                .insert(field.name().to_owned(), MultiVectorStorageWriter::create());
+        }
+        let multivec_dir = dir.join(MULTIVEC_DIR);
+        fs::create_dir_all(&multivec_dir)?;
+
         // Initialize scalar indexes.
         let mut inverted_indexes = HashMap::new();
         let mut range_indexes = HashMap::new();
@@ -197,6 +215,7 @@ impl SegmentWriter {
             row_count: 0,
             vector_writers,
             sparse_writers,
+            multivec_writers,
             inverted_indexes,
             range_indexes,
             bitmap_indexes,
@@ -233,6 +252,23 @@ impl SegmentWriter {
                         "record missing required vector field '{name}'"
                     )));
                 }
+            }
+        }
+
+        // 1c. Write multi-vector fields. Missing values get an empty list.
+        for field_def in self.schema.multi_vector_fields() {
+            let name = field_def.name();
+            let rows: Vec<Vec<f32>> = match record.get(name) {
+                Some(FieldValue::MultiVector(rows)) => rows.clone(),
+                Some(_) => {
+                    return Err(VedaError::Storage(format!(
+                        "field '{name}' expected MultiVector, got different type"
+                    )));
+                }
+                None => Vec::new(),
+            };
+            if let Some(w) = self.multivec_writers.get_mut(name) {
+                w.append(rows);
             }
         }
 
@@ -355,6 +391,12 @@ impl SegmentWriter {
             writer.close(&sparse_dir.join(sparse_file(&name)))?;
         }
 
+        // 1c. Close all multi-vector writers.
+        let multivec_dir = self.dir.join(MULTIVEC_DIR);
+        for (name, writer) in self.multivec_writers {
+            writer.close(&multivec_dir.join(multivec_file(&name)))?;
+        }
+
         // 2. Flush JSONL writer.
         self.record_writer.flush()?;
 
@@ -424,6 +466,9 @@ pub struct SegmentReader {
     // Sparse vector readers keyed by field name.
     sparse_readers: HashMap<String, SparseVectorStorageReader>,
 
+    // Multi-vector readers keyed by field name.
+    multivec_readers: HashMap<String, MultiVectorStorageReader>,
+
     // Scalar indexes keyed by field name.
     inverted_indexes: HashMap<String, InvertedIndex>,
     range_indexes: HashMap<String, RangeIndex>,
@@ -474,6 +519,17 @@ impl SegmentReader {
             }
         }
 
+        // Open multi-vector readers.
+        let multivec_dir = dir.join(MULTIVEC_DIR);
+        let mut multivec_readers = HashMap::new();
+        for field in schema.multi_vector_fields() {
+            let path = multivec_dir.join(multivec_file(field.name()));
+            if path.exists() {
+                let reader = MultiVectorStorageReader::open(&path)?;
+                multivec_readers.insert(field.name().to_owned(), reader);
+            }
+        }
+
         // Load scalar indexes.
         let scalars_dir = dir.join(SCALARS_DIR);
         let mut inverted_indexes = HashMap::new();
@@ -519,6 +575,7 @@ impl SegmentReader {
             schema,
             vector_readers,
             sparse_readers,
+            multivec_readers,
             inverted_indexes,
             range_indexes,
             bitmap_indexes,
@@ -554,6 +611,22 @@ impl SegmentReader {
         field: &str,
     ) -> Option<impl Iterator<Item = (u32, &SparseVec)>> {
         self.sparse_readers.get(field).map(|r| r.iter())
+    }
+
+    /// Get a multi-vector by field name and doc_id.
+    pub fn get_multi_vector(&self, field: &str, doc_id: u32) -> Result<&Vec<Vec<f32>>> {
+        let reader = self.multivec_readers.get(field).ok_or_else(|| {
+            VedaError::FieldNotFound(format!("multi-vector field '{field}' not found"))
+        })?;
+        reader.get(doc_id)
+    }
+
+    /// Iterate `(doc_id, &Vec<Vec<f32>>)` for a multi-vector field.
+    pub fn iter_multi_vector(
+        &self,
+        field: &str,
+    ) -> Option<impl Iterator<Item = (u32, &Vec<Vec<f32>>)>> {
+        self.multivec_readers.get(field).map(|r| r.iter())
     }
 
     /// Reconstruct a full [`Record`] for the given doc_id from stored JSONL data.
@@ -621,6 +694,17 @@ impl SegmentReader {
                 && sv.nnz() > 0
             {
                 record.set(name, FieldValue::SparseVector(sv.clone()));
+            }
+        }
+
+        // Restore multi-vector fields.
+        for field_def in self.schema.multi_vector_fields() {
+            let name = field_def.name();
+            if let Some(reader) = self.multivec_readers.get(name)
+                && let Ok(rows) = reader.get(doc_id)
+                && !rows.is_empty()
+            {
+                record.set(name, FieldValue::MultiVector(rows.clone()));
             }
         }
 

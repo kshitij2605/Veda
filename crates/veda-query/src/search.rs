@@ -39,6 +39,16 @@ pub struct SparseSearchRequest {
     pub filter: Option<String>,
 }
 
+/// A search request for a single multi-vector (ColPali) field.
+#[derive(Debug, Clone)]
+pub struct MultiVectorSearchRequest {
+    pub field: String,
+    pub query_rows: Vec<Vec<f32>>,
+    pub k: usize,
+    pub metric: DistanceMetric,
+    pub filter: Option<String>,
+}
+
 /// A search response containing scored records.
 #[derive(Debug, Clone)]
 pub struct SearchResponse {
@@ -306,6 +316,170 @@ impl SearchExecutor {
                 total_candidates,
             },
             timings,
+        ))
+    }
+}
+
+impl SearchExecutor {
+    /// Execute a MaxSim multi-vector search across all segments.
+    #[instrument(name = "execute_maxsim_search", skip(request, growing_segment, sealed_readers), fields(field = %request.field, k = request.k))]
+    pub fn search_multi_vector(
+        request: &MultiVectorSearchRequest,
+        growing_segment: Option<&GrowingSegment>,
+        sealed_readers: &[&SegmentReader],
+    ) -> Result<(SearchResponse, SearchTimings)> {
+        use std::time::Instant;
+        use veda_core::simd;
+
+        let filter_start = Instant::now();
+        let filter_expr: Option<FilterExpr> = match &request.filter {
+            Some(s) => Some(FilterParser::parse(s)?),
+            None => None,
+        };
+        let filter_ms = filter_start.elapsed().as_secs_f64() * 1000.0;
+
+        let mut all_results: Vec<ScoredRecord> = Vec::new();
+        let mut total_candidates: usize = 0;
+        let ann_start = Instant::now();
+
+        let per_row: fn(&[f32], &[f32]) -> f32 = match request.metric {
+            DistanceMetric::Cosine => simd::cosine_distance,
+            DistanceMetric::Euclidean => simd::euclidean_distance,
+            DistanceMetric::DotProduct => |a, b| -simd::dot_product(a, b),
+            _ => simd::cosine_distance,
+        };
+
+        if let Some(gs) = growing_segment {
+            let filter_bitmap: Option<RoaringBitmap> = match filter_expr.as_ref() {
+                Some(expr) => {
+                    let mut bm = RoaringBitmap::new();
+                    for doc_id in 0..gs.count() {
+                        if let Some(rec) = gs.get_record(doc_id)
+                            && evaluate_record(expr, rec)
+                        {
+                            bm.insert(doc_id);
+                        }
+                    }
+                    Some(bm)
+                }
+                None => None,
+            };
+            let raw = gs.search_multi_vector(
+                &request.field,
+                &request.query_rows,
+                request.k,
+                request.metric,
+                filter_bitmap.as_ref(),
+            )?;
+            total_candidates += gs.count() as usize;
+            let segment_id = gs.id();
+            all_results.extend(raw.into_iter().map(|(doc_id, distance)| {
+                let record_id = gs
+                    .get_record(doc_id)
+                    .map(|r| r.id())
+                    .unwrap_or_else(Uuid::new_v4);
+                ScoredRecord {
+                    id: record_id,
+                    segment_id,
+                    doc_id,
+                    distance,
+                }
+            }));
+        }
+
+        for reader in sealed_readers {
+            let row_count = reader.row_count() as u32;
+            total_candidates += row_count as usize;
+
+            let allowed: Option<RoaringBitmap> = match filter_expr.as_ref() {
+                Some(expr) => {
+                    let mut ctx = FilterContext::new(row_count);
+                    let mut fields = Vec::new();
+                    collect_filter_fields(expr, &mut fields);
+                    for f in &fields {
+                        if let Some(idx) = reader.inverted_index(f) {
+                            ctx.add_inverted(f, idx);
+                        }
+                        if let Some(idx) = reader.range_index(f) {
+                            ctx.add_range(f, idx);
+                        }
+                        if let Some(idx) = reader.bitmap_index(f) {
+                            ctx.add_bitmap(f, idx);
+                        }
+                    }
+                    let mut bm = ctx.evaluate(expr)?;
+                    let delete_bm = reader.delete_bitmap();
+                    for doc_id in 0..row_count {
+                        if delete_bm.is_deleted(doc_id) {
+                            bm.remove(doc_id);
+                        }
+                    }
+                    Some(bm)
+                }
+                None => None,
+            };
+
+            let Some(iter) = reader.iter_multi_vector(&request.field) else {
+                continue;
+            };
+            let mut local: Vec<(u32, f32)> = Vec::with_capacity(request.k * 2);
+            for (doc_id, doc_rows) in iter {
+                if reader.delete_bitmap().is_deleted(doc_id) {
+                    continue;
+                }
+                if let Some(bm) = allowed.as_ref()
+                    && !bm.contains(doc_id)
+                {
+                    continue;
+                }
+                if doc_rows.is_empty() {
+                    continue;
+                }
+                let dist = simd::maxsim_distance(&request.query_rows, doc_rows, per_row);
+                local.push((doc_id, dist));
+                if local.len() > request.k * 4 {
+                    local.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                    local.truncate(request.k);
+                }
+            }
+            local.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            local.truncate(request.k);
+            let segment_id = reader.metadata().id;
+            for (doc_id, distance) in local {
+                let record_id = reader
+                    .get_record(doc_id)
+                    .ok()
+                    .map(|r| r.id())
+                    .unwrap_or_else(Uuid::new_v4);
+                all_results.push(ScoredRecord {
+                    id: record_id,
+                    segment_id,
+                    doc_id,
+                    distance,
+                });
+            }
+        }
+
+        let ann_ms = ann_start.elapsed().as_secs_f64() * 1000.0;
+        let scoring_start = Instant::now();
+        all_results.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all_results.truncate(request.k);
+        let scoring_ms = scoring_start.elapsed().as_secs_f64() * 1000.0;
+
+        Ok((
+            SearchResponse {
+                results: all_results,
+                total_candidates,
+            },
+            SearchTimings {
+                filter_ms,
+                ann_search_ms: ann_ms,
+                scoring_ms,
+            },
         ))
     }
 }

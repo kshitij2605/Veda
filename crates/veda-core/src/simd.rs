@@ -290,6 +290,31 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     l2_squared(a, b).sqrt()
 }
 
+/// MaxSim distance (ColBERT/ColPali late-interaction): for each query row
+/// take the maximum similarity (= -distance) over all document rows, then
+/// sum. Returned as a distance — lower = more similar.
+pub fn maxsim_distance(
+    query_rows: &[Vec<f32>],
+    doc_rows: &[Vec<f32>],
+    per_row_distance: fn(&[f32], &[f32]) -> f32,
+) -> f32 {
+    if query_rows.is_empty() || doc_rows.is_empty() {
+        return f32::MAX;
+    }
+    let mut sum_max_sim = 0.0f32;
+    for q in query_rows {
+        let mut min_dist = f32::MAX;
+        for d in doc_rows {
+            let dist = per_row_distance(q, d);
+            if dist < min_dist {
+                min_dist = dist;
+            }
+        }
+        sum_max_sim += -min_dist;
+    }
+    -sum_max_sim
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

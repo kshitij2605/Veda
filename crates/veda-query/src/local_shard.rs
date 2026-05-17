@@ -12,7 +12,8 @@ use veda_storage::segment_manager::SegmentManager;
 
 use crate::distributed::ShardSearcher;
 use crate::search::{
-    ScoredRecord, SearchExecutor, SearchTimings, SparseSearchRequest, VectorSearchRequest,
+    MultiVectorSearchRequest, ScoredRecord, SearchExecutor, SearchTimings, SparseSearchRequest,
+    VectorSearchRequest,
 };
 
 /// Build a vector index of the declared type, populated from `vectors`.
@@ -182,6 +183,26 @@ impl ShardSearcher for LocalShardSearcher {
 
         let (response, timings) =
             SearchExecutor::search_sparse(request, growing_opt, &sealed_refs)?;
+        Ok((response.results, timings))
+    }
+
+    fn search_shard_multi_vector(
+        &self,
+        _shard_id: u32,
+        request: &MultiVectorSearchRequest,
+    ) -> Result<(Vec<ScoredRecord>, SearchTimings)> {
+        let growing = self.segment_manager.growing_segment();
+        let growing_opt = if growing.count() > 0 { Some(growing) } else { None };
+
+        let sealed_refs: Vec<&veda_storage::segment::SegmentReader> = self
+            .segment_manager
+            .sealed_segments()
+            .iter()
+            .map(|h| &h.reader)
+            .collect();
+
+        let (response, timings) =
+            SearchExecutor::search_multi_vector(request, growing_opt, &sealed_refs)?;
         Ok((response.results, timings))
     }
 }

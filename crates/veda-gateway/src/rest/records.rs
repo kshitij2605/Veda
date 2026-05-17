@@ -470,6 +470,35 @@ fn json_to_field_value(
             let sparse = parse_sparse_value(value, *dimension)?;
             Ok(FieldValue::SparseVector(sparse))
         }
+        FieldType::MultiVector { dimension, max_vectors, .. } => {
+            let arr = value
+                .as_array()
+                .ok_or("expected array-of-arrays for multi_vector field")?;
+            if *max_vectors > 0 && arr.len() as u32 > *max_vectors {
+                return Err(format!(
+                    "multi_vector has {} rows; field max_vectors={max_vectors}",
+                    arr.len()
+                ));
+            }
+            let mut rows: Vec<Vec<f32>> = Vec::with_capacity(arr.len());
+            for row in arr {
+                let inner = row
+                    .as_array()
+                    .ok_or("each multi_vector row must be an array of numbers")?;
+                if inner.len() as u32 != *dimension {
+                    return Err(format!(
+                        "multi_vector row length {} does not match dimension {dimension}",
+                        inner.len()
+                    ));
+                }
+                let floats: Vec<f32> = inner
+                    .iter()
+                    .map(|v| v.as_f64().map(|f| f as f32).ok_or("row elements must be numbers"))
+                    .collect::<Result<_, _>>()?;
+                rows.push(floats);
+            }
+            Ok(FieldValue::MultiVector(rows))
+        }
         FieldType::String => {
             let s = value.as_str().ok_or("expected string")?;
             Ok(FieldValue::String(s.to_owned()))
@@ -590,6 +619,11 @@ fn field_value_to_json(fv: &FieldValue) -> serde_json::Value {
             "indices": sv.indices(),
             "values": sv.values(),
         }),
+        FieldValue::MultiVector(rows) => serde_json::Value::Array(
+            rows.iter()
+                .map(|row| serde_json::Value::Array(row.iter().map(|f| serde_json::json!(*f)).collect()))
+                .collect(),
+        ),
         FieldValue::Json(j) => j.clone(),
         FieldValue::BlobRef(s) => serde_json::Value::String(s.clone()),
         FieldValue::Uuid(u) => serde_json::Value::String(u.to_string()),

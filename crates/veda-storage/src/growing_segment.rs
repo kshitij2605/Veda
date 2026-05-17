@@ -32,6 +32,8 @@ pub struct GrowingSegment {
     /// Per sparse vector field: ordered list of SparseVec per doc_id.
     /// Records that omit a sparse field get an empty SparseVec slot.
     sparse_vectors: HashMap<String, Vec<SparseVec>>,
+    /// Per multi-vector field: per doc_id a list of dense vectors.
+    multi_vectors: HashMap<String, Vec<Vec<Vec<f32>>>>,
     /// Estimated memory usage in bytes.
     size_bytes: usize,
     /// Seal threshold — when `size_bytes` exceeds this, `should_seal()` returns true.
@@ -56,6 +58,10 @@ impl GrowingSegment {
         for field in schema.sparse_vector_fields() {
             sparse_vectors.insert(field.name().to_owned(), Vec::new());
         }
+        let mut multi_vectors = HashMap::new();
+        for field in schema.multi_vector_fields() {
+            multi_vectors.insert(field.name().to_owned(), Vec::new());
+        }
 
         Self {
             id: Uuid::new_v4(),
@@ -63,6 +69,7 @@ impl GrowingSegment {
             records: Vec::new(),
             vectors,
             sparse_vectors,
+            multi_vectors,
             size_bytes: 0,
             max_size_bytes,
             delete_bitmap: DeleteBitmap::new(),
@@ -110,6 +117,47 @@ impl GrowingSegment {
                             "record missing required vector field '{name}'"
                         )));
                     }
+                }
+            }
+        }
+
+        // Extract and store multi-vector fields. Missing values become an
+        // empty list. Validates dimension and max_vectors against schema.
+        for field_def in self.schema.multi_vector_fields() {
+            let name = field_def.name();
+            if let FieldType::MultiVector { dimension, max_vectors, .. } = field_def.field_type() {
+                let rows = match record.get(name) {
+                    Some(FieldValue::MultiVector(rows)) => {
+                        if *max_vectors > 0 && rows.len() as u32 > *max_vectors {
+                            return Err(VedaError::Storage(format!(
+                                "multi-vector field '{name}' has {} rows but max_vectors={}",
+                                rows.len(),
+                                max_vectors
+                            )));
+                        }
+                        for r in rows {
+                            if r.len() as u32 != *dimension {
+                                return Err(VedaError::DimensionMismatch {
+                                    expected: *dimension,
+                                    actual: r.len() as u32,
+                                });
+                            }
+                        }
+                        added_bytes += rows
+                            .iter()
+                            .map(|r| r.len() * std::mem::size_of::<f32>())
+                            .sum::<usize>();
+                        rows.clone()
+                    }
+                    Some(_) => {
+                        return Err(VedaError::Storage(format!(
+                            "field '{name}' expected MultiVector, got different type"
+                        )));
+                    }
+                    None => Vec::new(),
+                };
+                if let Some(store) = self.multi_vectors.get_mut(name) {
+                    store.push(rows);
                 }
             }
         }
@@ -184,6 +232,64 @@ impl GrowingSegment {
         self.sparse_vectors
             .get(field)
             .and_then(|vecs| vecs.get(doc_id as usize))
+    }
+
+    /// Get a multi-vector by field name and doc_id.
+    pub fn get_multi_vector(&self, field: &str, doc_id: u32) -> Option<&Vec<Vec<f32>>> {
+        self.multi_vectors
+            .get(field)
+            .and_then(|vecs| vecs.get(doc_id as usize))
+    }
+
+    /// Brute-force MaxSim scan over a multi-vector field.
+    pub fn search_multi_vector(
+        &self,
+        field: &str,
+        query_rows: &[Vec<f32>],
+        k: usize,
+        metric: DistanceMetric,
+        filter: Option<&RoaringBitmap>,
+    ) -> Result<Vec<(u32, f32)>> {
+        let vecs = self.multi_vectors.get(field).ok_or_else(|| {
+            VedaError::FieldNotFound(format!("multi-vector field '{field}' not found"))
+        })?;
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let per_row: fn(&[f32], &[f32]) -> f32 = match metric {
+            DistanceMetric::Cosine => simd::cosine_distance,
+            DistanceMetric::Euclidean => simd::euclidean_distance,
+            DistanceMetric::DotProduct => |a, b| -simd::dot_product(a, b),
+            _ => simd::cosine_distance,
+        };
+        let mut heap: BinaryHeap<OrdF32Entry> = BinaryHeap::new();
+        for (doc_id, doc_rows) in vecs.iter().enumerate() {
+            let doc_id = doc_id as u32;
+            if self.delete_bitmap.is_deleted(doc_id) {
+                continue;
+            }
+            if let Some(bm) = filter
+                && !bm.contains(doc_id)
+            {
+                continue;
+            }
+            if doc_rows.is_empty() {
+                continue;
+            }
+            let dist = simd::maxsim_distance(query_rows, doc_rows, per_row);
+            if heap.len() < k {
+                heap.push(OrdF32Entry { dist, doc_id });
+            } else if let Some(top) = heap.peek()
+                && dist < top.dist
+            {
+                heap.pop();
+                heap.push(OrdF32Entry { dist, doc_id });
+            }
+        }
+        let mut results: Vec<(u32, f32)> =
+            heap.into_iter().map(|e| (e.doc_id, e.dist)).collect();
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(results)
     }
 
     /// Brute-force sparse scan against this growing segment.

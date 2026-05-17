@@ -41,7 +41,9 @@ pub struct QueryBody {
     pub vector: Option<SingleVectorQuery>,
     /// Sparse-vector query.
     pub sparse_vector: Option<SparseVectorQuery>,
-    /// Multi-vector fusion query.
+    /// ColPali / MaxSim multi-vector query against a single MultiVector field.
+    pub colpali: Option<MultiVectorColpaliQuery>,
+    /// Multi-vector fusion query (combines results across multiple dense fields).
     pub multi_vector: Option<Vec<MultiVectorField>>,
     /// Fusion strategy name (for multi_vector).
     pub fusion: Option<String>,
@@ -60,6 +62,12 @@ pub struct SparseVectorQuery {
     pub field: String,
     pub indices: Vec<u32>,
     pub values: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MultiVectorColpaliQuery {
+    pub field: String,
+    pub rows: Vec<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +207,45 @@ pub async fn search(
             });
         }
         hits
+    } else if let Some(ref cp) = req.query.colpali {
+        // MaxSim multi-vector search.
+        let metric = resolve_colpali_metric(&schema, &cp.field);
+        let request = veda_query::search::MultiVectorSearchRequest {
+            field: cp.field.clone(),
+            query_rows: cp.rows.clone(),
+            k: req.limit,
+            metric,
+            filter: req.filter.clone(),
+        };
+        let (response, timings) = executor
+            .search_multi_vector_colpali(&request)
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("colpali search failed: {e}"),
+                    }),
+                )
+            })?;
+        if req.explain {
+            let total = timings.filter_ms + timings.ann_search_ms + timings.scoring_ms;
+            explain_timing = Some(ExplainTiming {
+                filter_ms: timings.filter_ms,
+                ann_search_ms: timings.ann_search_ms,
+                scoring_ms: timings.scoring_ms,
+                fusion_ms: 0.0,
+                total_ms: total,
+            });
+        }
+        response
+            .results
+            .into_iter()
+            .map(|r| SearchHit {
+                id: r.id.to_string(),
+                distance: r.distance,
+                fields: serde_json::Map::new(),
+            })
+            .collect()
     } else if let Some(ref sparse_query) = req.query.sparse_vector {
         // Sparse-vector search.
         let metric = resolve_sparse_metric(&schema, &sparse_query.field);
@@ -237,7 +284,7 @@ pub async fn search(
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "query must contain 'vector', 'sparse_vector', or 'multi_vector'".into(),
+                error: "query must contain 'vector', 'sparse_vector', 'colpali', or 'multi_vector'".into(),
             }),
         ));
     };
@@ -403,6 +450,20 @@ fn execute_sparse_vector(
         })
         .collect();
     Ok((hits, timings))
+}
+
+/// Resolve the distance metric for a multi-vector field, defaulting to Cosine.
+fn resolve_colpali_metric(
+    schema: &veda_core::schema::CollectionSchema,
+    field_name: &str,
+) -> DistanceMetric {
+    schema
+        .get_field(field_name)
+        .and_then(|f| match f.field_type() {
+            veda_core::types::FieldType::MultiVector { metric, .. } => Some(*metric),
+            _ => None,
+        })
+        .unwrap_or(DistanceMetric::Cosine)
 }
 
 /// Resolve the distance metric for a sparse field, defaulting to Cosine.

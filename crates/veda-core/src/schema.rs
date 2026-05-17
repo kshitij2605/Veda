@@ -83,6 +83,26 @@ impl FieldDefinition {
         }
     }
 
+    /// Create a ColPali-style multi-vector field definition.
+    /// Each record stores up to `max_vectors` vectors of `dimension`.
+    pub fn multi_vector(
+        name: impl Into<String>,
+        dimension: u32,
+        max_vectors: u32,
+        metric: DistanceMetric,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            field_type: FieldType::MultiVector {
+                dimension,
+                max_vectors,
+                metric,
+            },
+            filterable: false,
+            index_type: IndexType::None,
+        }
+    }
+
     /// Create a blob field definition.
     pub fn blob(name: impl Into<String>) -> Self {
         Self {
@@ -171,6 +191,14 @@ impl CollectionSchema {
             .collect()
     }
 
+    /// Return only multi-vector (ColPali-style) fields.
+    pub fn multi_vector_fields(&self) -> Vec<&FieldDefinition> {
+        self.fields
+            .iter()
+            .filter(|f| matches!(f.field_type, FieldType::MultiVector { .. }))
+            .collect()
+    }
+
     /// Return only scalar (non-vector, non-blob) fields.
     pub fn scalar_fields(&self) -> Vec<&FieldDefinition> {
         self.fields
@@ -178,7 +206,10 @@ impl CollectionSchema {
             .filter(|f| {
                 !matches!(
                     f.field_type,
-                    FieldType::Vector { .. } | FieldType::Blob | FieldType::SparseVector { .. }
+                    FieldType::Vector { .. }
+                        | FieldType::Blob
+                        | FieldType::SparseVector { .. }
+                        | FieldType::MultiVector { .. }
                 )
             })
             .collect()

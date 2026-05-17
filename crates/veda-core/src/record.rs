@@ -20,6 +20,8 @@ pub enum FieldValue {
     Timestamp(i64),
     Vector(DenseVector),
     SparseVector(SparseVec),
+    /// ColPali-style multi-vector: a list of dense vectors of equal dimension.
+    MultiVector(Vec<Vec<f32>>),
     Json(serde_json::Value),
     /// URI pointing to object storage.
     BlobRef(String),

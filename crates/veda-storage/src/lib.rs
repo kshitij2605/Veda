@@ -8,6 +8,7 @@ pub mod delete_bitmap;
 pub mod growing_segment;
 pub mod inverted_index;
 pub mod range_index;
+pub mod multivector_storage;
 pub mod segment;
 pub mod segment_manager;
 pub mod sparse_storage;

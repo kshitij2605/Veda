@@ -45,6 +45,17 @@ pub enum FieldType {
         dimension: u32,
         metric: DistanceMetric,
     },
+    /// Multi-vector representation (ColBERT / ColPali / ColQwen style): each
+    /// record contains a variable number of `dimension`-sized vectors and
+    /// retrieval uses MaxSim — sum over query tokens of the maximum
+    /// similarity to any document token.
+    MultiVector {
+        dimension: u32,
+        /// Soft cap on the number of vectors per record (rejects inserts
+        /// exceeding this — 0 means unbounded).
+        max_vectors: u32,
+        metric: DistanceMetric,
+    },
     String,
     Int32,
     Int64,
