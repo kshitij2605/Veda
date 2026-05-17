@@ -102,9 +102,169 @@ impl WalReader for InMemoryWal {
     }
 }
 
-/// Placeholder for NATS JetStream WAL (to be implemented when NATS is available).
-/// Implements the same WalWriter/WalReader traits.
+/// NATS JetStream-backed WAL. Async-only — uses `async-nats` directly rather
+/// than implementing the sync `WalWriter`/`WalReader` traits, which would
+/// require blocking inside async runtime.
+///
+/// Stream layout:
+///   - One JetStream stream per Veda instance (default name `"veda-wal"`).
+///   - Subjects: `veda.wal.{collection}.{shard}` — collection/shard-scoped.
+///   - WalEntry bodies serialised via bincode for compactness.
+///
+/// NATS' own message `sequence` doubles as our `seq` — no separate counter.
 pub struct NatsWal {
-    // Will hold async-nats client, stream name, etc.
-    _placeholder: (),
+    client: async_nats::jetstream::Context,
+    stream_name: String,
+}
+
+impl NatsWal {
+    /// Connect to NATS and ensure the WAL stream exists.
+    ///
+    /// `url` example: `"nats://nats:4222"`. `stream_name` example: `"veda-wal"`.
+    pub async fn connect(url: &str, stream_name: impl Into<String>) -> Result<Self> {
+        let client = async_nats::connect(url).await.map_err(|e| {
+            veda_core::error::VedaError::Storage(format!("nats connect failed: {e}"))
+        })?;
+        let js = async_nats::jetstream::new(client);
+        let stream_name = stream_name.into();
+        js.get_or_create_stream(async_nats::jetstream::stream::Config {
+            name: stream_name.clone(),
+            subjects: vec![format!("veda.wal.>")],
+            retention: async_nats::jetstream::stream::RetentionPolicy::Limits,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| {
+            veda_core::error::VedaError::Storage(format!("nats stream create failed: {e}"))
+        })?;
+        Ok(Self {
+            client: js,
+            stream_name,
+        })
+    }
+
+    fn subject_for(entry: &WalEntry) -> String {
+        match entry {
+            WalEntry::Insert {
+                collection,
+                shard_id,
+                ..
+            }
+            | WalEntry::Delete {
+                collection,
+                shard_id,
+                ..
+            } => format!("veda.wal.{collection}.{shard_id}"),
+        }
+    }
+
+    /// Publish a WAL entry. Returns the NATS-assigned stream sequence.
+    pub async fn append(&self, entry: WalEntry) -> Result<u64> {
+        let subject = Self::subject_for(&entry);
+        let payload = bincode::serialize(&entry).map_err(|e| {
+            veda_core::error::VedaError::Storage(format!("wal serialise: {e}"))
+        })?;
+        let ack = self
+            .client
+            .publish(subject, payload.into())
+            .await
+            .map_err(|e| {
+                veda_core::error::VedaError::Storage(format!("nats publish failed: {e}"))
+            })?
+            .await
+            .map_err(|e| {
+                veda_core::error::VedaError::Storage(format!("nats ack failed: {e}"))
+            })?;
+        Ok(ack.sequence)
+    }
+
+    /// Read up to `max_entries` entries with sequence >= `seq`. Drains a
+    /// short-lived ephemeral consumer so callers can use this for recovery
+    /// or replay.
+    pub async fn read_from(
+        &self,
+        seq: u64,
+        max_entries: usize,
+    ) -> Result<Vec<(u64, WalEntry)>> {
+        use futures::StreamExt;
+
+        let stream = self
+            .client
+            .get_stream(&self.stream_name)
+            .await
+            .map_err(|e| {
+                veda_core::error::VedaError::Storage(format!("nats stream lookup: {e}"))
+            })?;
+
+        let consumer = stream
+            .create_consumer(async_nats::jetstream::consumer::pull::Config {
+                deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::ByStartSequence {
+                    start_sequence: seq.max(1),
+                },
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| {
+                veda_core::error::VedaError::Storage(format!("nats consumer: {e}"))
+            })?;
+
+        let mut messages = consumer
+            .fetch()
+            .max_messages(max_entries)
+            .messages()
+            .await
+            .map_err(|e| {
+                veda_core::error::VedaError::Storage(format!("nats fetch: {e}"))
+            })?;
+
+        let mut out = Vec::with_capacity(max_entries);
+        while let Some(m) = messages.next().await {
+            let m = m.map_err(|e| {
+                veda_core::error::VedaError::Storage(format!("nats msg: {e}"))
+            })?;
+            let info = m.info().map_err(|e| {
+                veda_core::error::VedaError::Storage(format!("nats info: {e}"))
+            })?;
+            let entry: WalEntry = bincode::deserialize(&m.payload).map_err(|e| {
+                veda_core::error::VedaError::Storage(format!("wal deserialise: {e}"))
+            })?;
+            out.push((info.stream_sequence, entry));
+            m.ack().await.ok();
+        }
+        Ok(out)
+    }
+
+    /// Stream's current last sequence.
+    pub async fn latest_seq(&self) -> Result<u64> {
+        let mut stream = self
+            .client
+            .get_stream(&self.stream_name)
+            .await
+            .map_err(|e| {
+                veda_core::error::VedaError::Storage(format!("nats stream lookup: {e}"))
+            })?;
+        let info = stream.info().await.map_err(|e| {
+            veda_core::error::VedaError::Storage(format!("nats stream info: {e}"))
+        })?;
+        Ok(info.state.last_sequence)
+    }
+
+    /// Purge messages with sequence <= `seq`. Bounds memory for long-running streams.
+    pub async fn acknowledge(&self, seq: u64) -> Result<()> {
+        let stream = self
+            .client
+            .get_stream(&self.stream_name)
+            .await
+            .map_err(|e| {
+                veda_core::error::VedaError::Storage(format!("nats stream lookup: {e}"))
+            })?;
+        stream
+            .purge()
+            .sequence(seq + 1)
+            .await
+            .map_err(|e| {
+                veda_core::error::VedaError::Storage(format!("nats purge: {e}"))
+            })?;
+        Ok(())
+    }
 }
