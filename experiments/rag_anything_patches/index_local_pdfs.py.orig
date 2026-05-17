@@ -1,0 +1,947 @@
+"""
+Index PDFs from Local Folder to Elasticsearch
+
+This script processes PDFs from a local directory and indexes them to Elasticsearch.
+It bypasses the need to fetch PDFs from a source Elasticsearch index.
+
+Usage:
+    python index_local_pdfs.py --pdf-dir /path/to/pdfs --index-name my-index
+
+    # With more options
+    python index_local_pdfs.py \
+        --pdf-dir /path/to/pdfs \
+        --index-name my-index \
+        --batch-size 10 \
+        --langs English Japanese
+"""
+
+import asyncio
+import os
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import List, Dict, Optional
+from dataclasses import dataclass
+from dotenv import load_dotenv
+
+from elasticsearch import Elasticsearch
+from elasticsearch.helpers import bulk
+from openai import OpenAI
+from glm_ocr_client import GLMOCRClient
+from langchain_text_splitters import CharacterTextSplitter
+
+from minio_handler import MinIOHandler, get_image_references_dict
+from page_screenshot import PageScreenshotGenerator
+from page_aware_chunker_deepseek import PageAwareChunkerDeepSeek
+
+load_dotenv()
+
+
+@dataclass
+class LocalPDFMetadata:
+    """Metadata for local PDF files"""
+    doc_id: str
+    filename: str
+    file_path: str
+    file_size: int
+    created_date: str
+    modified_date: str
+
+
+class LocalPDFIndexer:
+    """Process and index PDFs from local folder"""
+
+    def __init__(
+        self,
+        es_url: str,
+        es_user: str,
+        es_password: str,
+        embedding_base_url: str,
+        embedding_api_key: str,
+        embedding_model: str = "BAAI/bge-m3",
+        output_dir: str = "./output/local_pdfs",
+        max_embedding_chars: int = 8000,
+        index_name: str = None
+    ):
+        # BACKEND env var selects the index backend: "elasticsearch" (default)
+        # or "veda". When veda, the ES client is skipped and a VedaClient is
+        # used in create_index_if_not_exists + bulk_index.
+        self.backend = os.environ.get('BACKEND', 'elasticsearch').lower()
+        if self.backend == 'veda':
+            from veda_client import VedaClient
+            self.veda_client = VedaClient(
+                base_url=os.environ.get('VEDA_BASE_URL', 'http://localhost:6340'),
+                collection=index_name or os.environ.get('VEDA_COLLECTION', 'rag_anything'),
+            )
+            self.es_client = None
+        else:
+            self.veda_client = None
+            self.es_client = Elasticsearch(
+                es_url,
+                basic_auth=(es_user, es_password),
+                verify_certs=False,
+                ssl_show_warn=False,
+                request_timeout=100000
+            )
+
+        self.embedder = OpenAI(
+            base_url=embedding_base_url,
+            api_key=embedding_api_key
+        )
+
+        self.embedding_model = embedding_model
+        self.output_dir = output_dir
+        self.max_embedding_chars = max_embedding_chars
+        self.index_name = index_name  # Elasticsearch index name for MinIO folder structure
+
+        # Determine embedding dimensions (use 1024 for actual model output)
+        self.embedding_dims = 1024
+
+        # Text splitter for chunking (matching e2e_connector CharacterTextSplitter)
+        self.splitter = CharacterTextSplitter(
+            separator="\n\n",
+            chunk_size=1024,
+            chunk_overlap=64
+        )
+
+        # GLM Hybrid OCR client
+        self.glm_client = GLMOCRClient()
+
+        # MinIO handler for image storage (gracefully handles connection failures)
+        self.minio_handler = MinIOHandler()
+        if not self.minio_handler.available:
+            print("⚠ MinIO not available - image uploads will be skipped")
+
+        # Page screenshot generator
+        self.screenshot_generator = PageScreenshotGenerator(dpi=150)
+
+        # Page-aware chunker for DeepSeek format
+        self.page_chunker = PageAwareChunkerDeepSeek(
+            chunk_size=1024,
+            chunk_overlap=64,
+            separator="\n\n"
+        )
+
+        # Cleanup local images after upload (only if MinIO available)
+        self.cleanup_local_images = self.minio_handler.available
+
+        os.makedirs(output_dir, exist_ok=True)
+
+    def set_index_name(self, index_name: str):
+        """Set the index name for MinIO folder structure"""
+        self.index_name = index_name
+
+    def scan_pdf_folder(self, pdf_dir: str) -> List[LocalPDFMetadata]:
+        """Scan folder for PDF files"""
+        pdf_files = []
+        pdf_path = Path(pdf_dir)
+
+        if not pdf_path.exists():
+            raise ValueError(f"Directory does not exist: {pdf_dir}")
+
+        for pdf_file in pdf_path.glob("**/*.pdf"):
+            stat = pdf_file.stat()
+
+            metadata = LocalPDFMetadata(
+                doc_id=pdf_file.stem,  # filename without extension
+                filename=pdf_file.name,
+                file_path=str(pdf_file.absolute()),
+                file_size=stat.st_size,
+                created_date=datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                modified_date=datetime.fromtimestamp(stat.st_mtime).isoformat()
+            )
+            pdf_files.append(metadata)
+
+        print(f"✓ Found {len(pdf_files)} PDF files in {pdf_dir}")
+        return pdf_files
+
+    async def process_pdf(self, pdf_metadata: LocalPDFMetadata, index_name: str = None) -> Dict:
+        """Process a single PDF file using GLM Hybrid OCR
+        
+        Args:
+            pdf_metadata: Metadata for the PDF file
+            index_name: Elasticsearch index name for MinIO folder structure (overrides self.index_name)
+        """
+        import time
+        # Use provided index_name or fall back to instance attribute
+        target_index = index_name or self.index_name
+        
+        try:
+            # Process PDF with GLM Hybrid OCR API
+            print(f"[1/6] Calling GLM Hybrid OCR API...")
+            ocr_start = time.time()
+            result = self.glm_client.process_pdf_with_progress(
+                pdf_path=pdf_metadata.file_path,
+                output_dir=self.output_dir,
+                skip_captions=False,
+                skip_tables=False,
+                skip_misc_images_in_markdown=True,
+            )
+            print(f"      ✓ OCR completed in {time.time()-ocr_start:.1f}s")
+            print(f"      Pages: {result['pages_processed']}, Images: {result['images_extracted']}, Tables: {result['tables_extracted']}")
+
+            pdf_name = result['pdf_name']
+            pdf_subfolder = result['pdf_subfolder']
+            markdown_content = result['markdown_content']
+            images_dir = result['images_dir']
+            tables_dir = result['tables_dir']
+            parsing_metrics = result['metadata']
+
+            # Generate page screenshots from original PDF (for ページ section in chunk view)
+            from glob import glob as glob_files
+            layout_pdfs = glob_files(os.path.join(pdf_subfolder, "*_layouts.pdf"))
+            layout_pdf_path = layout_pdfs[0] if layout_pdfs else None
+
+            print(f"[2/6] Generating page screenshots from original PDF...")
+            screenshot_start = time.time()
+            screenshot_dir = os.path.join(pdf_subfolder, "pages")
+            os.makedirs(screenshot_dir, exist_ok=True)
+
+            screenshot_paths = self.screenshot_generator.generate_screenshots(
+                pdf_path=pdf_metadata.file_path,
+                output_dir=screenshot_dir,
+                pdf_name=pdf_name
+            )
+            print(f"      ✓ Generated {len(screenshot_paths)} screenshots in {time.time()-screenshot_start:.1f}s")
+
+            # Also generate layout PDF page thumbnails (for markdown view)
+            print(f"[2b/6] Generating layout PDF thumbnails...")
+            layout_screenshot_dir = os.path.join(pdf_subfolder, "layout_pages")
+            os.makedirs(layout_screenshot_dir, exist_ok=True)
+            if layout_pdf_path:
+                layout_screenshot_paths = self.screenshot_generator.generate_screenshots(
+                    pdf_path=layout_pdf_path,
+                    output_dir=layout_screenshot_dir,
+                    pdf_name=pdf_name
+                )
+            else:
+                layout_screenshot_paths = []
+            print(f"      ✓ Generated {len(layout_screenshot_paths)} layout thumbnails")
+
+            # Upload figures to MinIO (from OCR images/ folder)
+            # New structure: {index_name}/{pdf_name}/images/
+            if self.minio_handler.available:
+                print(f"[3/6] Uploading figures to MinIO ({target_index}/{pdf_name}/images/)...")
+                fig_start = time.time()
+                figure_refs = self.minio_handler.upload_directory(
+                    local_dir=images_dir,
+                    pdf_name=pdf_name,
+                    image_type="images",
+                    index_name=target_index
+                )
+                print(f"      ✓ Uploaded {len(figure_refs)} figures in {time.time()-fig_start:.1f}s")
+
+                # Upload tables to MinIO (from OCR tables/ folder)
+                # New structure: {index_name}/{pdf_name}/tables/
+                print(f"[4/6] Uploading tables to MinIO ({target_index}/{pdf_name}/tables/)...")
+                tbl_start = time.time()
+                table_refs = self.minio_handler.upload_directory(
+                    local_dir=tables_dir,
+                    pdf_name=pdf_name,
+                    image_type="tables",
+                    index_name=target_index
+                )
+                print(f"      ✓ Uploaded {len(table_refs)} tables in {time.time()-tbl_start:.1f}s")
+
+                # Upload original page thumbnails to MinIO (for ページ section)
+                # Stored under: {index_name}/{pdf_name}/pages/
+                print(f"[5/6] Uploading page thumbnails to MinIO ({target_index}/{pdf_name}/pages/)...")
+                ss_start = time.time()
+                screenshot_refs = self.minio_handler.upload_directory(
+                    local_dir=screenshot_dir,
+                    pdf_name=pdf_name,
+                    image_type="pages",
+                    index_name=target_index
+                )
+                print(f"      ✓ Uploaded {len(screenshot_refs)} page thumbnails")
+
+                # Upload layout PDF thumbnails to MinIO (for markdown view)
+                if layout_screenshot_paths:
+                    print(f"[5b/6] Uploading layout thumbnails to MinIO ({target_index}/{pdf_name}/layout_pages/)...")
+                    layout_ss_start = time.time()
+                    layout_screenshot_refs = self.minio_handler.upload_directory(
+                        local_dir=layout_screenshot_dir,
+                        pdf_name=pdf_name,
+                        image_type="layout_pages",
+                        index_name=target_index
+                    )
+                    print(f"      ✓ Uploaded {len(layout_screenshot_refs)} layout thumbnails")
+                print(f"      ✓ Uploaded {len(screenshot_refs)} screenshots in {time.time()-ss_start:.1f}s")
+
+                # Upload markdown file to MinIO
+                markdown_file = result.get('markdown_file')
+                if markdown_file and os.path.exists(markdown_file):
+                    print(f"      Uploading markdown to MinIO...")
+                    self.minio_handler.upload_markdown(
+                        local_path=markdown_file,
+                        pdf_name=pdf_name,
+                        index_name=target_index
+                    )
+
+                # Upload metadata.json to MinIO
+                metadata_path = os.path.join(pdf_subfolder, "metadata.json")
+                if os.path.exists(metadata_path):
+                    print(f"      Uploading metadata.json to MinIO...")
+                    self.minio_handler.upload_metadata_json(
+                        local_path=metadata_path,
+                        pdf_name=pdf_name,
+                        index_name=target_index
+                    )
+
+                # Upload parsing_metrics.json to MinIO
+                metrics_path = os.path.join(pdf_subfolder, "parsing_metrics.json")
+                if os.path.exists(metrics_path):
+                    print(f"      Uploading parsing metrics to MinIO...")
+                    self.minio_handler.upload_parsing_metrics(
+                        local_path=metrics_path,
+                        pdf_name=pdf_name,
+                        index_name=target_index
+                    )
+
+                # Combine all image references
+                all_image_refs = figure_refs + table_refs + screenshot_refs
+
+                # Convert to dict structure for metadata
+                image_references = get_image_references_dict(all_image_refs)
+
+                # Cleanup local images if configured
+                if self.cleanup_local_images:
+                    print(f"[6/6] Cleaning up local images...")
+                    self.minio_handler.cleanup_local_files(all_image_refs)
+                    print(f"      ✓ Cleaned up {len(all_image_refs)} local files")
+            else:
+                print(f"[3-6/6] Skipping MinIO uploads (not available)")
+                all_image_refs = []
+                image_references = get_image_references_dict(all_image_refs)
+
+            return {
+                'doc_id': pdf_metadata.doc_id,
+                'status': 'success',
+                'markdown_data': markdown_content,
+                'image_references': image_references,
+                'parsing_metrics': parsing_metrics,  # For page mapping
+                'images_dir': images_dir,
+                'tables_dir': tables_dir,
+                'pdf_subfolder': pdf_subfolder,
+                'pdf_name': pdf_name,
+                'index_name': target_index,  # Store index name for chunk processing
+                'metadata': {
+                    'filename': pdf_metadata.filename,
+                    'file_path': pdf_metadata.file_path,
+                    'file_type': 'pdf',
+                    'size': pdf_metadata.file_size,
+                    'created_date': pdf_metadata.created_date,
+                    'modified_date': pdf_metadata.modified_date,
+                    'processed_date': datetime.now().isoformat(),
+                    'source': 'local_file'
+                }
+            }
+        except Exception as e:
+            print(f"✗ Failed to process {pdf_metadata.filename}: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'doc_id': pdf_metadata.doc_id,
+                'status': 'failed',
+                'error': str(e),
+                'metadata': {
+                    'filename': pdf_metadata.filename
+                }
+            }
+
+    async def process_batch(self, pdf_files: List[LocalPDFMetadata], index_name: str = None) -> List[Dict]:
+        """Process multiple PDFs via GLM OCR jobs API (parallel submission).
+
+        Args:
+            pdf_files: List of PDF metadata objects
+            index_name: Elasticsearch index name for MinIO folder structure (overrides self.index_name)
+        """
+        import time
+        results = []
+        total_pdfs = len(pdf_files)
+        start_time = time.time()
+        target_index = index_name or self.index_name
+
+        # Build lookup: file_path -> LocalPDFMetadata
+        meta_by_path = {pdf.file_path: pdf for pdf in pdf_files}
+        pdf_paths = [pdf.file_path for pdf in pdf_files]
+
+        print(f"\n[OCR] Submitting {total_pdfs} PDFs to GLM OCR job queue...")
+        ocr_results = self.glm_client.process_pdf_batch(
+            pdf_paths=pdf_paths,
+            output_dir=self.output_dir,
+            skip_captions=False,
+            skip_misc_images_in_markdown=True,
+        )
+        print(f"[OCR] ✓ Received {len(ocr_results)} OCR results")
+
+        # Post-process each OCR result
+        for idx, ocr_result in enumerate(ocr_results, 1):
+            source_path = ocr_result.get('source_path', pdf_paths[idx - 1])
+            pdf_meta = meta_by_path.get(source_path)
+
+            # Fall back to matching by index if source_path not in lookup
+            if pdf_meta is None and idx - 1 < len(pdf_files):
+                pdf_meta = pdf_files[idx - 1]
+
+            print(f"\n{'='*60}")
+            print(f"Post-processing {idx}/{total_pdfs}: {pdf_meta.filename if pdf_meta else 'unknown'}")
+            print(f"{'='*60}")
+
+            pdf_start = time.time()
+
+            if 'error' in ocr_result:
+                doc_id = pdf_meta.doc_id if pdf_meta else f"doc_{idx}"
+                results.append({
+                    'doc_id': doc_id,
+                    'status': 'failed',
+                    'error': ocr_result['error'],
+                    'metadata': {'filename': pdf_meta.filename if pdf_meta else 'unknown'}
+                })
+                continue
+
+            try:
+                pdf_name = ocr_result['pdf_name']
+                pdf_subfolder = ocr_result['pdf_subfolder']
+                markdown_content = ocr_result['markdown_content']
+                images_dir = ocr_result['images_dir']
+                tables_dir = ocr_result['tables_dir']
+                parsing_metrics = ocr_result['metadata']
+
+                # Generate page screenshots from layout PDF
+                from glob import glob as glob_files
+                layout_pdfs = glob_files(os.path.join(pdf_subfolder, "*_layouts.pdf"))
+                layout_pdf_path = layout_pdfs[0] if layout_pdfs else None
+
+                print(f"[1/4] Generating page screenshots from original PDF...")
+                screenshot_dir = os.path.join(pdf_subfolder, "pages")
+                os.makedirs(screenshot_dir, exist_ok=True)
+                screenshot_paths = self.screenshot_generator.generate_screenshots(
+                    pdf_path=source_path,
+                    output_dir=screenshot_dir,
+                    pdf_name=pdf_name
+                )
+                print(f"      ✓ Generated {len(screenshot_paths)} page thumbnails")
+
+                # Also generate layout PDF thumbnails (for markdown view)
+                layout_screenshot_dir = os.path.join(pdf_subfolder, "layout_pages")
+                os.makedirs(layout_screenshot_dir, exist_ok=True)
+                if layout_pdf_path:
+                    layout_screenshot_paths = self.screenshot_generator.generate_screenshots(
+                        pdf_path=layout_pdf_path,
+                        output_dir=layout_screenshot_dir,
+                        pdf_name=pdf_name
+                    )
+                else:
+                    layout_screenshot_paths = []
+                print(f"      ✓ Generated {len(layout_screenshot_paths)} layout thumbnails")
+
+                if self.minio_handler.available:
+                    print(f"[2/4] Uploading images/tables/pages to MinIO...")
+
+                    figure_refs = self.minio_handler.upload_directory(
+                        local_dir=images_dir, pdf_name=pdf_name,
+                        image_type="images", index_name=target_index
+                    )
+                    table_refs = self.minio_handler.upload_directory(
+                        local_dir=tables_dir, pdf_name=pdf_name,
+                        image_type="tables", index_name=target_index
+                    )
+                    # Upload original page thumbnails (for ページ section)
+                    screenshot_refs = self.minio_handler.upload_directory(
+                        local_dir=screenshot_dir, pdf_name=pdf_name,
+                        image_type="pages", index_name=target_index
+                    )
+                    # Upload layout PDF thumbnails (for markdown view)
+                    layout_screenshot_refs = []
+                    if layout_screenshot_paths:
+                        layout_screenshot_refs = self.minio_handler.upload_directory(
+                            local_dir=layout_screenshot_dir, pdf_name=pdf_name,
+                            image_type="layout_pages", index_name=target_index
+                        )
+
+                    print(f"[3/4] Uploading artifacts (markdown, metadata, layout)...")
+                    markdown_file = ocr_result.get('markdown_file')
+                    if markdown_file and os.path.exists(markdown_file):
+                        self.minio_handler.upload_markdown(markdown_file, pdf_name, target_index)
+
+                    metadata_path = os.path.join(pdf_subfolder, "metadata.json")
+                    if os.path.exists(metadata_path):
+                        self.minio_handler.upload_metadata_json(metadata_path, pdf_name, target_index)
+
+                    metrics_path = os.path.join(pdf_subfolder, "parsing_metrics.json")
+                    if os.path.exists(metrics_path):
+                        self.minio_handler.upload_parsing_metrics(metrics_path, pdf_name, target_index)
+
+                    all_image_refs = figure_refs + table_refs + screenshot_refs + layout_screenshot_refs
+                    image_references = get_image_references_dict(all_image_refs)
+
+                    if self.cleanup_local_images:
+                        print(f"[4/4] Cleaning up local files...")
+                        self.minio_handler.cleanup_local_files(all_image_refs)
+                else:
+                    print(f"[2-4/4] Skipping MinIO uploads (not available)")
+                    all_image_refs = []
+                    layout_screenshot_refs = []
+                    image_references = get_image_references_dict(all_image_refs)
+
+                doc_id = pdf_meta.doc_id if pdf_meta else pdf_name
+                results.append({
+                    'doc_id': doc_id,
+                    'status': 'success',
+                    'markdown_data': markdown_content,
+                    'image_references': image_references,
+                    'parsing_metrics': parsing_metrics,
+                    'images_dir': images_dir,
+                    'tables_dir': tables_dir,
+                    'pdf_subfolder': pdf_subfolder,
+                    'pdf_name': pdf_name,
+                    'index_name': target_index,
+                    'metadata': {
+                        'filename': pdf_meta.filename if pdf_meta else pdf_name,
+                        'file_path': source_path,
+                        'file_type': 'pdf',
+                        'size': pdf_meta.file_size if pdf_meta else 0,
+                        'created_date': pdf_meta.created_date if pdf_meta else '',
+                        'modified_date': pdf_meta.modified_date if pdf_meta else '',
+                        'processed_date': datetime.now().isoformat(),
+                        'source': 'local_file'
+                    }
+                })
+
+            except Exception as e:
+                doc_id = pdf_meta.doc_id if pdf_meta else f"doc_{idx}"
+                print(f"✗ Post-processing failed for {doc_id}: {e}")
+                import traceback
+                traceback.print_exc()
+                results.append({
+                    'doc_id': doc_id,
+                    'status': 'failed',
+                    'error': str(e),
+                    'metadata': {'filename': pdf_meta.filename if pdf_meta else 'unknown'}
+                })
+
+            elapsed_total = time.time() - start_time
+            print(f"✓ Done in {time.time()-pdf_start:.1f}s | Total elapsed: {elapsed_total/60:.1f}m")
+
+        return results
+
+    def split_oversized_text(self, text: str, max_chars: int = None) -> List[str]:
+        """
+        Split oversized text into multiple chunks that fit within max_chars.
+        Uses sentence-aware splitting to preserve meaning.
+        
+        Args:
+            text: Text to split
+            max_chars: Maximum characters per chunk (defaults to self.max_embedding_chars)
+            
+        Returns:
+            List of text chunks, each within max_chars limit
+        """
+        if max_chars is None:
+            max_chars = self.max_embedding_chars
+            
+        if len(text) <= max_chars:
+            return [text]
+        
+        # Use RecursiveCharacterTextSplitter for intelligent splitting
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        
+        splitter = RecursiveCharacterTextSplitter(
+            separators=[
+                "\n\n",      # Paragraph breaks
+                "\n",        # Line breaks
+                "。",        # Japanese period
+                "．",        # Japanese full-width period
+                ". ",        # English sentence end
+                "、",        # Japanese comma
+                ", ",        # English comma
+                " ",         # Space
+                ""           # Character-level (last resort)
+            ],
+            chunk_size=max_chars,
+            chunk_overlap=100,  # Small overlap for context continuity
+            length_function=len
+        )
+        
+        sub_chunks = splitter.split_text(text)
+        print(f"  ℹ Split oversized text ({len(text)} chars) into {len(sub_chunks)} sub-chunks")
+        return sub_chunks
+
+    def get_embedding(self, text: str) -> List[float]:
+        """Generate embedding for text. Text should already be within max_chars limit."""
+        # Safety check - should not happen if split_oversized_text is used properly
+        if len(text) > self.max_embedding_chars:
+            print(f"⚠ Warning: Text ({len(text)} chars) exceeds max_embedding_chars ({self.max_embedding_chars}). This should have been split earlier!")
+            text = text[:self.max_embedding_chars]
+
+        try:
+            response = self.embedder.embeddings.create(
+                input=text,
+                model=self.embedding_model
+            )
+            embedding = response.data[0].embedding
+            # Truncate to 4096 dimensions if needed for ES compatibility
+            if len(embedding) > self.embedding_dims:
+                embedding = embedding[:self.embedding_dims]
+            return embedding
+        except Exception as e:
+            print(f"✗ Embedding error: {e}")
+            return [0.0] * self.embedding_dims  # Return zero vector on error
+
+    def chunk_and_embed(self, processed_results: List[Dict], index_name: str = None) -> List[Dict]:
+        """Chunk documents and generate embeddings
+        
+        Args:
+            processed_results: List of processed PDF results
+            index_name: Elasticsearch index name for MinIO URL construction (overrides self.index_name)
+        """
+        all_chunks = []
+        # Use provided index_name or fall back to instance attribute
+        target_index = index_name or self.index_name
+
+        for result in processed_results:
+            if result['status'] == 'failed':
+                continue
+
+            doc_id = result['doc_id']
+            pdf_name = result.get('pdf_name', doc_id)
+            markdown_content = result['markdown_data']
+            metadata = result['metadata']
+            image_references = result.get('image_references', {})
+            parsing_metrics = result.get('parsing_metrics', {})
+            # Get index_name from result if not provided (set during process_pdf)
+            chunk_index_name = target_index or result.get('index_name')
+
+            # Use page-aware chunking with index_name for MinIO URLs
+            print(f"  Using page-aware chunking for {doc_id}")
+            enhanced_chunks = self.page_chunker.chunk_with_pages_deepseek(
+                markdown_content=markdown_content,
+                parsing_metrics=parsing_metrics,
+                pdf_name=pdf_name,
+                image_references=image_references,
+                index_name=chunk_index_name  # For MinIO folder structure
+            )
+
+            # Convert to Elasticsearch format with embeddings, splitting oversized chunks
+            global_chunk_index = 0  # Track global chunk index for unique IDs
+            
+            for enhanced_chunk in enhanced_chunks:
+                content = enhanced_chunk['content']
+                page_number = enhanced_chunk['page_number']
+                
+                # Merge minio_metadata into metadata and add RAG processing params
+                chunk_metadata = {
+                    **metadata,
+                    "minio_metadata": enhanced_chunk.get('minio_metadata', {}),
+                    "chunking_strategy": self.page_chunker.strategy.value,
+                    "chunk_size": self.page_chunker.chunk_size,
+                    "chunk_overlap": self.page_chunker.chunk_overlap,
+                    "embedding_model": self.embedding_model,
+                }
+                
+                # Check if chunk needs to be split (exceeds embedding limit)
+                if len(content) > self.max_embedding_chars:
+                    # Split oversized chunk into multiple sub-chunks
+                    sub_chunks = self.split_oversized_text(content)
+                    
+                    for sub_idx, sub_content in enumerate(sub_chunks):
+                        # Mark sub-chunks in metadata for traceability
+                        sub_metadata = {
+                            **chunk_metadata,
+                            "is_sub_chunk": True,
+                            "original_chunk_index": enhanced_chunk['chunk_index'],
+                            "sub_chunk_index": sub_idx,
+                            "total_sub_chunks": len(sub_chunks)
+                        }
+                        
+                        chunk = {
+                            "_id": f"{doc_id}:chunk_{global_chunk_index}",
+                            "_op_type": "index",
+                            "_source": {
+                                "parent_doc_id": doc_id,
+                                "chunk_id": global_chunk_index,
+                                "content": sub_content,
+                                "embedding": self.get_embedding(sub_content),
+                                "page_number": page_number,
+                                "metadata": sub_metadata
+                            }
+                        }
+                        all_chunks.append(chunk)
+                        global_chunk_index += 1
+                else:
+                    # Normal chunk - fits within embedding limit
+                    chunk = {
+                        "_id": f"{doc_id}:chunk_{global_chunk_index}",
+                        "_op_type": "index",
+                        "_source": {
+                            "parent_doc_id": doc_id,
+                            "chunk_id": global_chunk_index,
+                            "content": content,
+                            "embedding": self.get_embedding(content),
+                            "page_number": page_number,
+                            "metadata": chunk_metadata
+                        }
+                    }
+                    all_chunks.append(chunk)
+                    global_chunk_index += 1
+
+        print(f"✓ Created {len(all_chunks)} chunks with embeddings and page tracking")
+        return all_chunks
+
+    def create_index_if_not_exists(self, index_name: str):
+        """Create the backing index/collection if missing.
+
+        BACKEND=veda → POST /v1/collections (idempotent via VedaClient).
+        BACKEND=elasticsearch (default) → create the ES index with the
+        ja_kuromoji_analyzer mapping below.
+        """
+        if self.backend == 'veda':
+            self.veda_client.collection = index_name
+            created = self.veda_client.create_collection_if_missing()
+            print(f"{'✓ Created' if created else '⊙ Exists'} Veda collection '{index_name}'")
+            return
+
+        mapping = {
+            "settings": {
+                "analysis": {
+                    "analyzer": {
+                        "ja_kuromoji_analyzer": {
+                            "type": "custom",
+                            "tokenizer": "kuromoji_tokenizer",
+                            "filter": [
+                                "kuromoji_baseform",
+                                "kuromoji_part_of_speech",
+                                "ja_stop",
+                                "kuromoji_number",
+                                "kuromoji_stemmer",
+                                "lowercase"
+                            ]
+                        }
+                    }
+                }
+            },
+            "mappings": {
+                "dynamic": "true",
+                "properties": {
+                    "parent_doc_id": {"type": "keyword"},
+                    "chunk_id": {"type": "integer"},
+                    "content": {
+                        "type": "text",
+                        "analyzer": "ja_kuromoji_analyzer",
+                        "search_analyzer": "ja_kuromoji_analyzer"
+                    },
+                    "embedding": {
+                        "type": "dense_vector",
+                        "dims": 1024,
+                        "index": True,
+                        "similarity": "cosine"
+                    },
+                    "page_number": {"type": "integer"},
+                    "metadata": {
+                        "type": "object",
+                        "enabled": True,
+                        "properties": {
+                            "minio_metadata": {
+                                "type": "object",
+                                "properties": {
+                                    "bucket_name": {"type": "keyword"},
+                                    "page_thumbnail_path": {"type": "keyword"},
+                                    "image_paths": {"type": "keyword"},
+                                    "table_paths": {"type": "keyword"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if not self.es_client.indices.exists(index=index_name):
+            print(f"✓ Creating index '{index_name}'...")
+            self.es_client.indices.create(index=index_name, body=mapping)
+            print(f"✓ Index '{index_name}' created successfully")
+        else:
+            print(f"⊙ Index '{index_name}' already exists")
+
+    def bulk_index(self, index_name: str, chunks: List[Dict]) -> Dict:
+        """Bulk index chunks to the configured backend.
+
+        Chunks arrive in ES bulk shape: `{_id, _op_type, _source: {...}}`.
+        For Veda, each `_source` is reshaped into Veda's record shape
+        `{id, fields: {...}}` and POSTed to /v1/collections/{name}/insert
+        in batches.
+        """
+        if self.backend == 'veda':
+            import uuid as _uuid
+            self.veda_client.collection = index_name
+            veda_records = []
+            for chunk in chunks:
+                src = chunk.get('_source', {})
+                veda_records.append({
+                    "id": str(_uuid.uuid4()),
+                    "fields": {
+                        "content": src.get('content', ''),
+                        "embedding": src.get('embedding'),
+                        "parent_doc_id": src.get('parent_doc_id', ''),
+                        "chunk_id": int(src.get('chunk_id', 0)),
+                        "page_number": int(src.get('page_number', 0)),
+                    },
+                })
+            print(f"Indexing {len(veda_records)} chunks to Veda collection '{index_name}'...")
+            result = self.veda_client.bulk_insert(veda_records, batch_size=200)
+            print(f"✓ Inserted: {result['inserted']}; failed: {result['failed']}")
+            return {
+                "index_name": index_name,
+                "total_chunks_indexed": result['inserted'],
+                "failed_chunks": result['failed'],
+                "errors": result['errors'],
+            }
+
+        # Set index name for all chunks
+        for chunk in chunks:
+            chunk["_index"] = index_name
+
+        try:
+            print(f"Indexing {len(chunks)} chunks to '{index_name}'...")
+            success, failed = bulk(self.es_client, chunks, raise_on_error=False)
+
+            print(f"✓ Successfully indexed: {success} chunks")
+            if failed:
+                print(f"✗ Failed to index: {len(failed)} chunks")
+                # Print first few errors for debugging
+                for i, error in enumerate(failed[:3]):
+                    print(f"  Error {i+1}: {error}")
+
+            return {
+                "index_name": index_name,
+                "total_chunks_indexed": success,
+                "failed_chunks": len(failed),
+                "errors": failed[:5] if failed else []  # Include sample errors
+            }
+        except Exception as e:
+            print(f"✗ Indexing error: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"error": str(e)}
+
+
+async def main(
+    pdf_dir: str,
+    index_name: str,
+    batch_size: Optional[int] = None,
+    langs: List[str] = None
+):
+    """Main execution function"""
+    print("="*60)
+    print("LOCAL PDF INDEXING PIPELINE")
+    print("="*60)
+    print(f"MinIO folder structure: {index_name}/{{pdf_name}}/{{images|tables|pages}}/")
+
+    # Initialize indexer with index_name for MinIO folder structure
+    indexer = LocalPDFIndexer(
+        es_url=os.getenv('ELASTICSEARCH_HOST', 'http://localhost:9200'),
+        es_user=os.getenv('ELASTICSEARCH_USER', 'elastic'),
+        es_password=os.getenv('ELASTICSEARCH_PASSWORD', 'password'),
+        embedding_base_url=os.getenv('OPENAI_BASE_URL', 'http://localhost:8000/v1'),
+        embedding_api_key=os.getenv('OPENAI_API_KEY', 'changeme'),
+        index_name=index_name  # Set index name for MinIO folder structure
+    )
+
+    # Step 1: Scan PDF folder
+    print(f"\n[1/5] Scanning PDF folder: {pdf_dir}")
+    pdf_files = indexer.scan_pdf_folder(pdf_dir)
+
+    if not pdf_files:
+        print("No PDF files found. Exiting.")
+        return
+
+    print(f"✓ Found {len(pdf_files)} PDF files in {pdf_dir}")
+
+    # Step 2: Create index
+    print(f"\n[2/5] Creating Elasticsearch index: {index_name}")
+    indexer.create_index_if_not_exists(index_name)
+
+    # Step 3: Process PDFs (with index_name for MinIO folder structure)
+    print(f"\n[3/5] Processing {len(pdf_files)} PDFs to Markdown")
+    processed_results = await indexer.process_batch(pdf_files, index_name=index_name)
+
+    successful = sum(1 for r in processed_results if r['status'] == 'success')
+    print(f"✓ Successfully processed: {successful}/{len(pdf_files)}")
+
+    if successful == 0:
+        print("No PDFs processed successfully. Exiting.")
+        return
+
+    # Step 4: Chunk and generate embeddings (with index_name for MinIO URLs)
+    print(f"\n[4/5] Chunking documents and generating embeddings")
+    chunks = indexer.chunk_and_embed(processed_results, index_name=index_name)
+
+    if not chunks:
+        print("No chunks created. Exiting.")
+        return
+
+    # Step 5: Index to Elasticsearch
+    print(f"\n[5/5] Indexing to Elasticsearch")
+    result = indexer.bulk_index(index_name, chunks)
+
+    # Final report
+    print("\n" + "="*60)
+    print("INDEXING COMPLETE")
+    print("="*60)
+    print(f"PDFs Found: {len(pdf_files)}")
+    print(f"PDFs Processed: {successful}")
+    print(f"Chunks Created: {len(chunks)}")
+    print(f"Chunks Indexed: {result.get('total_chunks_indexed', 0)}")
+    print(f"Index Name: {index_name}")
+    print(f"MinIO Folder: {index_name}/")
+    print("="*60)
+
+    return result
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Index PDFs from local folder to Elasticsearch"
+    )
+    parser.add_argument(
+        "--pdf-dir",
+        required=True,
+        help="Path to directory containing PDF files"
+    )
+    parser.add_argument(
+        "--index-name",
+        required=True,
+        help="Name of Elasticsearch index to create"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Limit number of PDFs to process (for testing)"
+    )
+    parser.add_argument(
+        "--langs",
+        nargs="+",
+        default=["English", "Japanese"],
+        help="Languages for PDF processing"
+    )
+
+    args = parser.parse_args()
+
+    try:
+        result = asyncio.run(main(
+            pdf_dir=args.pdf_dir,
+            index_name=args.index_name,
+            batch_size=args.batch_size,
+            langs=args.langs
+        ))
+        print("\n✓ Pipeline completed successfully!")
+    except KeyboardInterrupt:
+        print("\n✗ Pipeline interrupted by user")
+    except Exception as e:
+        print(f"\n✗ Pipeline failed: {e}")
+        import traceback
+        traceback.print_exc()

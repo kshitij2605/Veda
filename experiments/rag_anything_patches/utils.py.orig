@@ -1,0 +1,168 @@
+import json
+import os
+from typing import List
+from dotenv import load_dotenv
+
+from reranker import rerank_documents
+
+load_dotenv('.env')
+
+BACKEND = os.environ.get('BACKEND', 'elasticsearch').lower()
+
+RERANKER_ENDPOINT = os.environ['RERANKER_ENDPOINT']
+
+if BACKEND == 'veda':
+    from veda_retriever import VedaRetriever
+    es_retriever = VedaRetriever(
+        base_url=os.environ.get('VEDA_BASE_URL', 'http://localhost:6340'),
+        collection=os.environ.get('VEDA_COLLECTION', 'rag_anything'),
+    )
+    ES_INDEX = os.environ.get('VEDA_COLLECTION', 'rag_anything')
+else:
+    from es_retriever import ElasticsearchRetriever
+    ES_URL = os.environ['ELASTICSEARCH_HOST']
+    ES_USER = os.environ['ELASTICSEARCH_USER']
+    ES_PASSWORD = os.environ['ELASTICSEARCH_PASSWORD']
+    ES_INDEX = os.getenv('ELASTICSEARCH_INDEX', 'rag-anything-1k')
+    es_retriever = ElasticsearchRetriever(
+        url=ES_URL,
+        es_user=ES_USER,
+        es_password=ES_PASSWORD,
+        index=ES_INDEX,
+    )
+
+def process_filters(filters):
+    """
+    Process the given list of filters and generate a processed version suitable for Elastic Search Filter Query.
+
+    Parameters:
+        filters (str): A JSON string representing a list of filters.
+
+    Returns:
+        list: A processed version of the given filters, represented as a list of dictionaries.
+    """
+    filters = json.loads(filters)
+    
+    if filters == []:
+        return []
+    
+    processed_filters = [
+        {'bool':
+                {'must': 
+                    []
+                }
+        }
+    ]
+    
+    for field, values in filters.items():
+        temp = {'bool':
+                    {'should':
+                        []
+                    }
+                }
+        for value in values:
+            temp['bool']['should'].append(
+                {'match_phrase': 
+                    {f'metadata.{field}': 
+                        value
+                    }
+                }
+            )
+            print(f"{field}: {value}")
+        processed_filters[0]['bool']['must'].append(temp)
+
+    return processed_filters
+
+
+def _default_retriever_weights() -> List[float]:
+    """Read fusion weights from FUSION_WEIGHTS env (e.g. '0.7,0.3'). Default [0.7, 0.3]."""
+    raw = os.environ.get('FUSION_WEIGHTS')
+    if not raw:
+        return [0.7, 0.3]
+    try:
+        parts = [float(x.strip()) for x in raw.split(',')]
+        if len(parts) != 2:
+            raise ValueError(f"FUSION_WEIGHTS must have 2 values, got {len(parts)}")
+        return parts
+    except Exception as e:
+        print(f"⚠ Invalid FUSION_WEIGHTS={raw!r}: {e}; falling back to [0.7, 0.3]")
+        return [0.7, 0.3]
+
+
+async def search(
+    query: str,
+    filters: str,
+    k: int=10,
+    n: int=10,
+    load_more: bool=False,
+    retriever_weights: List[float]=None,
+    text_field: str="content"
+):
+    """
+    Perform a search using the given query, filters, and index name.
+
+    Args:
+        query (str): The search query.
+        filters (str): The filters to apply to the search.
+
+    Returns:
+        list: The search results.
+    """
+    # Process filters
+    filters = process_filters(filters=filters)
+    # Optional pre-retrieval query transformations (env-gated):
+    #   QUERY_REWRITE=1  → Qwen rewrites the question into a heading-form search phrase
+    #   HYDE=1           → Qwen generates a hypothetical answer; that text is embedded for the KNN leg
+    # Both can be combined; QUERY_REWRITE affects BM25 + embedding text, HYDE overrides embedding text.
+    bm25_query = query
+    embed_query = None
+    if os.environ.get('QUERY_REWRITE', '') == '1' or os.environ.get('HYDE', '') == '1':
+        try:
+            from query_rewriting import QueryRewriter
+            qr = QueryRewriter()
+            if os.environ.get('QUERY_REWRITE', '') == '1':
+                bm25_query = qr.rewrite_to_heading(query)
+                print(f"  rewrite: {query[:50]!r} → {bm25_query[:50]!r}")
+            if os.environ.get('HYDE', '') == '1':
+                embed_query = qr.hypothetical_answer(query)
+                print(f"  hyde: {embed_query[:60]!r}")
+        except Exception as e:
+            print(f"  query transform failed: {e}; using original query")
+
+    # Search — linear retriever with per-leg minmax normalization + explicit weights.
+    # Weights default to FUSION_WEIGHTS env var, then [0.7, 0.3].
+    # BM25 fields default to BM25_FIELDS env var, then "content".
+    # fetch_k defaults to FETCH_K env var, then 100.
+    if retriever_weights is None:
+        retriever_weights = _default_retriever_weights()
+    bm25_fields_env = os.environ.get('BM25_FIELDS', '').strip()
+    if bm25_fields_env:
+        text_field = bm25_fields_env
+    fetch_k = int(os.environ.get('FETCH_K', '100'))
+    results = await es_retriever.hybrid_search_linear(
+        query=bm25_query,
+        filter=filters,
+        k=k,
+        fetch_k=fetch_k,
+        text_field=text_field,
+        retriever_weights=retriever_weights,
+        normalizer="minmax",
+        embed_query=embed_query,
+    )
+    if results == []:
+        return []
+    # Rerank — use the primary field from BM25_FIELDS or text_field
+    primary_field = (text_field.split(",")[0].strip() if isinstance(text_field, str) else text_field[0])
+    texts = [doc.get(primary_field) or doc.get("content", "") for doc in results]
+    reranked_results = rerank_documents(
+        endpoint=RERANKER_ENDPOINT, 
+        query=query,
+        texts=texts,
+    )
+    # Reorder using indices
+    docs = [results[reranked_results[i][-1]] for i in range(n) if i < len(reranked_results)]
+    # Update scores 
+    for i, result in enumerate(reranked_results):
+        docs[i]["ce_score"] = result[1]
+    # If documents are not enough, return all
+    return docs[:n] if len(docs) < n else docs

@@ -1,0 +1,244 @@
+{
+  "adaptive_router": {
+    "queries": 5,
+    "results": [
+      {
+        "q": "Microsoft license",
+        "latency_ms": 3.6877132952213287,
+        "response": {
+          "strategy": "Dense",
+          "rerank": false,
+          "suggested_k": 10,
+          "reasoning": "2-token semantic query → dense vector path"
+        }
+      },
+      {
+        "q": "EDR",
+        "latency_ms": 2.0231902599334717,
+        "response": {
+          "strategy": "Sparse",
+          "rerank": false,
+          "suggested_k": 20,
+          "reasoning": "1 short tokens, no clear semantic intent → keyword/sparse path"
+        }
+      },
+      {
+        "q": "ランサムウェアから企業を守る方法を教えてください",
+        "latency_ms": 1.7729029059410095,
+        "response": {
+          "strategy": "Dense",
+          "rerank": false,
+          "suggested_k": 10,
+          "reasoning": "1-token semantic query → dense vector path"
+        }
+      },
+      {
+        "q": "Adobe",
+        "latency_ms": 1.651998609304428,
+        "response": {
+          "strategy": "Sparse",
+          "rerank": false,
+          "suggested_k": 20,
+          "reasoning": "1 short tokens, no clear semantic intent → keyword/sparse path"
+        }
+      },
+      {
+        "q": "compare cybersecurity insurance plans for SMB",
+        "latency_ms": 1.505378633737564,
+        "response": {
+          "strategy": "Dense",
+          "rerank": false,
+          "suggested_k": 10,
+          "reasoning": "6-token semantic query → dense vector path"
+        }
+      }
+    ]
+  },
+  "mcp": {
+    "tools_list": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "tools": [
+          {
+            "description": "List all Veda collections by name.",
+            "inputSchema": {
+              "properties": {},
+              "type": "object"
+            },
+            "name": "list_collections"
+          },
+          {
+            "description": "Return the schema and total record count for a Veda collection.",
+            "inputSchema": {
+              "properties": {
+                "name": {
+                  "description": "Collection name",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "name": "describe_collection"
+          },
+          {
+            "description": "Text search over a Veda collection. The query is auto-embedded using the collection's configured text embedding model. Returns the top-k nearest records by vector similarity.",
+            "inputSchema": {
+              "properties": {
+                "collection": {
+                  "description": "Collection to search",
+                  "type": "string"
+                },
+                "field": {
+                  "description": "Vector field name (optional; defaults to the first vector field on the collection)",
+                  "type": "string"
+                },
+                "filter": {
+                  "description": "Optional SQL-like filter expression, e.g. \"category = 'electronics' AND price < 500\"",
+                  "type": "string"
+                },
+                "limit": {
+                  "default": 10,
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "query": {
+                  "description": "Natural-language query text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "collection",
+                "query"
+              ],
+              "type": "object"
+            },
+            "name": "search"
+          },
+          {
+            "description": "Insert one record into a Veda collection. Fields must match the collection's schema. Vector fields can be supplied as float arrays, or omitted and computed via auto-embedding (call embed-insert instead for that flow).",
+            "inputSchema": {
+              "properties": {
+                "collection": {
+                  "type": "string"
+                },
+                "record": {
+                  "description": "Field name → value map.",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "collection",
+                "record"
+              ],
+              "type": "object"
+            },
+            "name": "upsert_record"
+          }
+        ]
+      }
+    },
+    "list_collections": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"collections\": [\n    \"rag_anything\"\n  ],\n  \"count\": 1\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    "describe": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"fields\": [\n    {\n      \"filterable\": false,\n      \"name\": \"content\",\n      \"type\": \"string\"\n    },\n    {\n      \"filterable\": false,\n      \"name\": \"embedding\",\n      \"type\": \"vector\"\n    },\n    {\n      \"filterable\": true,\n      \"name\": \"parent_doc_id\",\n      \"type\": \"string\"\n    },\n    {\n      \"filterable\": true,\n      \"name\": \"chunk_id\",\n      \"type\": \"int64\"\n    },\n    {\n      \"filterable\": true,\n      \"name\": \"page_number\",\n      \"type\": \"int64\"\n    }\n  ],\n  \"name\": \"rag_anything\",\n  \"record_count\": 2409,\n  \"shard_count\": 2\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    "search": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"count\": 10,\n  \"hits\": [\n    {\n      \"distance\": 0.3222140073776245,\n      \"id\": \"97f8e694-100b-4f53-9f4a-8e8f10541b3e\"\n    },\n    {\n      \"distance\": 0.32229602336883545,\n      \"id\": \"af3d5646-78b3-4f2a-819e-555fe4eb049a\"\n    },\n    {\n      \"distance\": 0.39298492670059204,\n      \"id\": \"13375e93-ea7e-47f4-940d-4b425903541b\"\n    },\n    {\n      \"distance\": 0.39298492670059204,\n      \"id\": \"d6a71533-bd84-4e7f-99e8-50021de3c89a\"\n    },\n    {\n      \"distance\": 0.3931199312210083,\n      \"id\": \"66eaa48e-36e9-43ed-a0c8-893e79907b74\"\n    },\n    {\n      \"distance\": 0.3931199312210083,\n      \"id\": \"2f12879e-f37f-4274-a466-d4d2422c1902\"\n    },\n    {\n      \"distance\": 0.3975455164909363,\n      \"id\": \"3d0cc15d-d70c-438a-a868-4cb2b776643d\"\n    },\n    {\n      \"distance\": 0.3975455164909363,\n      \"id\": \"06356ff0-195a-4b74-b279-4d442a146577\"\n    },\n    {\n      \"distance\": 0.4073163866996765,\n      \"id\": \"09221e3d-b35e-4357-9b0b-24d2434085b3\"\n    },\n    {\n      \"distance\": 0.4073163866996765,\n      \"id\": \"4462cef4-26e6-478f-89ac-cd0783f1d0f3\"\n    }\n  ]\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    }
+  },
+  "cold_tier": {
+    "note": "run separately: cargo test -p veda-storage --test segment_manager_test test_cold_tier"
+  },
+  "mrl": {
+    "runs": [
+      {
+        "truncate_to": null,
+        "median_ms": 2970.6101790070534,
+        "top_ids": [
+          "66eaa48e-36e9-43ed-a0c8-893e79907b74",
+          "2f12879e-f37f-4274-a466-d4d2422c1902",
+          "3b1e610b-846e-41d7-a9d0-a65b843476f9",
+          "6d2d34fe-c87a-495a-8476-ef1773816845",
+          "5c8dac02-78a8-4a78-82c1-a2a8c63a7644",
+          "09100bbb-f07c-49df-80a8-690fef5d8501",
+          "fc13da2a-10ad-42a6-b275-4c8f431476c3",
+          "5c53840d-62a6-4ea8-97a5-e023ede4e3af",
+          "0cce7bf7-5155-4386-a6c3-d7f2a260b29f",
+          "0392c8a1-12f3-491f-a8ac-bdc98253d601"
+        ]
+      },
+      {
+        "truncate_to": 768,
+        "median_ms": 2978.1422913074493,
+        "top_ids": [
+          "5c8dac02-78a8-4a78-82c1-a2a8c63a7644",
+          "09100bbb-f07c-49df-80a8-690fef5d8501",
+          "66eaa48e-36e9-43ed-a0c8-893e79907b74",
+          "2f12879e-f37f-4274-a466-d4d2422c1902",
+          "3b1e610b-846e-41d7-a9d0-a65b843476f9",
+          "6d2d34fe-c87a-495a-8476-ef1773816845",
+          "93205e0b-c03f-4dbd-8afa-c82fbde7c16d",
+          "bfc8ce85-33e2-446c-8e15-6cd8dfc6e474",
+          "0cce7bf7-5155-4386-a6c3-d7f2a260b29f",
+          "0392c8a1-12f3-491f-a8ac-bdc98253d601"
+        ]
+      },
+      {
+        "truncate_to": 512,
+        "median_ms": 3062.896315008402,
+        "top_ids": [
+          "5c8dac02-78a8-4a78-82c1-a2a8c63a7644",
+          "09100bbb-f07c-49df-80a8-690fef5d8501",
+          "3b1e610b-846e-41d7-a9d0-a65b843476f9",
+          "6d2d34fe-c87a-495a-8476-ef1773816845",
+          "0cce7bf7-5155-4386-a6c3-d7f2a260b29f",
+          "0392c8a1-12f3-491f-a8ac-bdc98253d601",
+          "66eaa48e-36e9-43ed-a0c8-893e79907b74",
+          "2f12879e-f37f-4274-a466-d4d2422c1902",
+          "93205e0b-c03f-4dbd-8afa-c82fbde7c16d",
+          "bfc8ce85-33e2-446c-8e15-6cd8dfc6e474"
+        ]
+      }
+    ]
+  },
+  "rerank": {
+    "latency_ms": 42196.77931442857,
+    "hits": 3
+  }
+}
