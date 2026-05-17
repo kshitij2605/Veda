@@ -53,3 +53,29 @@ export const searchCollection = (name: string, params: SearchParams) =>
 
 export const fetchRecords = (name: string, params?: { limit?: number; offset?: number }) =>
   api.get<{ records: Record<string, unknown>[]; total: number }>(`/collections/${name}/records`, { params })
+
+export interface FieldQuality {
+  missing: number
+  min_length: number | null
+  max_length: number | null
+  avg_length: number
+  null_or_empty: number
+}
+
+export interface DuplicatePair {
+  id_a: string
+  id_b: string
+  distance: number
+}
+
+export interface EvaluateResponse {
+  collection: string
+  records_evaluated: number
+  duplicate_pairs: DuplicatePair[]
+  field_quality: Record<string, FieldQuality>
+}
+
+export const evaluateCollection = (
+  name: string,
+  params?: { vector_field?: string; duplicate_threshold?: number; sample?: number },
+) => api.get<EvaluateResponse>(`/collections/${name}/evaluate`, { params })

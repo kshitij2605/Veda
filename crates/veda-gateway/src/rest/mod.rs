@@ -10,6 +10,7 @@ pub mod admin;
 pub mod collections;
 pub mod document;
 pub mod embed_insert;
+pub mod evaluate;
 pub mod metrics_middleware;
 pub mod records;
 pub mod search;
@@ -54,6 +55,11 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/collections/{name}/records",
             get(records::list_records).delete(records::delete_records),
+        )
+        // Data quality / duplicate evaluation
+        .route(
+            "/v1/collections/{name}/evaluate",
+            get(evaluate::evaluate),
         )
         // Document processing (OCR)
         .route(
