@@ -858,7 +858,14 @@ fn split_keeping_separator(text: &str, sep: &str) -> Vec<String> {
 
     while !remaining.is_empty() {
         // remaining starts with sep (or is the first piece without it).
-        let search_start = if remaining.starts_with(sep) { sep.len() } else { 1 };
+        // When skipping a single char we must use the byte length of the
+        // leading UTF-8 codepoint, not a hardcoded 1, otherwise multibyte
+        // text (e.g. Japanese) panics with "not a char boundary".
+        let search_start = if remaining.starts_with(sep) {
+            sep.len()
+        } else {
+            remaining.chars().next().map(char::len_utf8).unwrap_or(1)
+        };
         if let Some(next_idx) = remaining[search_start..].find(sep) {
             let split_at = search_start + next_idx;
             parts.push(remaining[..split_at].to_owned());
@@ -952,11 +959,18 @@ fn build_chunks_with_overlap(
     for (i, piece) in pieces.iter().enumerate() {
         let mut text = String::new();
 
-        // Prepend overlap from previous piece.
+        // Prepend overlap from previous piece. `chunk_overlap` is a byte
+        // budget, but multibyte text (Japanese, etc.) means the candidate
+        // byte index may fall mid-character — walk back to the nearest char
+        // boundary before slicing.
         if chunk_overlap > 0 && i > 0 {
             let prev = &pieces[i - 1].text;
             if prev.len() > chunk_overlap {
-                text.push_str(&prev[prev.len() - chunk_overlap..]);
+                let mut start = prev.len() - chunk_overlap;
+                while start > 0 && !prev.is_char_boundary(start) {
+                    start -= 1;
+                }
+                text.push_str(&prev[start..]);
             } else {
                 text.push_str(prev);
             }
@@ -977,4 +991,42 @@ fn build_chunks_with_overlap(
         offset += piece.text.len();
     }
     chunks
+}
+
+#[cfg(test)]
+mod multibyte_tests {
+    use super::*;
+
+    #[test]
+    fn markdown_recursive_handles_japanese_without_panic() {
+        // Real-world example that previously triggered
+        // `start byte index 1 is not a char boundary` in
+        // `split_keeping_separator` because the leading char '相' is 3 bytes.
+        let text = "相手先企業名 御中\n\n## MSライセンスの最適な選び方\n\n本文の内容です。";
+        let strat = ChunkingStrategy::MarkdownRecursive {
+            max_chunk_size: 1024,
+            chunk_overlap: 64,
+        };
+        let chunks = chunk_markdown(text, &strat);
+        assert!(!chunks.is_empty(), "should produce at least one chunk");
+    }
+
+    #[test]
+    fn fixed_size_overlap_respects_char_boundaries_on_japanese() {
+        // build_chunks_with_overlap was slicing `prev[prev.len() - overlap..]`
+        // by raw byte index; a Japanese-only string makes that boundary
+        // unsafe unless we walk back to a char boundary. Use markdown
+        // headings so the recursive splitter actually exercises the overlap
+        // code path.
+        let body = "あいうえおかきくけこさしすせそたちつてとなにぬねの".repeat(5);
+        let text = format!(
+            "## セクション1\n\n{body}\n\n## セクション2\n\n{body}\n\n## セクション3\n\n{body}",
+        );
+        let strat = ChunkingStrategy::MarkdownRecursive {
+            max_chunk_size: 200,
+            chunk_overlap: 30,
+        };
+        let chunks = chunk_markdown(&text, &strat);
+        assert!(chunks.len() > 1, "should produce multiple chunks under tight budget");
+    }
 }
