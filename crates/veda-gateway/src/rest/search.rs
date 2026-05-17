@@ -75,10 +75,21 @@ pub struct HybridQuery {
     /// Weight on the dense leg (0..1). Default 0.5 = balanced.
     #[serde(default = "default_dense_weight")]
     pub dense_weight: f32,
+    /// Fusion strategy. `"rrf"` (default) uses Reciprocal Rank Fusion —
+    /// rank-based, no score calibration needed. `"weighted_sum"` does
+    /// min-max normalization on each leg, then `dense_weight * dense_n +
+    /// (1 - dense_weight) * bm25_n`. Use weighted_sum when you want
+    /// linear control over the relative contribution of each leg.
+    #[serde(default = "default_fusion")]
+    pub fusion: String,
 }
 
 fn default_dense_weight() -> f32 {
     0.5
+}
+
+fn default_fusion() -> String {
+    "rrf".to_owned()
 }
 
 #[derive(Debug, Deserialize)]
@@ -562,12 +573,27 @@ async fn execute_bm25(
         ));
     };
 
-    // (record_uuid, bm25_score) merged across shards/segments. We do not
-    // currently score against growing segments — the growing-segment BM25
-    // story is a follow-up; sealed segments cover the post-ingest steady
-    // state which is what the benchmark measures.
+    // (record_uuid, bm25_score) merged across shards / growing+sealed
+    // segments. Growing segments maintain an in-memory Bm25Index updated
+    // on insert so freshly-ingested rows are immediately searchable —
+    // earlier this path was sealed-only, which made BM25 invisible to
+    // anything below the seal threshold.
     let mut merged: Vec<(uuid::Uuid, f32)> = Vec::new();
     for sm in shard_map.values() {
+        // Growing segment
+        let gs = sm.growing_segment();
+        if let Some(idx) = gs.bm25_index(&query.field) {
+            let scored = idx.search(&query.query, k.max(1));
+            for (doc_id, score) in scored {
+                if gs.is_deleted(doc_id) {
+                    continue;
+                }
+                if let Some(rec) = gs.get_record(doc_id) {
+                    merged.push((rec.id(), score));
+                }
+            }
+        }
+        // Sealed segments
         for handle in sm.sealed_segments() {
             let Some(idx) = handle.reader.bm25_index(&query.field) else {
                 continue;
@@ -598,10 +624,15 @@ async fn execute_bm25(
     Ok(hits)
 }
 
-/// Dense + BM25 hybrid via Reciprocal Rank Fusion. Each leg runs the
-/// full top-`k` retrieval; results are folded together via
-/// `RRF(d) = sum_l (w_l / (k_rrf + rank_l(d)))` with `k_rrf = 60`.
-/// Returns at most `k` hits.
+/// Dense + BM25 hybrid. Two fusion strategies:
+/// - `rrf` (default): `score(d) = sum_l (w_l / (k_rrf + rank_l(d)))`,
+///   k_rrf = 60. Rank-based — no score-scale calibration needed.
+/// - `weighted_sum`: min-max normalize each leg's scores to [0,1], then
+///   `dense_w * dense_n + (1 - dense_w) * bm25_n`. Linear, intuitive
+///   when you want explicit control over each leg's contribution.
+///
+/// Each leg runs the full top-`k` retrieval first; results are folded
+/// together into at most `k` hits.
 async fn execute_hybrid_dense_bm25(
     state: &AppState,
     collection: &str,
@@ -611,29 +642,16 @@ async fn execute_hybrid_dense_bm25(
     metric: DistanceMetric,
     k: usize,
 ) -> Result<Vec<SearchHit>, (StatusCode, Json<ErrorResponse>)> {
-    const K_RRF: f32 = 60.0;
     let dense_w = hybrid.dense_weight.clamp(0.0, 1.0);
     let bm25_w = 1.0 - dense_w;
 
-    let (dense_hits, _t) = execute_single_vector(
-        executor,
-        &hybrid.dense,
-        req,
-        metric,
-    )?;
+    let (dense_hits, _t) = execute_single_vector(executor, &hybrid.dense, req, metric)?;
     let bm25_hits = execute_bm25(state, collection, &hybrid.bm25, k.max(req.limit)).await?;
 
-    // RRF: rank ids in each list, sum weighted reciprocal-rank.
-    let mut scores: std::collections::HashMap<String, f32> =
-        std::collections::HashMap::with_capacity(dense_hits.len() + bm25_hits.len());
-    for (rank, h) in dense_hits.iter().enumerate() {
-        let s = dense_w / (K_RRF + (rank + 1) as f32);
-        *scores.entry(h.id.clone()).or_insert(0.0) += s;
-    }
-    for (rank, h) in bm25_hits.iter().enumerate() {
-        let s = bm25_w / (K_RRF + (rank + 1) as f32);
-        *scores.entry(h.id.clone()).or_insert(0.0) += s;
-    }
+    let scores: std::collections::HashMap<String, f32> = match hybrid.fusion.as_str() {
+        "weighted_sum" => weighted_sum_fuse(&dense_hits, &bm25_hits, dense_w, bm25_w, metric),
+        _ => rrf_fuse(&dense_hits, &bm25_hits, dense_w, bm25_w),
+    };
 
     let mut ranked: Vec<(String, f32)> = scores.into_iter().collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -647,6 +665,93 @@ async fn execute_hybrid_dense_bm25(
         })
         .collect();
     Ok(hits)
+}
+
+/// Reciprocal-rank fusion.
+fn rrf_fuse(
+    dense_hits: &[SearchHit],
+    bm25_hits: &[SearchHit],
+    dense_w: f32,
+    bm25_w: f32,
+) -> std::collections::HashMap<String, f32> {
+    const K_RRF: f32 = 60.0;
+    let mut scores: std::collections::HashMap<String, f32> =
+        std::collections::HashMap::with_capacity(dense_hits.len() + bm25_hits.len());
+    for (rank, h) in dense_hits.iter().enumerate() {
+        let s = dense_w / (K_RRF + (rank + 1) as f32);
+        *scores.entry(h.id.clone()).or_insert(0.0) += s;
+    }
+    for (rank, h) in bm25_hits.iter().enumerate() {
+        let s = bm25_w / (K_RRF + (rank + 1) as f32);
+        *scores.entry(h.id.clone()).or_insert(0.0) += s;
+    }
+    scores
+}
+
+/// Weighted-sum fusion with per-leg min-max normalization.
+///
+/// Dense hits carry `distance` (lower = closer). For cosine / dot we map
+/// to a similarity (higher = better) before normalizing; for euclidean /
+/// manhattan we negate. BM25 hits store `distance = -bm25_score`, so we
+/// just flip the sign back to recover the raw score.
+fn weighted_sum_fuse(
+    dense_hits: &[SearchHit],
+    bm25_hits: &[SearchHit],
+    dense_w: f32,
+    bm25_w: f32,
+    metric: DistanceMetric,
+) -> std::collections::HashMap<String, f32> {
+    // Dense → similarity, BM25 → raw score.
+    let dense_sims: Vec<(String, f32)> = dense_hits
+        .iter()
+        .map(|h| {
+            let sim = match metric {
+                DistanceMetric::Cosine | DistanceMetric::DotProduct => 1.0 - h.distance,
+                _ => -h.distance,
+            };
+            (h.id.clone(), sim)
+        })
+        .collect();
+    let bm25_raw: Vec<(String, f32)> =
+        bm25_hits.iter().map(|h| (h.id.clone(), -h.distance)).collect();
+
+    let mut scores: std::collections::HashMap<String, f32> =
+        std::collections::HashMap::with_capacity(dense_sims.len() + bm25_raw.len());
+    for (id, n) in min_max_normalize(&dense_sims) {
+        *scores.entry(id).or_insert(0.0) += dense_w * n;
+    }
+    for (id, n) in min_max_normalize(&bm25_raw) {
+        *scores.entry(id).or_insert(0.0) += bm25_w * n;
+    }
+    scores
+}
+
+/// Min-max normalize a list of (id, score) into [0, 1]. A degenerate
+/// `min == max` case collapses to a constant 1.0 so all hits contribute
+/// equally rather than zero (better matches what users intuitively
+/// expect when a leg returned identical scores).
+fn min_max_normalize(scored: &[(String, f32)]) -> Vec<(String, f32)> {
+    if scored.is_empty() {
+        return Vec::new();
+    }
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for (_, s) in scored {
+        if *s < min {
+            min = *s;
+        }
+        if *s > max {
+            max = *s;
+        }
+    }
+    let range = max - min;
+    if range.abs() < 1e-9 {
+        return scored.iter().map(|(id, _)| (id.clone(), 1.0)).collect();
+    }
+    scored
+        .iter()
+        .map(|(id, s)| (id.clone(), (s - min) / range))
+        .collect()
 }
 
 fn execute_multi_vector(

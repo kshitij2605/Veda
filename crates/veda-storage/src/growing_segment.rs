@@ -42,6 +42,12 @@ pub struct GrowingSegment {
     delete_bitmap: DeleteBitmap,
     /// UUID → doc_id index. Maintained on insert so lookups are O(1).
     uuid_to_doc_id: HashMap<Uuid, u32>,
+    /// In-memory BM25 indexes for opt-in string fields. Maintained on
+    /// insert so unsealed records are immediately searchable by BM25 —
+    /// previously BM25 only ran against sealed segments, which meant
+    /// freshly-ingested batches were invisible to text search until they
+    /// hit the seal threshold.
+    bm25_indexes: HashMap<String, crate::bm25_index::Bm25Index>,
 }
 
 impl GrowingSegment {
@@ -64,6 +70,15 @@ impl GrowingSegment {
         for field in schema.multi_vector_fields() {
             multi_vectors.insert(field.name().to_owned(), Vec::new());
         }
+        let mut bm25_indexes = HashMap::new();
+        for field in schema.scalar_fields() {
+            if field.bm25() && matches!(field.field_type(), veda_core::types::FieldType::String) {
+                bm25_indexes.insert(
+                    field.name().to_owned(),
+                    crate::bm25_index::Bm25Index::new(),
+                );
+            }
+        }
 
         Self {
             id: Uuid::new_v4(),
@@ -76,7 +91,14 @@ impl GrowingSegment {
             max_size_bytes,
             delete_bitmap: DeleteBitmap::new(),
             uuid_to_doc_id: HashMap::new(),
+            bm25_indexes,
         }
+    }
+
+    /// Access the BM25 index for a given field, if one was configured.
+    /// Returns `None` for fields without `bm25 = true` or non-string fields.
+    pub fn bm25_index(&self, field: &str) -> Option<&crate::bm25_index::Bm25Index> {
+        self.bm25_indexes.get(field)
     }
 
     /// O(1) lookup: doc_id by record UUID, or `None` if not in this segment.
@@ -197,6 +219,15 @@ impl GrowingSegment {
                 };
                 if let Some(store) = self.sparse_vectors.get_mut(name) {
                     store.push(sv);
+                }
+            }
+        }
+
+        // Populate BM25 indexes for any opt-in string fields on this record.
+        if !self.bm25_indexes.is_empty() {
+            for (name, idx) in self.bm25_indexes.iter_mut() {
+                if let Some(veda_core::record::FieldValue::String(s)) = record.get(name) {
+                    idx.insert(doc_id, s);
                 }
             }
         }
