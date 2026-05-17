@@ -42,6 +42,15 @@ fn build_vector_index(
             idx.build(&refs)?;
             Ok(Box::new(idx))
         }
+        IndexType::RaBitQ => {
+            // 1-bit-per-dim quantization, brute-force scan over codes.
+            // Cheap memory; wins at very large N. See
+            // `crates/veda-index/src/quantization/rabitq_vector_index.rs`.
+            use veda_index::quantization::rabitq_vector_index::RaBitQIndex;
+            let mut idx = RaBitQIndex::new(metric);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
         // Flat (or anything else that isn't a recognised vector index type).
         _ => {
             let mut idx = FlatIndex::new(metric, dimension);

@@ -111,6 +111,11 @@ pub enum IndexType {
     DiskAnn,
     IvfPq,
     Flat,
+    /// 1-bit-per-dim asymmetric quantization (RaBitQ). Brute-force scan
+    /// over compact binary codes — 32× smaller in memory than raw f32
+    /// vectors, but no graph pruning. Wins above ~1M rows where the
+    /// cheaper distance op + smaller working set beats HNSW's pruning.
+    RaBitQ,
     SuffixArray,
     Inverted,
     Range,

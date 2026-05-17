@@ -68,6 +68,13 @@ pub struct FieldDef {
     /// ASCII-only). Unknown names fall back to the default.
     #[serde(default)]
     pub bm25_tokenizer: Option<String>,
+    /// Vector index type. Recognized: `"hnsw"` (default for vector
+    /// fields), `"diskann"`, `"ivfpq"`, `"flat"`, `"rabitq"` (1-bit
+    /// quantized brute-force scan; ~32× memory savings at the cost of
+    /// some recall, well-suited for ≥ 1 M-row collections). Unknown
+    /// values fall back to `hnsw`.
+    #[serde(default)]
+    pub index: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -380,6 +387,22 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
             }
             if let Some(cfg) = &f.auto_embed {
                 fd = fd.with_auto_embed(cfg.clone());
+            }
+            if let Some(idx) = f.index.as_deref() {
+                let idx_type = match idx.to_lowercase().as_str() {
+                    "hnsw" => veda_core::types::IndexType::Hnsw,
+                    "diskann" => veda_core::types::IndexType::DiskAnn,
+                    "ivfpq" | "ivf_pq" => veda_core::types::IndexType::IvfPq,
+                    "flat" => veda_core::types::IndexType::Flat,
+                    "rabitq" | "rabit_q" => veda_core::types::IndexType::RaBitQ,
+                    other => {
+                        return Err(format!(
+                            "field '{}': unknown vector index type '{other}'",
+                            f.name
+                        ));
+                    }
+                };
+                fd = fd.with_index_type(idx_type);
             }
             Ok(fd.with_filterable(f.filterable))
         }
