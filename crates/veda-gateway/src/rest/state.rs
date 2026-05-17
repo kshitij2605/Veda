@@ -228,6 +228,121 @@ impl AppState {
         }
     }
 
+    /// Recover collections from `data_dir` on startup.
+    ///
+    /// For each subdirectory of `data_dir` that contains a `collection.json`,
+    /// re-build the in-memory state (schema, segment managers, query
+    /// executor) and load any sealed segments under each shard. This is
+    /// what makes Veda survive restarts; without it the in-memory
+    /// `schemas` map starts empty and any prior data is orphaned.
+    ///
+    /// Returns the number of collections recovered.
+    pub async fn recover_collections_from_disk(&self) -> usize {
+        use veda_storage::segment_manager::SegmentManager;
+        use veda_query::distributed::DistributedQueryExecutor;
+        use veda_query::local_shard::LocalShardSearcher;
+
+        let data_dir = &self.inner.data_dir;
+        let Ok(entries) = std::fs::read_dir(data_dir) else {
+            return 0;
+        };
+
+        let mut recovered = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // Skip Veda-managed dirs that aren't collections.
+            if let Some(name) = path.file_name().and_then(|s| s.to_str())
+                && (name == "blobs" || name.starts_with('.'))
+            {
+                continue;
+            }
+            let marker = path.join("collection.json");
+            if !marker.exists() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()).map(String::from) else {
+                continue;
+            };
+
+            let schema_bytes = match std::fs::read(&marker) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(collection = %name, error = %e, "recover: read schema failed");
+                    continue;
+                }
+            };
+            let schema: CollectionSchema = match serde_json::from_slice(&schema_bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(collection = %name, error = %e, "recover: parse schema failed");
+                    continue;
+                }
+            };
+
+            let mut shard_managers: HashMap<u32, SegmentManager> = HashMap::new();
+            let mut executor = DistributedQueryExecutor::new();
+            let mut total_sealed = 0usize;
+
+            for shard_id in 0..schema.shard_count() {
+                let mut sm = match SegmentManager::new(
+                    schema.clone(),
+                    shard_id,
+                    &path,
+                    512 * 1024 * 1024,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(collection = %name, shard = shard_id, error = %e, "recover: build segment manager failed");
+                        continue;
+                    }
+                };
+                match sm.load_sealed_segments() {
+                    Ok(n) => total_sealed += n,
+                    Err(e) => {
+                        tracing::warn!(collection = %name, shard = shard_id, error = %e, "recover: load_sealed_segments failed");
+                    }
+                }
+                // Build a parallel manager for the searcher (same pattern as
+                // create_collection — the executor wants its own owned
+                // copy of the segments since it builds ANN indexes lazily).
+                let mut searcher_sm = match SegmentManager::new(
+                    schema.clone(),
+                    shard_id,
+                    &path,
+                    512 * 1024 * 1024,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(collection = %name, shard = shard_id, error = %e, "recover: build searcher manager failed");
+                        continue;
+                    }
+                };
+                let _ = searcher_sm.load_sealed_segments();
+                let searcher = LocalShardSearcher::new(searcher_sm);
+                executor.register_shard(shard_id, Box::new(searcher));
+                shard_managers.insert(shard_id, sm);
+            }
+
+            self.inner.schemas.write().await.insert(name.clone(), schema);
+            self.inner
+                .segment_managers
+                .write()
+                .await
+                .insert(name.clone(), shard_managers);
+            self.inner
+                .query_executors
+                .write()
+                .await
+                .insert(name.clone(), executor);
+            recovered += 1;
+            tracing::info!(collection = %name, sealed_segments = total_sealed, "recovered collection from disk");
+        }
+        recovered
+    }
+
     /// Load blob store configuration from environment variables.
     ///
     /// If `VEDA_BLOB_BACKEND` is set, creates an `ObjectBlobStore` and swaps it

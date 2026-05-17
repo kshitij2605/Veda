@@ -20,6 +20,10 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let app_state = AppState::with_prometheus(&config.data_dir, prometheus_handle);
     app_state.load_embedding_from_env().await;
     app_state.load_blob_store_from_env().await;
+    let recovered = app_state.recover_collections_from_disk().await;
+    if recovered > 0 {
+        tracing::info!(collections = recovered, "recovered collections from data_dir on startup");
+    }
 
     // Optional NATS streaming ingestion worker.
     if let Ok(url) = std::env::var("VEDA_STREAMING_NATS")
