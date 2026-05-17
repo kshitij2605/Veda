@@ -41,6 +41,14 @@ pub enum TokenizerKind {
     /// smaller postings; fine for ASCII / Latin-script workloads where
     /// CJK is rare.
     Whitespace,
+    /// Lindera-backed morphological tokenizer (Kuromoji-compatible
+    /// IPADIC). Activated only when the `lindera_tokenizer` cargo
+    /// feature is enabled — otherwise this variant deserializes
+    /// successfully but tokenization falls back to `CjkBigram` at
+    /// runtime, with a one-line warning logged the first time it's
+    /// touched. That keeps a segment serialized with `lindera` from
+    /// breaking a binary built without the feature.
+    Lindera,
 }
 
 impl TokenizerKind {
@@ -48,6 +56,7 @@ impl TokenizerKind {
         match self {
             Self::CjkBigram => "cjk_bigram",
             Self::Whitespace => "whitespace",
+            Self::Lindera => "lindera",
         }
     }
 
@@ -55,6 +64,7 @@ impl TokenizerKind {
         match name {
             "cjk_bigram" | "cjk-bigram" | "default" => Some(Self::CjkBigram),
             "whitespace" | "ws" => Some(Self::Whitespace),
+            "lindera" | "kuromoji" | "ja" => Some(Self::Lindera),
             _ => None,
         }
     }
@@ -198,7 +208,58 @@ fn run_tokenizer(kind: TokenizerKind, text: &str) -> Vec<String> {
     match kind {
         TokenizerKind::CjkBigram => tokenize_cjk_bigram(text),
         TokenizerKind::Whitespace => tokenize_whitespace(text),
+        TokenizerKind::Lindera => tokenize_lindera(text),
     }
+}
+
+/// Lindera-backed morphological tokenizer.
+///
+/// When the `lindera_tokenizer` feature is enabled, this calls into the
+/// lindera crate with IPADIC. Otherwise it logs a one-time warning and
+/// falls back to the CJK-bigram tokenizer — so segments built or
+/// queried by a binary without the feature stay readable.
+#[cfg(feature = "lindera_tokenizer")]
+fn tokenize_lindera(text: &str) -> Vec<String> {
+    use std::sync::OnceLock;
+    static TOK: OnceLock<lindera::tokenizer::Tokenizer> = OnceLock::new();
+    let tok = TOK.get_or_init(|| {
+        // IPADIC dict + Normal mode. Errors here mean the binary was
+        // built with the feature but the dict wasn't shipped — fail
+        // loudly so the operator notices.
+        lindera::tokenizer::Tokenizer::from_config(
+            lindera::tokenizer::TokenizerConfig {
+                dictionary: lindera::dictionary::DictionaryConfig {
+                    kind: Some(lindera::DictionaryKind::IPADIC),
+                    path: None,
+                },
+                user_dictionary: None,
+                mode: lindera::mode::Mode::Normal,
+            },
+        )
+        .expect("lindera_tokenizer feature is on but IPADIC dict failed to load")
+    });
+    match tok.tokenize(text) {
+        Ok(toks) => toks
+            .into_iter()
+            .map(|t| t.text.to_lowercase())
+            .filter(|s| !s.trim().is_empty())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(not(feature = "lindera_tokenizer"))]
+fn tokenize_lindera(text: &str) -> Vec<String> {
+    use std::sync::Once;
+    static WARN: Once = Once::new();
+    WARN.call_once(|| {
+        tracing::warn!(
+            "bm25 field requested lindera tokenizer but the lindera_tokenizer \
+             cargo feature is not enabled; falling back to cjk_bigram. \
+             Build with `--features veda-storage/lindera_tokenizer` to enable."
+        );
+    });
+    tokenize_cjk_bigram(text)
 }
 
 /// Built-in default: lowercase ASCII word runs + unigrams + overlapping
@@ -340,6 +401,23 @@ mod tests {
         assert!(!hits.is_empty());
         // Doc 0 explicitly mentions ランサムウェア — should rank first.
         assert_eq!(hits[0].0, 0);
+    }
+
+    #[test]
+    fn lindera_variant_falls_back_when_feature_off() {
+        // With the lindera feature off, the variant deserializes and
+        // tokenization works (via the CJK-bigram fallback). The point
+        // of this test is to lock in the "doesn't panic / doesn't
+        // return empty" contract.
+        let toks = run_tokenizer(TokenizerKind::Lindera, "ランサムウェア対策");
+        assert!(!toks.is_empty(), "fallback should still produce tokens");
+    }
+
+    #[test]
+    fn lindera_name_parses() {
+        assert_eq!(TokenizerKind::from_name("lindera"), Some(TokenizerKind::Lindera));
+        assert_eq!(TokenizerKind::from_name("kuromoji"), Some(TokenizerKind::Lindera));
+        assert_eq!(TokenizerKind::from_name("ja"), Some(TokenizerKind::Lindera));
     }
 
     #[test]
