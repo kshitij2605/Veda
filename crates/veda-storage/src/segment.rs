@@ -56,6 +56,24 @@ fn range_file(name: &str) -> String {
 
 // ── SegmentMetadata ────────────────────────────────────────────────────────
 
+/// Storage tier for a sealed segment.
+///
+/// - `Hot` (default): full ANN index built in memory; lowest-latency search.
+/// - `Warm`: vectors are mmap-resident but no ANN index is built — search
+///   falls back to brute-force scan over the mmap. Trade a few ms of query
+///   latency for the memory of the ANN graph.
+/// - `Cold`: data is offloaded to remote object storage and not present
+///   locally. Queries return an "in cold tier" sentinel until a background
+///   job promotes the segment back. **Cold-tier promotion is not yet
+///   wired through the segment manager**; see `documentation/tiered-storage.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SegmentTier {
+    #[default]
+    Hot,
+    Warm,
+    Cold,
+}
+
 /// Metadata stored alongside a segment, persisted as `metadata.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentMetadata {
@@ -64,6 +82,10 @@ pub struct SegmentMetadata {
     pub schema_version: u32,
     pub created_at: i64,
     pub sealed: bool,
+    /// Hot/Warm/Cold tier marker. Older segments without this field load
+    /// as `Hot` (the serde default).
+    #[serde(default)]
+    pub tier: SegmentTier,
 }
 
 // ── Scalar index type selector ─────────────────────────────────────────────
@@ -437,6 +459,7 @@ impl SegmentWriter {
             schema_version: 1,
             created_at: now,
             sealed: true,
+            tier: SegmentTier::Hot,
         };
         let meta_json = serde_json::to_vec_pretty(&metadata)?;
         fs::write(self.dir.join(METADATA_FILE), meta_json)?;

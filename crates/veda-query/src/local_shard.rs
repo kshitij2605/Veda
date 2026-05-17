@@ -83,10 +83,19 @@ impl LocalShardSearcher {
     ///
     /// The index type is taken from the field definition's `index_type`
     /// (HNSW / DiskANN / IVF-PQ / Flat). Unknown types fall back to Flat.
+    /// Warm-tier segments are skipped (search will brute-force scan their
+    /// mmap-resident vectors instead).
     pub fn build_indexes(&mut self) -> Result<()> {
+        use veda_storage::segment::SegmentTier;
         for handle in self.segment_manager.sealed_segments() {
             let seg_id = handle.metadata.id;
             if self.indexes.contains_key(&seg_id) {
+                continue;
+            }
+            if handle.metadata.tier != SegmentTier::Hot {
+                // Warm: keep vector storage mmap'd but skip ANN build.
+                // Cold: ditto for now (cold-tier copy-back lands in a
+                // follow-up; see documentation/tiered-storage.md).
                 continue;
             }
 
@@ -241,6 +250,53 @@ impl ShardSearcher for LocalShardSearcher {
             {
                 let results = search_sealed_segment_ref(reader, index.as_ref(), request)?;
                 all_results.extend(results);
+            } else {
+                // No ANN index (e.g. Warm tier): brute-force scan vectors
+                // directly from the segment reader.
+                let row_count = reader.row_count() as u32;
+                let segment_id = reader.metadata().id;
+                let mut local: Vec<(u32, f32)> = Vec::with_capacity(request.k * 2);
+                let delete_bm = reader.delete_bitmap();
+                let metric_fn: fn(&[f32], &[f32]) -> f32 = match request.metric {
+                    DistanceMetric::Cosine => veda_core::simd::cosine_distance,
+                    DistanceMetric::Euclidean => veda_core::simd::euclidean_distance,
+                    DistanceMetric::DotProduct => |a, b| -veda_core::simd::dot_product(a, b),
+                    DistanceMetric::Manhattan => veda_core::simd::manhattan_distance,
+                    _ => veda_core::simd::euclidean_distance,
+                };
+                for doc_id in 0..row_count {
+                    if delete_bm.is_deleted(doc_id) {
+                        continue;
+                    }
+                    let Ok(stored) = reader.get_vector(&request.field, doc_id) else {
+                        continue;
+                    };
+                    let dist = metric_fn(&request.query_vector, stored);
+                    local.push((doc_id, dist));
+                    if local.len() > request.k * 4 {
+                        local.sort_by(|a, b| {
+                            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        local.truncate(request.k);
+                    }
+                }
+                local.sort_by(|a, b| {
+                    a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                local.truncate(request.k);
+                for (doc_id, distance) in local {
+                    let record_id = reader
+                        .get_record(doc_id)
+                        .ok()
+                        .map(|r| r.id())
+                        .unwrap_or_else(Uuid::new_v4);
+                    all_results.push(ScoredRecord {
+                        id: record_id,
+                        segment_id,
+                        doc_id,
+                        distance,
+                    });
+                }
             }
         }
         agg_timings.ann_search_ms += sealed_start.elapsed().as_secs_f64() * 1000.0;

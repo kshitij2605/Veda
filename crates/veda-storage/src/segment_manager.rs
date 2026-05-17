@@ -130,6 +130,28 @@ impl SegmentManager {
         ids
     }
 
+    /// Move a sealed segment to a new storage tier. Hot ↔ Warm transitions
+    /// only affect index-build behaviour at the next executor rebuild —
+    /// no data is moved. Returns `true` if the segment was found and updated.
+    pub fn set_segment_tier(
+        &mut self,
+        segment_id: SegmentId,
+        tier: crate::segment::SegmentTier,
+    ) -> Result<bool> {
+        for handle in &mut self.sealed_segments {
+            if handle.metadata.id == segment_id {
+                handle.metadata.tier = tier;
+                // Persist the tier change to metadata.json so it survives
+                // restart.
+                let meta_path = handle.dir.join("metadata.json");
+                let json = serde_json::to_vec_pretty(&handle.metadata)?;
+                fs::write(&meta_path, json)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Delete a record by marking it in the appropriate segment's delete bitmap.
     ///
     /// Scans the growing segment first, then sealed segments. Returns `true` if
