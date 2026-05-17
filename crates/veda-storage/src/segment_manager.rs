@@ -287,6 +287,11 @@ impl SegmentManager {
     /// `segment_{uuid}` naming convention and opens each as a `SegmentReader`.
     /// Returns the number of segments loaded.
     pub fn load_sealed_segments(&mut self) -> Result<usize> {
+        // A mid-seal crash can leave a `segment_*` dir without
+        // metadata.json, schema.json, or records.jsonl. Skip-and-log
+        // such segments so one bad dir doesn't make the whole shard
+        // unrecoverable — that was the failure mode flagged in the
+        // last review of recover_collections_from_disk.
         let mut loaded = 0;
 
         let entries = fs::read_dir(&self.base_dir).map_err(|e| {
@@ -294,11 +299,24 @@ impl SegmentManager {
         })?;
 
         for entry in entries {
-            let entry = entry?;
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(error = %e, "load_sealed_segments: skip unreadable entry");
+                    continue;
+                }
+            };
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
+            let file_type = match entry.file_type() {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(name = %name_str, error = %e, "load_sealed_segments: file_type failed");
+                    continue;
+                }
+            };
 
-            if !name_str.starts_with("segment_") || !entry.file_type()?.is_dir() {
+            if !name_str.starts_with("segment_") || !file_type.is_dir() {
                 continue;
             }
 
@@ -312,7 +330,28 @@ impl SegmentManager {
                 continue;
             }
 
-            let reader = SegmentReader::open(&seg_dir)?;
+            // Skip partial segments (mid-seal crash leaves them
+            // without metadata.json). The reader open below would
+            // also fail, but this check makes the log message clearer.
+            if !seg_dir.join("metadata.json").exists() {
+                tracing::warn!(
+                    dir = %seg_dir.display(),
+                    "load_sealed_segments: skipping segment without metadata.json (mid-seal crash?)"
+                );
+                continue;
+            }
+
+            let reader = match SegmentReader::open(&seg_dir) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        dir = %seg_dir.display(),
+                        error = %e,
+                        "load_sealed_segments: skipping segment that failed to open"
+                    );
+                    continue;
+                }
+            };
             let metadata = reader.metadata().clone();
 
             self.sealed_segments.push(SealedSegmentHandle {
