@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly Sunday 03:00 UTC — picks up upstream lindera / cuvs / etc.
+    # breakage in the optional-feature matrices.
+    - cron: '0 3 * * 0'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # Default build — what most users compile.
+  check:
+    name: cargo check (default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
+  # Per-feature check so the optional cargo features actually compile.
+  # gpu_nim is cheap (one HTTP-client dep, no network at build time).
+  # lindera is intentionally NOT in this matrix because its `ipadic`
+  # feature pulls a build-time HTTPS download from lindera.s3 that
+  # CI runners may not be able to reach; see the dedicated
+  # `lindera-feature` job below which gates on a manual workflow
+  # dispatch.
+  check-features:
+    name: cargo check (${{ matrix.feature }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature:
+          - veda-index/gpu_nim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --features ${{ matrix.feature }}
+
+  # Lindera feature compile — runs on workflow_dispatch and weekly cron
+  # only, so a sandbox without outbound network doesn't fail the
+  # default CI pipeline. When this runs it both verifies the lindera
+  # 0.32 API surface still matches our wrapper and exercises the dict
+  # download path.
+  lindera-feature:
+    name: cargo check (lindera_tokenizer)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --features veda-storage/lindera_tokenizer
+
+  # All unit + integration tests.
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-targets
+
+  # Fail the build on clippy warnings — the only enforced lint pass.
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Rustfmt check — keeps the diff noise down.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
