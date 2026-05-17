@@ -37,6 +37,13 @@ pub enum FieldType {
         /// When `None`, any truncation up to `dimension` is permitted.
         #[serde(default)]
         mrl_dims: Option<Vec<u32>>,
+        /// Per-field auto-embed configuration. When set, the process-document
+        /// pipeline reads `auto_embed.source` from each chunk record and
+        /// runs it through an embedder selected for `auto_embed.modality`.
+        /// When `None`, the gateway falls back to the legacy name-based
+        /// heuristic (text bucket vs image bucket).
+        #[serde(default)]
+        auto_embed: Option<AutoEmbedConfig>,
     },
     /// High-dimensional, sparse f32 vector (e.g. SPLADE, BM25).
     /// `dimension` is the vocabulary / index upper bound. Indices in stored
@@ -67,6 +74,34 @@ pub enum FieldType {
     Json,
     Blob,
     Uuid,
+}
+
+/// Per-field auto-embed configuration used by the process-document /
+/// embed-insert paths. Lets a schema declare exactly which source field
+/// feeds which vector field and which modality to embed with — replaces
+/// the global "any image in the doc → all vectors are multimodal"
+/// heuristic that broke mixed text+image schemas.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AutoEmbedConfig {
+    /// Name of the source field on each record (e.g. `"content"` for a
+    /// text-chunk field or `"image_blob"` for an image-bytes field).
+    pub source: String,
+    /// Which modality of embedder to select from the registry. The first
+    /// registered model whose `supported_modalities` contains this
+    /// modality is used.
+    pub modality: AutoEmbedModality,
+}
+
+/// Modality enum used by [`AutoEmbedConfig`]. Kept distinct from
+/// `veda_core::embedding::Modality` so that `veda-core::types` doesn't
+/// pull in the heavier embedding module just for two enum values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoEmbedModality {
+    Text,
+    Image,
+    Video,
+    Audio,
 }
 
 /// Index types for fields.
