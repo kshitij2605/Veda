@@ -42,7 +42,8 @@ fn test_get_field_by_name() {
         field.field_type(),
         FieldType::Vector {
             dimension: 128,
-            metric: DistanceMetric::Euclidean
+            metric: DistanceMetric::Euclidean,
+            ..
         }
     ));
     assert_eq!(field.index_type(), IndexType::Hnsw);
@@ -118,6 +119,7 @@ fn test_serde_roundtrip_field_type() {
         FieldType::Vector {
             dimension: 256,
             metric: DistanceMetric::DotProduct,
+            model_id: None,
         },
         FieldType::SparseVector {
             dimension: 30522,

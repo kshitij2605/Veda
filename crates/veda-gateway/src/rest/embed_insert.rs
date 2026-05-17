@@ -136,7 +136,7 @@ pub async fn embed_insert(
             )
         })?;
         match target_def.field_type() {
-            FieldType::Vector { dimension, .. } => {
+            FieldType::Vector { dimension, model_id, .. } => {
                 if model.output_dimension != *dimension {
                     return Err((
                         StatusCode::BAD_REQUEST,
@@ -144,6 +144,21 @@ pub async fn embed_insert(
                             error: format!(
                                 "model '{}' output dimension {} does not match field '{}' dimension {}",
                                 model_name, model.output_dimension, target_field, dimension
+                            ),
+                        }),
+                    ));
+                }
+                if let Some(declared) = model_id
+                    && declared != &model_name
+                {
+                    return Err((
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "field '{target_field}' is bound to model '{declared}' \
+                                but request would use '{model_name}'. Mixing models on the \
+                                same vector field corrupts retrieval — create a new field \
+                                or drop+re-embed the collection."
                             ),
                         }),
                     ));

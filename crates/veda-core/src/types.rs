@@ -24,6 +24,12 @@ pub enum FieldType {
     Vector {
         dimension: u32,
         metric: DistanceMetric,
+        /// Optional identifier of the embedding model that produced vectors
+        /// for this field. When set, embed-insert calls must use the same
+        /// model — guards against silently mixing incompatible embedding
+        /// spaces when an upstream model is swapped.
+        #[serde(default)]
+        model_id: Option<String>,
     },
     /// High-dimensional, sparse f32 vector (e.g. SPLADE, BM25).
     /// `dimension` is the vocabulary / index upper bound. Indices in stored

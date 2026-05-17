@@ -86,7 +86,7 @@ impl LocalShardSearcher {
             let mut field_indexes: HashMap<String, Box<dyn VectorIndex>> = HashMap::new();
 
             for field_def in schema.vector_fields() {
-                if let FieldType::Vector { dimension, metric } = field_def.field_type() {
+                if let FieldType::Vector { dimension, metric, .. } = field_def.field_type() {
                     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(row_count as usize);
                     for doc_id in 0..row_count {
                         let vec = reader.get_vector(field_def.name(), doc_id)?;

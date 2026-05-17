@@ -1327,6 +1327,76 @@ async fn test_sparse_vector_end_to_end() {
     assert_eq!(resp.status(), 400);
 }
 
+// ── Embedding model versioning ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_collection_records_declared_model() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "model_bound",
+            "fields": [
+                {
+                    "name": "embedding",
+                    "type": "vector",
+                    "dimension": 8,
+                    "metric": "cosine",
+                    "model": "bge-m3"
+                },
+                { "name": "title", "type": "string" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Describe should surface the declared model.
+    let resp = c
+        .get(format!("{base}/v1/collections/model_bound"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let emb = body["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "embedding")
+        .unwrap();
+    assert_eq!(emb["model"], "bge-m3");
+
+    // Default (no model) — no model field on response.
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "no_model",
+            "fields": [
+                { "name": "embedding", "type": "vector", "dimension": 8, "metric": "cosine" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let resp = c
+        .get(format!("{base}/v1/collections/no_model"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let emb = body["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "embedding")
+        .unwrap();
+    assert!(emb.get("model").is_none() || emb["model"].is_null());
+}
+
 // ── Array fields ───────────────────────────────────────────────────────────
 
 #[tokio::test]

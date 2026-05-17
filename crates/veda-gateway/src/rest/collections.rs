@@ -42,6 +42,9 @@ pub struct FieldDef {
     pub filterable: bool,
     pub dimension: Option<u32>,
     pub metric: Option<String>,
+    /// Optional embedding-model identifier for vector fields. When set,
+    /// embed-insert calls must use the same model.
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +83,8 @@ pub struct FieldInfo {
     pub dimension: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metric: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -299,7 +304,13 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
                 "manhattan" => DistanceMetric::Manhattan,
                 other => return Err(format!("field '{}': unknown metric '{other}'", f.name)),
             };
-            Ok(FieldDefinition::vector(&f.name, dim, metric).with_filterable(f.filterable))
+            let fd = match &f.model {
+                Some(m) if !m.is_empty() => {
+                    FieldDefinition::vector_with_model(&f.name, dim, metric, m)
+                }
+                _ => FieldDefinition::vector(&f.name, dim, metric),
+            };
+            Ok(fd.with_filterable(f.filterable))
         }
         "sparse_vector" | "sparsevector" => {
             let dim = f.dimension.ok_or_else(|| {
@@ -365,8 +376,8 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
 }
 
 fn field_to_info(f: &FieldDefinition) -> FieldInfo {
-    let (type_str, dimension, metric) = match f.field_type() {
-        FieldType::Vector { dimension, metric } => {
+    let (type_str, dimension, metric, model) = match f.field_type() {
+        FieldType::Vector { dimension, metric, model_id } => {
             let m = match metric {
                 DistanceMetric::Cosine => "cosine",
                 DistanceMetric::Euclidean => "euclidean",
@@ -375,27 +386,27 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
                 DistanceMetric::Hamming => "hamming",
                 DistanceMetric::Jaccard => "jaccard",
             };
-            ("vector", Some(*dimension), Some(m.to_owned()))
+            ("vector", Some(*dimension), Some(m.to_owned()), model_id.clone())
         }
-        FieldType::Blob => ("blob", None, None),
-        FieldType::String => ("string", None, None),
-        FieldType::Int32 => ("int32", None, None),
-        FieldType::Int64 => ("int64", None, None),
-        FieldType::Float32 => ("float32", None, None),
-        FieldType::Float64 => ("float64", None, None),
-        FieldType::Bool => ("bool", None, None),
-        FieldType::Timestamp => ("timestamp", None, None),
-        FieldType::Json => ("json", None, None),
-        FieldType::Uuid => ("uuid", None, None),
+        FieldType::Blob => ("blob", None, None, None),
+        FieldType::String => ("string", None, None, None),
+        FieldType::Int32 => ("int32", None, None, None),
+        FieldType::Int64 => ("int64", None, None, None),
+        FieldType::Float32 => ("float32", None, None, None),
+        FieldType::Float64 => ("float64", None, None, None),
+        FieldType::Bool => ("bool", None, None, None),
+        FieldType::Timestamp => ("timestamp", None, None, None),
+        FieldType::Json => ("json", None, None, None),
+        FieldType::Uuid => ("uuid", None, None, None),
         FieldType::SparseVector { dimension, metric } => {
             let m = match metric {
                 DistanceMetric::Cosine => "cosine",
                 DistanceMetric::DotProduct => "dot_product",
                 _ => "cosine",
             };
-            ("sparse_vector", Some(*dimension), Some(m.to_owned()))
+            ("sparse_vector", Some(*dimension), Some(m.to_owned()), None)
         }
-        FieldType::Array(_) => ("array", None, None),
+        FieldType::Array(_) => ("array", None, None, None),
     };
 
     FieldInfo {
@@ -404,5 +415,6 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
         filterable: f.filterable(),
         dimension,
         metric,
+        model,
     }
 }

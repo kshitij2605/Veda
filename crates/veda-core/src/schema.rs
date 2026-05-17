@@ -26,11 +26,35 @@ impl FieldDefinition {
     }
 
     /// Create a vector field definition with the given dimension and distance metric.
-    /// Defaults to HNSW indexing.
+    /// Defaults to HNSW indexing and no model binding.
     pub fn vector(name: impl Into<String>, dimension: u32, metric: DistanceMetric) -> Self {
         Self {
             name: name.into(),
-            field_type: FieldType::Vector { dimension, metric },
+            field_type: FieldType::Vector {
+                dimension,
+                metric,
+                model_id: None,
+            },
+            filterable: false,
+            index_type: IndexType::Hnsw,
+        }
+    }
+
+    /// Create a vector field bound to a specific embedding model.
+    /// Embed-insert calls using a different model will be rejected.
+    pub fn vector_with_model(
+        name: impl Into<String>,
+        dimension: u32,
+        metric: DistanceMetric,
+        model_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            field_type: FieldType::Vector {
+                dimension,
+                metric,
+                model_id: Some(model_id.into()),
+            },
             filterable: false,
             index_type: IndexType::Hnsw,
         }
