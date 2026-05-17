@@ -582,7 +582,8 @@ async fn process_single_file(
             }
 
             let record_id = record.id().to_string();
-            let shard_id = record.id().as_u128() as u32 % shard_count;
+            let shard_id =
+                veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
 
             let sm = shard_map.get_mut(&shard_id).ok_or_else(|| {
                 ocr_err(format!("shard {shard_id} not found"))
@@ -638,7 +639,8 @@ async fn process_single_file(
             }
 
             let record_id = record.id().to_string();
-            let shard_id = record.id().as_u128() as u32 % shard_count;
+            let shard_id =
+                veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
 
             let sm = shard_map.get_mut(&shard_id).ok_or_else(|| {
                 ocr_err(format!("shard {shard_id} not found"))

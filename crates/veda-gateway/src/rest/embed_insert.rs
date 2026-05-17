@@ -265,7 +265,8 @@ pub async fn embed_insert(
             }
         };
 
-        let shard_id = record.id().as_u128() as u32 % shard_count;
+        let shard_id =
+            veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
         let sm = shard_map.get_mut(&shard_id).ok_or_else(|| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
