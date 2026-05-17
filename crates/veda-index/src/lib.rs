@@ -3,6 +3,7 @@ pub mod distance;
 pub mod flat;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod gpu_nim_client;
 pub mod hnsw;
 pub mod ivfpq;
 pub mod quantization;
