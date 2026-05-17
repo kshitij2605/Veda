@@ -116,6 +116,12 @@ pub enum IndexType {
     /// vectors, but no graph pruning. Wins above ~1M rows where the
     /// cheaper distance op + smaller working set beats HNSW's pruning.
     RaBitQ,
+    /// Two-stage retrieval: RaBitQ for coarse candidate scan, then
+    /// raw-f32 distance for the precise top-k pass. Trades the
+    /// memory savings of pure RaBitQ for higher recall on the top
+    /// of the result set; useful when quality matters more than
+    /// memory footprint.
+    RaBitQRerank,
     SuffixArray,
     Inverted,
     Range,
