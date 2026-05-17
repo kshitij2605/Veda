@@ -68,6 +68,51 @@ pub enum ChunkingStrategy {
     None,
 }
 
+/// Time-window plan for audio / video chunking.
+///
+/// The chunker at this layer does not decode media; it produces a sequence of
+/// `(start_ms, end_ms)` ranges, with optional overlap. The embed-insert path
+/// is responsible for actually slicing the media bytes (via ffmpeg or the
+/// embedding service's own segmentation) and embedding each slice.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TimeWindowPlan {
+    pub window_ms: u64,
+    pub overlap_ms: u64,
+}
+
+impl Default for TimeWindowPlan {
+    /// 15-second overlapping windows with 3-second overlap — the de-facto
+    /// default in recent multimodal RAG research for audio and video.
+    fn default() -> Self {
+        Self {
+            window_ms: 15_000,
+            overlap_ms: 3_000,
+        }
+    }
+}
+
+impl TimeWindowPlan {
+    /// Emit `(start_ms, end_ms)` pairs covering `total_ms` with this plan.
+    /// The final window may be shorter than `window_ms` to cover the tail.
+    pub fn windows(&self, total_ms: u64) -> Vec<(u64, u64)> {
+        if total_ms == 0 || self.window_ms == 0 {
+            return Vec::new();
+        }
+        let step = self.window_ms.saturating_sub(self.overlap_ms).max(1);
+        let mut out = Vec::new();
+        let mut start = 0u64;
+        while start < total_ms {
+            let end = (start + self.window_ms).min(total_ms);
+            out.push((start, end));
+            if end == total_ms {
+                break;
+            }
+            start += step;
+        }
+        out
+    }
+}
+
 impl Default for ChunkingStrategy {
     fn default() -> Self {
         ChunkingStrategy::MarkdownRecursive {

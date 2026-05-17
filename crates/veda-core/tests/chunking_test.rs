@@ -1,4 +1,4 @@
-use veda_core::chunking::{chunk_markdown, ChunkingStrategy};
+use veda_core::chunking::{chunk_markdown, ChunkingStrategy, TimeWindowPlan};
 
 #[test]
 fn default_strategy_is_markdown_recursive() {
@@ -424,6 +424,29 @@ fn hierarchical_produces_coarse_and_fine() {
     for w in chunks.windows(2) {
         assert!(w[0].index < w[1].index);
     }
+}
+
+#[test]
+fn time_window_default_15s_overlap_3s() {
+    let plan = TimeWindowPlan::default();
+    // 30s clip → expect windows at [0,15], [12,27], [24,30].
+    let windows = plan.windows(30_000);
+    assert_eq!(windows, vec![(0, 15_000), (12_000, 27_000), (24_000, 30_000)]);
+}
+
+#[test]
+fn time_window_handles_empty_and_short() {
+    let plan = TimeWindowPlan::default();
+    assert!(plan.windows(0).is_empty());
+    // Shorter than one window: a single (0, total) range.
+    assert_eq!(plan.windows(5_000), vec![(0, 5_000)]);
+}
+
+#[test]
+fn time_window_no_overlap() {
+    let plan = TimeWindowPlan { window_ms: 10_000, overlap_ms: 0 };
+    let windows = plan.windows(25_000);
+    assert_eq!(windows, vec![(0, 10_000), (10_000, 20_000), (20_000, 25_000)]);
 }
 
 #[test]
