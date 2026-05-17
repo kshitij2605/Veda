@@ -59,6 +59,9 @@ pub struct LocalShardSearcher {
     segment_manager: SegmentManager,
     /// Vector indexes for each sealed segment, keyed by segment_id then field name.
     indexes: HashMap<Uuid, HashMap<String, Box<dyn VectorIndex>>>,
+    /// PLAID candidate-pruning indexes for multi-vector fields, keyed by
+    /// segment_id then field name.
+    plaid_indexes: HashMap<Uuid, HashMap<String, crate::plaid::PlaidIndex>>,
 }
 
 impl LocalShardSearcher {
@@ -66,6 +69,7 @@ impl LocalShardSearcher {
         Self {
             segment_manager,
             indexes: HashMap::new(),
+            plaid_indexes: HashMap::new(),
         }
     }
 
@@ -104,6 +108,25 @@ impl LocalShardSearcher {
             }
 
             self.indexes.insert(seg_id, field_indexes);
+
+            // Build PLAID indexes for each multi-vector field in this segment.
+            let mut plaid_field: HashMap<String, crate::plaid::PlaidIndex> = HashMap::new();
+            for field_def in schema.multi_vector_fields() {
+                let Some(iter) = reader.iter_multi_vector(field_def.name()) else {
+                    continue;
+                };
+                let collected: Vec<(u32, Vec<Vec<f32>>)> =
+                    iter.map(|(id, rows)| (id, rows.clone())).collect();
+                let plaid = crate::plaid::PlaidIndex::build(
+                    collected.iter().map(|(id, rows)| (*id, rows)),
+                );
+                if plaid.centroid_count() > 0 {
+                    plaid_field.insert(field_def.name().to_owned(), plaid);
+                }
+            }
+            if !plaid_field.is_empty() {
+                self.plaid_indexes.insert(seg_id, plaid_field);
+            }
         }
 
         Ok(())
@@ -191,19 +214,180 @@ impl ShardSearcher for LocalShardSearcher {
         _shard_id: u32,
         request: &MultiVectorSearchRequest,
     ) -> Result<(Vec<ScoredRecord>, SearchTimings)> {
+        use roaring::RoaringBitmap;
+        use std::time::Instant;
+        use uuid::Uuid;
+        use veda_core::simd;
+        use veda_core::types::DistanceMetric;
+
+        // Search filter -- shared across segments.
+        let filter_start = Instant::now();
+        let filter_expr: Option<crate::filter::FilterExpr> = match &request.filter {
+            Some(s) => Some(crate::filter::parser::FilterParser::parse(s)?),
+            None => None,
+        };
+        let filter_ms = filter_start.elapsed().as_secs_f64() * 1000.0;
+
+        let mut all_results: Vec<ScoredRecord> = Vec::new();
+        let ann_start = Instant::now();
+
+        let per_row: fn(&[f32], &[f32]) -> f32 = match request.metric {
+            DistanceMetric::Cosine => simd::cosine_distance,
+            DistanceMetric::Euclidean => simd::euclidean_distance,
+            DistanceMetric::DotProduct => |a, b| -simd::dot_product(a, b),
+            _ => simd::cosine_distance,
+        };
+
+        // Growing segment — brute force (no PLAID there yet).
         let growing = self.segment_manager.growing_segment();
-        let growing_opt = if growing.count() > 0 { Some(growing) } else { None };
+        if growing.count() > 0 {
+            let growing_filter: Option<RoaringBitmap> = match filter_expr.as_ref() {
+                Some(expr) => {
+                    let mut bm = RoaringBitmap::new();
+                    for doc_id in 0..growing.count() {
+                        if let Some(rec) = growing.get_record(doc_id)
+                            && crate::filter::evaluate_record(expr, rec)
+                        {
+                            bm.insert(doc_id);
+                        }
+                    }
+                    Some(bm)
+                }
+                None => None,
+            };
+            let raw = growing.search_multi_vector(
+                &request.field,
+                &request.query_rows,
+                request.k,
+                request.metric,
+                growing_filter.as_ref(),
+            )?;
+            let segment_id = growing.id();
+            all_results.extend(raw.into_iter().map(|(doc_id, distance)| {
+                let record_id = growing
+                    .get_record(doc_id)
+                    .map(|r| r.id())
+                    .unwrap_or_else(Uuid::new_v4);
+                ScoredRecord {
+                    id: record_id,
+                    segment_id,
+                    doc_id,
+                    distance,
+                }
+            }));
+        }
 
-        let sealed_refs: Vec<&veda_storage::segment::SegmentReader> = self
-            .segment_manager
-            .sealed_segments()
-            .iter()
-            .map(|h| &h.reader)
-            .collect();
+        // Sealed segments — use PLAID pruning when available.
+        // probe count grows with query size; "2 centroids per query token" is
+        // a reasonable default that captures the relevant cluster mass
+        // without exploding the candidate set.
+        let probe = 2usize;
+        for handle in self.segment_manager.sealed_segments() {
+            let reader = &handle.reader;
+            let row_count = reader.row_count() as u32;
 
-        let (response, timings) =
-            SearchExecutor::search_multi_vector(request, growing_opt, &sealed_refs)?;
-        Ok((response.results, timings))
+            // Build allowed bitmap from filter + delete tombstones.
+            let mut allowed: Option<RoaringBitmap> = match filter_expr.as_ref() {
+                Some(expr) => {
+                    let mut ctx = crate::filter::evaluator::FilterContext::new(row_count);
+                    let mut fields = Vec::new();
+                    collect_filter_fields(expr, &mut fields);
+                    for f in &fields {
+                        if let Some(idx) = reader.inverted_index(f) {
+                            ctx.add_inverted(f, idx);
+                        }
+                        if let Some(idx) = reader.range_index(f) {
+                            ctx.add_range(f, idx);
+                        }
+                        if let Some(idx) = reader.bitmap_index(f) {
+                            ctx.add_bitmap(f, idx);
+                        }
+                    }
+                    Some(ctx.evaluate(expr)?)
+                }
+                None => None,
+            };
+            let delete_bm = reader.delete_bitmap();
+            if let Some(bm) = allowed.as_mut() {
+                for doc_id in 0..row_count {
+                    if delete_bm.is_deleted(doc_id) {
+                        bm.remove(doc_id);
+                    }
+                }
+            }
+
+            // PLAID candidate pruning if available.
+            let plaid_candidates: Option<RoaringBitmap> = self
+                .plaid_indexes
+                .get(&handle.metadata.id)
+                .and_then(|m| m.get(&request.field))
+                .map(|p| p.candidates(&request.query_rows, probe));
+
+            // Final candidate set: intersect filter ∩ plaid (if any).
+            let candidates: Option<RoaringBitmap> = match (allowed, plaid_candidates) {
+                (Some(a), Some(p)) => Some(a & p),
+                (Some(a), None) => Some(a),
+                (None, Some(p)) => Some(p),
+                (None, None) => None,
+            };
+
+            // Brute MaxSim over the candidate set.
+            let Some(iter) = reader.iter_multi_vector(&request.field) else {
+                continue;
+            };
+            let mut local: Vec<(u32, f32)> = Vec::with_capacity(request.k * 2);
+            for (doc_id, doc_rows) in iter {
+                if delete_bm.is_deleted(doc_id) {
+                    continue;
+                }
+                if let Some(bm) = candidates.as_ref()
+                    && !bm.contains(doc_id)
+                {
+                    continue;
+                }
+                if doc_rows.is_empty() {
+                    continue;
+                }
+                let dist = simd::maxsim_distance(&request.query_rows, doc_rows, per_row);
+                local.push((doc_id, dist));
+            }
+            local.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            local.truncate(request.k);
+
+            let segment_id = handle.metadata.id;
+            for (doc_id, distance) in local {
+                let record_id = reader
+                    .get_record(doc_id)
+                    .ok()
+                    .map(|r| r.id())
+                    .unwrap_or_else(Uuid::new_v4);
+                all_results.push(ScoredRecord {
+                    id: record_id,
+                    segment_id,
+                    doc_id,
+                    distance,
+                });
+            }
+        }
+
+        let ann_ms = ann_start.elapsed().as_secs_f64() * 1000.0;
+        let scoring_start = Instant::now();
+        all_results.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all_results.truncate(request.k);
+        let scoring_ms = scoring_start.elapsed().as_secs_f64() * 1000.0;
+
+        Ok((
+            all_results,
+            SearchTimings {
+                filter_ms,
+                ann_search_ms: ann_ms,
+                scoring_ms,
+            },
+        ))
     }
 }
 
