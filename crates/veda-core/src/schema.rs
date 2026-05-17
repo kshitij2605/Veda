@@ -35,6 +35,7 @@ impl FieldDefinition {
                 metric,
                 model_id: None,
                 mrl_dims: None,
+                auto_embed: None,
             },
             filterable: false,
             index_type: IndexType::Hnsw,
@@ -56,6 +57,7 @@ impl FieldDefinition {
                 metric,
                 model_id: Some(model_id.into()),
                 mrl_dims: None,
+                auto_embed: None,
             },
             filterable: false,
             index_type: IndexType::Hnsw,
@@ -67,6 +69,18 @@ impl FieldDefinition {
     pub fn with_mrl_dims(mut self, dims: Vec<u32>) -> Self {
         if let FieldType::Vector { mrl_dims, .. } = &mut self.field_type {
             *mrl_dims = Some(dims);
+        }
+        self
+    }
+
+    /// Set per-field auto-embed config. The process-document handler
+    /// looks at this to pick which source field on each chunk record
+    /// (e.g. `"content"` or `"image_blob"`) feeds this vector field,
+    /// and what modality of embedder to use. Has no effect on non-
+    /// vector fields.
+    pub fn with_auto_embed(mut self, cfg: crate::types::AutoEmbedConfig) -> Self {
+        if let FieldType::Vector { auto_embed, .. } = &mut self.field_type {
+            *auto_embed = Some(cfg);
         }
         self
     }

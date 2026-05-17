@@ -533,21 +533,51 @@ async fn process_single_file(
     let mut image_embed_targets: Vec<(String, EmbeddingClient)> = Vec::new();
 
     for field_def in schema.fields() {
-        if let FieldType::Vector { .. } = field_def.field_type() {
+        if let FieldType::Vector { auto_embed, .. } = field_def.field_type() {
             let field_name = field_def.name();
+
+            // Prefer the per-field auto_embed config when set. Each vector
+            // field declares which modality of embedder feeds it, so a
+            // mixed text+image schema works correctly. Falls back to the
+            // legacy name-based heuristic when the schema doesn't set it.
+            if let Some(cfg) = auto_embed {
+                use veda_core::types::AutoEmbedModality;
+                let modality = match cfg.modality {
+                    AutoEmbedModality::Text => Modality::Text,
+                    AutoEmbedModality::Image => Modality::Image,
+                    AutoEmbedModality::Video => Modality::Video,
+                    AutoEmbedModality::Audio => Modality::Audio,
+                };
+                let models = registry.find_by_modality(modality);
+                if models.is_empty() {
+                    continue;
+                }
+                match cfg.modality {
+                    AutoEmbedModality::Text => text_embed_targets.push((
+                        field_name.to_owned(),
+                        EmbeddingClient::new(models[0].clone()),
+                    )),
+                    _ => image_embed_targets.push((
+                        field_name.to_owned(),
+                        EmbeddingClient::new(models[0].clone()),
+                    )),
+                }
+                continue;
+            }
+
             let lower = field_name.to_lowercase();
             // Image bucket: names containing "image" (and not also "text").
             let is_image_field = lower.contains("image") && !lower.contains("text");
             // Text bucket: anything else that's a vector field.
-            // We treat any non-image vector field as a text-embedding target
-            // so generic names like "embedding" or "vector" get filled in
-            // by the text encoder. Previously only names containing
-            // "text"/"content" were embedded, which silently produced
-            // INSERT_FAILED on perfectly valid schemas like `{name: "embedding"}`.
             let is_text_field = !is_image_field;
 
             if is_text_field {
-                let models = if has_images && !multimodal_models.is_empty() {
+                // Pick text-only model by default. The previous "swap to
+                // multimodal whenever ANY image is in the doc" behaviour
+                // broke mixed schemas — keep text fields text. If the
+                // operator wants multimodal embeds for the text field,
+                // they set auto_embed on it explicitly.
+                let models = if has_images && text_only_models.is_empty() {
                     &multimodal_models
                 } else {
                     &text_only_models

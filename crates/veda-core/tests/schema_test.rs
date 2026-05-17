@@ -121,6 +121,7 @@ fn test_serde_roundtrip_field_type() {
             metric: DistanceMetric::DotProduct,
             model_id: None,
             mrl_dims: None,
+            auto_embed: None,
         },
         FieldType::SparseVector {
             dimension: 30522,
