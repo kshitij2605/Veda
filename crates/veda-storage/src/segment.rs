@@ -14,6 +14,7 @@ use veda_core::types::{FieldType, SegmentId};
 
 use crate::bitmap_index::BitmapIndex;
 use crate::delete_bitmap::DeleteBitmap;
+use crate::bm25_index::Bm25Index;
 use crate::inverted_index::InvertedIndex;
 use crate::multivector_storage::{MultiVectorStorageReader, MultiVectorStorageWriter};
 use crate::range_index::RangeIndex;
@@ -76,6 +77,10 @@ fn bitmap_file(name: &str) -> String {
 
 fn range_file(name: &str) -> String {
     format!("{name}.rng")
+}
+
+fn bm25_file(name: &str) -> String {
+    format!("{name}.bm25")
 }
 
 // ── SegmentMetadata ────────────────────────────────────────────────────────
@@ -183,6 +188,10 @@ pub struct SegmentWriter {
     range_indexes: HashMap<String, RangeIndex>,
     bitmap_indexes: HashMap<String, BitmapIndex>,
 
+    // BM25 full-text indexes keyed by field name (only for String fields
+    // marked `bm25 = true` in the schema).
+    bm25_indexes: HashMap<String, Bm25Index>,
+
     // JSONL writer for full record scalar data.
     record_writer: BufWriter<fs::File>,
 
@@ -235,6 +244,7 @@ impl SegmentWriter {
         let mut inverted_indexes = HashMap::new();
         let mut range_indexes = HashMap::new();
         let mut bitmap_indexes = HashMap::new();
+        let mut bm25_indexes = HashMap::new();
 
         for field in schema.scalar_fields() {
             match scalar_index_kind(field.field_type()) {
@@ -247,6 +257,12 @@ impl SegmentWriter {
                 ScalarIndexKind::Bitmap => {
                     bitmap_indexes.insert(field.name().to_owned(), BitmapIndex::new());
                 }
+            }
+            // BM25 is orthogonal to the inverted/range/bitmap routing: a
+            // string field may want both a filterable Inverted index and
+            // a full-text BM25 index. Track them in a separate map.
+            if field.bm25() && matches!(field.field_type(), FieldType::String) {
+                bm25_indexes.insert(field.name().to_owned(), Bm25Index::new());
             }
         }
 
@@ -265,6 +281,7 @@ impl SegmentWriter {
             inverted_indexes,
             range_indexes,
             bitmap_indexes,
+            bm25_indexes,
             record_writer,
             blob_refs: Vec::new(),
         })
@@ -375,6 +392,12 @@ impl SegmentWriter {
                         }
                     }
                 }
+                // BM25 — runs alongside whichever scalar index is selected.
+                if let Some(bm25) = self.bm25_indexes.get_mut(name)
+                    && let FieldValue::String(s) = value
+                {
+                    bm25.insert(doc_id, s);
+                }
             }
         }
 
@@ -463,6 +486,12 @@ impl SegmentWriter {
             idx.save(&scalars_dir.join(bitmap_file(name)))?;
         }
 
+        // 5b. Save BM25 indexes (parallel to the scalar indexes; a
+        //     string field can have both).
+        for (name, idx) in &self.bm25_indexes {
+            idx.save(&scalars_dir.join(bm25_file(name)))?;
+        }
+
         // 6. Save empty delete bitmap.
         let delete_bitmap = DeleteBitmap::new();
         delete_bitmap.save(&self.dir.join(DELETE_BITMAP_FILE))?;
@@ -520,6 +549,10 @@ pub struct SegmentReader {
     inverted_indexes: HashMap<String, InvertedIndex>,
     range_indexes: HashMap<String, RangeIndex>,
     bitmap_indexes: HashMap<String, BitmapIndex>,
+
+    // BM25 full-text indexes keyed by field name. Loaded from disk if
+    // the corresponding `.bm25` file exists, otherwise the map is empty.
+    bm25_indexes: HashMap<String, Bm25Index>,
 
     // Delete bitmap.
     delete_bitmap: DeleteBitmap,
@@ -619,6 +652,20 @@ impl SegmentReader {
             }
         }
 
+        // Load BM25 indexes (one per field that has the `bm25 = true`
+        // schema flag). Tolerate missing files so segments built before
+        // BM25 support load cleanly.
+        let mut bm25_indexes = HashMap::new();
+        for field in schema.scalar_fields() {
+            if field.bm25() && matches!(field.field_type(), FieldType::String) {
+                let path = scalars_dir.join(bm25_file(field.name()));
+                if path.exists() {
+                    bm25_indexes
+                        .insert(field.name().to_owned(), Bm25Index::load(&path)?);
+                }
+            }
+        }
+
         // Load delete bitmap.
         let delete_bitmap_path = dir.join(DELETE_BITMAP_FILE);
         let delete_bitmap = if delete_bitmap_path.exists() {
@@ -675,11 +722,17 @@ impl SegmentReader {
             inverted_indexes,
             range_indexes,
             bitmap_indexes,
+            bm25_indexes,
             delete_bitmap,
             records_mmap: Arc::new(records_mmap),
             record_offsets,
             uuid_to_doc_id,
         })
+    }
+
+    /// Access the BM25 index for a given field name, if one was built.
+    pub fn bm25_index(&self, field: &str) -> Option<&Bm25Index> {
+        self.bm25_indexes.get(field)
     }
 
     /// O(1) lookup: doc_id by record UUID, or `None` if not in this segment.

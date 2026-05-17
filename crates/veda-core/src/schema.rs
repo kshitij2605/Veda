@@ -12,6 +12,12 @@ pub struct FieldDefinition {
     field_type: FieldType,
     filterable: bool,
     index_type: IndexType,
+    /// Build a full-text BM25 index over this field's string values.
+    /// Only meaningful for `String` fields; ignored elsewhere. When
+    /// `true`, the segment writer maintains a `Bm25Index` and the
+    /// search API accepts a `bm25` query against this field.
+    #[serde(default)]
+    bm25: bool,
 }
 
 impl FieldDefinition {
@@ -21,6 +27,7 @@ impl FieldDefinition {
             name: name.into(),
             field_type,
             filterable: false,
+            bm25: false,
             index_type: IndexType::None,
         }
     }
@@ -38,6 +45,7 @@ impl FieldDefinition {
                 auto_embed: None,
             },
             filterable: false,
+            bm25: false,
             index_type: IndexType::Hnsw,
         }
     }
@@ -60,6 +68,7 @@ impl FieldDefinition {
                 auto_embed: None,
             },
             filterable: false,
+            bm25: false,
             index_type: IndexType::Hnsw,
         }
     }
@@ -93,6 +102,7 @@ impl FieldDefinition {
             name: name.into(),
             field_type: FieldType::SparseVector { dimension, metric },
             filterable: false,
+            bm25: false,
             index_type: IndexType::None,
         }
     }
@@ -113,6 +123,7 @@ impl FieldDefinition {
                 metric,
             },
             filterable: false,
+            bm25: false,
             index_type: IndexType::None,
         }
     }
@@ -123,6 +134,7 @@ impl FieldDefinition {
             name: name.into(),
             field_type: FieldType::Blob,
             filterable: false,
+            bm25: false,
             index_type: IndexType::None,
         }
     }
@@ -136,6 +148,13 @@ impl FieldDefinition {
     /// Set the index type for this field.
     pub fn with_index_type(mut self, index_type: IndexType) -> Self {
         self.index_type = index_type;
+        self
+    }
+
+    /// Mark this string field for a full-text BM25 index. No-op on
+    /// non-string fields — the segment writer just skips them.
+    pub fn with_bm25(mut self, bm25: bool) -> Self {
+        self.bm25 = bm25;
         self
     }
 
@@ -153,6 +172,11 @@ impl FieldDefinition {
 
     pub fn index_type(&self) -> IndexType {
         self.index_type
+    }
+
+    /// Whether this field should have a BM25 inverted index built.
+    pub fn bm25(&self) -> bool {
+        self.bm25
     }
 }
 
