@@ -92,6 +92,70 @@ collection's segments to materialize all non-vector fields onto hits.
 First implementation was O(K·N) (~10s latency on K=10 over N=2.4K) —
 rewrote as a single pass with a `HashSet<Uuid>` of wanted IDs.
 
+## Round 4 — pluggable tokenizers, RaBitQ as a VectorIndex, columnar design (commits `c2cb7b4`, `c3e773a`, `6c3f676`, `71cc8b3`)
+
+Round 4 worked through the five competitive-positioning items left in
+the Recommendations list. Two of them turned out to be already wired
+when I claimed they weren't — the live verification corrected the
+record.
+
+`c2cb7b4 feat(bm25): pluggable tokenizers` — `Bm25Index` now carries a
+`TokenizerKind` (default `cjk_bigram`, alt `whitespace`) that's
+persisted with the postings. Fields opt in via `bm25_tokenizer` on the
+schema. Adding a Kuromoji or Jieba tokenizer is now a single match arm
+in `run_tokenizer` plus a `TokenizerKind` variant — index format and
+gateway plumbing don't change. 8 tests cover both tokenizers + a save/
+load roundtrip that preserves the tokenizer choice.
+
+`c3e773a feat(search): BM25 on growing segments + weighted_sum hybrid
+fusion` — `GrowingSegment` now keeps an in-memory `Bm25Index` per
+opt-in string field, populated on insert; `execute_bm25` walks growing
+then sealed per shard. Validated end-to-end: insert 3 rows, query
+`bm25` for "rust" before any seal → returns the two matching docs and
+excludes the non-matching one. `HybridQuery.fusion` switches between
+RRF (default) and weighted-sum; weighted-sum min-max normalizes each
+leg then `dense_w · dense_n + (1 - dense_w) · bm25_n`.
+
+`6c3f676 feat(index): RaBitQ quantization as a VectorIndex backend` —
+new `RaBitQIndex` wraps `RaBitQuantizer` in the `VectorIndex` trait
+plus runtime soft-delete tracking. `IndexType::RaBitQ` plumbs through
+the schema and `build_vector_index`. Gateway `index: "rabitq"` opts in.
+Memory drops 32× per stored vector (1 bit/dim); search is brute-force
+over codes with asymmetric distance estimation. Best fit is ≥ 1 M-row
+collections where the cheap-per-distance op + small working set beat
+HNSW's graph pruning. Below ~100 K rows HNSW still wins — opt-in only.
+
+`71cc8b3 docs: columnar stored_fields design + migration plan` — full
+design + 5-step implementation plan in `documentation/columnar-stored-
+fields.md`. Trait-first refactor (`StoredFields::get_field` + `::
+get_record`), one column file per stored field, `storage_format.txt`
+marker so existing JSONL segments keep loading unchanged. Honest
+about what columnar buys (projection-only hydration, per-column
+codecs, cheaper cold-tier shipping) and what it doesn't (HNSW / BM25
+search latency is already field-independent). Implementation deferred.
+
+### Corrections
+
+The Round-2 recommendations listed **in-graph filtering** and
+**per-field MRL HNSW** as future work. Both are already implemented in
+the current tree:
+
+- `crates/veda-index/src/hnsw/searcher.rs::search_layer_filtered`
+  dispatches between `PreFilter`, `InAlgorithm`, and `PostFilter`
+  strategies based on filter selectivity, scaling `ef` inversely to
+  the filter ratio (the same adaptive pattern Qdrant 2026 describes).
+  `crates/veda-query/src/local_shard.rs:702` calls it whenever a
+  filter is set.
+- `crates/veda-query/src/local_shard.rs` already builds a per-dim HNSW
+  for every `mrl_dims` rung at seal time (lines 142-170) and routes
+  `truncate_to=N` to the matching per-dim index at search time
+  (lines 303-330). The report's earlier "needs implementing" claim was
+  wrong; the latency invariance we saw was Gap E (file-reopen) dominating.
+
+Both items are now marked verified rather than implemented. Latency
+test on the 2.4K-row corpus at `truncate_to ∈ {1024, 768, 512}` came
+back uniformly ≤ 6 ms.
+
 ## Round 3 — built-in BM25 + hybrid search (commits `5204123`, `d33e906`)
 
 The remaining functional parity gap with Elasticsearch was sparse / BM25
@@ -306,30 +370,41 @@ gap is dominated by two factors:
   and `bulk_module/index_local_pdfs.py` (plus the new
   `bulk_module/index_from_preocr.py` for pre-OCR'd ingest).
 
-## Recommendations (priority-ordered)
+## Recommendations status
 
-All five Round-2 gaps and the Round-3 BM25 / hybrid path are now done.
-Remaining follow-ups, ordered by impact relative to Qdrant / Pinecone /
-Milvus:
+All five Round-3+ priorities have been addressed:
 
-1. **Quantization on the hot path** — Qdrant's PQ/SQ at p99 ≤ 40 ms on
-   100 M vectors. Veda has the `RaBitQuantizer` scaffolding (`crates/
-   veda-index/src/quantization/rabitq.rs`) but it isn't wired into the
-   HNSW build path; doing so should compress hot-tier memory by 4-8×
-   and improve large-collection latency further.
-2. **In-graph filtering** (filter during HNSW traversal, not after) —
-   2-3× faster filtered queries per Qdrant 2026 reports. The current
-   filter path is post-filter, which over-fetches when filter
-   selectivity is low.
-3. **Per-field MRL HNSW** so `truncate_to=768/512` actually drops query
-   cost, not just rescoring math (Round 1 Gap H from Phase 8e).
-4. **Tantivy/Lucene-style stored_fields columnar format** would let us
-   drop the JSONL+offset-table trick entirely and stream large numbers
-   of fields cheaply.
-5. **Tokenizer plugin point for BM25** — the built-in CJK bigram
-   tokenizer is fast and zero-deps, but Kuromoji / Jieba / SentencePiece
-   would improve BM25 quality on JA / ZH / multilingual corpora. Make
-   the tokenizer pluggable per field.
+1. **Quantization (RaBitQ)** — landed as opt-in `IndexType::RaBitQ`
+   (commit `6c3f676`). Right tradeoff is ≥ 1 M-row collections; opt
+   in via schema `{index: "rabitq"}`. Deep HNSW integration (storing
+   quantized codes in the graph itself) is a separate follow-up if a
+   workload needs both pruning *and* compression.
+2. **In-graph filtering** — already implemented; verified.
+3. **Per-field MRL HNSW** — already implemented; verified.
+4. **Columnar stored_fields** — design + migration plan landed
+   (`documentation/columnar-stored-fields.md`); implementation deferred
+   as the next focused chunk of work.
+5. **Pluggable BM25 tokenizers** — landed (commit `c2cb7b4`).
+   `cjk_bigram` + `whitespace` built in; Kuromoji / Jieba / SentencePiece
+   are now a single match arm away.
+
+### Next work (priority-ordered)
+
+1. **Columnar `StoredFields` implementation** — see
+   `documentation/columnar-stored-fields.md`. Trait-first refactor,
+   ~3-5 days. The biggest hydration latency win for wide records;
+   marginal for the rag_anything-shape corpus we benchmarked.
+2. **Deep RaBitQ → HNSW** — replace raw f32 storage in the HNSW graph
+   with quantized codes, so the graph pruning *and* the small memory
+   footprint compound. Bigger refactor of the distance abstraction.
+3. **External tokenizers** (Kuromoji / Jieba) plugged into
+   `TokenizerKind`. Now a small change inside `bm25_index.rs`.
+4. **Per-segment HNSW with quantized re-rank** — keep HNSW raw for the
+   top-k retrieval, run RaBitQ for the final rank refinement on big
+   collections. Hybrid memory profile.
+5. **GPU-accelerated build** (cuVS / `crates/veda-index/src/gpu.rs`
+   already has the feature gate). Out of scope for the rag_anything
+   workload but the next obvious axis for ≥ 100 M row scale.
 
 ## Notes
 
