@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod metrics_middleware;
 pub mod records;
 pub mod rerank;
+pub mod route;
 pub mod search;
 pub mod state;
 
@@ -70,6 +71,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         )
         // Model Context Protocol (MCP) for AI agents
         .route("/v1/mcp", post(mcp::handle_mcp))
+        // Adaptive query router (recommends retrieval strategy for a query)
+        .route("/v1/route", post(route::route))
         // Document processing (OCR)
         .route(
             "/v1/collections/{name}/process-document",
