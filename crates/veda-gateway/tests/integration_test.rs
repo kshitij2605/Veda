@@ -1158,3 +1158,79 @@ async fn test_delete_then_reinsert() {
     // Search results include newly inserted records (at minimum 5)
     assert!(body["count"].as_u64().unwrap() >= 5);
 }
+
+// ── list_records pagination ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_list_records_pagination() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    c.post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "list_col",
+            "fields": [
+                { "name": "embedding", "type": "vector", "dimension": 4, "metric": "cosine" },
+                { "name": "title", "type": "string", "filterable": true }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let mut records = Vec::new();
+    for i in 0..23 {
+        records.push(json!({
+            "embedding": seeded_vector(4, i),
+            "title": format!("Item {i}")
+        }));
+    }
+    let resp = c
+        .post(format!("{base}/v1/collections/list_col/insert"))
+        .json(&json!({ "records": records }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Default limit (50): all 23 records returned, total=23.
+    let resp = c
+        .get(format!("{base}/v1/collections/list_col/records"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["total"], 23);
+    assert_eq!(body["records"].as_array().unwrap().len(), 23);
+
+    // limit=10: first 10 records, total still 23.
+    let resp = c
+        .get(format!("{base}/v1/collections/list_col/records?limit=10"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["total"], 23);
+    assert_eq!(body["records"].as_array().unwrap().len(), 10);
+
+    // limit=10&offset=20: last 3 records.
+    let resp = c
+        .get(format!(
+            "{base}/v1/collections/list_col/records?limit=10&offset=20"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["total"], 23);
+    assert_eq!(body["records"].as_array().unwrap().len(), 3);
+
+    // Unknown collection: 404.
+    let resp = c
+        .get(format!("{base}/v1/collections/does_not_exist/records"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}

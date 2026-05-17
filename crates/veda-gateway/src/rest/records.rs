@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,24 @@ pub struct DeleteRecordsRequest {
 #[derive(Debug, Serialize)]
 pub struct DeleteRecordsResponse {
     pub deleted: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListRecordsQuery {
+    #[serde(default = "default_list_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_list_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListRecordsResponse {
+    pub records: Vec<GetRecordResponse>,
+    pub total: u64,
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────
@@ -189,6 +207,73 @@ pub async fn insert(
     }
 
     Ok((StatusCode::CREATED, Json(InsertResponse { inserted })))
+}
+
+#[instrument(name = "list_records", skip(state), fields(collection = %name, limit = q.limit, offset = q.offset))]
+pub async fn list_records(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<ListRecordsQuery>,
+) -> Result<Json<ListRecordsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    {
+        let schemas = state.inner.schemas.read().await;
+        if !schemas.contains_key(&name) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("collection '{name}' not found"),
+                }),
+            ));
+        }
+    }
+
+    let managers = state.inner.segment_managers.read().await;
+    let shard_map = managers.get(&name).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("collection '{name}' not found"),
+            }),
+        )
+    })?;
+
+    // Two-pass: count non-deleted records, then collect window [offset, offset+limit).
+    let mut total: u64 = 0;
+    let mut seen: usize = 0;
+    let mut records: Vec<GetRecordResponse> = Vec::with_capacity(q.limit);
+
+    for sm in shard_map.values() {
+        let gs = sm.growing_segment();
+        for doc_id in 0..gs.count() {
+            if gs.is_deleted(doc_id) {
+                continue;
+            }
+            if let Some(rec) = gs.get_record(doc_id) {
+                total += 1;
+                if seen >= q.offset && records.len() < q.limit {
+                    records.push(record_to_response(rec));
+                }
+                seen += 1;
+            }
+        }
+
+        for handle in sm.sealed_segments() {
+            for doc_id in 0..handle.metadata.row_count as u32 {
+                if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                    continue;
+                }
+                if let Ok(rec) = handle.reader.get_record(doc_id) {
+                    total += 1;
+                    if seen >= q.offset && records.len() < q.limit {
+                        records.push(record_to_response(&rec));
+                    }
+                    seen += 1;
+                }
+            }
+        }
+    }
+
+    Ok(Json(ListRecordsResponse { records, total }))
 }
 
 pub async fn get_record(

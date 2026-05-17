@@ -53,7 +53,7 @@ pub fn build_router(app_state: state::AppState) -> Router {
         )
         .route(
             "/v1/collections/{name}/records",
-            delete(records::delete_records),
+            get(records::list_records).delete(records::delete_records),
         )
         // Document processing (OCR)
         .route(
