@@ -258,6 +258,18 @@ impl SegmentWriter {
         for field_def in self.schema.scalar_fields() {
             let name = field_def.name();
             if let Some(value) = record.get(name) {
+                // Array fields: index each element individually so equality
+                // filters (`field = 'tag-a'`) match if any element equals.
+                if let FieldValue::Array(elems) = value {
+                    if let Some(idx) = self.inverted_indexes.get_mut(name) {
+                        for elem in elems {
+                            if let Some(s) = field_value_to_string(elem) {
+                                idx.insert(doc_id, &s);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 match scalar_index_kind(field_def.field_type()) {
                     ScalarIndexKind::Inverted => {
                         if let Some(s) = field_value_to_string(value)

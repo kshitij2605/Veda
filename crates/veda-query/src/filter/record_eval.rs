@@ -41,10 +41,21 @@ enum CmpOp {
 }
 
 /// Check equality between a record's field value and a filter value.
+///
+/// For Array field values, returns true if any element equals the filter value
+/// (membership semantics — `tags = 'foo'` matches a record whose `tags` array
+/// contains `"foo"`).
 fn match_eq(record: &Record, field: &str, value: &FilterValue) -> bool {
     let Some(fv) = record.get(field) else {
         return false;
     };
+    if let FieldValue::Array(elems) = fv {
+        return elems.iter().any(|elem| match_field_value(elem, value));
+    }
+    match_field_value(fv, value)
+}
+
+fn match_field_value(fv: &FieldValue, value: &FilterValue) -> bool {
     match (fv, value) {
         (FieldValue::String(s), FilterValue::String(v)) => s == v,
         (FieldValue::Int32(n), FilterValue::Int(v)) => *n as i64 == *v,

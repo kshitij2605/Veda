@@ -1326,3 +1326,87 @@ async fn test_sparse_vector_end_to_end() {
         .unwrap();
     assert_eq!(resp.status(), 400);
 }
+
+// ── Array fields ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_array_field_indexing() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    // Collection with a tags array field (string[]) and a required vector.
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "tagged_col",
+            "fields": [
+                { "name": "embedding", "type": "vector", "dimension": 4, "metric": "cosine" },
+                { "name": "tags", "type": "array_string", "filterable": true }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let resp = c
+        .post(format!("{base}/v1/collections/tagged_col/insert"))
+        .json(&json!({
+            "records": [
+                { "embedding": [0.1, 0.2, 0.3, 0.4], "tags": ["red", "small"] },
+                { "embedding": [0.2, 0.3, 0.4, 0.5], "tags": ["blue", "small"] },
+                { "embedding": [0.3, 0.4, 0.5, 0.6], "tags": ["red", "large"] }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Filter on array membership: tags = 'red' should return 2 records.
+    let resp = c
+        .post(format!("{base}/v1/collections/tagged_col/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": [0.1, 0.2, 0.3, 0.4] } },
+            "limit": 10,
+            "filter": "tags = 'red'"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["count"].as_u64().unwrap(),
+        2,
+        "tags = 'red' should match 2 records, got: {body}"
+    );
+
+    // Filter on array membership: tags = 'small' should also return 2.
+    let resp = c
+        .post(format!("{base}/v1/collections/tagged_col/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": [0.1, 0.2, 0.3, 0.4] } },
+            "limit": 10,
+            "filter": "tags = 'small'"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["count"].as_u64().unwrap(), 2);
+
+    // No match: tags = 'nonexistent' returns 0.
+    let resp = c
+        .post(format!("{base}/v1/collections/tagged_col/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": [0.1, 0.2, 0.3, 0.4] } },
+            "limit": 10,
+            "filter": "tags = 'nonexistent'"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["count"].as_u64().unwrap(), 0);
+}

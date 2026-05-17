@@ -501,7 +501,12 @@ fn json_to_field_value(
             let u: uuid::Uuid = s.parse().map_err(|_| "invalid UUID")?;
             Ok(FieldValue::Uuid(u))
         }
-        _ => Err(format!("unsupported field type: {field_type:?}")),
+        FieldType::Array(inner) => {
+            let arr = value.as_array().ok_or("expected JSON array for array field")?;
+            let elems: Result<Vec<FieldValue>, String> =
+                arr.iter().map(|v| json_to_field_value(v, inner)).collect();
+            Ok(FieldValue::Array(elems?))
+        }
     }
 }
 

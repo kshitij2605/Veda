@@ -345,6 +345,21 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
         "uuid" => Ok(
             FieldDefinition::new(&f.name, FieldType::Uuid).with_filterable(f.filterable),
         ),
+        "array_string" | "stringarray" | "string_array" => Ok(FieldDefinition::new(
+            &f.name,
+            FieldType::Array(Box::new(FieldType::String)),
+        )
+        .with_filterable(f.filterable)),
+        "array_int32" | "int32_array" => Ok(FieldDefinition::new(
+            &f.name,
+            FieldType::Array(Box::new(FieldType::Int32)),
+        )
+        .with_filterable(f.filterable)),
+        "array_int64" | "int64_array" => Ok(FieldDefinition::new(
+            &f.name,
+            FieldType::Array(Box::new(FieldType::Int64)),
+        )
+        .with_filterable(f.filterable)),
         other => Err(format!("field '{}': unknown type '{other}'", f.name)),
     }
 }
