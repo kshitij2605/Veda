@@ -4,6 +4,7 @@ pub mod bitmap_index;
 pub mod blob_manager;
 pub mod blob_store;
 pub mod bm25_index;
+pub mod columnar_stored_fields;
 pub mod stored_fields;
 pub mod compaction;
 pub mod delete_bitmap;
