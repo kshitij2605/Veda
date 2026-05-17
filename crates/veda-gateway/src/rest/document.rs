@@ -535,9 +535,18 @@ async fn process_single_file(
     for field_def in schema.fields() {
         if let FieldType::Vector { .. } = field_def.field_type() {
             let field_name = field_def.name();
+            let lower = field_name.to_lowercase();
+            // Image bucket: names containing "image" (and not also "text").
+            let is_image_field = lower.contains("image") && !lower.contains("text");
+            // Text bucket: anything else that's a vector field.
+            // We treat any non-image vector field as a text-embedding target
+            // so generic names like "embedding" or "vector" get filled in
+            // by the text encoder. Previously only names containing
+            // "text"/"content" were embedded, which silently produced
+            // INSERT_FAILED on perfectly valid schemas like `{name: "embedding"}`.
+            let is_text_field = !is_image_field;
 
-            if field_name.contains("text") || field_name.contains("content") {
-                // Use multimodal model for text when images are present, otherwise text-only model.
+            if is_text_field {
                 let models = if has_images && !multimodal_models.is_empty() {
                     &multimodal_models
                 } else {
@@ -551,13 +560,11 @@ async fn process_single_file(
                 }
             }
 
-            if field_name.contains("image") {
-                if !multimodal_models.is_empty() {
-                    image_embed_targets.push((
-                        field_name.to_owned(),
-                        EmbeddingClient::new(multimodal_models[0].clone()),
-                    ));
-                }
+            if is_image_field && !multimodal_models.is_empty() {
+                image_embed_targets.push((
+                    field_name.to_owned(),
+                    EmbeddingClient::new(multimodal_models[0].clone()),
+                ));
             }
         }
     }
