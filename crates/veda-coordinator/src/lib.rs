@@ -11,13 +11,15 @@
 //! - **`store`** — In-memory log store and deterministic state machine.
 //! - **`network`** — Channel-based coordinator and in-process network
 //!   transport for testing.
+//! - **`raft`** — openraft type-config scaffolding for distributed
+//!   consensus (work in progress; see `documentation/raft-migration.md`).
 //!
-//! The current implementation uses a single-leader, channel-based approach.
-//! The types and state machine are designed so that a full Raft consensus
-//! layer (via `openraft`) can be plugged in later without changing the
-//! command/response interface.
+//! The current production path uses a single-leader, channel-based approach.
+//! The types and state machine are designed so that the openraft layer can
+//! take over without changing the command/response interface.
 
 pub mod network;
+pub mod raft;
 pub mod raft_types;
 pub mod shard_router;
 pub mod store;
