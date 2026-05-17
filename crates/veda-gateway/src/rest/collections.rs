@@ -52,6 +52,12 @@ pub struct FieldDef {
     /// built so search with `truncate_to=N` (for N in this list) hits a
     /// real ANN index instead of brute-force scanning.
     pub mrl_dims: Option<Vec<u32>>,
+    /// Per-field auto-embed config. JSON form:
+    /// `{"source": "content", "modality": "text"}`. When present, the
+    /// process-document handler uses this to pick the source field and
+    /// embedder for this vector field instead of the name-based
+    /// heuristic.
+    pub auto_embed: Option<veda_core::types::AutoEmbedConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,12 +127,19 @@ pub async fn create_collection(
         ));
     }
 
-    // Check for duplicate
+    // Check for duplicate — in-memory state OR an existing on-disk
+    // collection directory with our schema marker. The on-disk check
+    // closes Gap D: previously, after a Veda restart with empty
+    // in-memory state, POST /v1/collections silently orphaned the
+    // existing sealed segments under data_dir/{name}/ by overwriting
+    // the segment-manager view of the world.
+    let collection_dir = state.inner.data_dir.join(&req.name);
+    let schema_marker = collection_dir.join("collection.json");
     {
         let schemas = state.inner.schemas.read().await;
-        if schemas.contains_key(&req.name) {
+        if schemas.contains_key(&req.name) || schema_marker.exists() {
             return Err((
-                StatusCode::BAD_REQUEST,
+                StatusCode::CONFLICT,
                 Json(ErrorResponse {
                     error: format!("collection '{}' already exists", req.name),
                 }),
@@ -158,8 +171,35 @@ pub async fn create_collection(
         )
     })?;
 
+    // Persist the schema at the collection root so a restart can recover
+    // both the in-memory state and the on-disk segments under each shard.
+    // This is the source of truth for `recover_collections_from_disk`.
+    std::fs::create_dir_all(&collection_dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("failed to create collection dir: {e}"),
+            }),
+        )
+    })?;
+    let schema_json = serde_json::to_vec_pretty(&schema).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("serialize schema: {e}"),
+            }),
+        )
+    })?;
+    std::fs::write(&schema_marker, &schema_json).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("persist schema: {e}"),
+            }),
+        )
+    })?;
+
     // Create segment managers and query executor for all shards
-    let collection_dir = state.inner.data_dir.join(&req.name);
     let mut shard_managers: HashMap<u32, SegmentManager> = HashMap::new();
     let mut executor = DistributedQueryExecutor::new();
 
@@ -283,6 +323,14 @@ pub async fn drop_collection(
         executors.remove(&name);
     }
 
+    // Remove the on-disk collection dir so a subsequent POST with the
+    // same name doesn't trip the dedup guard and so disk space is
+    // actually reclaimed.
+    let collection_dir = state.inner.data_dir.join(&name);
+    if collection_dir.exists() {
+        let _ = std::fs::remove_dir_all(&collection_dir);
+    }
+
     // Update active collections gauge.
     let collection_count = {
         let schemas = state.inner.schemas.read().await;
@@ -319,6 +367,9 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
             };
             if let Some(dims) = &f.mrl_dims {
                 fd = fd.with_mrl_dims(dims.clone());
+            }
+            if let Some(cfg) = &f.auto_embed {
+                fd = fd.with_auto_embed(cfg.clone());
             }
             Ok(fd.with_filterable(f.filterable))
         }
