@@ -67,6 +67,13 @@ pub struct LocalShardSearcher {
     /// `mrl_dims`; queried when search includes `truncate_to`.
     mrl_indexes:
         HashMap<Uuid, HashMap<String, HashMap<u32, Box<dyn VectorIndex>>>>,
+    /// One MUVERA encoder per (shard, field). Lazily created on first
+    /// build_indexes call for a multi-vector field. The encoder is
+    /// deterministic from the field name so all segments share anchors —
+    /// a single query encoding then scores against every segment's FDE list.
+    muvera_encoders: HashMap<String, crate::muvera::MuveraEncoder>,
+    /// Per-doc MUVERA FDEs: `seg_id -> field -> Vec<(doc_id, fde)>`.
+    muvera_fdes: HashMap<Uuid, HashMap<String, Vec<(u32, Vec<f32>)>>>,
 }
 
 impl LocalShardSearcher {
@@ -76,6 +83,8 @@ impl LocalShardSearcher {
             indexes: HashMap::new(),
             plaid_indexes: HashMap::new(),
             mrl_indexes: HashMap::new(),
+            muvera_encoders: HashMap::new(),
+            muvera_fdes: HashMap::new(),
         }
     }
 
@@ -161,28 +170,107 @@ impl LocalShardSearcher {
                 self.mrl_indexes.insert(seg_id, field_mrl);
             }
 
-            // Build PLAID indexes for each multi-vector field in this segment.
+            // Build PLAID, optional Light-ColPali reduction, and MUVERA FDEs
+            // for each multi-vector field in this segment.
+            //
+            // Env knobs:
+            //   VEDA_COLPALI_TOKEN_FRACTION=0.1   → enable Light-ColPali, keep ~10% of tokens
+            //   VEDA_MUVERA_ENABLED=1             → build MUVERA FDEs alongside PLAID
+            //   VEDA_MUVERA_K_SIM=128             → anchor count (default 128)
+            let reduce_fraction: Option<f32> = std::env::var("VEDA_COLPALI_TOKEN_FRACTION")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+                .filter(|f| (0.01..=1.0).contains(f));
+            let muvera_enabled = std::env::var("VEDA_MUVERA_ENABLED")
+                .ok()
+                .map(|s| !s.is_empty() && s != "0" && s.to_ascii_lowercase() != "false")
+                .unwrap_or(false);
+            let muvera_k_sim: usize = std::env::var("VEDA_MUVERA_K_SIM")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(crate::muvera::DEFAULT_K_SIM);
+
             let mut plaid_field: HashMap<String, crate::plaid::PlaidIndex> = HashMap::new();
+            let mut muvera_field: HashMap<String, Vec<(u32, Vec<f32>)>> = HashMap::new();
+
             for field_def in schema.multi_vector_fields() {
                 let Some(iter) = reader.iter_multi_vector(field_def.name()) else {
                     continue;
                 };
-                let collected: Vec<(u32, Vec<Vec<f32>>)> =
-                    iter.map(|(id, rows)| (id, rows.clone())).collect();
+
+                // Pull (id, rows) and optionally reduce tokens.
+                let mut collected: Vec<(u32, Vec<Vec<f32>>)> = iter
+                    .map(|(id, rows)| {
+                        let rows = if let Some(frac) = reduce_fraction {
+                            crate::light_colpali::reduce_tokens(rows, frac)
+                        } else {
+                            rows.clone()
+                        };
+                        (id, rows)
+                    })
+                    .collect();
+
+                // Build PLAID centroid pruning.
                 let plaid = crate::plaid::PlaidIndex::build(
                     collected.iter().map(|(id, rows)| (*id, rows)),
                 );
                 if plaid.centroid_count() > 0 {
                     plaid_field.insert(field_def.name().to_owned(), plaid);
                 }
+
+                // Build MUVERA FDEs (per doc) if enabled. Use a per-field
+                // deterministic seed so all segments share anchors and a
+                // single query encoding works across them.
+                if muvera_enabled
+                    && let Some((_, first_rows)) = collected.first()
+                    && let Some(first_row) = first_rows.first()
+                {
+                    let token_dim = first_row.len();
+                    let field_name = field_def.name().to_owned();
+                    let encoder = self
+                        .muvera_encoders
+                        .entry(field_name.clone())
+                        .or_insert_with(|| {
+                            crate::muvera::MuveraEncoder::new(
+                                token_dim,
+                                muvera_k_sim,
+                                seed_from_field(&field_name),
+                            )
+                        });
+                    let fdes: Vec<(u32, Vec<f32>)> = collected
+                        .iter_mut()
+                        .map(|(id, rows)| {
+                            let fde = encoder.encode(rows);
+                            (*id, fde)
+                        })
+                        .collect();
+                    if !fdes.is_empty() {
+                        muvera_field.insert(field_name, fdes);
+                    }
+                }
             }
+
             if !plaid_field.is_empty() {
                 self.plaid_indexes.insert(seg_id, plaid_field);
+            }
+            if !muvera_field.is_empty() {
+                self.muvera_fdes.insert(seg_id, muvera_field);
             }
         }
 
         Ok(())
     }
+}
+
+/// Deterministic seed from a field name for MUVERA anchor generation.
+/// FNV-1a hash; doesn't need to be cryptographic.
+fn seed_from_field(name: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in name.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 impl ShardSearcher for LocalShardSearcher {
@@ -448,13 +536,46 @@ impl ShardSearcher for LocalShardSearcher {
                 .and_then(|m| m.get(&request.field))
                 .map(|p| p.candidates(&request.query_rows, probe));
 
-            // Final candidate set: intersect filter ∩ plaid (if any).
-            let candidates: Option<RoaringBitmap> = match (allowed, plaid_candidates) {
-                (Some(a), Some(p)) => Some(a & p),
-                (Some(a), None) => Some(a),
-                (None, Some(p)) => Some(p),
-                (None, None) => None,
-            };
+            // MUVERA FDE candidate pruning if available — score each doc's
+            // FDE by cosine against the query FDE, take top `request.k * 4`.
+            let muvera_candidates: Option<RoaringBitmap> = self
+                .muvera_encoders
+                .get(&request.field)
+                .and_then(|enc| {
+                    self.muvera_fdes
+                        .get(&handle.metadata.id)
+                        .and_then(|m| m.get(&request.field))
+                        .map(|fdes| (enc, fdes))
+                })
+                .map(|(enc, fdes)| {
+                    let q_fde = enc.encode(&request.query_rows);
+                    let q_norm: f32 = q_fde.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let mut scored: Vec<(u32, f32)> = fdes
+                        .iter()
+                        .map(|(doc_id, fde)| {
+                            let dot: f32 = q_fde.iter().zip(fde).map(|(a, b)| a * b).sum();
+                            let d_norm: f32 = fde.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            let denom = q_norm * d_norm;
+                            let sim = if denom < 1e-10 { 0.0 } else { dot / denom };
+                            (*doc_id, sim)
+                        })
+                        .collect();
+                    scored.sort_by(|a, b| {
+                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    scored.truncate((request.k * 4).max(20));
+                    let mut bm = RoaringBitmap::new();
+                    for (id, _) in scored {
+                        bm.insert(id);
+                    }
+                    bm
+                });
+
+            // Final candidate set: intersect filter ∩ plaid ∩ muvera (if any).
+            let candidates: Option<RoaringBitmap> = [allowed, plaid_candidates, muvera_candidates]
+                .into_iter()
+                .flatten()
+                .reduce(|acc, x| acc & x);
 
             // Brute MaxSim over the candidate set.
             let Some(iter) = reader.iter_multi_vector(&request.field) else {
