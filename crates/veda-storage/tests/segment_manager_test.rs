@@ -272,3 +272,73 @@ fn test_segment_ids_unique() {
     let unique: std::collections::HashSet<_> = ids.iter().collect();
     assert_eq!(unique.len(), 3, "all segment IDs must be unique");
 }
+
+#[test]
+fn test_cold_tier_demote_and_promote_roundtrip() {
+    use veda_storage::blob_store::{BlobStore, LocalBlobStore};
+    use veda_storage::segment::SegmentTier;
+
+    let dir = TempDir::new().unwrap();
+    let blob_dir = TempDir::new().unwrap();
+    let schema = test_schema();
+    let mut mgr = SegmentManager::new(schema, 0, dir.path(), 512 * 1024 * 1024).unwrap();
+
+    // Build a sealed segment.
+    let mut originals = Vec::new();
+    for i in 0..20 {
+        let rec = make_record(i);
+        originals.push(rec.clone());
+        mgr.insert(rec).unwrap();
+    }
+    let meta = mgr.seal_growing().unwrap().unwrap();
+    let seg_id = meta.id;
+    assert_eq!(mgr.sealed_segments().len(), 1);
+
+    let store = LocalBlobStore::new(blob_dir.path()).unwrap();
+
+    // Demote: should upload to blob store, remove local dir, and drop the
+    // segment from sealed_segments.
+    let archived = mgr
+        .demote_to_cold(seg_id, &store, "manager_test")
+        .unwrap()
+        .expect("segment should be found");
+    assert_eq!(archived.tier, SegmentTier::Cold);
+    assert!(mgr.sealed_segments().is_empty());
+
+    // At least one blob exists under the expected prefix.
+    let keys = store
+        .list(&format!("cold/manager_test/{seg_id}/"))
+        .unwrap();
+    assert!(
+        !keys.is_empty(),
+        "blob store should contain archived files"
+    );
+
+    // Promote back. Reader should re-open and metadata should be Warm.
+    mgr.promote_from_cold(seg_id, &store, "manager_test")
+        .unwrap();
+    assert_eq!(mgr.sealed_segments().len(), 1);
+    let restored = &mgr.sealed_segments()[0];
+    assert_eq!(restored.metadata.id, seg_id);
+    assert_eq!(restored.metadata.tier, SegmentTier::Warm);
+    assert_eq!(restored.metadata.row_count, 20);
+
+    // Records should be readable.
+    let rec = restored.reader.get_record(7).unwrap();
+    assert_eq!(rec.id(), originals[7].id());
+}
+
+#[test]
+fn test_cold_tier_demote_unknown_segment_returns_none() {
+    use veda_storage::blob_store::LocalBlobStore;
+
+    let dir = TempDir::new().unwrap();
+    let blob_dir = TempDir::new().unwrap();
+    let schema = test_schema();
+    let mut mgr = SegmentManager::new(schema, 0, dir.path(), 512 * 1024 * 1024).unwrap();
+    let store = LocalBlobStore::new(blob_dir.path()).unwrap();
+
+    let ghost_id = uuid::Uuid::new_v4();
+    let result = mgr.demote_to_cold(ghost_id, &store, "manager_test").unwrap();
+    assert!(result.is_none());
+}

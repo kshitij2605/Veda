@@ -133,6 +133,9 @@ impl SegmentManager {
     /// Move a sealed segment to a new storage tier. Hot ↔ Warm transitions
     /// only affect index-build behaviour at the next executor rebuild —
     /// no data is moved. Returns `true` if the segment was found and updated.
+    ///
+    /// **Not for Cold** — use [`demote_to_cold`] which also uploads and
+    /// removes local files.
     pub fn set_segment_tier(
         &mut self,
         segment_id: SegmentId,
@@ -141,8 +144,6 @@ impl SegmentManager {
         for handle in &mut self.sealed_segments {
             if handle.metadata.id == segment_id {
                 handle.metadata.tier = tier;
-                // Persist the tier change to metadata.json so it survives
-                // restart.
                 let meta_path = handle.dir.join("metadata.json");
                 let json = serde_json::to_vec_pretty(&handle.metadata)?;
                 fs::write(&meta_path, json)?;
@@ -150,6 +151,76 @@ impl SegmentManager {
             }
         }
         Ok(false)
+    }
+
+    /// Archive a sealed segment to cold blob storage and remove the local
+    /// copy. The segment is removed from this manager's `sealed_segments`
+    /// list — subsequent searches will not see it until it is promoted.
+    ///
+    /// Returns the segment's metadata so the caller can track it
+    /// out-of-band (Veda does not yet maintain a cold-segment registry).
+    pub fn demote_to_cold(
+        &mut self,
+        segment_id: SegmentId,
+        blob_store: &dyn crate::blob_store::BlobStore,
+        collection: &str,
+    ) -> Result<Option<crate::segment::SegmentMetadata>> {
+        let pos = self
+            .sealed_segments
+            .iter()
+            .position(|h| h.metadata.id == segment_id);
+        let Some(pos) = pos else {
+            return Ok(None);
+        };
+
+        let handle = &self.sealed_segments[pos];
+        crate::cold_storage::archive_segment_to_blob(
+            blob_store,
+            &handle.dir,
+            collection,
+            &segment_id.to_string(),
+        )?;
+
+        let mut metadata = handle.metadata.clone();
+        metadata.tier = crate::segment::SegmentTier::Cold;
+        let dir = handle.dir.clone();
+
+        // Drop the reader (and mmaps) before deleting the directory.
+        self.sealed_segments.remove(pos);
+        fs::remove_dir_all(&dir).ok();
+        Ok(Some(metadata))
+    }
+
+    /// Restore a previously cold-archived segment from blob storage and
+    /// reattach it as a Warm sealed segment. The segment dir is recreated
+    /// under this shard's base dir using the original `segment_{id}` name.
+    pub fn promote_from_cold(
+        &mut self,
+        segment_id: SegmentId,
+        blob_store: &dyn crate::blob_store::BlobStore,
+        collection: &str,
+    ) -> Result<()> {
+        let dir = self.base_dir.join(format!("segment_{segment_id}"));
+        crate::cold_storage::restore_segment_from_blob(
+            blob_store,
+            &dir,
+            collection,
+            &segment_id.to_string(),
+        )?;
+        let reader = crate::segment::SegmentReader::open(&dir)?;
+        let mut metadata = reader.metadata().clone();
+        metadata.tier = crate::segment::SegmentTier::Warm;
+        // Persist the new tier marker so a restart keeps it Warm.
+        fs::write(
+            dir.join("metadata.json"),
+            serde_json::to_vec_pretty(&metadata)?,
+        )?;
+        self.sealed_segments.push(SealedSegmentHandle {
+            metadata,
+            reader,
+            dir,
+        });
+        Ok(())
     }
 
     /// Delete a record by marking it in the appropriate segment's delete bitmap.
