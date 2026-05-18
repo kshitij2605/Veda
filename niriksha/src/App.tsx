@@ -8,6 +8,7 @@ import { VectorAtlas } from './pages/VectorAtlas'
 import { SystemHealth } from './pages/SystemHealth'
 import { IndexManager } from './pages/IndexManager'
 import { EvaluationView } from './pages/EvaluationView'
+import { Pipelines } from './pages/Pipelines'
 
 export default function App() {
   return (
@@ -30,7 +31,7 @@ export default function App() {
           <Route path="/evaluation" element={<EvaluationView />} />
           {/* Surfaces queued for later phases — render placeholder until they're built */}
           <Route path="/quality" element={<Placeholder name="Quality Lab" phase="Phase 5" />} />
-          <Route path="/pipelines" element={<Placeholder name="Pipelines" phase="Phase 3" />} />
+          <Route path="/pipelines" element={<Pipelines />} />
           <Route path="/observability" element={<Placeholder name="Observability" phase="Phase 6" />} />
           <Route path="/console" element={<Placeholder name="Dev Console" phase="Phase 6" />} />
           <Route path="/settings" element={<Placeholder name="Settings" phase="Phase 6" />} />
