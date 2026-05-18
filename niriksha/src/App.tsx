@@ -9,6 +9,7 @@ import { SystemHealth } from './pages/SystemHealth'
 import { IndexManager } from './pages/IndexManager'
 import { EvaluationView } from './pages/EvaluationView'
 import { Pipelines } from './pages/Pipelines'
+import { ChunkerAB } from './pages/ChunkerAB'
 import { QualityLab } from './pages/quality/QualityLab'
 import { Console } from './pages/Console'
 import { Observability } from './pages/Observability'
@@ -36,6 +37,7 @@ export default function App() {
           {/* Surfaces queued for later phases — render placeholder until they're built */}
           <Route path="/quality" element={<QualityLab />} />
           <Route path="/pipelines" element={<Pipelines />} />
+          <Route path="/chunker" element={<ChunkerAB />} />
           <Route path="/observability" element={<Observability />} />
           <Route path="/console" element={<Console />} />
           <Route path="/settings" element={<Settings />} />

@@ -31,6 +31,44 @@ export type ChunkingStrategyName =
   | 'contextual_chunking'
   | 'none'
 
+export interface ChunkPreviewSpec {
+  label?: string
+  strategy_name: ChunkingStrategyName | string
+  chunk_size?: number
+  chunk_overlap?: number
+}
+
+export interface ChunkPreviewChunk {
+  index: number
+  text: string
+  char_count: number
+  start_offset: number
+  end_offset: number
+  heading_path: string[]
+  page_number?: number
+}
+
+export interface ChunkPreviewRun {
+  label: string
+  strategy_name: string
+  elapsed_ms: number
+  total_chunks: number
+  total_chars: number
+  avg_chars: number
+  min_chars: number
+  max_chars: number
+  truncated: boolean
+  chunks: ChunkPreviewChunk[]
+}
+
+export interface ChunkPreviewResponse {
+  input_chars: number
+  runs: ChunkPreviewRun[]
+}
+
+export const chunkPreview = (text: string, runs: ChunkPreviewSpec[]) =>
+  api.post<ChunkPreviewResponse>('/chunk/preview', { text, runs })
+
 export interface ProcessDocumentSettings {
   chunking_strategy: ChunkingStrategyName
   chunk_size?: number

@@ -7,6 +7,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth;
 
 pub mod admin;
+pub mod chunk_preview;
 pub mod collections;
 pub mod document;
 pub mod embed;
@@ -57,6 +58,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route("/v1/embed", post(embed::embed))
         // LLM chat-completion proxy (cluster labels / NL→DSL / failure classifier)
         .route("/v1/llm/complete", post(llm::complete))
+        // Chunker A/B preview (no storage / no embedding)
+        .route("/v1/chunk/preview", post(chunk_preview::preview))
         // Records
         .route("/v1/collections/{name}/insert", post(records::insert))
         .route(
