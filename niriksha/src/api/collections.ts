@@ -46,16 +46,69 @@ export interface VectorQuery {
   values: number[]
 }
 
+export interface SparseVectorQuery {
+  field: string
+  indices: number[]
+  values: number[]
+}
+
+export interface Bm25Query {
+  field: string
+  query: string
+}
+
+export interface HybridQuery {
+  vector: VectorQuery
+  bm25: Bm25Query
+  /** Per-leg weights for weighted-sum fusion. */
+  vector_weight?: number
+  bm25_weight?: number
+}
+
+export interface FusionParams {
+  k?: number
+}
+
+export interface RerankConfig {
+  field: string
+  query: string
+  top_k?: number
+  model?: string
+}
+
 /** Full /search body. Mirrors the gateway's `SearchRequest`. */
 export interface SearchRequest {
   query: {
     vector?: VectorQuery
+    sparse_vector?: SparseVectorQuery
+    bm25?: Bm25Query
+    hybrid?: HybridQuery
+    fusion?: string
+    fusion_params?: FusionParams
   }
   filter?: string
   limit: number
   explain?: boolean
   truncate_to?: number
+  rerank?: RerankConfig
 }
+
+export interface EmbedRequest {
+  text?: string
+  image_b64?: string
+  model?: string
+}
+
+export interface EmbedResponse {
+  model: string
+  modality: string
+  dimension: number
+  values: number[]
+  elapsed_ms: number
+}
+
+export const embedQuery = (body: EmbedRequest) =>
+  api.post<EmbedResponse>('/embed', body)
 
 export interface SearchHit {
   id: string

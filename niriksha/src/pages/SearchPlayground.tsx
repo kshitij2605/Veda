@@ -1,13 +1,80 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import * as Tabs from '@radix-ui/react-tabs'
+import {
+  AlertCircle,
+  Atom,
+  Copy,
+  Play,
+  Save,
+  Sparkles,
+  Type,
+  Zap,
+} from 'lucide-react'
+import {
+  embedQuery,
+  fetchCollection,
+  type CollectionInfo,
+  type EmbedResponse,
+  type ExplainTiming,
+  type FieldSchema,
+  type SearchHit,
+  type SearchRequest,
+} from '../api/collections'
 import { useCollectionStore } from '../stores/collectionStore'
+import { useSavedObjects } from '../stores/savedObjectStore'
 import { useSearchStore } from '../stores/searchStore'
-import { fetchCollection } from '../api/collections'
-import type { CollectionInfo } from '../api/collections'
-import { PageHeader } from '../components/PageHeader'
-import { LoadingSpinner } from '../components/LoadingSpinner'
-import { EmptyState } from '../components/EmptyState'
+import { useUrlState } from '../hooks/useUrlState'
+import {
+  Badge,
+  Button,
+  CopyButton,
+  Input,
+  Select,
+  Skeleton,
+  toast,
+  Tooltip,
+} from '../components/primitives'
+import { Textarea } from '../components/primitives/Input'
+import { cn } from '../lib/cn'
+
+type QueryMode = 'dense' | 'sparse' | 'bm25' | 'hybrid'
+
+interface PlaygroundState {
+  collection: string
+  mode: QueryMode
+  text: string
+  vectorField: string
+  bm25Field: string
+  filter: string
+  topK: number
+  truncateTo: number | null
+  fusion: 'rrf' | 'weighted'
+  rrfK: number
+  vectorWeight: number
+  bm25Weight: number
+  rerankOn: boolean
+  rerankField: string
+  explainOn: boolean
+}
+
+const DEFAULT_STATE = (initialCollection: string): PlaygroundState => ({
+  collection: initialCollection,
+  mode: 'dense',
+  text: '',
+  vectorField: '',
+  bm25Field: '',
+  filter: '',
+  topK: 10,
+  truncateTo: null,
+  fusion: 'rrf',
+  rrfK: 60,
+  vectorWeight: 0.5,
+  bm25Weight: 0.5,
+  rerankOn: false,
+  rerankField: '',
+  explainOn: true,
+})
 
 export function SearchPlayground() {
   const { collection: urlCollection } = useParams<{ collection: string }>()
@@ -15,369 +82,874 @@ export function SearchPlayground() {
   const { results, loading, error, tookMs, explain, search, clearResults } =
     useSearchStore()
 
-  const [selectedCollection, setSelectedCollection] = useState(
-    urlCollection ?? '',
+  const [state, setState] = useUrlState<PlaygroundState>(
+    's',
+    DEFAULT_STATE(urlCollection ?? ''),
   )
-  const [collectionSchema, setCollectionSchema] =
-    useState<CollectionInfo | null>(null)
-  const [vectorField, setVectorField] = useState('')
-  const [vectorInput, setVectorInput] = useState('')
-  const [filterInput, setFilterInput] = useState('')
-  const [limit, setLimit] = useState(10)
-  const [explainOn, setExplainOn] = useState(false)
-  const [truncateTo, setTruncateTo] = useState<number | ''>('')
-  const [expandedRow, setExpandedRow] = useState<number | null>(null)
-  const [parseError, setParseError] = useState<string | null>(null)
+  const setS = <K extends keyof PlaygroundState>(
+    k: K,
+    v: PlaygroundState[K],
+  ) => setState({ ...state, [k]: v })
+
+  const [schema, setSchema] = useState<CollectionInfo | null>(null)
+  const [embedInfo, setEmbedInfo] = useState<EmbedResponse | null>(null)
+  const [embedding, setEmbedding] = useState(false)
+  const [embedError, setEmbedError] = useState<string | null>(null)
 
   useEffect(() => {
     fetchCollections()
   }, [fetchCollections])
 
   useEffect(() => {
-    if (urlCollection) setSelectedCollection(urlCollection)
+    if (urlCollection && urlCollection !== state.collection) {
+      setState({ ...DEFAULT_STATE(urlCollection) })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlCollection])
 
+  // Load schema when collection changes; pick reasonable defaults for fields.
   useEffect(() => {
-    if (!selectedCollection) {
-      setCollectionSchema(null)
-      setVectorField('')
+    if (!state.collection) {
+      setSchema(null)
       return
     }
-    fetchCollection(selectedCollection)
+    fetchCollection(state.collection)
       .then(({ data }) => {
-        setCollectionSchema(data)
-        const firstVector = data.fields.find((f) => f.type === 'vector')
-        if (firstVector) setVectorField(firstVector.name)
+        setSchema(data)
+        const firstVec = data.fields.find((f) => f.type === 'vector')
+        const firstStr = data.fields.find((f) => f.type === 'string')
+        setState((prev) => ({
+          ...prev,
+          vectorField: prev.vectorField || firstVec?.name || '',
+          bm25Field: prev.bm25Field || firstStr?.name || '',
+          rerankField: prev.rerankField || firstStr?.name || '',
+        }))
       })
-      .catch(() => setCollectionSchema(null))
-  }, [selectedCollection])
+      .catch(() => setSchema(null))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.collection])
 
-  const vectorFields =
-    collectionSchema?.fields.filter((f) => f.type === 'vector') ?? []
-  const selectedFieldSchema = vectorFields.find((f) => f.name === vectorField)
+  const vectorFields = useMemo(
+    () => schema?.fields.filter((f) => f.type === 'vector') ?? [],
+    [schema],
+  )
+  const stringFields = useMemo(
+    () => schema?.fields.filter((f) => f.type === 'string') ?? [],
+    [schema],
+  )
+  const activeVectorField = vectorFields.find((f) => f.name === state.vectorField)
 
-  const handleSearch = () => {
-    if (!selectedCollection || !vectorField || !vectorInput.trim()) return
-    setParseError(null)
-    setExpandedRow(null)
+  const handleEmbedAndSearch = async () => {
+    if (!state.collection || !state.text.trim()) return
+    setEmbedError(null)
+    setEmbedInfo(null)
+    let values: number[] | null = null
 
-    let values: number[]
-    try {
-      values = JSON.parse(vectorInput.trim())
-      if (!Array.isArray(values) || !values.every((v) => typeof v === 'number')) {
-        throw new Error('Must be an array of numbers')
+    // For dense + hybrid we need a query vector. BM25/sparse can skip embedding.
+    if (state.mode === 'dense' || state.mode === 'hybrid') {
+      if (!activeVectorField) {
+        setEmbedError('Pick a vector field for this query mode.')
+        return
       }
-    } catch (e) {
-      setParseError(e instanceof Error ? e.message : 'Invalid JSON')
-      return
+      setEmbedding(true)
+      try {
+        const { data } = await embedQuery({
+          text: state.text,
+          model: activeVectorField.model,
+        })
+        if (
+          activeVectorField.dimension &&
+          data.dimension !== activeVectorField.dimension
+        ) {
+          setEmbedError(
+            `Embedding dim ${data.dimension} does not match field dim ${activeVectorField.dimension}`,
+          )
+          setEmbedding(false)
+          return
+        }
+        values = data.values
+        setEmbedInfo(data)
+      } catch (e) {
+        setEmbedError(
+          (e as { response?: { data?: { error?: string } } })?.response?.data
+            ?.error ??
+            (e instanceof Error ? e.message : 'Embedding failed'),
+        )
+        setEmbedding(false)
+        return
+      }
+      setEmbedding(false)
     }
 
-    if (selectedFieldSchema?.dimension && values.length !== selectedFieldSchema.dimension) {
-      setParseError(
-        `Vector has ${values.length} dims, field expects ${selectedFieldSchema.dimension}`,
-      )
-      return
-    }
-
-    search(selectedCollection, {
-      query: { vector: { field: vectorField, values } },
-      filter: filterInput.trim() || undefined,
-      limit,
-      explain: explainOn || undefined,
-      truncate_to: typeof truncateTo === 'number' ? truncateTo : undefined,
-    })
+    const body = buildSearchRequest(state, values)
+    if (!body) return
+    search(state.collection, body)
   }
 
   return (
-    <motion.div
-      className="p-8"
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25 }}
-    >
-      <PageHeader
-        title="Search Playground"
-        actions={
-          <select
-            value={selectedCollection}
-            onChange={(e) => {
-              setSelectedCollection(e.target.value)
-              clearResults()
-            }}
-            className="px-3 py-2 bg-bg-secondary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
-          >
-            <option value="">Select collection...</option>
-            {collections.map((c) => (
-              <option key={c.name} value={c.name}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        }
-      />
+    <div className="flex h-full min-h-0 bg-[var(--color-bg)]">
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <Composer
+          collection={state.collection}
+          collections={collections.map((c) => c.name)}
+          onCollectionChange={(v) => {
+            setState({ ...DEFAULT_STATE(v) })
+            clearResults()
+          }}
+          mode={state.mode}
+          onModeChange={(m) => setS('mode', m)}
+          text={state.text}
+          onTextChange={(t) => setS('text', t)}
+          onRun={handleEmbedAndSearch}
+          loading={loading || embedding}
+        />
 
-      <div className="rounded-lg border border-border bg-bg-secondary p-5 mb-6">
-        <h3 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-4">
-          Query
-        </h3>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-          <div>
-            <label className="block text-xs font-medium text-text-muted mb-1">
-              Vector Field
-            </label>
-            <select
-              value={vectorField}
-              onChange={(e) => setVectorField(e.target.value)}
-              disabled={vectorFields.length === 0}
-              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent disabled:opacity-50"
-            >
-              {vectorFields.length === 0 && (
-                <option value="">No vector fields</option>
-              )}
-              {vectorFields.map((f) => (
-                <option key={f.name} value={f.name}>
-                  {f.name} ({f.dimension ?? '?'} dims, {f.metric ?? '?'})
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-text-muted mb-1">
-              Limit
-            </label>
-            <input
-              type="number"
-              value={limit}
-              onChange={(e) =>
-                setLimit(Math.max(1, Math.min(100, parseInt(e.target.value) || 10)))
-              }
-              min={1}
-              max={100}
-              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
-            />
-          </div>
-        </div>
-
-        <div className="mb-4">
-          <label className="block text-xs font-medium text-text-muted mb-1">
-            Vector (JSON array)
-            {selectedFieldSchema?.dimension && (
-              <span className="ml-2 text-text-muted">
-                expected {selectedFieldSchema.dimension} dims
-              </span>
-            )}
-          </label>
-          <textarea
-            value={vectorInput}
-            onChange={(e) => {
-              setVectorInput(e.target.value)
-              setParseError(null)
-            }}
-            placeholder="[0.1, 0.2, 0.3, ...]"
-            rows={3}
-            className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent font-mono resize-none"
-          />
-          {parseError && (
-            <p className="mt-1 text-xs text-error">{parseError}</p>
+        <div className="flex-1 overflow-auto">
+          {embedError && (
+            <Banner kind="error" icon={<AlertCircle size={12} strokeWidth={2.5} />}>
+              {embedError}
+            </Banner>
           )}
-        </div>
-
-        <div className="mb-4">
-          <label className="block text-xs font-medium text-text-muted mb-1">
-            Filter (optional)
-          </label>
-          <input
-            value={filterInput}
-            onChange={(e) => setFilterInput(e.target.value)}
-            placeholder="category = 'electronics' AND price < 500"
-            className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+          {error && (
+            <Banner kind="error" icon={<AlertCircle size={12} strokeWidth={2.5} />}>
+              {error}
+            </Banner>
+          )}
+          {embedInfo && (
+            <EmbedInfoBar info={embedInfo} />
+          )}
+          {explain && state.explainOn && <ExplainBar explain={explain} tookMs={tookMs} />}
+          <ResultsArea
+            loading={loading || embedding}
+            results={results}
+            schema={schema}
+            mode={state.mode}
+            text={state.text}
           />
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-          <label className="flex items-center gap-2 text-sm text-text-secondary">
-            <input
-              type="checkbox"
-              checked={explainOn}
-              onChange={(e) => setExplainOn(e.target.checked)}
-            />
-            Request per-phase timing
-          </label>
-          <div>
-            <label className="block text-xs font-medium text-text-muted mb-1">
-              Truncate to (MRL, optional)
-            </label>
-            <input
-              type="number"
-              min={1}
-              value={truncateTo}
-              onChange={(e) => {
-                const v = e.target.value
-                setTruncateTo(v === '' ? '' : Math.max(1, parseInt(v) || 1))
-              }}
-              placeholder={selectedFieldSchema?.dimension?.toString() ?? ''}
-              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
-            />
-          </div>
-        </div>
-
-        <div className="flex justify-end">
-          <button
-            onClick={handleSearch}
-            disabled={
-              loading ||
-              !selectedCollection ||
-              !vectorField ||
-              !vectorInput.trim()
-            }
-            className="px-5 py-2 bg-accent hover:bg-accent-hover text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {loading ? 'Searching...' : 'Search'}
-          </button>
         </div>
       </div>
-
-      {loading && <LoadingSpinner label="Searching..." />}
-
-      {error && (
-        <div className="rounded-lg bg-error/10 border border-error/20 px-4 py-3 text-sm text-error mb-4">
-          {error}
-        </div>
-      )}
-
-      {explain && (
-        <div className="rounded-lg border border-border bg-bg-secondary p-4 mb-4 grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
-          <ExplainCell label="Filter" ms={explain.filter_ms} />
-          <ExplainCell label="ANN" ms={explain.ann_search_ms} />
-          <ExplainCell label="Scoring" ms={explain.scoring_ms} />
-          <ExplainCell label="Fusion" ms={explain.fusion_ms} />
-          <ExplainCell label="Total" ms={explain.total_ms} highlight />
-        </div>
-      )}
-
-      {!loading && !error && results.length > 0 && (
-        <div>
-          <div className="flex items-center gap-3 mb-3">
-            <h3 className="text-sm font-medium text-text-secondary">
-              Results ({results.length} found, {tookMs.toFixed(1)}ms)
-            </h3>
-          </div>
-
-          <div className="rounded-lg border border-border overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-bg-secondary text-text-muted text-left">
-                  <th className="px-4 py-3 font-medium w-16">Rank</th>
-                  <th className="px-4 py-3 font-medium">ID</th>
-                  <th className="px-4 py-3 font-medium w-28">Distance</th>
-                  <th className="px-4 py-3 font-medium">Fields</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {results.map((hit, i) => (
-                  <tr
-                    key={hit.id}
-                    onClick={() => setExpandedRow(expandedRow === i ? null : i)}
-                    className="hover:bg-bg-tertiary cursor-pointer transition-colors"
-                  >
-                    <td className="px-4 py-3 text-text-muted">{i + 1}</td>
-                    <td className="px-4 py-3 font-mono text-text-primary text-xs">
-                      {hit.id.length > 12 ? hit.id.slice(0, 12) + '...' : hit.id}
-                    </td>
-                    <td className="px-4 py-3">
-                      <DistanceBadge distance={hit.distance} />
-                    </td>
-                    <td className="px-4 py-3 text-text-secondary text-xs truncate max-w-xs">
-                      {formatFieldsSummary(hit.fields)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <AnimatePresence>
-            {expandedRow !== null && results[expandedRow] && (
-              <motion.div
-                className="mt-3 rounded-lg border border-border bg-bg-secondary p-4"
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                exit={{ opacity: 0, height: 0 }}
-              >
-                <h4 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-3">
-                  Result #{expandedRow + 1} - {results[expandedRow].id}
-                </h4>
-                <pre className="text-xs text-text-secondary overflow-x-auto">
-                  {JSON.stringify(results[expandedRow], null, 2)}
-                </pre>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-      )}
-
-      {!loading && !error && results.length === 0 && selectedCollection && (
-        <EmptyState
-          title="No results yet"
-          description="Enter a vector and click Search to find similar records."
-        />
-      )}
-
-      {!selectedCollection && (
-        <EmptyState
-          title="Select a collection"
-          description="Choose a collection from the dropdown to begin searching."
-        />
-      )}
-    </motion.div>
+      <KnobPanel
+        state={state}
+        setS={setS}
+        schema={schema}
+        vectorFields={vectorFields}
+        stringFields={stringFields}
+        onCopyCurl={() => copyCurl(state, embedInfo)}
+        onSave={() => saveCurrentView(state)}
+      />
+    </div>
   )
 }
 
-function ExplainCell({
-  label,
-  ms,
-  highlight,
+/* ────────────────────────────────────────────────────────────────────────
+   Composer — text/image input + query-type tabs + run button
+   ──────────────────────────────────────────────────────────────────── */
+
+function Composer({
+  collection,
+  collections,
+  onCollectionChange,
+  mode,
+  onModeChange,
+  text,
+  onTextChange,
+  onRun,
+  loading,
 }: {
-  label: string
-  ms: number
-  highlight?: boolean
+  collection: string
+  collections: string[]
+  onCollectionChange: (v: string) => void
+  mode: QueryMode
+  onModeChange: (m: QueryMode) => void
+  text: string
+  onTextChange: (t: string) => void
+  onRun: () => void
+  loading: boolean
 }) {
+  const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault()
+      onRun()
+    }
+  }
   return (
-    <div>
-      <div className="text-text-muted uppercase tracking-wider text-[10px]">
-        {label}
+    <div className="border-b border-[var(--color-border)] bg-[var(--color-bg)]">
+      <div className="flex items-center gap-2 px-4 pt-3 pb-2">
+        <Atom size={14} strokeWidth={2} className="text-[var(--color-accent-9)]" />
+        <h1 className="text-[14px] font-medium text-[var(--color-text)]">Search</h1>
+        <span className="text-[var(--color-text-subtle)]">·</span>
+        <Select
+          value={collection}
+          onValueChange={onCollectionChange}
+          placeholder="Select collection"
+          options={collections.map((c) => ({ value: c, label: c }))}
+        />
+        <div className="ml-auto" />
+        <ModeTabs value={mode} onChange={onModeChange} />
       </div>
-      <div
-        className={`font-mono ${
-          highlight ? 'text-accent font-semibold' : 'text-text-primary'
-        }`}
-      >
-        {ms.toFixed(2)}ms
+      <div className="px-4 pb-3 flex items-start gap-2">
+        <div className="flex-1">
+          <Textarea
+            value={text}
+            onChange={(e) => onTextChange(e.target.value)}
+            onKeyDown={onKey}
+            placeholder={placeholderFor(mode)}
+            rows={2}
+            className="resize-none min-h-[44px]"
+          />
+        </div>
+        <Button
+          variant="primary"
+          size="md"
+          onClick={onRun}
+          disabled={loading || !collection || !text.trim()}
+          leading={
+            loading ? (
+              <Sparkles size={12} strokeWidth={2.25} className="animate-pulse" />
+            ) : (
+              <Play size={11} strokeWidth={2.5} />
+            )
+          }
+          trailing={
+            <span className="text-[10px] font-mono opacity-70">⌘↵</span>
+          }
+        >
+          {loading ? 'Running' : 'Run'}
+        </Button>
       </div>
     </div>
   )
 }
 
-function DistanceBadge({ distance }: { distance: number }) {
-  let colorClass: string
-  if (distance < 0.3) colorClass = 'text-success bg-success/15'
-  else if (distance < 0.7) colorClass = 'text-warning bg-warning/15'
-  else colorClass = 'text-error bg-error/15'
-
+function ModeTabs({
+  value,
+  onChange,
+}: {
+  value: QueryMode
+  onChange: (m: QueryMode) => void
+}) {
+  const modes: { id: QueryMode; label: string; icon: React.ReactNode; hint: string }[] = [
+    { id: 'dense', label: 'Dense', icon: <Atom size={11} strokeWidth={2.25} />, hint: 'kNN over a vector field' },
+    { id: 'sparse', label: 'Sparse', icon: <Zap size={11} strokeWidth={2.5} />, hint: 'SPLADE-style sparse retrieval' },
+    { id: 'bm25', label: 'BM25', icon: <Type size={11} strokeWidth={2.25} />, hint: 'Lexical full-text' },
+    { id: 'hybrid', label: 'Hybrid', icon: <Sparkles size={11} strokeWidth={2.25} />, hint: 'Dense + BM25 fused' },
+  ]
   return (
-    <span
-      className={`inline-flex px-2 py-0.5 rounded text-xs font-mono font-medium ${colorClass}`}
-    >
-      {distance.toFixed(4)}
-    </span>
+    <Tabs.Root value={value} onValueChange={(v) => onChange(v as QueryMode)}>
+      <Tabs.List className="flex items-center gap-0.5 p-0.5 rounded-[var(--radius-sm)] bg-[var(--color-base-1)] border border-[var(--color-border)]">
+        {modes.map((m) => (
+          <Tooltip key={m.id} label={m.hint} side="bottom">
+            <Tabs.Trigger
+              value={m.id}
+              className={cn(
+                'inline-flex items-center gap-1 px-2 h-6 rounded-[var(--radius-xs)]',
+                'text-[11.5px]',
+                'data-[state=active]:bg-[var(--color-accent)] data-[state=active]:text-[var(--color-text-on-accent)]',
+                'data-[state=inactive]:text-[var(--color-text-muted)] hover:data-[state=inactive]:text-[var(--color-text)]',
+              )}
+            >
+              {m.icon}
+              {m.label}
+            </Tabs.Trigger>
+          </Tooltip>
+        ))}
+      </Tabs.List>
+    </Tabs.Root>
   )
 }
 
-function formatFieldsSummary(fields: Record<string, unknown>): string {
-  return Object.entries(fields)
-    .filter(([, v]) => !Array.isArray(v))
-    .slice(0, 3)
-    .map(([k, v]) => `${k}: ${String(v)}`)
-    .join(', ')
+function placeholderFor(m: QueryMode): string {
+  switch (m) {
+    case 'dense':
+      return 'Type a natural-language query — Veda embeds it server-side.'
+    case 'sparse':
+      return 'Type a query — SPLADE inference produces the sparse vector.'
+    case 'bm25':
+      return 'Type lexical terms — BM25 ranks against the indexed string field.'
+    case 'hybrid':
+      return 'Type a query — dense vector + BM25 fused with RRF or weighted-sum.'
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Knob panel — right rail
+   ──────────────────────────────────────────────────────────────────── */
+
+function KnobPanel({
+  state,
+  setS,
+  schema,
+  vectorFields,
+  stringFields,
+  onCopyCurl,
+  onSave,
+}: {
+  state: PlaygroundState
+  setS: <K extends keyof PlaygroundState>(k: K, v: PlaygroundState[K]) => void
+  schema: CollectionInfo | null
+  vectorFields: FieldSchema[]
+  stringFields: FieldSchema[]
+  onCopyCurl: () => void
+  onSave: () => void
+}) {
+  const vf = vectorFields.find((f) => f.name === state.vectorField)
+  const mrlOptions = vf?.dimension
+    ? [vf.dimension, 512, 256, 128, 64].filter(
+        (n, i, arr) =>
+          n <= vf.dimension! && arr.indexOf(n) === i,
+      )
+    : []
+  return (
+    <aside className="flex flex-col w-[280px] flex-none border-l border-[var(--color-border)] bg-[var(--color-bg)] overflow-y-auto">
+      <header className="px-3 py-2 border-b border-[var(--color-border)]">
+        <h3 className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)]">
+          Query knobs
+        </h3>
+      </header>
+
+      <Section title="Fields">
+        {(state.mode === 'dense' || state.mode === 'hybrid') && (
+          <Knob label="Vector field">
+            <Select
+              size="sm"
+              value={state.vectorField}
+              onValueChange={(v) => setS('vectorField', v)}
+              options={vectorFields.map((f) => ({
+                value: f.name,
+                label: f.name,
+                description: `${f.dimension ?? '?'}d · ${f.metric ?? '?'}`,
+              }))}
+              placeholder="Pick a vector field"
+            />
+          </Knob>
+        )}
+        {(state.mode === 'bm25' || state.mode === 'hybrid') && (
+          <Knob label="BM25 field">
+            <Select
+              size="sm"
+              value={state.bm25Field}
+              onValueChange={(v) => setS('bm25Field', v)}
+              options={stringFields.map((f) => ({ value: f.name, label: f.name }))}
+              placeholder="Pick a string field"
+            />
+          </Knob>
+        )}
+        {state.mode === 'sparse' && (
+          <Knob label="Sparse field">
+            <Select
+              size="sm"
+              value={state.vectorField}
+              onValueChange={(v) => setS('vectorField', v)}
+              options={
+                schema?.fields
+                  .filter((f) => f.type === 'sparse_vector')
+                  .map((f) => ({ value: f.name, label: f.name })) ?? []
+              }
+              placeholder="Pick a sparse vector field"
+            />
+          </Knob>
+        )}
+      </Section>
+
+      <Section title="Retrieval">
+        <Knob label={`Top-K · ${state.topK}`}>
+          <input
+            type="range"
+            min={1}
+            max={100}
+            value={state.topK}
+            onChange={(e) => setS('topK', parseInt(e.target.value, 10))}
+            className="w-full accent-[var(--color-accent)]"
+          />
+        </Knob>
+        {(state.mode === 'dense' || state.mode === 'hybrid') && vf?.dimension && (
+          <Knob label="Truncate to (MRL)">
+            <Select
+              size="sm"
+              value={state.truncateTo == null ? 'full' : String(state.truncateTo)}
+              onValueChange={(v) =>
+                setS('truncateTo', v === 'full' ? null : parseInt(v, 10))
+              }
+              options={[
+                { value: 'full', label: `Full · ${vf.dimension}d` },
+                ...mrlOptions
+                  .filter((d) => d !== vf.dimension)
+                  .map((d) => ({ value: String(d), label: `${d}d` })),
+              ]}
+            />
+          </Knob>
+        )}
+        <Knob label="Filter (Veda DSL)">
+          <Input
+            mono
+            value={state.filter}
+            onChange={(e) => setS('filter', e.target.value)}
+            placeholder='field = "value" AND …'
+          />
+        </Knob>
+      </Section>
+
+      {state.mode === 'hybrid' && (
+        <Section title="Fusion">
+          <Knob label="Strategy">
+            <Select
+              size="sm"
+              value={state.fusion}
+              onValueChange={(v) => setS('fusion', v as 'rrf' | 'weighted')}
+              options={[
+                { value: 'rrf', label: 'RRF (reciprocal rank fusion)' },
+                { value: 'weighted', label: 'Weighted sum' },
+              ]}
+            />
+          </Knob>
+          {state.fusion === 'rrf' && (
+            <Knob label={`k · ${state.rrfK}`}>
+              <input
+                type="range"
+                min={1}
+                max={200}
+                value={state.rrfK}
+                onChange={(e) => setS('rrfK', parseInt(e.target.value, 10))}
+                className="w-full accent-[var(--color-accent)]"
+              />
+            </Knob>
+          )}
+          {state.fusion === 'weighted' && (
+            <>
+              <Knob label={`Vector weight · ${state.vectorWeight.toFixed(2)}`}>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={state.vectorWeight}
+                  onChange={(e) => setS('vectorWeight', parseFloat(e.target.value))}
+                  className="w-full accent-[var(--color-accent)]"
+                />
+              </Knob>
+              <Knob label={`BM25 weight · ${state.bm25Weight.toFixed(2)}`}>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={state.bm25Weight}
+                  onChange={(e) => setS('bm25Weight', parseFloat(e.target.value))}
+                  className="w-full accent-[var(--color-accent)]"
+                />
+              </Knob>
+            </>
+          )}
+        </Section>
+      )}
+
+      <Section title="Rerank">
+        <label className="flex items-center gap-2 text-[11.5px] text-[var(--color-text-muted)] mb-1.5">
+          <input
+            type="checkbox"
+            checked={state.rerankOn}
+            onChange={(e) => setS('rerankOn', e.target.checked)}
+          />
+          Re-rank top-K with a cross-encoder
+        </label>
+        {state.rerankOn && (
+          <Knob label="Rerank field">
+            <Select
+              size="sm"
+              value={state.rerankField}
+              onValueChange={(v) => setS('rerankField', v)}
+              options={stringFields.map((f) => ({ value: f.name, label: f.name }))}
+              placeholder="Pick a string field"
+            />
+          </Knob>
+        )}
+      </Section>
+
+      <Section title="Debug">
+        <label className="flex items-center gap-2 text-[11.5px] text-[var(--color-text-muted)]">
+          <input
+            type="checkbox"
+            checked={state.explainOn}
+            onChange={(e) => setS('explainOn', e.target.checked)}
+          />
+          Show per-phase timing (explain)
+        </label>
+      </Section>
+
+      <div className="mt-auto px-3 py-3 border-t border-[var(--color-border)] flex flex-col gap-1.5">
+        <Button
+          variant="secondary"
+          size="sm"
+          leading={<Save size={11} strokeWidth={2.25} />}
+          onClick={onSave}
+        >
+          Save view
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          leading={<Copy size={11} strokeWidth={2.25} />}
+          onClick={onCopyCurl}
+        >
+          Copy as cURL
+        </Button>
+      </div>
+    </aside>
+  )
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="px-3 py-2.5 border-b border-[var(--color-border)]">
+      <h4 className="text-[9.5px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)] mb-2 font-medium">
+        {title}
+      </h4>
+      <div className="space-y-2.5">{children}</div>
+    </section>
+  )
+}
+
+function Knob({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-[10.5px] text-[var(--color-text-muted)] mb-1">
+        {label}
+      </label>
+      {children}
+    </div>
+  )
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Banner / Explain / Embed-info
+   ──────────────────────────────────────────────────────────────────── */
+
+function Banner({
+  kind,
+  icon,
+  children,
+}: {
+  kind: 'error' | 'info'
+  icon: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <div
+      className={cn(
+        'mx-4 mt-3 flex items-center gap-2 px-3 py-2 rounded-[var(--radius-sm)]',
+        'text-[12px]',
+        kind === 'error' &&
+          'bg-[color-mix(in_oklch,var(--color-error)_10%,transparent)] border border-[color-mix(in_oklch,var(--color-error)_30%,transparent)] text-[var(--color-error)]',
+        kind === 'info' &&
+          'bg-[var(--color-bg-elevated)] border border-[var(--color-border)] text-[var(--color-text-muted)]',
+      )}
+    >
+      {icon}
+      <span className="flex-1">{children}</span>
+    </div>
+  )
+}
+
+function EmbedInfoBar({ info }: { info: EmbedResponse }) {
+  return (
+    <div className="mx-4 mt-3 flex flex-wrap items-center gap-2 text-[10.5px] font-mono text-[var(--color-text-subtle)]">
+      <Badge label="embed" variant="ghost" dot />
+      <span>{info.model}</span>
+      <span className="text-[var(--color-border-strong)]">·</span>
+      <span>{info.dimension}d</span>
+      <span className="text-[var(--color-border-strong)]">·</span>
+      <span className="text-[var(--color-data-7)]">
+        {info.elapsed_ms.toFixed(1)}ms
+      </span>
+    </div>
+  )
+}
+
+function ExplainBar({
+  explain,
+  tookMs,
+}: {
+  explain: ExplainTiming
+  tookMs: number
+}) {
+  const cells: { label: string; ms: number; highlight?: boolean }[] = [
+    { label: 'Filter', ms: explain.filter_ms },
+    { label: 'ANN', ms: explain.ann_search_ms },
+    { label: 'Score', ms: explain.scoring_ms },
+    { label: 'Fuse', ms: explain.fusion_ms },
+    { label: 'Total', ms: explain.total_ms || tookMs, highlight: true },
+  ]
+  return (
+    <div className="mx-4 mt-3 flex items-stretch rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] overflow-hidden divide-x divide-[var(--color-border)]">
+      {cells.map((c) => (
+        <div key={c.label} className="px-3 py-1.5 flex-1">
+          <div className="text-[9.5px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)] mb-0.5">
+            {c.label}
+          </div>
+          <div
+            className={cn(
+              'text-[12px] font-mono tabular-nums',
+              c.highlight ? 'text-[var(--color-accent-9)] font-semibold' : 'text-[var(--color-text)]',
+            )}
+          >
+            {c.ms.toFixed(2)}ms
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Results
+   ──────────────────────────────────────────────────────────────────── */
+
+function ResultsArea({
+  loading,
+  results,
+  schema,
+  mode,
+  text,
+}: {
+  loading: boolean
+  results: SearchHit[]
+  schema: CollectionInfo | null
+  mode: QueryMode
+  text: string
+}) {
+  if (loading) {
+    return (
+      <div className="px-4 py-4 space-y-2">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <Skeleton key={i} className="h-16 w-full" />
+        ))}
+      </div>
+    )
+  }
+  if (results.length === 0) {
+    return <EmptyResults />
+  }
+  return (
+    <div className="px-4 py-3 space-y-1.5">
+      {results.map((hit, i) => (
+        <ResultRow
+          key={hit.id + i}
+          hit={hit}
+          rank={i + 1}
+          schema={schema}
+          mode={mode}
+          queryText={text}
+        />
+      ))}
+    </div>
+  )
+}
+
+function EmptyResults() {
+  return (
+    <div className="relative h-[400px] m-4 rounded-[var(--radius-md)] border border-dashed border-[var(--color-border-strong)] flex items-center justify-center">
+      <div className="dot-grid absolute inset-0 opacity-30 rounded-[var(--radius-md)]" aria-hidden />
+      <div className="relative text-center max-w-md px-4">
+        <h2 className="text-[14px] font-medium text-[var(--color-text)] mb-1">
+          No results yet
+        </h2>
+        <p className="text-[12px] text-[var(--color-text-muted)]">
+          Type a query above and press <span className="font-mono text-[11px]">⌘↵</span>{' '}
+          to run. Each query type calls the right Veda endpoint —
+          dense → kNN, sparse → SPLADE, BM25 → lexical, hybrid → RRF
+          fusion.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function ResultRow({
+  hit,
+  rank,
+  schema,
+  mode,
+  queryText,
+}: {
+  hit: SearchHit
+  rank: number
+  schema: CollectionInfo | null
+  mode: QueryMode
+  queryText: string
+}) {
+  const [open, setOpen] = useState(false)
+  const stringField = schema?.fields.find(
+    (f) => f.type === 'string' && hit.fields[f.name],
+  )
+  const snippet = stringField
+    ? String(hit.fields[stringField.name] ?? '').slice(0, 280)
+    : Object.entries(hit.fields)
+        .filter(([, v]) => typeof v !== 'object')
+        .slice(0, 3)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('  ·  ')
+
+  return (
+    <button
+      type="button"
+      onClick={() => setOpen((v) => !v)}
+      className={cn(
+        'group w-full text-left rounded-[var(--radius-sm)] border border-[var(--color-border)]',
+        'bg-[var(--color-bg-elevated)] hover:border-[var(--color-border-strong)]',
+        'transition-[border-color,background] duration-[var(--duration-fast)]',
+        'p-3',
+      )}
+    >
+      <div className="flex items-start gap-3">
+        <span className="flex-none w-7 text-[10.5px] font-mono text-[var(--color-text-subtle)] tabular-nums pt-0.5">
+          {rank.toString().padStart(2, '0')}
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-2 mb-1">
+            <span className="font-mono text-[11px] text-[var(--color-text-muted)] truncate">
+              {hit.id}
+            </span>
+            <DistanceBadge distance={hit.distance} />
+            <CopyButton value={hit.id} className="ml-auto opacity-0 group-hover:opacity-100" />
+          </div>
+          <div
+            className="text-[12.5px] text-[var(--color-text)] leading-relaxed line-clamp-2"
+            // eslint-disable-next-line react/no-danger
+            dangerouslySetInnerHTML={{
+              __html: highlightSnippet(snippet, queryText, mode),
+            }}
+          />
+        </div>
+      </div>
+      {open && (
+        <pre className="mt-2 ml-10 font-mono text-[11px] text-[var(--color-text-muted)] whitespace-pre-wrap break-words bg-[var(--color-base-1)] rounded-[var(--radius-xs)] p-2 border border-[var(--color-border)]">
+          {JSON.stringify(hit, null, 2)}
+        </pre>
+      )}
+    </button>
+  )
+}
+
+function DistanceBadge({ distance }: { distance: number }) {
+  let variant: 'success' | 'warning' | 'error' = 'success'
+  if (distance >= 0.7) variant = 'error'
+  else if (distance >= 0.3) variant = 'warning'
+  return <Badge label={distance.toFixed(4)} variant={variant} mono />
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Helpers
+   ──────────────────────────────────────────────────────────────────── */
+
+function buildSearchRequest(
+  state: PlaygroundState,
+  vectorValues: number[] | null,
+): SearchRequest | null {
+  const body: SearchRequest = {
+    query: {},
+    limit: state.topK,
+  }
+  if (state.filter.trim()) body.filter = state.filter
+  if (state.explainOn) body.explain = true
+  if (state.truncateTo) body.truncate_to = state.truncateTo
+  if (state.rerankOn && state.rerankField) {
+    body.rerank = {
+      field: state.rerankField,
+      query: state.text,
+      top_k: state.topK,
+    }
+  }
+
+  switch (state.mode) {
+    case 'dense':
+      if (!vectorValues || !state.vectorField) return null
+      body.query.vector = { field: state.vectorField, values: vectorValues }
+      return body
+    case 'bm25':
+      if (!state.bm25Field) return null
+      body.query.bm25 = { field: state.bm25Field, query: state.text }
+      return body
+    case 'sparse':
+      // Sparse queries currently require client-side SPLADE
+      // encoding; until Phase 2 adds an /embed-sparse companion we
+      // skip the request and let the page show an empty-state.
+      toast.error(
+        'Sparse playground composer needs the upcoming /v1/embed-sparse endpoint. Pick BM25 or Hybrid for now.',
+      )
+      return null
+    case 'hybrid':
+      if (!vectorValues || !state.vectorField || !state.bm25Field) return null
+      body.query.hybrid = {
+        vector: { field: state.vectorField, values: vectorValues },
+        bm25: { field: state.bm25Field, query: state.text },
+        vector_weight:
+          state.fusion === 'weighted' ? state.vectorWeight : undefined,
+        bm25_weight: state.fusion === 'weighted' ? state.bm25Weight : undefined,
+      }
+      body.query.fusion = state.fusion
+      if (state.fusion === 'rrf')
+        body.query.fusion_params = { k: state.rrfK }
+      return body
+  }
+}
+
+function highlightSnippet(
+  snippet: string,
+  query: string,
+  mode: QueryMode,
+): string {
+  const escaped = escapeHtml(snippet)
+  if (!query.trim() || mode === 'dense') return escaped
+  // For BM25 / sparse / hybrid, lit up the matched tokens.
+  const tokens = query
+    .toLowerCase()
+    .split(/\W+/)
+    .filter((t) => t.length >= 2)
+  if (tokens.length === 0) return escaped
+  const re = new RegExp(`(${tokens.map(escapeRegex).join('|')})`, 'gi')
+  return escaped.replace(
+    re,
+    (m) =>
+      `<mark class="bg-[color-mix(in_oklch,var(--color-accent)_30%,transparent)] text-[var(--color-text)] rounded-[2px] px-0.5">${m}</mark>`,
+  )
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function copyCurl(state: PlaygroundState, embed: EmbedResponse | null) {
+  if (!state.collection) {
+    toast.error('Pick a collection first.')
+    return
+  }
+  const body = buildSearchRequest(state, embed?.values ?? null)
+  if (!body) {
+    toast.error('Run a query first so cURL captures the actual values.')
+    return
+  }
+  const cmd = `curl -sS -X POST 'http://localhost:6340/v1/collections/${state.collection}/search' \\
+  -H 'Content-Type: application/json' \\
+  -d '${JSON.stringify(body, null, 2).replace(/'/g, "'\\''")}'`
+  navigator.clipboard.writeText(cmd)
+  toast.success('cURL copied')
+}
+
+function saveCurrentView(state: PlaygroundState) {
+  const name = window.prompt('Name this search')
+  if (!name) return
+  useSavedObjects.getState().upsert({
+    id: '',
+    type: 'search',
+    name,
+    body: state,
+  })
+  toast.success(`Saved search "${name}"`)
 }

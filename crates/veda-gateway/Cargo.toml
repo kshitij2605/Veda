@@ -28,6 +28,7 @@ reqwest = { version = "0.12", features = ["json", "multipart"] }
 zip = "2"
 async-nats = "0.38"
 futures = "0.3"
+base64 = "0.22"
 
 [dev-dependencies]
 jsonwebtoken = "9"

@@ -9,6 +9,7 @@ use crate::auth;
 pub mod admin;
 pub mod collections;
 pub mod document;
+pub mod embed;
 pub mod embed_insert;
 pub mod evaluate;
 pub mod mcp;
@@ -45,6 +46,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         )
         // Search
         .route("/v1/collections/{name}/search", post(search::search))
+        // One-shot text/image -> vector for the playground composer
+        .route("/v1/embed", post(embed::embed))
         // Records
         .route("/v1/collections/{name}/insert", post(records::insert))
         .route(
