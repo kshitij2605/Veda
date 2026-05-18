@@ -10,6 +10,9 @@ import { IndexManager } from './pages/IndexManager'
 import { EvaluationView } from './pages/EvaluationView'
 import { Pipelines } from './pages/Pipelines'
 import { QualityLab } from './pages/quality/QualityLab'
+import { Console } from './pages/Console'
+import { Observability } from './pages/Observability'
+import { Settings } from './pages/Settings'
 
 export default function App() {
   return (
@@ -33,9 +36,9 @@ export default function App() {
           {/* Surfaces queued for later phases — render placeholder until they're built */}
           <Route path="/quality" element={<QualityLab />} />
           <Route path="/pipelines" element={<Pipelines />} />
-          <Route path="/observability" element={<Placeholder name="Observability" phase="Phase 6" />} />
-          <Route path="/console" element={<Placeholder name="Dev Console" phase="Phase 6" />} />
-          <Route path="/settings" element={<Placeholder name="Settings" phase="Phase 6" />} />
+          <Route path="/observability" element={<Observability />} />
+          <Route path="/console" element={<Console />} />
+          <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/collections" replace />} />
         </Routes>
       </AppShell>
@@ -43,23 +46,3 @@ export default function App() {
   )
 }
 
-function Placeholder({ name, phase }: { name: string; phase: string }) {
-  return (
-    <div className="h-full flex items-center justify-center">
-      <div className="dot-grid absolute inset-0 opacity-30" aria-hidden />
-      <div className="relative text-center max-w-md">
-        <div className="text-[11px] uppercase tracking-[0.1em] text-[var(--color-text-subtle)] mb-2">
-          {phase}
-        </div>
-        <h2 className="text-[20px] font-medium text-[var(--color-text)] mb-2">
-          {name}
-        </h2>
-        <p className="text-[12.5px] text-[var(--color-text-muted)]">
-          This surface is part of the multi-phase rebuild. The route is
-          reserved and the navigation reaches it — the implementation lands
-          in {phase}.
-        </p>
-      </div>
-    </div>
-  )
-}

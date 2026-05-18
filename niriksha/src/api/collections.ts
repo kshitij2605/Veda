@@ -110,6 +110,16 @@ export interface EmbedResponse {
 export const embedQuery = (body: EmbedRequest) =>
   api.post<EmbedResponse>('/embed', body)
 
+export interface RouteResponse {
+  strategy: 'Dense' | 'Sparse' | 'BM25' | 'Hybrid' | string
+  rerank: boolean
+  suggested_k: number
+  reasoning: string
+}
+
+export const routeQuery = (query: string) =>
+  api.post<RouteResponse>('/route', { query })
+
 export interface SearchHit {
   id: string
   distance: number
