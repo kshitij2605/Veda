@@ -51,6 +51,11 @@ pub enum FieldType {
     SparseVector {
         dimension: u32,
         metric: DistanceMetric,
+        /// Per-field auto-embed config. When set, embed-insert and
+        /// process-document route the named source field through a
+        /// sparse encoder (SPLADE today) to populate this column.
+        #[serde(default)]
+        auto_embed: Option<AutoEmbedConfig>,
     },
     /// Multi-vector representation (ColBERT / ColPali / ColQwen style): each
     /// record contains a variable number of `dimension`-sized vectors and

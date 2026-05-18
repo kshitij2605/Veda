@@ -469,7 +469,11 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
                     ));
                 }
             };
-            Ok(FieldDefinition::sparse_vector(&f.name, dim, metric).with_filterable(f.filterable))
+            let mut fd = FieldDefinition::sparse_vector(&f.name, dim, metric);
+            if let Some(cfg) = &f.auto_embed {
+                fd = fd.with_sparse_auto_embed(cfg.clone());
+            }
+            Ok(fd.with_filterable(f.filterable))
         }
         "blob" => Ok(FieldDefinition::blob(&f.name).with_filterable(f.filterable)),
         "string" => Ok(
@@ -544,7 +548,7 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
         FieldType::Timestamp => ("timestamp", None, None, None),
         FieldType::Json => ("json", None, None, None),
         FieldType::Uuid => ("uuid", None, None, None),
-        FieldType::SparseVector { dimension, metric } => {
+        FieldType::SparseVector { dimension, metric, .. } => {
             let m = match metric {
                 DistanceMetric::Cosine => "cosine",
                 DistanceMetric::DotProduct => "dot_product",

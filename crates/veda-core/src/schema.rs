@@ -103,13 +103,24 @@ impl FieldDefinition {
         self
     }
 
+    /// Set per-field auto-embed config for a sparse-vector field. The
+    /// process-document handler reads this and routes the source
+    /// field through the configured sparse encoder (SPLADE) to fill
+    /// the sparse column. No-op on non-sparse fields.
+    pub fn with_sparse_auto_embed(mut self, cfg: crate::types::AutoEmbedConfig) -> Self {
+        if let FieldType::SparseVector { auto_embed, .. } = &mut self.field_type {
+            *auto_embed = Some(cfg);
+        }
+        self
+    }
+
     /// Create a sparse vector field definition.
     /// `dimension` is the vocabulary / index upper bound.
     /// Sparse fields do not use any of the dense ANN indexes.
     pub fn sparse_vector(name: impl Into<String>, dimension: u32, metric: DistanceMetric) -> Self {
         Self {
             name: name.into(),
-            field_type: FieldType::SparseVector { dimension, metric },
+            field_type: FieldType::SparseVector { dimension, metric, auto_embed: None },
             filterable: false,
             bm25: false,
             bm25_tokenizer: None,

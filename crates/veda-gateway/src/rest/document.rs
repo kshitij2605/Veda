@@ -531,6 +531,11 @@ async fn process_single_file(
 
     let mut text_embed_targets: Vec<(String, EmbeddingClient)> = Vec::new();
     let mut image_embed_targets: Vec<(String, EmbeddingClient)> = Vec::new();
+    // Sparse-vector fields with `auto_embed.modality = text` get
+    // routed through the SPLADE client at insert time. Just collect
+    // the field names here; the lookup of source-text-per-record
+    // happens inside the chunk loop below.
+    let mut sparse_text_targets: Vec<(String, String)> = Vec::new(); // (target_field, source_field)
 
     for field_def in schema.fields() {
         if let FieldType::Vector { auto_embed, .. } = field_def.field_type() {
@@ -597,6 +602,14 @@ async fn process_single_file(
                 ));
             }
         }
+        // Sparse-vector field with `auto_embed.modality = text` → SPLADE.
+        if let FieldType::SparseVector { auto_embed: Some(cfg), .. } = field_def.field_type() {
+            use veda_core::types::AutoEmbedModality;
+            if matches!(cfg.modality, AutoEmbedModality::Text) {
+                sparse_text_targets
+                    .push((field_def.name().to_owned(), cfg.source.clone()));
+            }
+        }
     }
     drop(registry);
 
@@ -628,6 +641,46 @@ async fn process_single_file(
                     Err(e) => {
                         tracing::warn!(field = %target_field, error = %e, "text embedding failed, skipping vector field");
                     }
+                }
+            }
+
+            // Route the same text through SPLADE for any sparse_vector
+            // targets that opted into auto_embed{modality: text}. The
+            // chunk content is what feeds the encoder regardless of
+            // the `source` field name in the schema — this is the
+            // document path, not free-form embed-insert. We still
+            // honour source when it refers to a populated record
+            // field (e.g. blob_ref strings), but default to chunk.text.
+            if !sparse_text_targets.is_empty() {
+                let splade_guard = state.inner.splade_client.read().await;
+                if let Some(splade) = splade_guard.as_ref() {
+                    for (target_field, source_field) in &sparse_text_targets {
+                        let input = match record.get(source_field) {
+                            Some(FieldValue::String(s)) => s.clone(),
+                            _ => chunk.text.clone(),
+                        };
+                        match splade.encode(&input) {
+                            Ok(enc) => {
+                                if let Ok(sv) = veda_core::sparse::SparseVec::new(
+                                    enc.indices,
+                                    enc.values,
+                                ) {
+                                    record.set(
+                                        target_field,
+                                        FieldValue::SparseVector(sv),
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(field = %target_field, error = %e, "splade encoding failed, skipping sparse field");
+                            }
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        target_count = sparse_text_targets.len(),
+                        "sparse_vector field requested SPLADE auto_embed but VEDA_SPLADE_ENDPOINT is unset"
+                    );
                 }
             }
 
