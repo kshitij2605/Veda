@@ -120,6 +120,30 @@ export interface RouteResponse {
 export const routeQuery = (query: string) =>
   api.post<RouteResponse>('/route', { query })
 
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+export interface LlmCompleteResponse {
+  model: string
+  content: string
+  finish_reason?: string
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  elapsed_ms: number
+}
+export const llmComplete = (
+  messages: ChatMessage[],
+  opts?: { temperature?: number; max_tokens?: number; json_mode?: boolean },
+) =>
+  api.post<LlmCompleteResponse>('/llm/complete', {
+    messages,
+    temperature: opts?.temperature,
+    max_tokens: opts?.max_tokens,
+    json_mode: opts?.json_mode,
+  })
+
 export interface SearchHit {
   id: string
   distance: number

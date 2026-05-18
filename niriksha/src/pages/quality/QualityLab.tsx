@@ -26,7 +26,7 @@ import {
   toast,
 } from '../../components/primitives'
 import { useUrlState } from '../../hooks/useUrlState'
-import { fetchCollection } from '../../api/collections'
+import { fetchCollection, llmComplete } from '../../api/collections'
 import type { FieldSchema } from '../../api/collections'
 import { cn } from '../../lib/cn'
 import { parseEvalSet } from './parseEvalSet'
@@ -669,6 +669,15 @@ function Metric({ label, value }: { label: string; value: string }) {
    ──────────────────────────────────────────────────────────────────── */
 
 function RunDetail({ run }: { run: SavedObject<EvalRunBody> | undefined }) {
+  const [explanations, setExplanations] = useState<Map<string, string>>(new Map())
+  const [explaining, setExplaining] = useState<Set<string>>(new Set())
+
+  // Reset state when the active run changes — explanations are run-scoped.
+  useEffect(() => {
+    setExplanations(new Map())
+    setExplaining(new Set())
+  }, [run?.id])
+
   if (!run) {
     return (
       <aside className="w-[300px] flex-none border-l border-[var(--color-border)] bg-[var(--color-bg)] flex flex-col">
@@ -718,39 +727,133 @@ function RunDetail({ run }: { run: SavedObject<EvalRunBody> | undefined }) {
         <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)] mb-1">
           Per-query
         </div>
-        <ul className="space-y-0.5 max-h-[460px] overflow-y-auto">
+        <ul className="space-y-1 max-h-[460px] overflow-y-auto">
           {run.body.perQuery
             .slice()
             .sort((a, b) => a.rr - b.rr)
             .map((r, i) => (
-              <li
+              <PerQueryItem
                 key={i}
-                className="flex items-center gap-2 text-[11px] font-mono tabular-nums"
-              >
-                <span
-                  className={cn(
-                    'inline-block w-1.5 h-1.5 rounded-full',
-                    r.error
-                      ? 'bg-[var(--color-error)]'
-                      : r.rr >= 0.5
-                        ? 'bg-[var(--color-success)]'
-                        : r.rr > 0
-                          ? 'bg-[var(--color-warning)]'
-                          : 'bg-[var(--color-text-subtle)]',
-                  )}
-                />
-                <span className="flex-1 truncate text-[var(--color-text-muted)]">
-                  {r.query}
-                </span>
-                <span className="text-[var(--color-text-subtle)] w-12 text-right">
-                  rr {r.rr.toFixed(2)}
-                </span>
-              </li>
+                r={r}
+                explanation={explanations.get(r.query)}
+                explaining={explaining.has(r.query)}
+                onExplain={async () => {
+                  setExplaining((prev) => {
+                    const next = new Set(prev)
+                    next.add(r.query)
+                    return next
+                  })
+                  const text = await classifyFailure(r)
+                  setExplanations((prev) => {
+                    const next = new Map(prev)
+                    next.set(r.query, text)
+                    return next
+                  })
+                  setExplaining((prev) => {
+                    const next = new Set(prev)
+                    next.delete(r.query)
+                    return next
+                  })
+                }}
+              />
             ))}
         </ul>
       </section>
     </aside>
   )
+}
+
+function PerQueryItem({
+  r,
+  explanation,
+  explaining,
+  onExplain,
+}: {
+  r: PerQueryResult
+  explanation?: string
+  explaining: boolean
+  onExplain: () => void
+}) {
+  const dotColor = r.error
+    ? 'bg-[var(--color-error)]'
+    : r.rr >= 0.5
+      ? 'bg-[var(--color-success)]'
+      : r.rr > 0
+        ? 'bg-[var(--color-warning)]'
+        : 'bg-[var(--color-text-subtle)]'
+  // Offer the classifier for anything not at rank 1 (rr < 1) and for
+  // errors. Perfect-rank hits don't need an explanation.
+  const couldClassify = r.error || r.rr < 1
+  return (
+    <li className="group flex flex-col gap-0.5 text-[11px] tabular-nums">
+      <div className="flex items-center gap-2 font-mono">
+        <span className={cn('inline-block w-1.5 h-1.5 rounded-full flex-none', dotColor)} />
+        <span className="flex-1 truncate text-[var(--color-text-muted)]">
+          {r.query}
+        </span>
+        <span className="text-[var(--color-text-subtle)] w-10 text-right">
+          rr {r.rr.toFixed(2)}
+        </span>
+        {couldClassify && !explanation && (
+          <button
+            onClick={onExplain}
+            disabled={explaining}
+            title="Ask LLM to classify the failure mode"
+            className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-[var(--color-text-subtle)] hover:text-[var(--color-accent)] disabled:text-[var(--color-text-disabled)]"
+          >
+            {explaining ? '…' : '🪄'}
+          </button>
+        )}
+      </div>
+      {explanation && (
+        <div className="ml-3.5 text-[10.5px] font-sans text-[var(--color-accent-11)] italic leading-snug">
+          {explanation}
+        </div>
+      )}
+    </li>
+  )
+}
+
+/**
+ * Ask the LLM to classify the failure mode for one per-query result.
+ * Returns a short label (≤80 chars) — "vocabulary mismatch", "no gold
+ * present in corpus", "ambiguous query", "retrieval scored wrong
+ * chunk first", etc.
+ */
+async function classifyFailure(r: PerQueryResult): Promise<string> {
+  const expected = r.expected.length > 0 ? r.expected.join(', ') : '(none)'
+  const retrieved =
+    r.retrieved_ids.length > 0
+      ? r.retrieved_ids.slice(0, 5).join(', ')
+      : '(none — empty result set)'
+  try {
+    const { data } = await llmComplete(
+      [
+        {
+          role: 'system',
+          content:
+            'You diagnose RAG retrieval failures in 6–12 words. ' +
+            'Pick the single most likely failure mode (vocabulary ' +
+            'mismatch, ambiguous query, missing-from-corpus, wrong ' +
+            'first-rank, multi-hop, etc) and state it tersely. No ' +
+            'preamble, no period at end.',
+        },
+        {
+          role: 'user',
+          content:
+            `Query: ${r.query}\n` +
+            `Expected doc ids: ${expected}\n` +
+            `Top-K retrieved: ${retrieved}\n` +
+            `RR=${r.rr.toFixed(3)} hits=${r.hits} took=${r.took_ms.toFixed(0)}ms` +
+            (r.error ? `\nError: ${r.error}` : ''),
+        },
+      ],
+      { temperature: 0.2, max_tokens: 48 },
+    )
+    return data.content.trim().replace(/^["'`]+|["'`.]+$/g, '').slice(0, 120)
+  } catch (e) {
+    return e instanceof Error ? `(LLM error: ${e.message})` : 'LLM call failed'
+  }
 }
 
 function Stat({

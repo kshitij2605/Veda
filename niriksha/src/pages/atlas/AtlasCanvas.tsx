@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { cn } from '../../lib/cn'
+import type { Cluster } from './clusters'
 
 export interface AtlasPoint {
   id: string
@@ -26,6 +27,8 @@ interface AtlasCanvasProps {
   onLasso?: (selectedIds: Set<string>) => void
   /** External selection overlay (e.g. from BubbleUp lasso). */
   selectedIds?: Set<string>
+  /** Optional auto-labeled clusters to overlay on the scatter. */
+  clusters?: Cluster[]
 }
 
 const POINT_RADIUS = 2.4
@@ -49,6 +52,7 @@ export function AtlasCanvas({
   lasso,
   onLasso,
   selectedIds,
+  clusters,
 }: AtlasCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, zoom: 1 })
@@ -131,6 +135,40 @@ export function AtlasCanvas({
     }
     ctx.globalAlpha = 1
 
+    // Cluster labels — drawn after points so they sit on top.
+    if (clusters && clusters.length > 0) {
+      ctx.font =
+        '600 12px "Inter", system-ui, sans-serif'
+      ctx.textBaseline = 'middle'
+      for (const c of clusters) {
+        const [sx, sy] = toScreen(c.cx, c.cy)
+        if (sx < -100 || sx > width + 100 || sy < -40 || sy > height + 40) {
+          continue
+        }
+        const text = c.label ?? `· cluster ${c.id + 1}`
+        const tw = ctx.measureText(text).width
+        const padX = 6
+        const padY = 3
+        // Pill background
+        ctx.fillStyle = 'oklch(0.12 0.005 252 / 0.86)'
+        ctx.strokeStyle = 'oklch(0.32 0.13 282 / 0.7)'
+        ctx.lineWidth = 1
+        const bx = sx - tw / 2 - padX
+        const by = sy - 9 - padY
+        const bw = tw + padX * 2
+        const bh = 18 + padY * 2 - 4
+        roundedRect(ctx, bx, by, bw, bh, 4)
+        ctx.fill()
+        ctx.stroke()
+        // Label text
+        ctx.fillStyle = c.label
+          ? 'oklch(0.92 0.05 282)'
+          : 'oklch(0.62 0.005 252)'
+        ctx.textAlign = 'center'
+        ctx.fillText(text, sx, sy)
+      }
+    }
+
     // Lasso polygon
     if (lassoPts.length >= 2) {
       ctx.strokeStyle = 'oklch(0.62 0.22 282)'
@@ -148,7 +186,7 @@ export function AtlasCanvas({
       ctx.fill()
       ctx.setLineDash([])
     }
-  }, [points, width, height, toScreen, hoverId, lassoPts, selectedIds])
+  }, [points, width, height, toScreen, hoverId, lassoPts, selectedIds, clusters])
 
   /* Mouse handlers — switched by `lasso` mode */
 
@@ -281,6 +319,23 @@ function drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number) {
     ctx.lineTo(w, y)
   }
   ctx.stroke()
+}
+
+function roundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+) {
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.arcTo(x + w, y, x + w, y + h, r)
+  ctx.arcTo(x + w, y + h, x, y + h, r)
+  ctx.arcTo(x, y + h, x, y, r)
+  ctx.arcTo(x, y, x + w, y, r)
+  ctx.closePath()
 }
 
 function pointInPolygon(
