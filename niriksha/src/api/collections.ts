@@ -111,11 +111,20 @@ export const dropCollection = (name: string) =>
 export const searchCollection = (name: string, body: SearchRequest) =>
   api.post<SearchResponse>(`/collections/${name}/search`, body)
 
+/**
+ * One row in GET /v1/collections/{name}/records — gateway wraps fields
+ * under a `fields` key alongside the canonical id.
+ */
+export interface RecordRow {
+  id: string
+  fields: Record<string, unknown>
+}
+
 export const fetchRecords = (
   name: string,
   params?: { limit?: number; offset?: number },
 ) =>
-  api.get<{ records: Record<string, unknown>[]; total: number }>(
+  api.get<{ records: RecordRow[]; total: number }>(
     `/collections/${name}/records`,
     { params },
   )

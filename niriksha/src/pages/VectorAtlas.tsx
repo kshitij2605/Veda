@@ -96,15 +96,15 @@ export function VectorAtlas() {
       // Build a color map from the colorField values
       const uniqueValues = new Map<string, number>()
       for (const rec of records) {
-        const val = String(rec[colorField] ?? 'unknown')
+        const val = String(rec.fields[colorField] ?? 'unknown')
         if (!uniqueValues.has(val)) uniqueValues.set(val, uniqueValues.size)
       }
 
       // Gather vectors that are valid arrays of the same dimension.
       const vectors: number[][] = []
-      const validRecords: Record<string, unknown>[] = []
+      const validRecords: typeof records = []
       for (const rec of records) {
-        const vec = rec[vectorField]
+        const vec = rec.fields[vectorField]
         if (Array.isArray(vec) && vec.length >= 2) {
           vectors.push(vec as number[])
           validRecords.push(rec)
@@ -118,18 +118,18 @@ export function VectorAtlas() {
 
       const newPoints: ScatterPoint[] = []
       for (let i = 0; i < validRecords.length; i++) {
-        const rec = validRecords[i]
-        const [x, y] = coords[i]
-        const colorVal = String(rec[colorField] ?? 'unknown')
+        const rec = validRecords[i]!
+        const [x, y] = coords[i]!
+        const colorVal = String(rec.fields[colorField] ?? 'unknown')
         const colorIdx = uniqueValues.get(colorVal) ?? 0
 
         newPoints.push({
-          id: String(rec['id'] ?? rec['_id'] ?? newPoints.length),
+          id: rec.id,
           x,
           y,
-          color: COLORS[colorIdx % COLORS.length],
+          color: COLORS[colorIdx % COLORS.length]!,
           label: colorVal,
-          data: rec,
+          data: rec.fields,
         })
       }
 
