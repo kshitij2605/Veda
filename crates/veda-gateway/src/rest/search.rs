@@ -505,10 +505,15 @@ async fn populate_hit_fields(
             if vector_field_names.contains(name) {
                 continue;
             }
-            if let Some(value) = rec.get(name)
-                && let Ok(json) = serde_json::to_value(value)
-            {
-                map.insert(name.to_string(), json);
+            if let Some(value) = rec.get(name) {
+                // Use the same JSON conversion as the records endpoint
+                // so hit.fields[k] is the unwrapped value (`"foo"`, `42`),
+                // not the tagged FieldValue variant (`{"String":"foo"}`)
+                // that serde_json::to_value produces on the enum directly.
+                map.insert(
+                    name.to_string(),
+                    super::records::field_value_to_json(value),
+                );
             }
         }
         hit.fields = map;
