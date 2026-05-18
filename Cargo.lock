@@ -4434,6 +4434,7 @@ version = "0.1.0"
 dependencies = [
  "async-nats",
  "axum 0.8.8",
+ "base64",
  "futures",
  "jsonwebtoken",
  "metrics",
