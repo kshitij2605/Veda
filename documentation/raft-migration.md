@@ -14,7 +14,7 @@ distributed Raft consensus layer backed by [openraft](https://github.com/datafus
 | `Coordinator` / `CoordinatorHandle` (channel-based) | Working for single-node |
 | `ChannelNetwork` | Placeholder, multi-node transport stub |
 | `raft` module (openraft scaffolding) | Type config + aliases declared |
-| `raft_storage` module | `MemLogState` + `MemStateMachine` data structures, snapshot round-trip tested. `RaftLogStorage` / `RaftStateMachine` *trait* impls deferred — see "Phase 2 friction" below. |
+| `raft_storage` module | `MemLogState` + `MemStateMachine` data structures, snapshot round-trip tested. `MemRaftStorage` implements v1 `RaftStorage<VedaTypeConfig>` end-to-end; `MemSnapshotBuilder` implements `RaftSnapshotBuilder`. `Adaptor::new(MemRaftStorage::new())` produces the v2 `(RaftLogStorage, RaftStateMachine)` pair `Raft::new` expects. |
 | `raft_network` module | `NodeAddressBook` + `InProcessNetwork` channel-based transport. `RaftNetwork` trait impl deferred. |
 
 The async traits and types in `crates/veda-coordinator/src/raft.rs` exist so
@@ -39,32 +39,41 @@ is a localised change.
 
 This is the entrypoint surface. Nothing functionally changes.
 
-### Phase 2 — Storage adapter
+### Phase 2 — Storage adapter ✅ (in-memory)
 
-Implement `openraft::RaftLogStorage` and `openraft::RaftStateMachine` over
-our existing types:
+Implemented in `crates/veda-coordinator/src/raft_storage.rs`:
 
-- `LogStore` → satisfies log read/append/truncate/purge methods.
-- `ClusterStateMachine` → satisfies state-machine `apply` + snapshot build/install.
-- Add persistent vote storage (currently in-memory; needs durable file or
-  the WAL).
-- Implement snapshot creation: serialise `ClusterStateMachine` via bincode.
+- `MemRaftStorage` composes `MemLogState` + `MemStateMachine` and
+  implements v1 `RaftStorage<VedaTypeConfig>` end-to-end (vote, log,
+  state-machine apply, snapshot build/install).
+- `MemSnapshotBuilder` implements `RaftSnapshotBuilder` against a cloned
+  `MemStateMachine` so snapshot building doesn't block the apply path.
+- The combined `EntryPayload` dispatch handles `Normal` (forwarded to
+  `ClusterStateMachine::apply`), `Membership` (recorded into
+  `StoredMembership`), and `Blank` (bumps `last_applied` only).
+- Test coverage in `raft_storage::tests`:
+  - `mem_raft_storage_vote_log_apply_snapshot_cycle` — drives every v1
+    trait method end-to-end.
+  - `mem_raft_storage_adaptor_compiles` — proves
+    `Adaptor::<VedaTypeConfig, MemRaftStorage>::new(...)` produces the v2
+    `(RaftLogStorage, RaftStateMachine)` pair `Raft::new` requires.
 
-#### Phase 2 friction (discovered in commits adding `raft_storage.rs`)
+What is **not** yet covered (deliberately left for follow-ups):
 
-openraft 0.9 split the legacy `RaftStorage` trait into `RaftLogStorage` +
-`RaftStateMachine`. **Both are sealed** — only implementable via the
-`openraft::storage::Adaptor<C, S>` wrapper around the v1 `RaftStorage`
-trait. So the actual path is:
+- Durable backing. Vote, log, and state machine all live in `Arc<RwLock>`
+  over in-process structures. Plugging in a file-backed log + fsync'd
+  vote is the next focused piece.
+- Snapshot streaming via `begin_receiving_snapshot` returns an empty
+  cursor; a chunked-disk variant is a future concern.
 
-1. Implement v1 `RaftStorage<VedaTypeConfig>` (12+ methods, single combined trait).
-2. Wrap with `Adaptor::new(your_storage)` to get the v2 traits.
-3. Pass to `openraft::Raft::new(...)`.
+#### Why the v1 adapter path
 
-The structural state needed for the impl already lives in
-`MemLogState` + `MemStateMachine`. The remaining work is purely
-trait-method-to-plain-method translation, plus careful review against
-the `examples/raft-kv-memstore` reference. Estimated 1-2 focused days.
+openraft 0.9 split the legacy `RaftStorage` into `RaftLogStorage` +
+`RaftStateMachine` v2 traits, but both are sealed under the
+`storage-v2` feature. Without that feature, the supported path is to
+implement v1 `RaftStorage` and wrap with
+`openraft::storage::Adaptor<C, S>`. Our `MemRaftStorage` is exactly that
+implementation; the Adaptor round-trip test pins the contract.
 
 ### Phase 3 — Network transport
 

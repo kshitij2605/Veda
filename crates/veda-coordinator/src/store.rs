@@ -136,6 +136,15 @@ impl ClusterStateMachine {
         resp
     }
 
+    /// Advance `last_applied` without running any business logic. Used by
+    /// the openraft adapter for `EntryPayload::Blank` / `Membership`
+    /// entries that don't touch domain state but still occupy a log index.
+    pub fn skip_apply(&mut self, idx: u64) {
+        if idx > self.last_applied {
+            self.last_applied = idx;
+        }
+    }
+
     /// Apply a command (without index bookkeeping) — pure business logic.
     fn apply_command(&mut self, cmd: &ClusterCommand) -> ClusterResponse {
         match cmd {
