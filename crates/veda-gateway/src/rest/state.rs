@@ -13,6 +13,7 @@ use veda_storage::blob_store::{BlobStore, LocalBlobStore, ObjectBlobStore, Objec
 use veda_storage::segment_manager::SegmentManager;
 
 use crate::auth::Role;
+use crate::rest::saved_objects::SavedObjectStore;
 
 /// Represents a user in the in-memory user store.
 #[derive(Clone)]
@@ -60,6 +61,8 @@ pub struct AppStateInner {
     pub blob_store: RwLock<Arc<dyn BlobStore>>,
     /// Prometheus metrics handle (None when recorder is not installed).
     pub prometheus_handle: Option<PrometheusHandle>,
+    /// SavedObject store, persisted to `{data_dir}/_saved_objects.json`.
+    pub saved_objects: SavedObjectStore,
 }
 
 impl AppState {
@@ -82,6 +85,7 @@ impl AppState {
                     LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
                 )),
                 prometheus_handle: None,
+                saved_objects: SavedObjectStore::new(data_dir),
             }),
         }
     }
@@ -113,6 +117,7 @@ impl AppState {
                     LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
                 )),
                 prometheus_handle: None,
+                saved_objects: SavedObjectStore::new(data_dir),
             }),
         }
     }
@@ -140,6 +145,7 @@ impl AppState {
                     LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
                 )),
                 prometheus_handle: None,
+                saved_objects: SavedObjectStore::new(data_dir),
             }),
         }
     }

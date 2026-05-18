@@ -20,6 +20,7 @@ pub mod query_log;
 pub mod records;
 pub mod rerank;
 pub mod route;
+pub mod saved_objects;
 pub mod search;
 pub mod state;
 
@@ -60,6 +61,15 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route("/v1/llm/complete", post(llm::complete))
         // Chunker A/B preview (no storage / no embedding)
         .route("/v1/chunk/preview", post(chunk_preview::preview))
+        // SavedObjects — Phase 6.5 follow-up: server-side persistence
+        // for searches / atlas views / dashboards / etc. so they
+        // survive a browser/localStorage wipe.
+        .route("/v1/saved_objects", get(saved_objects::list))
+        .route(
+            "/v1/saved_objects/{id}",
+            axum::routing::put(saved_objects::upsert)
+                .delete(saved_objects::delete),
+        )
         // Records
         .route("/v1/collections/{name}/insert", post(records::insert))
         .route(
