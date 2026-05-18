@@ -126,6 +126,7 @@ fn test_serde_roundtrip_field_type() {
         FieldType::SparseVector {
             dimension: 30522,
             metric: DistanceMetric::Cosine,
+            auto_embed: None,
         },
         FieldType::String,
         FieldType::Int32,

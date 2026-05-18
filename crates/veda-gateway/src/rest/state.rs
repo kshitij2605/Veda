@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use veda_core::embedding::{EmbeddingModelConfig, EmbeddingModelRegistry, Modality};
+use veda_core::splade_client::{SpladeClient, SpladeClientConfig};
 use veda_core::schema::CollectionSchema;
 use veda_query::distributed::DistributedQueryExecutor;
 use metrics_exporter_prometheus::PrometheusHandle;
@@ -34,6 +35,11 @@ pub struct AppStateInner {
     pub query_executors: RwLock<HashMap<String, DistributedQueryExecutor>>,
     /// Embedding model registry.
     pub embedding_registry: RwLock<EmbeddingModelRegistry>,
+    /// Optional SPLADE sparse-encoder client, configured from
+    /// `VEDA_SPLADE_*` env vars at startup. None when no endpoint is
+    /// set — sparse_vector fields with `auto_embed` then fall back to
+    /// "leave empty" with a one-shot warn.
+    pub splade_client: RwLock<Option<SpladeClient>>,
     /// Base data directory.
     pub data_dir: PathBuf,
     /// FlashParse OCR endpoint (None = document processing disabled).
@@ -59,6 +65,7 @@ impl AppState {
                 segment_managers: RwLock::new(HashMap::new()),
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
+                splade_client: RwLock::new(None),
                 data_dir: data_dir.to_owned(),
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: false,
@@ -88,6 +95,7 @@ impl AppState {
                 segment_managers: RwLock::new(HashMap::new()),
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
+                splade_client: RwLock::new(None),
                 data_dir: data_dir.to_owned(),
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: true,
@@ -113,6 +121,7 @@ impl AppState {
                 segment_managers: RwLock::new(HashMap::new()),
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
+                splade_client: RwLock::new(None),
                 data_dir: data_dir.to_owned(),
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: true,
@@ -153,6 +162,21 @@ impl AppState {
         &self,
     ) -> &RwLock<EmbeddingModelRegistry> {
         &self.inner.embedding_registry
+    }
+
+    /// Load a SPLADE sparse-encoder client from `VEDA_SPLADE_*` env
+    /// vars. No-op when the endpoint isn't configured; sparse_vector
+    /// fields with `auto_embed.modality = text` will then leave their
+    /// values empty at insert time.
+    pub async fn load_splade_from_env(&self) {
+        let Some(cfg) = SpladeClientConfig::from_env() else {
+            return;
+        };
+        let endpoint = cfg.endpoint.clone();
+        let model = cfg.model.clone();
+        let mut guard = self.inner.splade_client.write().await;
+        *guard = Some(SpladeClient::new(cfg));
+        tracing::info!(model = %model, endpoint = %endpoint, "registered SPLADE encoder from environment");
     }
 
     /// Load embedding model configuration from environment variables and register it.
