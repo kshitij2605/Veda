@@ -300,7 +300,7 @@ pub async fn process_documents_batch(
 
 /// Process a single file through FlashParse and insert results into the collection.
 /// Parse chunking strategy from multipart form parameters.
-fn parse_chunking_strategy(
+pub(crate) fn parse_chunking_strategy(
     name: Option<&str>,
     size: Option<usize>,
     overlap: Option<usize>,

@@ -48,6 +48,7 @@ const GROUPS: NavGroup[] = [
     label: 'Operate',
     items: [
       { to: '/pipelines', label: 'Pipelines', icon: GitBranch },
+      { to: '/chunker', label: 'Chunker A/B', icon: Beaker },
       { to: '/health', label: 'Health', icon: Activity },
       { to: '/indexes', label: 'Indexes', icon: Layers },
       { to: '/observability', label: 'Observability', icon: BarChart3 },
