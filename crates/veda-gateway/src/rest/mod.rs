@@ -15,6 +15,7 @@ pub mod llm;
 pub mod evaluate;
 pub mod mcp;
 pub mod metrics_middleware;
+pub mod query_log;
 pub mod records;
 pub mod rerank;
 pub mod route;
@@ -47,6 +48,11 @@ pub fn build_router(app_state: state::AppState) -> Router {
         )
         // Search
         .route("/v1/collections/{name}/search", post(search::search))
+        // Coverage rollup over the per-collection query log
+        .route(
+            "/v1/collections/{name}/coverage",
+            get(query_log::coverage),
+        )
         // One-shot text/image -> vector for the playground composer
         .route("/v1/embed", post(embed::embed))
         // LLM chat-completion proxy (cluster labels / NL→DSL / failure classifier)
