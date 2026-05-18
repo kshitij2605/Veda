@@ -173,39 +173,41 @@ function Row({ field, stats, selected, onColumnToggle, onAddFilter }: RowProps) 
   const [open, setOpen] = useState(false)
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          className={cn(
-            'group w-full flex items-center gap-1.5 pl-3 pr-2 h-6 text-left',
-            'hover:bg-[var(--color-bg-hover)] transition-colors duration-[var(--duration-fast)]',
-            'cursor-default',
-            selected && 'text-[var(--color-text)]',
-            !selected && 'text-[var(--color-text-muted)]',
-          )}
-        >
-          <FieldIcon field={field} />
-          <span className="flex-1 truncate text-[11.5px]">{field.name}</span>
-          <span className="text-[10px] font-mono text-[var(--color-text-subtle)] opacity-0 group-hover:opacity-100">
-            {stats?.present ?? 0}
-          </span>
+      <div
+        className={cn(
+          'group relative flex items-center gap-1.5 pl-3 pr-2 h-6',
+          'hover:bg-[var(--color-bg-hover)] transition-colors duration-[var(--duration-fast)]',
+          selected ? 'text-[var(--color-text)]' : 'text-[var(--color-text-muted)]',
+        )}
+      >
+        <Popover.Trigger asChild>
           <button
             type="button"
-            onClick={(e) => {
-              e.stopPropagation()
-              onColumnToggle(field.name)
-            }}
-            className="p-0.5 rounded-[2px] text-[var(--color-text-subtle)] opacity-0 group-hover:opacity-100 hover:text-[var(--color-text)] hover:bg-[var(--color-bg-hover)]"
-            aria-label={selected ? 'Hide column' : 'Show as column'}
+            className="flex flex-1 items-center gap-1.5 text-left min-w-0 cursor-default"
           >
-            {selected ? (
-              <EyeOff size={11} strokeWidth={2.25} />
-            ) : (
-              <Eye size={11} strokeWidth={2.25} />
-            )}
+            <FieldIcon field={field} />
+            <span className="flex-1 truncate text-[11.5px]">{field.name}</span>
+            <span className="text-[10px] font-mono text-[var(--color-text-subtle)] opacity-0 group-hover:opacity-100">
+              {stats?.present ?? 0}
+            </span>
           </button>
+        </Popover.Trigger>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation()
+            onColumnToggle(field.name)
+          }}
+          className="p-0.5 rounded-[2px] text-[var(--color-text-subtle)] opacity-0 group-hover:opacity-100 hover:text-[var(--color-text)] hover:bg-[var(--color-bg-hover)]"
+          aria-label={selected ? 'Hide column' : 'Show as column'}
+        >
+          {selected ? (
+            <EyeOff size={11} strokeWidth={2.25} />
+          ) : (
+            <Eye size={11} strokeWidth={2.25} />
+          )}
         </button>
-      </Popover.Trigger>
+      </div>
       <Popover.Portal>
         <Popover.Content
           side="right"

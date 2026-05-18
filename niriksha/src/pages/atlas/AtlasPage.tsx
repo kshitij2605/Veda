@@ -358,11 +358,11 @@ function Header({
         options={vectorFields.map((v) => ({ value: v, label: v }))}
       />
       <Select
-        value={colorField}
-        onValueChange={onColorField}
+        value={colorField || '__none__'}
+        onValueChange={(v) => onColorField(v === '__none__' ? '' : v)}
         placeholder="color by"
         options={[
-          { value: '', label: 'none' },
+          { value: '__none__', label: 'none' },
           ...colorFields.map((v) => ({ value: v, label: v })),
         ]}
       />
