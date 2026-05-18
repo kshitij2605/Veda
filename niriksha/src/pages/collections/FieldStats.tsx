@@ -88,11 +88,10 @@ export function FieldStats({ collection }: FieldStatsProps) {
             Field statistics
           </h2>
           <p className="text-[11.5px] text-[var(--color-text-muted)]">
-            Sampled from the first {rows.length.toLocaleString()} of{' '}
-            {collection.shard_count > 1
-              ? `${collection.shard_count} shards`
-              : 'this collection'}
-            . Numbers reflect the sample, not the whole corpus.
+            Sampled {rows.length.toLocaleString()} record
+            {rows.length === 1 ? '' : 's'} from{' '}
+            <span className="font-mono">{collection.name}</span>. Numbers
+            reflect the sample, not the whole corpus.
           </p>
         </div>
         <select

@@ -44,8 +44,15 @@ interface CommandPaletteProps {
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate()
   const { collections, fetchCollections } = useCollectionStore()
-  const savedObjects = useSavedObjects((s) => s.list())
+  const objectsMap = useSavedObjects((s) => s.objects)
   const touch = useSavedObjects((s) => s.touch)
+  const savedObjects = useMemo<SavedObject[]>(
+    () =>
+      Object.values(objectsMap).sort(
+        (a, b) => (b.lastUsedAt ?? b.updatedAt) - (a.lastUsedAt ?? a.updatedAt),
+      ),
+    [objectsMap],
+  )
   const [query, setQuery] = useState('')
 
   useEffect(() => {

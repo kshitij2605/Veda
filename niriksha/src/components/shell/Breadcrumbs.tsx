@@ -1,5 +1,5 @@
 import { ChevronRight } from 'lucide-react'
-import { Link, useLocation, useParams } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { cn } from '../../lib/cn'
 
 interface Crumb {
@@ -19,12 +19,15 @@ interface Crumb {
  *   /health               → Health
  *   /console              → Dev Console
  *
+ * Parses the pathname directly — `useParams` returns empty when used
+ * outside a matched `<Route>` (we live in the AppShell, above the
+ * router's match boundary). Path segments are the source of truth.
+ *
  * Fallback for unknown paths is a Titlecased segment list.
  */
 export function Breadcrumbs() {
   const location = useLocation()
-  const params = useParams<{ name?: string; id?: string }>()
-  const crumbs = pathToCrumbs(location.pathname, params)
+  const crumbs = pathToCrumbs(location.pathname)
   if (crumbs.length === 0) return null
   return (
     <nav aria-label="Breadcrumb" className="flex items-center min-w-0">
@@ -70,10 +73,7 @@ export function Breadcrumbs() {
   )
 }
 
-function pathToCrumbs(
-  pathname: string,
-  params: { name?: string; id?: string },
-): Crumb[] {
+function pathToCrumbs(pathname: string): Crumb[] {
   const parts = pathname.split('/').filter(Boolean)
   if (parts.length === 0) return [{ label: 'Home' }]
 
@@ -95,8 +95,9 @@ function pathToCrumbs(
   const out: Crumb[] = [{ label: topLabel, to: '/' + top }]
 
   // /collections/:name/...
-  if (top === 'collections' && params.name) {
-    out.push({ label: params.name, to: `/collections/${params.name}` })
+  if (top === 'collections' && parts[1]) {
+    const name = parts[1]
+    out.push({ label: name, to: `/collections/${name}` })
     // Tab segment after collection name
     const tab = parts[2]
     if (tab) {

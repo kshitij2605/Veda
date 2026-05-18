@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 
@@ -87,7 +88,20 @@ export const useSavedObjects = create<SavedObjectState>()(
   ),
 )
 
-/** Recent-items hook used by the palette. */
+/**
+ * Recent-items hook for the palette. Selects the raw `objects` map (a
+ * stable reference managed by zustand+persist) and derives the sorted
+ * recent list in a memo — selecting `s.list()` directly would return a
+ * fresh array on every render and trip React's infinite-loop guard.
+ */
 export function useRecentObjects(limit = 8): SavedObject[] {
-  return useSavedObjects((s) => s.list()).slice(0, limit)
+  const objects = useSavedObjects((s) => s.objects)
+  return useMemo(() => {
+    const all = Object.values(objects) as SavedObject[]
+    return all
+      .sort(
+        (a, b) => (b.lastUsedAt ?? b.updatedAt) - (a.lastUsedAt ?? a.updatedAt),
+      )
+      .slice(0, limit)
+  }, [objects, limit])
 }
