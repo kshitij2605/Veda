@@ -24,6 +24,7 @@ import {
 import { useCollectionStore } from '../stores/collectionStore'
 import { useSavedObjects } from '../stores/savedObjectStore'
 import { useSearchStore } from '../stores/searchStore'
+import { HybridSankey } from './search/HybridSankey'
 import { useUrlState } from '../hooks/useUrlState'
 import {
   Badge,
@@ -79,8 +80,16 @@ const DEFAULT_STATE = (initialCollection: string): PlaygroundState => ({
 export function SearchPlayground() {
   const { collection: urlCollection } = useParams<{ collection: string }>()
   const { collections, fetchCollections } = useCollectionStore()
-  const { results, loading, error, tookMs, explain, search, clearResults } =
-    useSearchStore()
+  const {
+    results,
+    loading,
+    error,
+    tookMs,
+    explain,
+    hybridExplain,
+    search,
+    clearResults,
+  } = useSearchStore()
 
   const [state, setState] = useUrlState<PlaygroundState>(
     's',
@@ -219,6 +228,14 @@ export function SearchPlayground() {
             <EmbedInfoBar info={embedInfo} />
           )}
           {explain && state.explainOn && <ExplainBar explain={explain} tookMs={tookMs} />}
+          {hybridExplain && state.explainOn && (
+            <div className="px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-bg)]">
+              <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)] mb-2">
+                Hybrid retrieval · {hybridExplain.fusion} fusion
+              </div>
+              <HybridSankey data={hybridExplain} />
+            </div>
+          )}
           <ResultsArea
             loading={loading || embedding}
             results={results}
@@ -880,15 +897,12 @@ function buildSearchRequest(
     case 'hybrid':
       if (!vectorValues || !state.vectorField || !state.bm25Field) return null
       body.query.hybrid = {
-        vector: { field: state.vectorField, values: vectorValues },
+        dense: { field: state.vectorField, values: vectorValues },
         bm25: { field: state.bm25Field, query: state.text },
-        vector_weight:
-          state.fusion === 'weighted' ? state.vectorWeight : undefined,
-        bm25_weight: state.fusion === 'weighted' ? state.bm25Weight : undefined,
+        dense_weight:
+          state.fusion === 'weighted_sum' ? state.vectorWeight : 0.5,
+        fusion: state.fusion === 'weighted_sum' ? 'weighted_sum' : 'rrf',
       }
-      body.query.fusion = state.fusion
-      if (state.fusion === 'rrf')
-        body.query.fusion_params = { k: state.rrfK }
       return body
   }
 }

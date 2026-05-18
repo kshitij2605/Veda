@@ -58,11 +58,16 @@ export interface Bm25Query {
 }
 
 export interface HybridQuery {
-  vector: VectorQuery
+  /** Dense leg — name MUST be `dense` to match the gateway's
+   *  HybridQuery struct (was previously `vector` and the request
+   *  422-ed on the server). */
+  dense: VectorQuery
   bm25: Bm25Query
-  /** Per-leg weights for weighted-sum fusion. */
-  vector_weight?: number
-  bm25_weight?: number
+  /** Weight on the dense leg, in [0, 1]. The BM25 leg gets
+   *  (1 - dense_weight). Default on the gateway is 0.5. */
+  dense_weight?: number
+  /** "rrf" (default) or "weighted_sum". */
+  fusion?: string
 }
 
 export interface FusionParams {
@@ -179,10 +184,20 @@ export interface ExplainTiming {
   total_ms: number
 }
 
+export interface HybridExplain {
+  fusion: string
+  dense_weight: number
+  bm25_weight: number
+  dense_top: string[]
+  bm25_top: string[]
+  final_top: string[]
+}
+
 export interface SearchResponse {
   results: SearchHit[]
   took_ms: number
   explain?: ExplainTiming
+  hybrid_explain?: HybridExplain
 }
 
 /**

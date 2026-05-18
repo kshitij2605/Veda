@@ -139,6 +139,21 @@ pub struct ExplainTiming {
     pub total_ms: f64,
 }
 
+/// Per-leg telemetry for hybrid retrieval. Set only when the query
+/// is hybrid AND `req.explain == true`. Powers the Phase 5.6
+/// retrieval Sankey in the dashboard.
+#[derive(Debug, Serialize)]
+pub struct HybridExplain {
+    pub fusion: String,
+    pub dense_weight: f32,
+    pub bm25_weight: f32,
+    /// Top doc-ids in rank order from each leg, before fusion.
+    pub dense_top: Vec<String>,
+    pub bm25_top: Vec<String>,
+    /// Final fused / re-ranked top-K doc-ids in display order.
+    pub final_top: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
     pub results: Vec<SearchHit>,
@@ -146,6 +161,8 @@ pub struct SearchResponse {
     pub took_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explain: Option<ExplainTiming>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hybrid_explain: Option<HybridExplain>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -196,6 +213,7 @@ pub async fn search(
     })?;
 
     let mut explain_timing: Option<ExplainTiming> = None;
+    let mut hybrid_explain: Option<HybridExplain> = None;
 
     let results = if let Some(ref vec_query) = req.query.vector {
         // Single-vector search.
@@ -338,7 +356,7 @@ pub async fn search(
         // scored independently; RRF folds the rankings into one set.
         // dense_weight in [0, 1] biases the RRF weighting.
         let metric = resolve_metric(&schema, &hybrid_query.dense.field);
-        execute_hybrid_dense_bm25(
+        let (hits, legs) = execute_hybrid_dense_bm25(
             &state,
             &name,
             executor,
@@ -347,7 +365,19 @@ pub async fn search(
             metric,
             req.limit,
         )
-        .await?
+        .await?;
+        if req.explain {
+            let dense_w = hybrid_query.dense_weight.clamp(0.0, 1.0);
+            hybrid_explain = Some(HybridExplain {
+                fusion: hybrid_query.fusion.clone(),
+                dense_weight: dense_w,
+                bm25_weight: 1.0 - dense_w,
+                dense_top: legs.dense_top,
+                bm25_top: legs.bm25_top,
+                final_top: hits.iter().map(|h| h.id.clone()).collect(),
+            });
+        }
+        hits
     } else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -379,11 +409,19 @@ pub async fn search(
     let doc_ids: Vec<String> = results.iter().map(|h| h.id.clone()).collect();
     super::query_log::record_search(&state, &name, final_limit, doc_ids, took_ms);
 
+    // After rerank the final ranking may differ from the original fused
+    // list — keep the final_top in HybridExplain aligned with what the
+    // caller actually sees.
+    if let Some(ref mut hx) = hybrid_explain {
+        hx.final_top = results.iter().map(|h| h.id.clone()).collect();
+    }
+
     Ok(Json(SearchResponse {
         results,
         count,
         took_ms,
         explain: explain_timing,
+        hybrid_explain,
     }))
 }
 
@@ -643,6 +681,13 @@ async fn execute_bm25(
 ///
 /// Each leg runs the full top-`k` retrieval first; results are folded
 /// together into at most `k` hits.
+/// Per-leg ids exposed to the gateway-level explain plumbing so the
+/// dashboard can draw the retrieval Sankey (Phase 5.6).
+pub struct HybridLegs {
+    pub dense_top: Vec<String>,
+    pub bm25_top: Vec<String>,
+}
+
 async fn execute_hybrid_dense_bm25(
     state: &AppState,
     collection: &str,
@@ -651,12 +696,15 @@ async fn execute_hybrid_dense_bm25(
     req: &SearchRequest,
     metric: DistanceMetric,
     k: usize,
-) -> Result<Vec<SearchHit>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(Vec<SearchHit>, HybridLegs), (StatusCode, Json<ErrorResponse>)> {
     let dense_w = hybrid.dense_weight.clamp(0.0, 1.0);
     let bm25_w = 1.0 - dense_w;
 
     let (dense_hits, _t) = execute_single_vector(executor, &hybrid.dense, req, metric)?;
     let bm25_hits = execute_bm25(state, collection, &hybrid.bm25, k.max(req.limit)).await?;
+
+    let dense_top: Vec<String> = dense_hits.iter().map(|h| h.id.clone()).collect();
+    let bm25_top: Vec<String> = bm25_hits.iter().map(|h| h.id.clone()).collect();
 
     let scores: std::collections::HashMap<String, f32> = match hybrid.fusion.as_str() {
         "weighted_sum" => weighted_sum_fuse(&dense_hits, &bm25_hits, dense_w, bm25_w, metric),
@@ -674,7 +722,7 @@ async fn execute_hybrid_dense_bm25(
             fields: serde_json::Map::new(),
         })
         .collect();
-    Ok(hits)
+    Ok((hits, HybridLegs { dense_top, bm25_top }))
 }
 
 /// Reciprocal-rank fusion.
