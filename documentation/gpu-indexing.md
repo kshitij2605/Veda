@@ -19,11 +19,35 @@ This is the single biggest gap in Veda's competitive matrix as of May
 
 ## Status
 
-Currently a placeholder: a `gpu` cargo feature flag exists on
-`veda-index`, and `crates/veda-index/src/gpu.rs` reserves the module path.
-No `cuvs-rs` dependency is declared yet — adding it requires the CUDA
-toolkit at build time and would break CPU-only builds without further
-conditional compilation work.
+Two GPU paths are wired in code:
+
+- **`gpu_nim`** (`crates/veda-index/src/gpu_nim_client.rs`) — HTTP client
+  that POSTs vectors to an external cuVS-backed NIM container and
+  receives serialized HNSW bytes back. Off by default; lets the Veda
+  binary stay CUDA-free.
+- **`gpu_cuvs`** (`crates/veda-index/src/gpu_cuvs.rs`) — In-binary cuVS
+  build via `cuvs = "26.4"` + `ndarray = "0.15"`. `CagraIndex` implements
+  `VectorIndex::build` / `search` against `cuvs::cagra::Index`, plus
+  `serialize_to_hnswlib` / `deserialize_from_hnswlib` for persistence
+  through cuVS's HNSW wire format.
+
+Default `cargo build` enables neither feature and stays CUDA-free; the
+`CagraIndex` shell still compiles and returns a clear "feature off"
+error from every method.
+
+### `gpu_cuvs` build prereqs
+
+- CUDA toolkit 12.x on the build host (`nvcc` + `libcuvs`).
+- CMake **≥ 3.30.4** — `cuvs-sys`'s build script invokes CMake and
+  will hard-fail on older versions. Ubuntu 22.04's apt CMake is 3.22 —
+  install a newer one via Kitware's apt repo or
+  `pip install cmake`.
+- NVIDIA driver ≥ 535 at runtime.
+
+Build: `cargo build -p veda-index --features gpu_cuvs`.
+
+GPU-only smoke test (won't run on CPU-only CI): `cargo test -p
+veda-index --features gpu_cuvs gpu_cuvs:: -- --ignored`.
 
 ## Phased plan
 

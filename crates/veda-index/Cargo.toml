@@ -16,6 +16,11 @@ bincode = "1.3"
 # Optional: blocking HTTP client for the NVIDIA NIM GPU build offload.
 # Only pulled in when the gpu_nim feature is on.
 reqwest = { version = "0.12", optional = true, features = ["blocking"] }
+# Optional: NVIDIA cuVS Rust bindings + ndarray for the in-binary GPU
+# build path. Both require the CUDA toolkit at build time and an
+# NVIDIA GPU at runtime. Default builds do not pull these in.
+cuvs = { version = "26.4", optional = true }
+ndarray = { version = "0.15", optional = true }
 
 [features]
 default = []
@@ -29,11 +34,10 @@ gpu = []
 # --features veda-index/gpu_nim.
 gpu_nim = ["dep:reqwest"]
 # In-binary cuVS path: link cuvs-rs into Veda so the binary itself
-# runs CAGRA on the GPU (alternative to gpu_nim). Pre-1.0 cuvs-rs is
-# kept out of the default Cargo.toml — the scaffold compiles
-# without the upstream dep so users can opt in once the API
-# stabilises (see crates/veda-index/src/gpu_cuvs.rs).
-gpu_cuvs = []
+# runs CAGRA on the GPU (alternative to gpu_nim). Activating this
+# feature requires the CUDA toolkit on the build host; default
+# builds stay CUDA-free.
+gpu_cuvs = ["dep:cuvs", "dep:ndarray"]
 
 [dev-dependencies]
 tempfile = "3"
