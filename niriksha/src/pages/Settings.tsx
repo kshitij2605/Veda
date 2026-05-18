@@ -271,14 +271,17 @@ function buildConnectors(
     },
     {
       id: 'llm-vlm',
-      name: 'LLM / VLM (Qwen3.5-122B-A10B)',
+      name: 'LLM (chat completions)',
       type: 'llm',
+      // /admin/health doesn't probe the LLM yet; surface as "unknown"
+      // until a probe lands. The endpoint itself is wired (Phase 5.8).
       status: 'unknown',
-      endpoint: 'difgpu01.tdc:9000/v1/chat/completions',
+      endpoint: 'POST /v1/llm/complete · proxies VEDA_LLM_ENDPOINT',
       details: [
-        { label: 'Model', value: 'Qwen/Qwen3.5-122B-A10B' },
-        { label: 'Use', value: 'cluster-labels · failure-mode · NL→DSL' },
-        { label: 'Connector wire', value: 'planned, Phase 5.8' },
+        { label: 'Model', value: 'VEDA_LLM_MODEL env' },
+        { label: 'Wire', value: 'OpenAI-compatible chat/completions' },
+        { label: 'Use', value: 'cluster labels · failure mode · NL→DSL' },
+        { label: 'JSON mode', value: 'supported (json_mode flag)' },
       ],
     },
     {

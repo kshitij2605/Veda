@@ -11,6 +11,7 @@ pub mod collections;
 pub mod document;
 pub mod embed;
 pub mod embed_insert;
+pub mod llm;
 pub mod evaluate;
 pub mod mcp;
 pub mod metrics_middleware;
@@ -48,6 +49,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route("/v1/collections/{name}/search", post(search::search))
         // One-shot text/image -> vector for the playground composer
         .route("/v1/embed", post(embed::embed))
+        // LLM chat-completion proxy (cluster labels / NL→DSL / failure classifier)
+        .route("/v1/llm/complete", post(llm::complete))
         // Records
         .route("/v1/collections/{name}/insert", post(records::insert))
         .route(

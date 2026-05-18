@@ -2,6 +2,7 @@ pub mod chunking;
 pub mod embedding;
 pub mod embedding_client;
 pub mod error;
+pub mod llm_client;
 pub mod metrics;
 pub mod record;
 pub mod schema;

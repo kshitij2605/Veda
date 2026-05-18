@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use veda_core::embedding::{EmbeddingModelConfig, EmbeddingModelRegistry, Modality};
+use veda_core::llm_client::LlmConfig;
 use veda_core::splade_client::{SpladeClient, SpladeClientConfig};
 use veda_core::schema::CollectionSchema;
 use veda_query::distributed::DistributedQueryExecutor;
@@ -40,6 +41,11 @@ pub struct AppStateInner {
     /// set — sparse_vector fields with `auto_embed` then fall back to
     /// "leave empty" with a one-shot warn.
     pub splade_client: RwLock<Option<SpladeClient>>,
+    /// Optional LLM endpoint config (OpenAI-compatible chat completions),
+    /// from `VEDA_LLM_*` env vars at startup. When unset the
+    /// `POST /v1/llm/complete` route returns 503 and LLM-backed UI
+    /// affordances (cluster labels, NL→DSL, failure classifier) hide.
+    pub llm_config: RwLock<Option<LlmConfig>>,
     /// Base data directory.
     pub data_dir: PathBuf,
     /// FlashParse OCR endpoint (None = document processing disabled).
@@ -66,6 +72,7 @@ impl AppState {
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 splade_client: RwLock::new(None),
+                llm_config: RwLock::new(None),
                 data_dir: data_dir.to_owned(),
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: false,
@@ -96,6 +103,7 @@ impl AppState {
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 splade_client: RwLock::new(None),
+                llm_config: RwLock::new(None),
                 data_dir: data_dir.to_owned(),
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: true,
@@ -122,6 +130,7 @@ impl AppState {
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 splade_client: RwLock::new(None),
+                llm_config: RwLock::new(None),
                 data_dir: data_dir.to_owned(),
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: true,
@@ -177,6 +186,18 @@ impl AppState {
         let mut guard = self.inner.splade_client.write().await;
         *guard = Some(SpladeClient::new(cfg));
         tracing::info!(model = %model, endpoint = %endpoint, "registered SPLADE encoder from environment");
+    }
+
+    /// Load an OpenAI-compatible LLM endpoint from `VEDA_LLM_*` env
+    /// vars. No-op when unset — LLM-backed UI affordances then hide
+    /// (cluster labels, failure classification, NL→DSL).
+    pub async fn load_llm_from_env(&self) {
+        let Some(cfg) = LlmConfig::from_env() else { return };
+        let endpoint = cfg.endpoint.clone();
+        let model = cfg.model.clone();
+        let mut guard = self.inner.llm_config.write().await;
+        *guard = Some(cfg);
+        tracing::info!(model = %model, endpoint = %endpoint, "registered LLM endpoint from environment");
     }
 
     /// Load embedding model configuration from environment variables and register it.
