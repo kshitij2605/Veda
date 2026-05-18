@@ -20,6 +20,7 @@ use std::time::Instant;
 use veda_core::types::DistanceMetric;
 use veda_index::flat::FlatIndex;
 use veda_index::hnsw::HnswIndex;
+use veda_index::hnsw::quantized::QuantizedHnswIndex;
 use veda_index::quantization::rabitq_rerank::RaBitQRerankIndex;
 use veda_index::quantization::rabitq_vector_index::RaBitQIndex;
 use veda_index::traits::VectorIndex;
@@ -106,6 +107,13 @@ fn run_scale(label: &str, n: usize, dim: usize) {
     rerank.build(&refs).unwrap();
     let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
     print_row("rabitq+rerank", n, build_ms, &rerank, &queries, &truths);
+
+    // Deep-quantized HNSW: graph + RaBitQ codes, no raw vectors.
+    let t0 = Instant::now();
+    let mut qhnsw = QuantizedHnswIndex::new(DistanceMetric::Cosine, dim as u32);
+    qhnsw.build(&refs).unwrap();
+    let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    print_row("hnsw+rabitq", n, build_ms, &qhnsw, &queries, &truths);
 }
 
 fn print_row<I: VectorIndex + ?Sized>(

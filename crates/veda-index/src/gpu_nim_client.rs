@@ -159,9 +159,16 @@ pub fn build_on_nim(
 mod tests {
     use super::*;
 
+    // Serialize env-mutating tests so cargo's parallel runner doesn't
+    // interleave set_var / remove_var across them. A simple Mutex is
+    // enough — these tests are cheap and run in process.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn config_reads_minimal_env() {
-        // SAFETY: env mutation is intentional and scoped to this test.
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: env mutation is intentional and the lock makes it
+        // observable only to this test at a time.
         unsafe {
             std::env::set_var("VEDA_GPU_NIM_ENDPOINT", "http://nim:8000");
         }
@@ -175,6 +182,7 @@ mod tests {
 
     #[test]
     fn config_none_when_endpoint_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::remove_var("VEDA_GPU_NIM_ENDPOINT");
         }

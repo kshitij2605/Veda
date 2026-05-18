@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use rand::Rng;
 
 use crate::distance::compute_distance;
+use crate::hnsw::distance_provider::RawVectorsProvider;
 use crate::hnsw::graph::HnswGraph;
 use crate::hnsw::searcher::HnswSearcher;
 use veda_core::types::DistanceMetric;
@@ -54,6 +55,7 @@ impl HnswBuilder {
 
         let current_max_level = graph.max_level();
         let mut ep_id = ep;
+        let dp = RawVectorsProvider::new(vectors, metric);
         let mut ep_dist = compute_distance(vector, &vectors[ep_id as usize], metric);
 
         // Phase 1: Greedily traverse from the top level down to new_level + 1.
@@ -62,7 +64,7 @@ impl HnswBuilder {
         if top > new_level {
             for layer in (new_level + 1..=top).rev() {
                 let (nearest_id, nearest_dist) =
-                    HnswSearcher::greedy_search(vector, ep_id, layer, graph, vectors, metric);
+                    HnswSearcher::greedy_search(vector, ep_id, layer, graph, &dp);
                 ep_id = nearest_id;
                 ep_dist = nearest_dist;
             }
@@ -81,8 +83,7 @@ impl HnswBuilder {
                 ef_construction,
                 layer,
                 graph,
-                vectors,
-                metric,
+                &dp,
                 &deleted,
             );
 

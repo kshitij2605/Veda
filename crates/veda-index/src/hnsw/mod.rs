@@ -1,5 +1,7 @@
 pub mod builder;
+pub mod distance_provider;
 pub mod graph;
+pub mod quantized;
 pub mod searcher;
 
 pub use builder::HnswBuilder;
@@ -16,6 +18,7 @@ use veda_core::error::{Result, VedaError};
 use veda_core::types::DistanceMetric;
 
 use crate::distance::compute_distance;
+use crate::hnsw::distance_provider::DistanceProvider;
 use crate::traits::{SearchResult, VectorIndex};
 
 /// HNSW (Hierarchical Navigable Small World) index implementing VectorIndex.
@@ -162,7 +165,8 @@ impl VectorIndex for HnswIndex {
 
         let max_level = self.graph.max_level();
         let mut ep_id = ep;
-        let mut ep_dist = compute_distance(query, &self.vectors[ep_id as usize], self.metric);
+        let dp = crate::hnsw::distance_provider::RawVectorsProvider::new(&self.vectors, self.metric);
+        let mut ep_dist = dp.distance(query, ep_id);
 
         // Phase 1: Greedily descend from the top level down to layer 1.
         if max_level > 0 {
@@ -172,8 +176,7 @@ impl VectorIndex for HnswIndex {
                     ep_id,
                     layer,
                     &self.graph,
-                    &self.vectors,
-                    self.metric,
+                    &dp,
                 );
                 ep_id = nearest_id;
                 ep_dist = nearest_dist;
@@ -188,8 +191,7 @@ impl VectorIndex for HnswIndex {
             self.ef_search.max(k), // ef must be >= k
             0,
             &self.graph,
-            &self.vectors,
-            self.metric,
+            &dp,
             &self.deleted,
         );
 
@@ -227,7 +229,8 @@ impl VectorIndex for HnswIndex {
 
         let max_level = self.graph.max_level();
         let mut ep_id = ep;
-        let mut ep_dist = compute_distance(query, &self.vectors[ep_id as usize], self.metric);
+        let dp = crate::hnsw::distance_provider::RawVectorsProvider::new(&self.vectors, self.metric);
+        let mut ep_dist = dp.distance(query, ep_id);
 
         // Phase 1: Greedily descend from the top level down to layer 1.
         if max_level > 0 {
@@ -237,8 +240,7 @@ impl VectorIndex for HnswIndex {
                     ep_id,
                     layer,
                     &self.graph,
-                    &self.vectors,
-                    self.metric,
+                    &dp,
                 );
                 ep_id = nearest_id;
                 ep_dist = nearest_dist;
@@ -249,12 +251,11 @@ impl VectorIndex for HnswIndex {
         let entry_points = vec![(ep_id, ep_dist)];
         let results = HnswSearcher::search_layer_filtered(
             &self.graph,
-            &self.vectors,
+            &dp,
             query,
             &entry_points,
             self.ef_search.max(k),
             0,
-            self.metric,
             &self.deleted,
             filter,
             k,

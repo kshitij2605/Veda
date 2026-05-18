@@ -12,7 +12,7 @@ pub struct HnswNode {
 }
 
 /// The HNSW graph structure holding all nodes and the entry point.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HnswGraph {
     nodes: Vec<Option<HnswNode>>,
     entry_point: Option<u32>,
