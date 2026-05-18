@@ -13,6 +13,7 @@ export type SavedObjectType =
   | 'search'
   | 'atlas'
   | 'eval'
+  | 'eval_run'
   | 'console_query'
   | 'pipeline'
 
