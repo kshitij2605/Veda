@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { useNavigate, useParams } from 'react-router-dom'
+import * as Tabs from '@radix-ui/react-tabs'
+import { Database, Plus, Search, Trash2 } from 'lucide-react'
 import { useCollectionStore } from '../stores/collectionStore'
 import {
-  fetchCollection,
-  fetchRecords,
   createCollection,
   dropCollection,
+  fetchCollection,
 } from '../api/collections'
 import type {
   CollectionInfo,
@@ -14,72 +14,89 @@ import type {
   CreateFieldDef,
   FieldSchema,
 } from '../api/collections'
-import { PageHeader } from '../components/PageHeader'
-import { LoadingSpinner } from '../components/LoadingSpinner'
-import { EmptyState } from '../components/EmptyState'
-import { Badge } from '../components/Badge'
-import { Modal } from '../components/Modal'
+import {
+  Badge,
+  Button,
+  Input,
+  Modal,
+  Select,
+  Skeleton,
+  toast,
+} from '../components/primitives'
+import { FieldStats } from './collections/FieldStats'
+import { RecordsBrowser } from './collections/RecordsBrowser'
+import { isScalarField, isVectorField } from './collections/types'
+import { cn } from '../lib/cn'
 
 export function CollectionBrowser() {
   const { name } = useParams<{ name: string }>()
-
-  return (
-    <motion.div
-      className="p-8"
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25 }}
-    >
-      {name ? <CollectionDetail name={name} /> : <CollectionList />}
-    </motion.div>
-  )
+  return name ? <CollectionDetail name={name} /> : <CollectionList />
 }
 
-/* ── List Mode ──────────────────────────────────────────────── */
+/* ────────────────────────────────────────────────────────────────────────
+   List mode
+   ──────────────────────────────────────────────────────────────────── */
 
 function CollectionList() {
   const { collections, loading, error, fetchCollections } = useCollectionStore()
   const navigate = useNavigate()
   const [showCreate, setShowCreate] = useState(false)
+  const [query, setQuery] = useState('')
 
   useEffect(() => {
     fetchCollections()
   }, [fetchCollections])
 
-  return (
-    <>
-      <PageHeader
-        title="Collections"
-        subtitle="Browse and manage your vector collections."
-        actions={
-          <button
-            onClick={() => setShowCreate(true)}
-            className="px-4 py-2 bg-accent hover:bg-accent-hover text-white text-sm font-medium rounded-lg transition-colors"
-          >
-            + Create
-          </button>
-        }
-      />
+  const filtered = collections.filter((c) =>
+    c.name.toLowerCase().includes(query.toLowerCase()),
+  )
 
-      {loading && <LoadingSpinner label="Loading collections..." />}
+  return (
+    <div className="px-6 py-5">
+      <header className="flex items-center gap-3 mb-5">
+        <div className="flex-1">
+          <h1 className="text-[20px] font-semibold tracking-tight text-[var(--color-text)] mb-0.5">
+            Collections
+          </h1>
+          <p className="text-[12.5px] text-[var(--color-text-muted)]">
+            {collections.length} collection
+            {collections.length !== 1 ? 's' : ''} on this node
+          </p>
+        </div>
+        <Input
+          leading={<Search size={11} strokeWidth={2.25} />}
+          placeholder="Filter…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className="w-56"
+        />
+        <Button
+          variant="primary"
+          leading={<Plus size={12} strokeWidth={2.25} />}
+          onClick={() => setShowCreate(true)}
+        >
+          New collection
+        </Button>
+      </header>
 
       {error && (
-        <div className="rounded-lg bg-error/10 border border-error/20 px-4 py-3 text-sm text-error">
+        <div className="mb-4 rounded-[var(--radius-sm)] border border-[color-mix(in_oklch,var(--color-error)_30%,transparent)] bg-[color-mix(in_oklch,var(--color-error)_8%,transparent)] px-3 py-2 text-[12px] text-[var(--color-error)]">
           {error}
         </div>
       )}
 
-      {!loading && !error && collections.length === 0 && (
-        <EmptyState
-          title="No collections yet"
-          description="Create your first collection to get started."
-        />
-      )}
-
-      {!loading && !error && collections.length > 0 && (
-        <div className="grid gap-3">
-          {collections.map((col) => (
-            <CollectionCard key={col.name} collection={col} onClick={() => navigate(`/collections/${col.name}`)} />
+      {loading && collections.length === 0 ? (
+        <SkeletonCards />
+      ) : filtered.length === 0 ? (
+        <EmptyState onCreate={() => setShowCreate(true)} hasQuery={!!query} />
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {filtered.map((col) => (
+            <CollectionCard
+              key={col.name}
+              collection={col}
+              onClick={() => navigate(`/collections/${col.name}`)}
+            />
           ))}
         </div>
       )}
@@ -87,12 +104,13 @@ function CollectionList() {
       <CreateCollectionModal
         open={showCreate}
         onClose={() => setShowCreate(false)}
-        onCreated={() => {
+        onCreated={(name) => {
           setShowCreate(false)
           fetchCollections()
+          navigate(`/collections/${name}`)
         }}
       />
-    </>
+    </div>
   )
 }
 
@@ -106,37 +124,94 @@ function CollectionCard({
   return (
     <button
       onClick={onClick}
-      className="w-full text-left rounded-lg border border-border bg-bg-secondary hover:bg-bg-tertiary p-4 transition-colors"
+      className={cn(
+        'group relative flex flex-col gap-2 text-left p-4',
+        'rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)]',
+        'hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-hover)]',
+        'transition-[border-color,background] duration-[var(--duration-base)]',
+      )}
     >
-      <div className="font-medium text-text-primary">{collection.name}</div>
-      <div className="flex items-center gap-3 mt-2 text-xs text-text-muted">
-        <span>
-          {collection.field_count} field
-          {collection.field_count !== 1 ? 's' : ''}
+      <div className="flex items-center gap-2">
+        <Database size={13} strokeWidth={2} className="text-[var(--color-accent-9)]" />
+        <span className="font-mono text-[13px] font-medium text-[var(--color-text)] truncate flex-1">
+          {collection.name}
         </span>
-        <span className="text-border">|</span>
+        <span className="opacity-0 group-hover:opacity-100 text-[10px] text-[var(--color-text-subtle)]">
+          open →
+        </span>
+      </div>
+      <div className="flex items-center gap-3 text-[11px] font-mono text-[var(--color-text-muted)] tabular-nums">
         <span>
-          {collection.shard_count} shard
-          {collection.shard_count !== 1 ? 's' : ''}
+          {collection.field_count}
+          <span className="text-[var(--color-text-subtle)]"> fields</span>
+        </span>
+        <span className="text-[var(--color-border-strong)]">·</span>
+        <span>
+          {collection.shard_count}
+          <span className="text-[var(--color-text-subtle)]"> shard{collection.shard_count !== 1 ? 's' : ''}</span>
         </span>
       </div>
     </button>
   )
 }
 
-/* ── Detail Mode ────────────────────────────────────────────── */
+function SkeletonCards() {
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      {Array.from({ length: 6 }).map((_, i) => (
+        <div
+          key={i}
+          className="p-4 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] flex flex-col gap-3"
+        >
+          <Skeleton className="h-4 w-32" />
+          <Skeleton className="h-3 w-24" />
+        </div>
+      ))}
+    </div>
+  )
+}
 
-type DetailTab = 'schema' | 'data'
+function EmptyState({
+  onCreate,
+  hasQuery,
+}: {
+  onCreate: () => void
+  hasQuery: boolean
+}) {
+  return (
+    <div className="relative h-[420px] rounded-[var(--radius-md)] border border-dashed border-[var(--color-border-strong)] flex items-center justify-center">
+      <div className="dot-grid absolute inset-0 opacity-30 rounded-[var(--radius-md)]" aria-hidden />
+      <div className="relative text-center max-w-sm">
+        <Database size={28} strokeWidth={1.5} className="text-[var(--color-text-subtle)] mx-auto mb-3" />
+        <h2 className="text-[14px] font-medium text-[var(--color-text)] mb-1">
+          {hasQuery ? 'No collections match your filter' : 'No collections yet'}
+        </h2>
+        <p className="text-[12px] text-[var(--color-text-muted)] mb-4">
+          {hasQuery
+            ? 'Try a different query or create a new collection with this name.'
+            : 'Create one to start ingesting embeddings, then use Atlas, Quality Lab, and the Search Playground.'}
+        </p>
+        <Button variant="primary" onClick={onCreate} leading={<Plus size={12} strokeWidth={2.25} />}>
+          Create collection
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Detail mode — object-with-views
+   ──────────────────────────────────────────────────────────────────── */
+
+type DetailTab = 'records' | 'schema' | 'stats' | 'settings'
 
 function CollectionDetail({ name }: { name: string }) {
   const navigate = useNavigate()
   const { fetchCollections } = useCollectionStore()
-  const [tab, setTab] = useState<DetailTab>('schema')
   const [collection, setCollection] = useState<CollectionInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [dropping, setDropping] = useState(false)
-  const [dropError, setDropError] = useState<string | null>(null)
+  const [tab, setTab] = useState<DetailTab>('records')
   const [confirmDrop, setConfirmDrop] = useState(false)
 
   useEffect(() => {
@@ -150,162 +225,320 @@ function CollectionDetail({ name }: { name: string }) {
       .finally(() => setLoading(false))
   }, [name])
 
-  const handleDrop = async () => {
-    setDropping(true)
-    setDropError(null)
-    try {
-      await dropCollection(name)
-      fetchCollections()
-      navigate('/collections')
-    } catch (err) {
-      setDropError(err instanceof Error ? err.message : 'Failed to drop collection')
-      setDropping(false)
-    }
-  }
-
-  if (loading) return <LoadingSpinner label={`Loading ${name}...`} />
-  if (error) {
+  if (loading) {
     return (
-      <div className="rounded-lg bg-error/10 border border-error/20 px-4 py-3 text-sm text-error">
-        {error}
+      <div className="px-6 py-5">
+        <Skeleton className="h-5 w-48 mb-4" />
+        <Skeleton className="h-8 w-64 mb-4" />
+        <Skeleton className="h-[400px] w-full" />
       </div>
     )
   }
-  if (!collection) return null
+  if (error || !collection) {
+    return (
+      <div className="px-6 py-5">
+        <div className="rounded-[var(--radius-sm)] border border-[color-mix(in_oklch,var(--color-error)_30%,transparent)] bg-[color-mix(in_oklch,var(--color-error)_8%,transparent)] px-3 py-2 text-[12px] text-[var(--color-error)]">
+          {error ?? 'Collection not found'}
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <>
-      <PageHeader
-        title={collection.name}
-        actions={
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => navigate('/collections')}
-              className="px-3 py-2 text-sm text-text-secondary hover:text-text-primary transition-colors"
-            >
-              &larr; Back
-            </button>
-            <TabButton
-              active={tab === 'schema'}
-              onClick={() => setTab('schema')}
-            >
-              Schema
-            </TabButton>
-            <TabButton active={tab === 'data'} onClick={() => setTab('data')}>
-              Data
-            </TabButton>
-            <button
-              onClick={() => setConfirmDrop(true)}
-              className="px-3 py-2 text-sm text-error hover:bg-error/10 rounded-lg transition-colors"
-            >
-              Drop
-            </button>
-          </div>
-        }
+    <div className="flex flex-col h-full min-h-0">
+      <DetailHeader
+        collection={collection}
+        tab={tab}
+        onTabChange={setTab}
+        onSearch={() => navigate(`/search/${name}`)}
+        onDrop={() => setConfirmDrop(true)}
       />
-
+      <div className="flex-1 min-h-0">
+        {tab === 'records' && <RecordsBrowser collection={collection} />}
+        {tab === 'schema' && <SchemaView fields={collection.fields} />}
+        {tab === 'stats' && <FieldStats collection={collection} />}
+        {tab === 'settings' && <SettingsView collection={collection} />}
+      </div>
       <Modal
         open={confirmDrop}
         onClose={() => setConfirmDrop(false)}
         title="Drop collection?"
+        description={
+          <>
+            <span className="font-mono text-[var(--color-text)]">{collection.name}</span>{' '}
+            and every record + embedding in it will be permanently removed.
+          </>
+        }
       >
-        <p className="text-sm text-text-secondary mb-4">
-          This will permanently delete{' '}
-          <span className="font-mono text-text-primary">{collection.name}</span>{' '}
-          and all its records.
-        </p>
-        {dropError && (
-          <div className="rounded-lg bg-error/10 border border-error/20 px-3 py-2 text-sm text-error mb-3">
-            {dropError}
-          </div>
-        )}
-        <div className="flex justify-end gap-3">
-          <button
-            onClick={() => setConfirmDrop(false)}
-            className="px-4 py-2 text-sm text-text-secondary hover:text-text-primary transition-colors"
-          >
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setConfirmDrop(false)}>
             Cancel
-          </button>
-          <button
-            onClick={handleDrop}
-            disabled={dropping}
-            className="px-4 py-2 bg-error hover:bg-error/80 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={async () => {
+              try {
+                await dropCollection(collection.name)
+                fetchCollections()
+                navigate('/collections')
+                toast.success(`Dropped ${collection.name}`)
+              } catch (e) {
+                toast.error(
+                  e instanceof Error ? e.message : 'Failed to drop collection',
+                )
+              }
+            }}
+            leading={<Trash2 size={11} strokeWidth={2.5} />}
           >
-            {dropping ? 'Dropping...' : 'Drop'}
-          </button>
+            Drop collection
+          </Button>
         </div>
       </Modal>
-
-      <AnimatePresence mode="wait">
-        {tab === 'schema' ? (
-          <motion.div key="schema" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-            <SchemaView fields={collection.fields} />
-          </motion.div>
-        ) : (
-          <motion.div key="data" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-            <RecordsTable collectionName={name} fields={collection.fields} />
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </>
+    </div>
   )
 }
 
-function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+function DetailHeader({
+  collection,
+  tab,
+  onTabChange,
+  onSearch,
+  onDrop,
+}: {
+  collection: CollectionInfo
+  tab: DetailTab
+  onTabChange: (t: DetailTab) => void
+  onSearch: () => void
+  onDrop: () => void
+}) {
+  const vCount = collection.fields.filter(isVectorField).length
   return (
-    <button
-      onClick={onClick}
-      className={`px-3 py-2 text-sm rounded-lg transition-colors ${
-        active ? 'bg-accent/10 text-accent' : 'text-text-secondary hover:text-text-primary hover:bg-bg-tertiary'
-      }`}
+    <header className="border-b border-[var(--color-border)] bg-[var(--color-bg)] px-4 pt-3 flex-none">
+      <div className="flex items-start gap-3 mb-2">
+        <Database size={18} strokeWidth={1.75} className="text-[var(--color-accent-9)] mt-0.5" />
+        <div className="flex-1 min-w-0">
+          <h1 className="font-mono text-[15px] font-semibold text-[var(--color-text)] truncate">
+            {collection.name}
+          </h1>
+          <div className="flex items-center gap-2.5 mt-0.5 text-[11.5px] font-mono text-[var(--color-text-muted)] tabular-nums">
+            <span>{collection.fields.length} fields</span>
+            <span className="text-[var(--color-border-strong)]">·</span>
+            <span>
+              {vCount} vector
+            </span>
+            <span className="text-[var(--color-border-strong)]">·</span>
+            <span>{collection.shard_count} shards</span>
+            <span className="text-[var(--color-border-strong)]">·</span>
+            <span>rf={collection.replication_factor}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Button
+            variant="secondary"
+            size="sm"
+            leading={<Search size={11} strokeWidth={2.25} />}
+            onClick={onSearch}
+          >
+            Search
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            leading={<Trash2 size={11} strokeWidth={2.5} />}
+            onClick={onDrop}
+            className="text-[var(--color-text-subtle)] hover:text-[var(--color-error)]"
+          >
+            Drop
+          </Button>
+        </div>
+      </div>
+      <Tabs.Root value={tab} onValueChange={(v) => onTabChange(v as DetailTab)}>
+        <Tabs.List className="flex items-center gap-0.5 -mb-[1px]">
+          <TabBtn value="records" current={tab}>Records</TabBtn>
+          <TabBtn value="schema" current={tab}>Schema</TabBtn>
+          <TabBtn value="stats" current={tab}>Statistics</TabBtn>
+          <TabBtn value="settings" current={tab}>Settings</TabBtn>
+        </Tabs.List>
+      </Tabs.Root>
+    </header>
+  )
+}
+
+function TabBtn({
+  value,
+  current,
+  children,
+}: {
+  value: DetailTab
+  current: DetailTab
+  children: React.ReactNode
+}) {
+  const active = value === current
+  return (
+    <Tabs.Trigger
+      value={value}
+      className={cn(
+        'relative px-3 h-8 text-[12.5px] rounded-t-[var(--radius-xs)]',
+        'transition-colors duration-[var(--duration-fast)]',
+        active
+          ? 'text-[var(--color-text)] font-medium'
+          : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)]',
+      )}
     >
       {children}
-    </button>
+      {active && (
+        <span
+          aria-hidden
+          className="absolute left-1.5 right-1.5 -bottom-px h-[2px] bg-[var(--color-accent)] rounded-t-full"
+        />
+      )}
+    </Tabs.Trigger>
   )
 }
 
-/* ── Schema View ────────────────────────────────────────────── */
+/* ────────────────────────────────────────────────────────────────────────
+   Schema view (in-place rewrite of the prior page)
+   ──────────────────────────────────────────────────────────────────── */
 
 function SchemaView({ fields }: { fields: FieldSchema[] }) {
-  const typeVariant = (ft: string) => {
-    if (ft === 'vector' || ft === 'multi_vector' || ft === 'sparse_vector')
-      return 'accent' as const
-    if (ft === 'blob') return 'warning' as const
-    return 'default' as const
-  }
+  const vec = fields.filter(isVectorField)
+  const scalar = fields.filter(isScalarField)
+  const blob = fields.filter((f) => f.type === 'blob')
 
   return (
-    <div className="rounded-lg border border-border overflow-hidden">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="bg-bg-secondary text-text-muted text-left">
-            <th className="px-4 py-3 font-medium">Field Name</th>
-            <th className="px-4 py-3 font-medium">Type</th>
-            <th className="px-4 py-3 font-medium">Dimension</th>
-            <th className="px-4 py-3 font-medium">Metric</th>
-            <th className="px-4 py-3 font-medium">Model</th>
-            <th className="px-4 py-3 font-medium">Filterable</th>
+    <div className="px-6 py-5 space-y-6 overflow-auto h-full">
+      {vec.length > 0 && (
+        <Section title="Vector fields" count={vec.length}>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+            {vec.map((f) => (
+              <VectorFieldCard key={f.name} field={f} />
+            ))}
+          </div>
+        </Section>
+      )}
+      {scalar.length > 0 && (
+        <Section title="Scalar fields" count={scalar.length}>
+          <FieldTable fields={scalar} kind="scalar" />
+        </Section>
+      )}
+      {blob.length > 0 && (
+        <Section title="Blob fields" count={blob.length}>
+          <FieldTable fields={blob} kind="blob" />
+        </Section>
+      )}
+    </div>
+  )
+}
+
+function Section({
+  title,
+  count,
+  children,
+}: {
+  title: string
+  count: number
+  children: React.ReactNode
+}) {
+  return (
+    <section>
+      <h2 className="flex items-baseline gap-2 mb-2.5">
+        <span className="text-[11.5px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)] font-medium">
+          {title}
+        </span>
+        <span className="text-[10.5px] font-mono text-[var(--color-text-subtle)] tabular-nums">
+          {count}
+        </span>
+      </h2>
+      {children}
+    </section>
+  )
+}
+
+function VectorFieldCard({ field }: { field: FieldSchema }) {
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3.5">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="font-mono text-[13px] font-medium text-[var(--color-text)] truncate flex-1">
+          {field.name}
+        </span>
+        <Badge label={field.type} variant="accent" />
+      </div>
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11.5px]">
+        <Field label="Dimension" value={field.dimension ? `${field.dimension}d` : '—'} mono />
+        <Field label="Metric" value={field.metric ?? '—'} />
+        <Field label="Model" value={field.model ?? '—'} mono small />
+        <Field label="Filterable" value={field.filterable ? 'yes' : '—'} />
+      </dl>
+    </div>
+  )
+}
+
+function Field({
+  label,
+  value,
+  mono,
+  small,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+  small?: boolean
+}) {
+  return (
+    <div className="flex flex-col gap-0.5 min-w-0">
+      <span className="text-[10px] uppercase tracking-wider text-[var(--color-text-subtle)]">
+        {label}
+      </span>
+      <span
+        className={cn(
+          'text-[var(--color-text)] truncate',
+          mono && 'font-mono',
+          small && 'text-[10.5px]',
+        )}
+        title={value}
+      >
+        {value}
+      </span>
+    </div>
+  )
+}
+
+function FieldTable({
+  fields,
+  kind,
+}: {
+  fields: FieldSchema[]
+  kind: 'scalar' | 'blob'
+}) {
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] overflow-hidden">
+      <table className="w-full text-[12px]">
+        <thead className="bg-[var(--color-bg-elevated)] text-[10.5px] uppercase tracking-[0.06em] text-[var(--color-text-subtle)]">
+          <tr>
+            <th className="px-3 py-2 text-left font-medium">Field</th>
+            <th className="px-3 py-2 text-left font-medium">Type</th>
+            {kind === 'scalar' && (
+              <th className="px-3 py-2 text-left font-medium">Filterable</th>
+            )}
           </tr>
         </thead>
-        <tbody className="divide-y divide-border">
+        <tbody className="divide-y divide-[var(--color-border)]">
           {fields.map((f) => (
-            <tr key={f.name}>
-              <td className="px-4 py-3 font-medium text-text-primary">{f.name}</td>
-              <td className="px-4 py-3">
-                <Badge label={f.type} variant={typeVariant(f.type)} />
+            <tr
+              key={f.name}
+              className="hover:bg-[var(--color-bg-hover)] transition-colors"
+            >
+              <td className="px-3 py-2 font-mono text-[var(--color-text)]">
+                {f.name}
               </td>
-              <td className="px-4 py-3 text-text-secondary">
-                {f.dimension ?? '—'}
+              <td className="px-3 py-2">
+                <Badge label={f.type} variant={kind === 'blob' ? 'warning' : 'default'} />
               </td>
-              <td className="px-4 py-3 text-text-secondary">
-                {f.metric ?? '—'}
-              </td>
-              <td className="px-4 py-3 text-text-secondary font-mono text-xs">
-                {f.model ?? '—'}
-              </td>
-              <td className="px-4 py-3 text-text-secondary">
-                {f.filterable ? 'yes' : '—'}
-              </td>
+              {kind === 'scalar' && (
+                <td className="px-3 py-2 text-[var(--color-text-muted)]">
+                  {f.filterable ? 'yes' : '—'}
+                </td>
+              )}
             </tr>
           ))}
         </tbody>
@@ -314,153 +547,26 @@ function SchemaView({ fields }: { fields: FieldSchema[] }) {
   )
 }
 
-/* ── Records Table ──────────────────────────────────────────── */
-
-function RecordsTable({ collectionName, fields }: { collectionName: string; fields: FieldSchema[] }) {
-  const [records, setRecords] = useState<Record<string, unknown>[]>([])
-  const [total, setTotal] = useState(0)
-  const [page, setPage] = useState(0)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [expandedRow, setExpandedRow] = useState<number | null>(null)
-  const limit = 20
-
-  useEffect(() => {
-    setLoading(true)
-    setError(null)
-    fetchRecords(collectionName, { limit, offset: page * limit })
-      .then(({ data }) => {
-        setRecords(data.records)
-        setTotal(data.total)
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load records'))
-      .finally(() => setLoading(false))
-  }, [collectionName, page])
-
-  const totalPages = Math.ceil(total / limit)
-  const fieldNames = fields.map((f) => f.name)
-  const vectorFieldNames = new Set(
-    fields
-      .filter(
-        (f) =>
-          f.type === 'vector' ||
-          f.type === 'multi_vector' ||
-          f.type === 'sparse_vector',
-      )
-      .map((f) => f.name),
-  )
-
-  if (loading) return <LoadingSpinner label="Loading records..." />
-  if (error) {
-    return (
-      <div className="rounded-lg bg-error/10 border border-error/20 px-4 py-3 text-sm text-error">{error}</div>
-    )
-  }
-  if (records.length === 0) {
-    return <EmptyState title="No records" description="This collection is empty." />
-  }
-
+function SettingsView({ collection }: { collection: CollectionInfo }) {
   return (
-    <div>
-      <div className="rounded-lg border border-border overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-bg-secondary text-text-muted text-left">
-              {fieldNames.map((fn) => (
-                <th key={fn} className="px-4 py-3 font-medium whitespace-nowrap">{fn}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {records.map((rec, i) => (
-              <tr
-                key={i}
-                onClick={() => setExpandedRow(expandedRow === i ? null : i)}
-                className="hover:bg-bg-tertiary cursor-pointer transition-colors"
-              >
-                {fieldNames.map((fn) => (
-                  <td key={fn} className="px-4 py-3 text-text-secondary whitespace-nowrap max-w-[200px] truncate">
-                    {formatCellValue(rec[fn], vectorFieldNames.has(fn))}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Expanded row detail */}
-      <AnimatePresence>
-        {expandedRow !== null && records[expandedRow] && (
-          <motion.div
-            className="mt-3 rounded-lg border border-border bg-bg-secondary p-4"
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-          >
-            <h4 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-3">Record Detail</h4>
-            <pre className="text-xs text-text-secondary overflow-x-auto">
-              {JSON.stringify(records[expandedRow], null, 2)}
-            </pre>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-center gap-2 mt-4">
-          <button
-            onClick={() => setPage((p) => Math.max(0, p - 1))}
-            disabled={page === 0}
-            className="px-3 py-1.5 text-sm rounded-lg border border-border text-text-secondary hover:bg-bg-tertiary disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            &lsaquo;
-          </button>
-          {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
-            const pageNum = totalPages <= 5 ? i : Math.min(Math.max(page - 2, 0), totalPages - 5) + i
-            return (
-              <button
-                key={pageNum}
-                onClick={() => setPage(pageNum)}
-                className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
-                  page === pageNum
-                    ? 'border-accent bg-accent/10 text-accent'
-                    : 'border-border text-text-secondary hover:bg-bg-tertiary'
-                }`}
-              >
-                {pageNum + 1}
-              </button>
-            )
-          })}
-          <button
-            onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-            disabled={page >= totalPages - 1}
-            className="px-3 py-1.5 text-sm rounded-lg border border-border text-text-secondary hover:bg-bg-tertiary disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            &rsaquo;
-          </button>
-        </div>
-      )}
+    <div className="px-6 py-5 max-w-2xl space-y-4">
+      <Section title="Schema" count={collection.fields.length}>
+        <pre className="font-mono text-[11.5px] leading-relaxed text-[var(--color-text-muted)] bg-[var(--color-bg-elevated)] rounded-[var(--radius-md)] border border-[var(--color-border)] p-3 overflow-auto max-h-72">
+          {JSON.stringify(collection, null, 2)}
+        </pre>
+      </Section>
     </div>
   )
 }
 
-/* ── Create Collection Modal ────────────────────────────────── */
+/* ────────────────────────────────────────────────────────────────────────
+   Create modal
+   ──────────────────────────────────────────────────────────────────── */
 
 const FIELD_TYPE_OPTIONS = [
-  'string',
-  'int32',
-  'int64',
-  'float32',
-  'float64',
-  'bool',
-  'timestamp',
-  'json',
-  'uuid',
-  'vector',
-  'sparse_vector',
-  'multi_vector',
-  'blob',
+  'string', 'int32', 'int64', 'float32', 'float64', 'bool',
+  'timestamp', 'json', 'uuid', 'vector', 'sparse_vector',
+  'multi_vector', 'blob',
 ] as const
 
 const METRIC_OPTIONS = ['cosine', 'euclidean', 'dot_product', 'manhattan']
@@ -472,63 +578,49 @@ function CreateCollectionModal({
 }: {
   open: boolean
   onClose: () => void
-  onCreated: () => void
+  onCreated: (name: string) => void
 }) {
   const [name, setName] = useState('')
   const [fields, setFields] = useState<CreateFieldDef[]>([
     { name: '', type: 'string' },
   ])
-  const [shardCount, setShardCount] = useState(1)
+  const [shards, setShards] = useState(1)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const addField = () =>
-    setFields([...fields, { name: '', type: 'string' }])
-
-  const updateField = (i: number, patch: Partial<CreateFieldDef>) => {
-    setFields(fields.map((f, idx) => (idx === i ? { ...f, ...patch } : f)))
+  const reset = () => {
+    setName('')
+    setFields([{ name: '', type: 'string' }])
+    setShards(1)
+    setError(null)
   }
 
-  const removeField = (i: number) => {
-    if (fields.length > 1) setFields(fields.filter((_, idx) => idx !== i))
-  }
-
-  const isVectorLike = (t: string) =>
-    t === 'vector' || t === 'sparse_vector' || t === 'multi_vector'
-
-  const handleSubmit = async () => {
+  const submit = async () => {
     if (!name.trim()) return
-    // Strip empty optional fields so the server's serde defaults kick in.
-    const cleanFields: CreateFieldDef[] = fields
-      .filter((f) => f.name.trim())
-      .map((f) => {
-        const out: CreateFieldDef = { name: f.name.trim(), type: f.type }
-        if (isVectorLike(f.type)) {
-          out.dimension = f.dimension ?? 768
-          if (f.metric) out.metric = f.metric
-          if (f.model) out.model = f.model
-        }
-        if (f.filterable) out.filterable = true
-        return out
-      })
     setSubmitting(true)
     setError(null)
     try {
-      await createCollection({
-        name: name.trim(),
-        fields: cleanFields,
-        shard_count: shardCount,
-      })
-      setName('')
-      setFields([{ name: '', type: 'string' }])
-      setShardCount(1)
-      onCreated()
-    } catch (err) {
+      const clean = fields
+        .filter((f) => f.name.trim())
+        .map((f) => {
+          const out: CreateFieldDef = { name: f.name.trim(), type: f.type }
+          if (isVectorishType(f.type)) {
+            out.dimension = f.dimension ?? 768
+            if (f.metric) out.metric = f.metric
+            if (f.model) out.model = f.model
+          }
+          if (f.filterable) out.filterable = true
+          return out
+        })
+      await createCollection({ name: name.trim(), fields: clean, shard_count: shards })
+      const created = name.trim()
+      reset()
+      onCreated(created)
+      toast.success(`Created ${created}`)
+    } catch (e) {
       const msg =
-        // Surface the server's error body if axios attached it.
-        (err as { response?: { data?: { error?: string } } })?.response?.data
-          ?.error ??
-        (err instanceof Error ? err.message : 'Failed to create collection')
+        (e as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+        (e instanceof Error ? e.message : 'Failed to create collection')
       setError(msg)
     } finally {
       setSubmitting(false)
@@ -536,202 +628,210 @@ function CreateCollectionModal({
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Create Collection">
+    <Modal
+      open={open}
+      onClose={() => {
+        reset()
+        onClose()
+      }}
+      title="New collection"
+      description="Define the schema. Vector fields take a dimension + metric; scalars can be marked filterable."
+      width={520}
+    >
       <div className="space-y-4">
         <div className="grid grid-cols-3 gap-3">
           <div className="col-span-2">
-            <label className="block text-xs font-medium text-text-muted mb-1">
-              Collection Name
+            <label className="block text-[10.5px] uppercase tracking-wider text-[var(--color-text-subtle)] mb-1">
+              Name
             </label>
-            <input
+            <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="my_collection"
-              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+              mono
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-text-muted mb-1">
+            <label className="block text-[10.5px] uppercase tracking-wider text-[var(--color-text-subtle)] mb-1">
               Shards
             </label>
-            <input
+            <Input
               type="number"
               min={1}
               max={64}
-              value={shardCount}
-              onChange={(e) =>
-                setShardCount(Math.max(1, parseInt(e.target.value) || 1))
-              }
-              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
+              value={shards}
+              onChange={(e) => setShards(Math.max(1, parseInt(e.target.value) || 1))}
+              mono
             />
           </div>
         </div>
 
         <div>
-          <div className="flex items-center justify-between mb-2">
-            <label className="text-xs font-medium text-text-muted">Fields</label>
-            <button
-              onClick={addField}
-              className="text-xs text-accent hover:text-accent-hover transition-colors"
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-[10.5px] uppercase tracking-wider text-[var(--color-text-subtle)]">
+              Fields
+            </label>
+            <Button
+              size="xs"
+              variant="ghost"
+              leading={<Plus size={11} strokeWidth={2.25} />}
+              onClick={() => setFields([...fields, { name: '', type: 'string' }])}
             >
-              + Add field
-            </button>
+              Add field
+            </Button>
           </div>
-          <div className="space-y-2">
+          <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
             {fields.map((f, i) => (
-              <div key={i} className="rounded-lg border border-border p-3 space-y-2">
-                <div className="flex items-center gap-2">
-                  <input
-                    value={f.name}
-                    onChange={(e) => updateField(i, { name: e.target.value })}
-                    placeholder="field_name"
-                    className="flex-1 px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
-                  />
-                  <select
-                    value={f.type}
-                    onChange={(e) => {
-                      const newType = e.target.value
-                      const patch: Partial<CreateFieldDef> = { type: newType }
-                      if (isVectorLike(newType)) {
-                        patch.dimension = f.dimension ?? 768
-                        patch.metric = f.metric ?? 'cosine'
-                      } else {
-                        patch.dimension = undefined
-                        patch.metric = undefined
-                        patch.model = undefined
-                      }
-                      updateField(i, patch)
-                    }}
-                    className="px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
-                  >
-                    {FIELD_TYPE_OPTIONS.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    onClick={() => removeField(i)}
-                    title="Remove field"
-                    className="text-text-muted hover:text-error transition-colors p-1"
-                  >
-                    <svg
-                      className="w-4 h-4"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <line x1="18" y1="6" x2="6" y2="18" />
-                      <line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                  </button>
-                </div>
-
-                {isVectorLike(f.type) && (
-                  <div className="grid grid-cols-3 gap-2 pl-1">
-                    <div>
-                      <label className="block text-[10px] uppercase tracking-wider text-text-muted mb-0.5">
-                        Dimension
-                      </label>
-                      <input
-                        type="number"
-                        value={f.dimension ?? 768}
-                        onChange={(e) =>
-                          updateField(i, {
-                            dimension: parseInt(e.target.value) || 768,
-                          })
-                        }
-                        className="w-full px-2 py-1.5 bg-bg-primary border border-border rounded text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] uppercase tracking-wider text-text-muted mb-0.5">
-                        Metric
-                      </label>
-                      <select
-                        value={f.metric ?? 'cosine'}
-                        onChange={(e) =>
-                          updateField(i, { metric: e.target.value })
-                        }
-                        className="w-full px-2 py-1.5 bg-bg-primary border border-border rounded text-sm"
-                      >
-                        {METRIC_OPTIONS.map((m) => (
-                          <option key={m} value={m}>
-                            {m}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-[10px] uppercase tracking-wider text-text-muted mb-0.5">
-                        Model (optional)
-                      </label>
-                      <input
-                        value={f.model ?? ''}
-                        onChange={(e) =>
-                          updateField(i, {
-                            model: e.target.value || undefined,
-                          })
-                        }
-                        placeholder="BAAI/bge-m3"
-                        className="w-full px-2 py-1.5 bg-bg-primary border border-border rounded text-sm placeholder:text-text-muted"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {!isVectorLike(f.type) && f.type !== 'blob' && (
-                  <label className="flex items-center gap-2 pl-1 text-xs text-text-secondary">
-                    <input
-                      type="checkbox"
-                      checked={!!f.filterable}
-                      onChange={(e) =>
-                        updateField(i, { filterable: e.target.checked })
-                      }
-                    />
-                    Filterable
-                  </label>
-                )}
-              </div>
+              <FieldRowEditor
+                key={i}
+                field={f}
+                onChange={(patch) =>
+                  setFields(fields.map((x, j) => (j === i ? { ...x, ...patch } : x)))
+                }
+                onRemove={fields.length > 1 ? () => setFields(fields.filter((_, j) => j !== i)) : undefined}
+              />
             ))}
           </div>
         </div>
 
         {error && (
-          <div className="rounded-lg bg-error/10 border border-error/20 px-3 py-2 text-sm text-error whitespace-pre-wrap break-words">
+          <div className="rounded-[var(--radius-sm)] border border-[color-mix(in_oklch,var(--color-error)_30%,transparent)] bg-[color-mix(in_oklch,var(--color-error)_8%,transparent)] px-3 py-2 text-[12px] text-[var(--color-error)] whitespace-pre-wrap break-words font-mono">
             {error}
           </div>
         )}
 
-        <div className="flex justify-end gap-3 pt-2">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm text-text-secondary hover:text-text-primary transition-colors"
-          >
+        <div className="flex justify-end gap-2 pt-1">
+          <Button variant="ghost" onClick={onClose}>
             Cancel
-          </button>
-          <button
-            onClick={handleSubmit}
+          </Button>
+          <Button
+            variant="primary"
+            onClick={submit}
             disabled={submitting || !name.trim()}
-            className="px-4 py-2 bg-accent hover:bg-accent-hover text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {submitting ? 'Creating...' : 'Create'}
-          </button>
+            {submitting ? 'Creating…' : 'Create'}
+          </Button>
         </div>
       </div>
     </Modal>
   )
 }
 
-/* ── Utilities ──────────────────────────────────────────────── */
+function FieldRowEditor({
+  field,
+  onChange,
+  onRemove,
+}: {
+  field: CreateFieldDef
+  onChange: (patch: Partial<CreateFieldDef>) => void
+  onRemove?: () => void
+}) {
+  const vec = isVectorishType(field.type)
+  return (
+    <div className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-2.5 space-y-2">
+      <div className="flex items-center gap-2">
+        <Input
+          value={field.name}
+          onChange={(e) => onChange({ name: e.target.value })}
+          placeholder="field_name"
+          mono
+          className="flex-1"
+        />
+        <Select
+          value={field.type}
+          onValueChange={(v) => {
+            const patch: Partial<CreateFieldDef> = { type: v }
+            if (isVectorishType(v)) {
+              patch.dimension = field.dimension ?? 768
+              patch.metric = field.metric ?? 'cosine'
+            } else {
+              patch.dimension = undefined
+              patch.metric = undefined
+              patch.model = undefined
+            }
+            onChange(patch)
+          }}
+          options={FIELD_TYPE_OPTIONS.map((t) => ({ value: t, label: t }))}
+        />
+        {onRemove && (
+          <Button variant="ghost" size="xs" onClick={onRemove} title="Remove field">
+            ✕
+          </Button>
+        )}
+      </div>
+      {vec && (
+        <div className="grid grid-cols-3 gap-2 pl-1">
+          <FieldEditor
+            label="Dimension"
+            value={String(field.dimension ?? 768)}
+            type="number"
+            onChange={(v) => onChange({ dimension: parseInt(v, 10) || 768 })}
+          />
+          <div>
+            <label className="block text-[10px] uppercase tracking-wider text-[var(--color-text-subtle)] mb-0.5">
+              Metric
+            </label>
+            <Select
+              size="sm"
+              value={field.metric ?? 'cosine'}
+              onValueChange={(v) => onChange({ metric: v })}
+              options={METRIC_OPTIONS.map((m) => ({ value: m, label: m }))}
+            />
+          </div>
+          <FieldEditor
+            label="Model"
+            value={field.model ?? ''}
+            placeholder="BAAI/bge-m3"
+            mono
+            onChange={(v) => onChange({ model: v || undefined })}
+          />
+        </div>
+      )}
+      {!vec && field.type !== 'blob' && (
+        <label className="flex items-center gap-2 pl-1 text-[11.5px] text-[var(--color-text-muted)]">
+          <input
+            type="checkbox"
+            checked={!!field.filterable}
+            onChange={(e) => onChange({ filterable: e.target.checked })}
+          />
+          Filterable
+        </label>
+      )}
+    </div>
+  )
+}
 
-function formatCellValue(value: unknown, isVector: boolean): string {
-  if (value == null) return '--'
-  if (isVector && Array.isArray(value)) return `[${value.length} dims]`
-  if (typeof value === 'string') return value.length > 50 ? value.slice(0, 50) + '...' : value
-  if (typeof value === 'object') return JSON.stringify(value).slice(0, 50) + '...'
-  return String(value)
+function FieldEditor({
+  label,
+  value,
+  placeholder,
+  type,
+  mono,
+  onChange,
+}: {
+  label: string
+  value: string
+  placeholder?: string
+  type?: string
+  mono?: boolean
+  onChange: (v: string) => void
+}) {
+  return (
+    <div>
+      <label className="block text-[10px] uppercase tracking-wider text-[var(--color-text-subtle)] mb-0.5">
+        {label}
+      </label>
+      <Input
+        value={value}
+        type={type}
+        mono={mono}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </div>
+  )
+}
+
+function isVectorishType(t: string): boolean {
+  return t === 'vector' || t === 'sparse_vector' || t === 'multi_vector'
 }

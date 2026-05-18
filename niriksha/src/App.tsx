@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AppShell } from './components/shell/AppShell'
 import { DashboardHome } from './pages/DashboardHome'
 import { CollectionBrowser } from './pages/CollectionBrowser'
+import { RecordPage } from './pages/collections/RecordPage'
 import { SearchPlayground } from './pages/SearchPlayground'
 import { VectorAtlas } from './pages/VectorAtlas'
 import { SystemHealth } from './pages/SystemHealth'
@@ -17,6 +18,10 @@ export default function App() {
           <Route path="/home" element={<DashboardHome />} />
           <Route path="/collections" element={<CollectionBrowser />} />
           <Route path="/collections/:name" element={<CollectionBrowser />} />
+          <Route
+            path="/collections/:name/records/:id"
+            element={<RecordPage />}
+          />
           <Route path="/search" element={<SearchPlayground />} />
           <Route path="/search/:collection" element={<SearchPlayground />} />
           <Route path="/atlas" element={<VectorAtlas />} />
