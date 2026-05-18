@@ -4,7 +4,7 @@ import { DashboardHome } from './pages/DashboardHome'
 import { CollectionBrowser } from './pages/CollectionBrowser'
 import { RecordPage } from './pages/collections/RecordPage'
 import { SearchPlayground } from './pages/SearchPlayground'
-import { VectorAtlas } from './pages/VectorAtlas'
+import { AtlasPage } from './pages/atlas/AtlasPage'
 import { SystemHealth } from './pages/SystemHealth'
 import { IndexManager } from './pages/IndexManager'
 import { EvaluationView } from './pages/EvaluationView'
@@ -25,7 +25,7 @@ export default function App() {
           />
           <Route path="/search" element={<SearchPlayground />} />
           <Route path="/search/:collection" element={<SearchPlayground />} />
-          <Route path="/atlas" element={<VectorAtlas />} />
+          <Route path="/atlas" element={<AtlasPage />} />
           <Route path="/health" element={<SystemHealth />} />
           <Route path="/indexes" element={<IndexManager />} />
           <Route path="/evaluation" element={<EvaluationView />} />
