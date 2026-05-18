@@ -5,6 +5,7 @@ import {
   CircleStop,
   FileText,
   FlaskConical,
+  GitBranch,
   Plus,
   Play,
   Sparkles,
@@ -37,11 +38,14 @@ import type {
   PerQueryResult,
 } from './types'
 import { CompareRuns } from './CompareRuns'
+import { RouterExplorer } from './RouterExplorer'
 
 interface QualityLabUrlState {
   setId?: string
   runId?: string
   compareId?: string
+  /** When true, the active set is shown in the Router-decision view. */
+  router?: boolean
 }
 
 export function QualityLab() {
@@ -88,6 +92,16 @@ export function QualityLab() {
     )
   }
 
+  if (state.router && activeSet) {
+    return (
+      <RouterExplorer
+        set={activeSet}
+        runs={runs.filter((r) => r.body.evalSetId === activeSet.id)}
+        onClose={() => setState({ ...state, router: undefined })}
+      />
+    )
+  }
+
   return (
     <div className="flex h-full min-h-0 bg-[var(--color-bg)] overflow-hidden">
       <SetsRail
@@ -113,6 +127,7 @@ export function QualityLab() {
                   state.runId && state.runId !== otherId ? otherId : undefined,
               })
             }
+            onRouter={() => setState({ ...state, router: true })}
           />
         ) : (
           <EmptyMain onCreate={() => setShowCreate(true)} hasSets={sets.length > 0} />
@@ -213,12 +228,14 @@ function SetPanel({
   activeRunId,
   onRunSelect,
   onCompare,
+  onRouter,
 }: {
   set: SavedObject<EvalSetBody>
   runs: SavedObject<EvalRunBody>[]
   activeRunId?: string
   onRunSelect: (id: string) => void
   onCompare: (id: string) => void
+  onRouter: () => void
 }) {
   const { upsert, remove, touch } = useSavedObjects.getState()
   const [schema, setSchema] = useState<FieldSchema[] | undefined>()
@@ -347,13 +364,22 @@ function SetPanel({
         <Button
           size="xs"
           variant="ghost"
+          leading={<GitBranch size={11} strokeWidth={2.25} />}
+          onClick={onRouter}
+          className="ml-auto"
+        >
+          Router decisions
+        </Button>
+        <Button
+          size="xs"
+          variant="ghost"
           leading={<Trash2 size={11} strokeWidth={2.5} />}
           onClick={() => {
             if (confirm(`Delete eval set "${set.name}"?`)) {
               remove(set.id)
             }
           }}
-          className="ml-auto text-[var(--color-text-subtle)] hover:text-[var(--color-error)]"
+          className="text-[var(--color-text-subtle)] hover:text-[var(--color-error)]"
         >
           Delete
         </Button>
