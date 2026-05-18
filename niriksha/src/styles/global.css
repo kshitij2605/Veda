@@ -1,43 +1,226 @@
 @import "tailwindcss";
 
+/* ──────────────────────────────────────────────────────────────────────────
+   Niriksha design tokens — Phase 0
+   - OKLCH-derived monochrome base (Linear-family) + indigo-violet accent
+   - Dark default; light theme defined under [data-theme="light"]
+   - All component code uses these tokens, never raw oklch()
+   ────────────────────────────────────────────────────────────────────── */
+
 @theme {
-  --color-bg-primary: #0f0f14;
-  --color-bg-secondary: #1a1a24;
-  --color-bg-tertiary: #242430;
-  --color-text-primary: #e8e6e3;
-  --color-text-secondary: #9d9b97;
-  --color-text-muted: #6b6966;
-  --color-accent: #7c6af0;
-  --color-accent-hover: #9484f5;
-  --color-success: #4ade80;
-  --color-warning: #fbbf24;
-  --color-error: #f87171;
-  --color-border: #2a2a36;
+  /* ── Base scale (cool gray, hint of blue at hue 252)
+        0 = deepest bg, 12 = highest contrast on dark ───────────────── */
+  --color-base-0:  oklch(0.105 0.004 252);
+  --color-base-1:  oklch(0.140 0.004 252);
+  --color-base-2:  oklch(0.170 0.005 252);
+  --color-base-3:  oklch(0.210 0.005 252);
+  --color-base-4:  oklch(0.270 0.006 252);
+  --color-base-5:  oklch(0.340 0.006 252);
+  --color-base-6:  oklch(0.420 0.006 252);
+  --color-base-7:  oklch(0.520 0.006 252);
+  --color-base-8:  oklch(0.620 0.006 252);
+  --color-base-9:  oklch(0.720 0.005 252);
+  --color-base-10: oklch(0.840 0.004 252);
+  --color-base-11: oklch(0.920 0.003 252);
+  --color-base-12: oklch(0.990 0     0);
+
+  /* ── Accent (indigo-violet, hue 282) ───────────────────────────────── */
+  --color-accent-0:  oklch(0.180 0.040 282);
+  --color-accent-2:  oklch(0.260 0.090 282);
+  --color-accent-4:  oklch(0.380 0.160 282);
+  --color-accent-5:  oklch(0.480 0.200 282);
+  --color-accent-7:  oklch(0.620 0.220 282);
+  --color-accent-9:  oklch(0.760 0.160 282);
+  --color-accent-11: oklch(0.890 0.075 282);
+
+  /* ── Data hue (teal, for charts/sparklines — distinct from interactive) */
+  --color-data-3:  oklch(0.460 0.090 195);
+  --color-data-5:  oklch(0.620 0.110 195);
+  --color-data-7:  oklch(0.760 0.090 195);
+
+  /* ── Semantic ──────────────────────────────────────────────────────── */
+  --color-success:   oklch(0.720 0.170 145);
+  --color-warning:   oklch(0.800 0.150 75);
+  --color-error:     oklch(0.640 0.220 25);
+  --color-info:      oklch(0.660 0.140 220);
+
+  /* ── Surface aliases — what components actually reference ──────────── */
+  --color-bg:           var(--color-base-0);
+  --color-bg-elevated:  var(--color-base-1);
+  --color-bg-overlay:   var(--color-base-2);
+  --color-bg-hover:     var(--color-base-3);
+  --color-bg-active:    var(--color-base-4);
+  --color-bg-selected:  var(--color-accent-0);
+
+  --color-border:        var(--color-base-3);
+  --color-border-strong: var(--color-base-5);
+  --color-border-accent: var(--color-accent-5);
+
+  --color-text:          var(--color-base-11);
+  --color-text-muted:    var(--color-base-8);
+  --color-text-subtle:   var(--color-base-6);
+  --color-text-disabled: var(--color-base-5);
+  --color-text-on-accent: var(--color-base-12);
+
+  --color-accent:        var(--color-accent-7);
+  --color-accent-hover:  var(--color-accent-5);
+  --color-accent-subtle: var(--color-accent-0);
+
+  /* ── Legacy aliases (kept until every page is rewritten) ───────────── */
+  --color-bg-primary:    var(--color-bg);
+  --color-bg-secondary:  var(--color-bg-elevated);
+  --color-bg-tertiary:   var(--color-bg-hover);
+  --color-text-primary:  var(--color-text);
+  --color-text-secondary: var(--color-base-9);
+
+  /* ── Typography ─────────────────────────────────────────────────────── */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-display: "Inter", sans-serif;
+
+  --text-2xs: 10px;
+  --text-xs:  11px;
+  --text-sm:  12px;
+  --text-base: 13px;
+  --text-md:  14px;
+  --text-lg:  16px;
+  --text-xl:  20px;
+  --text-2xl: 24px;
+  --text-3xl: 32px;
+
+  /* ── Radii ──────────────────────────────────────────────────────────── */
+  --radius-xs: 3px;
+  --radius-sm: 5px;
+  --radius-md: 7px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+
+  /* ── Spacing primitives (4px grid) ──────────────────────────────────── */
+  --space-px: 1px;
+  --space-0_5: 2px;
+  --space-1: 4px;
+  --space-1_5: 6px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ── Elevation (composited shadows) ─────────────────────────────────── */
+  --shadow-xs: 0 0 0 1px oklch(0 0 0 / 0.4);
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.4), 0 0 0 1px oklch(0 0 0 / 0.3);
+  --shadow-md: 0 4px 12px oklch(0 0 0 / 0.4), 0 0 0 1px oklch(0 0 0 / 0.3);
+  --shadow-lg: 0 16px 40px oklch(0 0 0 / 0.5), 0 0 0 1px oklch(0 0 0 / 0.3);
+  --shadow-glow: 0 0 0 3px oklch(0.620 0.220 282 / 0.25);
+
+  /* ── Motion ─────────────────────────────────────────────────────────── */
+  --duration-instant: 50ms;
+  --duration-fast:    100ms;
+  --duration-base:    150ms;
+  --duration-slow:    240ms;
+  --ease-out:    cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-body {
-  background-color: var(--color-bg-primary);
-  color: var(--color-text-primary);
-  font-family: 'Inter', system-ui, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+/* ── Light theme override (best-effort; dark is canonical) ─────────────── */
+[data-theme="light"] {
+  --color-base-0:  oklch(1.000 0     0);
+  --color-base-1:  oklch(0.985 0.003 252);
+  --color-base-2:  oklch(0.965 0.004 252);
+  --color-base-3:  oklch(0.940 0.005 252);
+  --color-base-4:  oklch(0.890 0.006 252);
+  --color-base-5:  oklch(0.820 0.006 252);
+  --color-base-6:  oklch(0.700 0.006 252);
+  --color-base-7:  oklch(0.580 0.006 252);
+  --color-base-8:  oklch(0.460 0.006 252);
+  --color-base-9:  oklch(0.340 0.006 252);
+  --color-base-10: oklch(0.220 0.005 252);
+  --color-base-11: oklch(0.140 0.004 252);
+  --color-base-12: oklch(0.060 0.003 252);
 }
 
-/* Scrollbar styling */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+/* ── Base layer ────────────────────────────────────────────────────────── */
+
+@layer base {
+  html, body, #root { height: 100%; }
+
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: 1.45;
+    letter-spacing: -0.01em;
+    font-feature-settings: "cv11", "ss01", "calt";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Numeric stability — used in every table that shows IDs, latencies, sizes */
+  .tabular-nums { font-variant-numeric: tabular-nums; }
+
+  /* Code/IDs */
+  code, kbd, samp, pre {
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+  }
+
+  /* Focus rings — never outline:none, always 2px / 3:1 contrast min */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+  /* Suppress default focus on mouse, keep for keyboard */
+  :focus:not(:focus-visible) { outline: none; }
+
+  /* Scrollbars — thin Linear-style */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-base-4);
+    border-radius: 9999px;
+    border: 2px solid var(--color-bg);
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--color-base-6); }
+  ::-webkit-scrollbar-corner { background: transparent; }
+
+  /* Selection */
+  ::selection {
+    background: color-mix(in oklch, var(--color-accent) 35%, transparent);
+    color: var(--color-base-12);
+  }
+
+  /* Reduced motion */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
+/* ── Utility helpers (additive — Tailwind handles the rest) ────────────── */
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { scrollbar-width: none; }
+
+.glass {
+  background: color-mix(in oklch, var(--color-bg-elevated) 80%, transparent);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
 }
 
-::-webkit-scrollbar-thumb {
-  background: var(--color-border);
-  border-radius: 9999px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-muted);
+/* Subtle dot grid for empty-state backgrounds */
+.dot-grid {
+  background-image: radial-gradient(
+    circle,
+    var(--color-base-3) 1px,
+    transparent 1px
+  );
+  background-size: 16px 16px;
 }
