@@ -9,5 +9,6 @@ pub mod simd;
 #[cfg(feature = "simsimd")]
 pub mod simd_simsimd;
 pub mod sparse;
+pub mod splade_client;
 pub mod types;
 pub mod vector;

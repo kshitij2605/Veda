@@ -143,3 +143,105 @@ multiple rounds of testing — not what a quick session should attempt.
 
 The scaffolding is in place so that work can start immediately when the
 team chooses to allocate time.
+
+## Concrete next-pass checklist (openraft 0.9)
+
+When the implementation work starts, these are the trait method
+signatures that need to land. Each one already has a Veda-internal
+counterpart in `store.rs` / `raft_storage.rs` — the impl is mostly
+adapter code mapping types back and forth, plus careful attention to
+the persistence ordering rules openraft documents in its README.
+
+### `impl RaftLogStorage<VedaTypeConfig> for MemRaftLogStorage`
+
+```rust
+type LogReader = Self; // shareable read view
+
+async fn get_log_state(&mut self) -> Result<LogState<VedaTypeConfig>, StorageError<NodeId>>;
+async fn read_vote(&mut self) -> Result<Option<Vote<NodeId>>, StorageError<NodeId>>;
+async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>>;
+
+async fn append<I>(&mut self, entries: I, callback: LogFlushed<VedaTypeConfig>)
+    -> Result<(), StorageError<NodeId>>
+where
+    I: IntoIterator<Item = Entry<VedaTypeConfig>> + Send;
+
+async fn truncate(&mut self, log_id: LogId<NodeId>)
+    -> Result<(), StorageError<NodeId>>;
+async fn purge(&mut self, log_id: LogId<NodeId>)
+    -> Result<(), StorageError<NodeId>>;
+
+async fn get_log_reader(&mut self) -> Self::LogReader;
+```
+
+### `impl RaftLogReader<VedaTypeConfig> for MemRaftLogStorage`
+
+```rust
+async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send>(
+    &mut self,
+    range: RB,
+) -> Result<Vec<Entry<VedaTypeConfig>>, StorageError<NodeId>>;
+```
+
+### `impl RaftStateMachine<VedaTypeConfig> for MemRaftStateMachine`
+
+```rust
+type SnapshotBuilder = SnapshotBuilderType;
+
+async fn applied_state(&mut self) -> Result<(
+    Option<LogId<NodeId>>,
+    StoredMembership<NodeId, BasicNode>,
+), StorageError<NodeId>>;
+
+async fn apply<I>(&mut self, entries: I) -> Result<Vec<ClusterResponse>, StorageError<NodeId>>
+where I: IntoIterator<Item = Entry<VedaTypeConfig>> + Send;
+
+async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder;
+async fn begin_receiving_snapshot(&mut self) -> Result<Box<Cursor<Vec<u8>>>, StorageError<NodeId>>;
+
+async fn install_snapshot(
+    &mut self,
+    meta: &SnapshotMeta<NodeId, BasicNode>,
+    snapshot: Box<Cursor<Vec<u8>>>,
+) -> Result<(), StorageError<NodeId>>;
+
+async fn get_current_snapshot(&mut self)
+    -> Result<Option<Snapshot<VedaTypeConfig>>, StorageError<NodeId>>;
+```
+
+### `impl RaftNetworkFactory<VedaTypeConfig> for ChannelNetwork`
+
+```rust
+type Network = ChannelNetworkConn;
+async fn new_client(&mut self, target: NodeId, node: &BasicNode) -> Self::Network;
+```
+
+### `impl RaftNetwork<VedaTypeConfig> for ChannelNetworkConn`
+
+```rust
+async fn send_append_entries(...)    -> Result<AppendEntriesResponse<NodeId>, ...>;
+async fn send_install_snapshot(...)  -> Result<InstallSnapshotResponse<NodeId>, ...>;
+async fn send_vote(...)              -> Result<VoteResponse<NodeId>, ...>;
+```
+
+### Persistence ordering (openraft README requirement)
+
+1. `save_vote` returns only after the vote is fsync'd.
+2. `append` returns only after entries are durable AND the `LogFlushed`
+   callback has been invoked.
+3. `purge(log_id)` may not remove entries above the latest applied
+   log id; openraft will only call it with safe values, but defence-in-
+   depth in the impl is wise.
+4. `install_snapshot` is followed by a purge — the storage must accept
+   that and clear log entries below the snapshot.
+
+Get these four invariants right and the rest is mechanical mapping.
+
+### What lands here (now)
+
+This commit adds the trait-method checklist above plus a snapshot
+round-trip integration test
+(`crates/veda-coordinator/tests/snapshot_roundtrip_test.rs`) that
+proves the in-memory log + state machine pieces compose into a
+consistent snapshot before any openraft trait surface is in play.
+The implementer can build on top of that contract.

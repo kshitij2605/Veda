@@ -28,6 +28,12 @@ gpu = []
 # performance. Off by default; activate with
 # --features veda-index/gpu_nim.
 gpu_nim = ["dep:reqwest"]
+# In-binary cuVS path: link cuvs-rs into Veda so the binary itself
+# runs CAGRA on the GPU (alternative to gpu_nim). Pre-1.0 cuvs-rs is
+# kept out of the default Cargo.toml — the scaffold compiles
+# without the upstream dep so users can opt in once the API
+# stabilises (see crates/veda-index/src/gpu_cuvs.rs).
+gpu_cuvs = []
 
 [dev-dependencies]
 tempfile = "3"
