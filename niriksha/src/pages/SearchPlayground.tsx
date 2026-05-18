@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useCollectionStore } from '../stores/collectionStore'
 import { useSearchStore } from '../stores/searchStore'
 import { fetchCollection } from '../api/collections'
-import type { CollectionInfo, FieldSchema } from '../api/collections'
+import type { CollectionInfo } from '../api/collections'
 import { PageHeader } from '../components/PageHeader'
 import { LoadingSpinner } from '../components/LoadingSpinner'
 import { EmptyState } from '../components/EmptyState'
@@ -12,14 +12,20 @@ import { EmptyState } from '../components/EmptyState'
 export function SearchPlayground() {
   const { collection: urlCollection } = useParams<{ collection: string }>()
   const { collections, fetchCollections } = useCollectionStore()
-  const { results, loading, error, tookMs, search, clearResults } = useSearchStore()
+  const { results, loading, error, tookMs, explain, search, clearResults } =
+    useSearchStore()
 
-  const [selectedCollection, setSelectedCollection] = useState(urlCollection ?? '')
-  const [collectionSchema, setCollectionSchema] = useState<CollectionInfo | null>(null)
+  const [selectedCollection, setSelectedCollection] = useState(
+    urlCollection ?? '',
+  )
+  const [collectionSchema, setCollectionSchema] =
+    useState<CollectionInfo | null>(null)
   const [vectorField, setVectorField] = useState('')
   const [vectorInput, setVectorInput] = useState('')
   const [filterInput, setFilterInput] = useState('')
   const [limit, setLimit] = useState(10)
+  const [explainOn, setExplainOn] = useState(false)
+  const [truncateTo, setTruncateTo] = useState<number | ''>('')
   const [expandedRow, setExpandedRow] = useState<number | null>(null)
   const [parseError, setParseError] = useState<string | null>(null)
 
@@ -31,7 +37,6 @@ export function SearchPlayground() {
     if (urlCollection) setSelectedCollection(urlCollection)
   }, [urlCollection])
 
-  // Load schema when collection changes
   useEffect(() => {
     if (!selectedCollection) {
       setCollectionSchema(null)
@@ -41,23 +46,25 @@ export function SearchPlayground() {
     fetchCollection(selectedCollection)
       .then(({ data }) => {
         setCollectionSchema(data)
-        const firstVector = data.fields.find((f: FieldSchema) => f.field_type === 'vector')
+        const firstVector = data.fields.find((f) => f.type === 'vector')
         if (firstVector) setVectorField(firstVector.name)
       })
       .catch(() => setCollectionSchema(null))
   }, [selectedCollection])
 
-  const vectorFields = collectionSchema?.fields.filter((f) => f.field_type === 'vector') ?? []
+  const vectorFields =
+    collectionSchema?.fields.filter((f) => f.type === 'vector') ?? []
+  const selectedFieldSchema = vectorFields.find((f) => f.name === vectorField)
 
   const handleSearch = () => {
     if (!selectedCollection || !vectorField || !vectorInput.trim()) return
     setParseError(null)
     setExpandedRow(null)
 
-    let vector: number[]
+    let values: number[]
     try {
-      vector = JSON.parse(vectorInput.trim())
-      if (!Array.isArray(vector) || !vector.every((v) => typeof v === 'number')) {
+      values = JSON.parse(vectorInput.trim())
+      if (!Array.isArray(values) || !values.every((v) => typeof v === 'number')) {
         throw new Error('Must be an array of numbers')
       }
     } catch (e) {
@@ -65,11 +72,19 @@ export function SearchPlayground() {
       return
     }
 
+    if (selectedFieldSchema?.dimension && values.length !== selectedFieldSchema.dimension) {
+      setParseError(
+        `Vector has ${values.length} dims, field expects ${selectedFieldSchema.dimension}`,
+      )
+      return
+    }
+
     search(selectedCollection, {
-      field: vectorField,
-      vector,
+      query: { vector: { field: vectorField, values } },
       filter: filterInput.trim() || undefined,
       limit,
+      explain: explainOn || undefined,
+      truncate_to: typeof truncateTo === 'number' ? truncateTo : undefined,
     })
   }
 
@@ -93,39 +108,50 @@ export function SearchPlayground() {
           >
             <option value="">Select collection...</option>
             {collections.map((c) => (
-              <option key={c.name} value={c.name}>{c.name}</option>
+              <option key={c.name} value={c.name}>
+                {c.name}
+              </option>
             ))}
           </select>
         }
       />
 
-      {/* Query Form */}
       <div className="rounded-lg border border-border bg-bg-secondary p-5 mb-6">
-        <h3 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-4">Query</h3>
+        <h3 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-4">
+          Query
+        </h3>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
           <div>
-            <label className="block text-xs font-medium text-text-muted mb-1">Vector Field</label>
+            <label className="block text-xs font-medium text-text-muted mb-1">
+              Vector Field
+            </label>
             <select
               value={vectorField}
               onChange={(e) => setVectorField(e.target.value)}
               disabled={vectorFields.length === 0}
               className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent disabled:opacity-50"
             >
-              {vectorFields.length === 0 && <option value="">No vector fields</option>}
+              {vectorFields.length === 0 && (
+                <option value="">No vector fields</option>
+              )}
               {vectorFields.map((f) => (
                 <option key={f.name} value={f.name}>
-                  {f.name} ({f.dimensions} dims)
+                  {f.name} ({f.dimension ?? '?'} dims, {f.metric ?? '?'})
                 </option>
               ))}
             </select>
           </div>
           <div>
-            <label className="block text-xs font-medium text-text-muted mb-1">Limit</label>
+            <label className="block text-xs font-medium text-text-muted mb-1">
+              Limit
+            </label>
             <input
               type="number"
               value={limit}
-              onChange={(e) => setLimit(Math.max(1, Math.min(100, parseInt(e.target.value) || 10)))}
+              onChange={(e) =>
+                setLimit(Math.max(1, Math.min(100, parseInt(e.target.value) || 10)))
+              }
               min={1}
               max={100}
               className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
@@ -136,6 +162,11 @@ export function SearchPlayground() {
         <div className="mb-4">
           <label className="block text-xs font-medium text-text-muted mb-1">
             Vector (JSON array)
+            {selectedFieldSchema?.dimension && (
+              <span className="ml-2 text-text-muted">
+                expected {selectedFieldSchema.dimension} dims
+              </span>
+            )}
           </label>
           <textarea
             value={vectorInput}
@@ -153,7 +184,9 @@ export function SearchPlayground() {
         </div>
 
         <div className="mb-4">
-          <label className="block text-xs font-medium text-text-muted mb-1">Filter (optional)</label>
+          <label className="block text-xs font-medium text-text-muted mb-1">
+            Filter (optional)
+          </label>
           <input
             value={filterInput}
             onChange={(e) => setFilterInput(e.target.value)}
@@ -162,10 +195,42 @@ export function SearchPlayground() {
           />
         </div>
 
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <label className="flex items-center gap-2 text-sm text-text-secondary">
+            <input
+              type="checkbox"
+              checked={explainOn}
+              onChange={(e) => setExplainOn(e.target.checked)}
+            />
+            Request per-phase timing
+          </label>
+          <div>
+            <label className="block text-xs font-medium text-text-muted mb-1">
+              Truncate to (MRL, optional)
+            </label>
+            <input
+              type="number"
+              min={1}
+              value={truncateTo}
+              onChange={(e) => {
+                const v = e.target.value
+                setTruncateTo(v === '' ? '' : Math.max(1, parseInt(v) || 1))
+              }}
+              placeholder={selectedFieldSchema?.dimension?.toString() ?? ''}
+              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+            />
+          </div>
+        </div>
+
         <div className="flex justify-end">
           <button
             onClick={handleSearch}
-            disabled={loading || !selectedCollection || !vectorField || !vectorInput.trim()}
+            disabled={
+              loading ||
+              !selectedCollection ||
+              !vectorField ||
+              !vectorInput.trim()
+            }
             className="px-5 py-2 bg-accent hover:bg-accent-hover text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? 'Searching...' : 'Search'}
@@ -173,12 +238,21 @@ export function SearchPlayground() {
         </div>
       </div>
 
-      {/* Results */}
       {loading && <LoadingSpinner label="Searching..." />}
 
       {error && (
         <div className="rounded-lg bg-error/10 border border-error/20 px-4 py-3 text-sm text-error mb-4">
           {error}
+        </div>
+      )}
+
+      {explain && (
+        <div className="rounded-lg border border-border bg-bg-secondary p-4 mb-4 grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+          <ExplainCell label="Filter" ms={explain.filter_ms} />
+          <ExplainCell label="ANN" ms={explain.ann_search_ms} />
+          <ExplainCell label="Scoring" ms={explain.scoring_ms} />
+          <ExplainCell label="Fusion" ms={explain.fusion_ms} />
+          <ExplainCell label="Total" ms={explain.total_ms} highlight />
         </div>
       )}
 
@@ -223,7 +297,6 @@ export function SearchPlayground() {
             </table>
           </div>
 
-          {/* Expanded result detail */}
           <AnimatePresence>
             {expandedRow !== null && results[expandedRow] && (
               <motion.div
@@ -261,7 +334,30 @@ export function SearchPlayground() {
   )
 }
 
-/* ── Distance Badge ─────────────────────────────────────────── */
+function ExplainCell({
+  label,
+  ms,
+  highlight,
+}: {
+  label: string
+  ms: number
+  highlight?: boolean
+}) {
+  return (
+    <div>
+      <div className="text-text-muted uppercase tracking-wider text-[10px]">
+        {label}
+      </div>
+      <div
+        className={`font-mono ${
+          highlight ? 'text-accent font-semibold' : 'text-text-primary'
+        }`}
+      >
+        {ms.toFixed(2)}ms
+      </div>
+    </div>
+  )
+}
 
 function DistanceBadge({ distance }: { distance: number }) {
   let colorClass: string
@@ -270,13 +366,13 @@ function DistanceBadge({ distance }: { distance: number }) {
   else colorClass = 'text-error bg-error/15'
 
   return (
-    <span className={`inline-flex px-2 py-0.5 rounded text-xs font-mono font-medium ${colorClass}`}>
+    <span
+      className={`inline-flex px-2 py-0.5 rounded text-xs font-mono font-medium ${colorClass}`}
+    >
       {distance.toFixed(4)}
     </span>
   )
 }
-
-/* ── Utilities ──────────────────────────────────────────────── */
 
 function formatFieldsSummary(fields: Record<string, unknown>): string {
   return Object.entries(fields)

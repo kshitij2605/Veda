@@ -81,9 +81,45 @@ export function SystemHealth() {
         </div>
       </div>
 
-      {/* Collections Overview */}
+      {/* Subsystem checks from /admin/health */}
+      {health?.checks && Object.keys(health.checks).length > 0 && (
+        <div className="mb-6">
+          <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider mb-3">
+            Subsystem Checks
+          </h2>
+          <div className="rounded-lg border border-border overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-bg-secondary text-text-muted text-left">
+                  <th className="px-4 py-3 font-medium">Subsystem</th>
+                  <th className="px-4 py-3 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {Object.entries(health.checks).map(([sub, st]) => (
+                  <tr key={sub} className="hover:bg-bg-tertiary transition-colors">
+                    <td className="px-4 py-3 font-mono text-xs text-text-primary">
+                      {sub}
+                    </td>
+                    <td className="px-4 py-3">
+                      <Badge
+                        label={st}
+                        variant={st === 'healthy' ? 'success' : 'error'}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Collections summary */}
       <div className="mb-6">
-        <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider mb-3">Collections Overview</h2>
+        <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider mb-3">
+          Collections Overview
+        </h2>
         {collections.length === 0 && !loading ? (
           <div className="rounded-lg border border-border bg-bg-secondary p-5 text-sm text-text-muted">
             No collections found.
@@ -94,23 +130,27 @@ export function SystemHealth() {
               <thead>
                 <tr className="bg-bg-secondary text-text-muted text-left">
                   <th className="px-4 py-3 font-medium">Name</th>
-                  <th className="px-4 py-3 font-medium">Records</th>
                   <th className="px-4 py-3 font-medium">Fields</th>
-                  <th className="px-4 py-3 font-medium">Vector Fields</th>
+                  <th className="px-4 py-3 font-medium">Shards</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {collections.map((col) => {
-                  const vectorCount = col.fields.filter((f) => f.field_type === 'vector').length
-                  return (
-                    <tr key={col.name} className="hover:bg-bg-tertiary transition-colors">
-                      <td className="px-4 py-3 font-medium text-text-primary">{col.name}</td>
-                      <td className="px-4 py-3 text-text-secondary">{formatCount(col.record_count)}</td>
-                      <td className="px-4 py-3 text-text-secondary">{col.fields.length}</td>
-                      <td className="px-4 py-3 text-text-secondary">{vectorCount}</td>
-                    </tr>
-                  )
-                })}
+                {collections.map((col) => (
+                  <tr
+                    key={col.name}
+                    className="hover:bg-bg-tertiary transition-colors"
+                  >
+                    <td className="px-4 py-3 font-medium text-text-primary">
+                      {col.name}
+                    </td>
+                    <td className="px-4 py-3 text-text-secondary">
+                      {col.field_count}
+                    </td>
+                    <td className="px-4 py-3 text-text-secondary">
+                      {col.shard_count}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -176,10 +216,4 @@ function InfoCell({ label, value }: { label: string; value: string }) {
       <div className="text-text-primary font-medium">{value}</div>
     </div>
   )
-}
-
-function formatCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
 }
