@@ -1,36 +1,27 @@
 //! In-binary GPU-accelerated index build via NVIDIA cuVS.
 //!
-//! Companion to [`crate::gpu_nim_client`]. The NIM client offloads
-//! to an external container — this module would link cuvs-rs
-//! directly so the Veda binary itself runs the GPU build.
+//! Companion to [`crate::gpu_nim_client`]. The NIM client offloads to an
+//! external container; this module links `cuvs-rs` directly so the Veda
+//! binary itself runs the CAGRA build on the GPU.
 //!
-//! ## Status
+//! ## Build prereqs (`--features veda-index/gpu_cuvs`)
 //!
-//! Scaffold only. The `gpu_cuvs` cargo feature gates the cuvs-rs
-//! dependency. Real activation requires:
+//! - CUDA toolkit (12.x recommended) on the build host. `cuvs-sys`'s
+//!   `build.rs` invokes `nvcc` and links against `libcuvs`.
+//! - An NVIDIA GPU + driver ≥ 535 at runtime.
 //!
-//! 1. A working CUDA toolkit at build time (CUDA 12.x recommended).
-//! 2. An NVIDIA GPU + recent driver at runtime (≥ 535).
-//! 3. The `cuvs` crate published with a stable Rust API. As of the
-//!    last review, `cuvs-rs` was still pre-1.0 and the ergonomics
-//!    are rough. The scaffolding below is the plug point; flesh it
-//!    out once the upstream crate stabilises (or vendor a wrapper).
+//! Default `cargo build` does not enable this feature and stays
+//! CUDA-free; the no-op `CagraIndex` below still compiles and returns
+//! actionable errors when called.
 //!
-//! We chose the NIM client (`crates/veda-index/src/gpu_nim_client.rs`)
-//! as the primary GPU path because it doesn't force CUDA into the
-//! Veda binary — operators can keep Veda CPU-only and run a sidecar
-//! NIM container for the build burst. This in-binary variant is the
-//! tighter integration story for deployments that want a single
-//! binary and have CUDA available.
-//!
-//! ## Intended wire
+//! ## Usage
 //!
 //! ```rust,ignore
-//! // With the gpu_cuvs feature:
+//! // With --features gpu_cuvs:
 //! let mut idx = CagraIndex::new(DistanceMetric::Cosine, dim);
-//! idx.build(vectors)?;            // GPU build via cuVS CAGRA
-//! let hnsw_bytes = idx.export_hnsw()?; // CAGRA → HNSW conversion
-//! // Persist via the normal HnswIndex::load entry point.
+//! idx.build(vectors)?;            // CAGRA build on GPU
+//! let hits = idx.search(query, 10)?;     // GPU search
+//! idx.serialize_to_hnswlib(path)?;       // persist via cuVS HNSW
 //! ```
 
 use std::path::Path;
@@ -41,21 +32,27 @@ use veda_core::types::DistanceMetric;
 
 use crate::traits::{SearchResult, VectorIndex};
 
-/// GPU CAGRA index handle. When the `gpu_cuvs` feature is off, the
-/// struct exists but every method returns `VedaError::Index` with a
-/// clear "feature not enabled" message so callers can detect at
-/// runtime whether GPU acceleration is available.
+#[cfg(feature = "gpu_cuvs")]
+use cuvs::cagra::{Index as CuvsCagraIndex, IndexParams, SearchParams};
+#[cfg(feature = "gpu_cuvs")]
+use cuvs::{ManagedTensor, Resources};
+#[cfg(feature = "gpu_cuvs")]
+use ndarray::{Array2, s};
+
+/// GPU CAGRA index handle.
+///
+/// With the `gpu_cuvs` feature on, this owns a `cuvs::Resources` plus the
+/// underlying CAGRA index built on the GPU. Without the feature, every
+/// method returns a clear `VedaError::Index` so callers can detect at
+/// runtime that GPU acceleration was not compiled in.
 pub struct CagraIndex {
     metric: DistanceMetric,
     dimension: u32,
+    count: usize,
     #[cfg(feature = "gpu_cuvs")]
-    inner: Option<CagraInner>,
-}
-
-#[cfg(feature = "gpu_cuvs")]
-struct CagraInner {
-    // Placeholder for the cuvs::Index handle and any GPU state.
-    // Filled in when the cuvs-rs API stabilizes.
+    resources: Option<Resources>,
+    #[cfg(feature = "gpu_cuvs")]
+    index: Option<CuvsCagraIndex>,
 }
 
 impl CagraIndex {
@@ -63,102 +60,221 @@ impl CagraIndex {
         Self {
             metric,
             dimension,
+            count: 0,
             #[cfg(feature = "gpu_cuvs")]
-            inner: None,
+            resources: None,
+            #[cfg(feature = "gpu_cuvs")]
+            index: None,
         }
     }
 
-    /// Export the CAGRA graph in HNSW-compatible bytes so the rest of
-    /// Veda can serve it from the existing `HnswIndex::load` path.
-    /// Returns a clear error when the feature is off.
-    pub fn export_hnsw(&self) -> Result<Vec<u8>> {
+    /// Persist the CAGRA graph in cuVS's hnswlib-compatible format.
+    /// The bytes can be loaded back with [`Self::deserialize_from_hnswlib`].
+    /// Note: per cuVS, the serialised file is only readable by cuVS's own
+    /// hnswlib wrapper — it is not byte-compatible with upstream hnswlib.
+    pub fn serialize_to_hnswlib(&self, path: &Path) -> Result<()> {
         #[cfg(feature = "gpu_cuvs")]
         {
-            // TODO: wire cuvs::Index::to_hnsw_bytes() when the upstream
-            // API exposes it; until then, this is the explicit gap.
-            Err(VedaError::Index(
-                "gpu_cuvs: export_hnsw not yet wired against cuvs-rs (upstream API \
-                 is still pre-1.0). Track this in documentation/gpu-indexing.md."
-                    .into(),
-            ))
+            let res = self
+                .resources
+                .as_ref()
+                .ok_or_else(|| feature_off_error("serialize_to_hnswlib: index not built"))?;
+            let idx = self
+                .index
+                .as_ref()
+                .ok_or_else(|| feature_off_error("serialize_to_hnswlib: index not built"))?;
+            idx.serialize_to_hnswlib(res, path)
+                .map_err(|e| VedaError::Index(format!("cuvs serialize_to_hnswlib failed: {e:?}")))
         }
         #[cfg(not(feature = "gpu_cuvs"))]
         {
-            Err(VedaError::Index(
-                "gpu_cuvs: CagraIndex called but the gpu_cuvs cargo feature is off; \
-                 rebuild with --features veda-index/gpu_cuvs and ensure the CUDA \
-                 toolkit is on the build PATH"
-                    .into(),
-            ))
+            let _ = path;
+            Err(feature_off_error("serialize_to_hnswlib"))
+        }
+    }
+
+    /// Load a previously-serialised CAGRA graph from cuVS's hnswlib format.
+    pub fn deserialize_from_hnswlib(
+        path: &Path,
+        metric: DistanceMetric,
+        dimension: u32,
+    ) -> Result<Self> {
+        #[cfg(feature = "gpu_cuvs")]
+        {
+            let res = Resources::new()
+                .map_err(|e| VedaError::Index(format!("cuvs Resources init failed: {e:?}")))?;
+            let idx = CuvsCagraIndex::deserialize(&res, path)
+                .map_err(|e| VedaError::Index(format!("cuvs deserialize failed: {e:?}")))?;
+            Ok(Self {
+                metric,
+                dimension,
+                count: 0, // unknown after load — populated only by build()
+                resources: Some(res),
+                index: Some(idx),
+            })
+        }
+        #[cfg(not(feature = "gpu_cuvs"))]
+        {
+            let _ = (path, metric, dimension);
+            Err(feature_off_error("deserialize_from_hnswlib"))
         }
     }
 }
 
+#[allow(dead_code)]
+fn feature_off_error(op: &str) -> VedaError {
+    VedaError::Index(format!(
+        "gpu_cuvs: {op} called but the gpu_cuvs cargo feature is off; \
+         rebuild with --features veda-index/gpu_cuvs and ensure the CUDA \
+         toolkit is on the build PATH"
+    ))
+}
+
 impl VectorIndex for CagraIndex {
-    fn build(&mut self, _vectors: &[&[f32]]) -> Result<()> {
-        #[cfg(feature = "gpu_cuvs")]
-        {
-            // Placeholder — the cuvs-rs call would live here.
-            return Err(VedaError::Index(
-                "gpu_cuvs: build not yet wired against cuvs-rs (upstream API is \
-                 still pre-1.0). The scaffold + feature flag are ready; cuvs \
-                 integration is the next step once the upstream crate stabilises."
-                    .into(),
-            ));
+    #[cfg(feature = "gpu_cuvs")]
+    fn build(&mut self, vectors: &[&[f32]]) -> Result<()> {
+        let n = vectors.len();
+        if n == 0 {
+            return Err(VedaError::Index("gpu_cuvs: cannot build over empty vector set".into()));
         }
-        #[cfg(not(feature = "gpu_cuvs"))]
-        {
-            Err(VedaError::Index(
-                "gpu_cuvs: build called but the gpu_cuvs cargo feature is off"
-                    .into(),
-            ))
+        let dim = self.dimension as usize;
+        // Validate dimensions match.
+        for (i, v) in vectors.iter().enumerate() {
+            if v.len() != dim {
+                return Err(VedaError::Index(format!(
+                    "gpu_cuvs: vector {i} has dim {} but index dim is {dim}",
+                    v.len()
+                )));
+            }
         }
+        // Flatten to a row-major ndarray Array2 on the host. cuvs takes
+        // care of staging to device memory.
+        let mut flat = Vec::with_capacity(n * dim);
+        for v in vectors {
+            flat.extend_from_slice(v);
+        }
+        let dataset: Array2<f32> = Array2::from_shape_vec((n, dim), flat)
+            .map_err(|e| VedaError::Index(format!("gpu_cuvs: ndarray reshape failed: {e}")))?;
+
+        let res = Resources::new()
+            .map_err(|e| VedaError::Index(format!("cuvs Resources init failed: {e:?}")))?;
+        let params = IndexParams::new()
+            .map_err(|e| VedaError::Index(format!("cuvs IndexParams init failed: {e:?}")))?;
+        let idx = CuvsCagraIndex::build(&res, &params, &dataset)
+            .map_err(|e| VedaError::Index(format!("cuvs CAGRA build failed: {e:?}")))?;
+
+        self.resources = Some(res);
+        self.index = Some(idx);
+        self.count = n;
+        Ok(())
     }
 
+    #[cfg(not(feature = "gpu_cuvs"))]
+    fn build(&mut self, _vectors: &[&[f32]]) -> Result<()> {
+        Err(feature_off_error("build"))
+    }
+
+    #[cfg(feature = "gpu_cuvs")]
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
+        let res = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| VedaError::Index("gpu_cuvs: search before build".into()))?;
+        let idx = self
+            .index
+            .as_ref()
+            .ok_or_else(|| VedaError::Index("gpu_cuvs: search before build".into()))?;
+        let dim = self.dimension as usize;
+        if query.len() != dim {
+            return Err(VedaError::Index(format!(
+                "gpu_cuvs: query dim {} != index dim {dim}",
+                query.len()
+            )));
+        }
+
+        let query_host: Array2<f32> = Array2::from_shape_vec((1, dim), query.to_vec())
+            .map_err(|e| VedaError::Index(format!("gpu_cuvs: query reshape failed: {e}")))?;
+        let queries_dev = ManagedTensor::from(&query_host)
+            .to_device(res)
+            .map_err(|e| VedaError::Index(format!("cuvs query to_device failed: {e:?}")))?;
+
+        let mut neighbors_host: Array2<u32> = Array2::zeros((1, k));
+        let neighbors_dev = ManagedTensor::from(&neighbors_host)
+            .to_device(res)
+            .map_err(|e| VedaError::Index(format!("cuvs neighbors to_device failed: {e:?}")))?;
+
+        let mut distances_host: Array2<f32> = Array2::zeros((1, k));
+        let distances_dev = ManagedTensor::from(&distances_host)
+            .to_device(res)
+            .map_err(|e| VedaError::Index(format!("cuvs distances to_device failed: {e:?}")))?;
+
+        let search_params = SearchParams::new()
+            .map_err(|e| VedaError::Index(format!("cuvs SearchParams init failed: {e:?}")))?;
+
+        idx.search(res, &search_params, &queries_dev, &neighbors_dev, &distances_dev)
+            .map_err(|e| VedaError::Index(format!("cuvs CAGRA search failed: {e:?}")))?;
+
+        // Copy results back to host.
+        neighbors_dev
+            .to_host(res, &mut neighbors_host)
+            .map_err(|e| VedaError::Index(format!("cuvs neighbors to_host failed: {e:?}")))?;
+        distances_dev
+            .to_host(res, &mut distances_host)
+            .map_err(|e| VedaError::Index(format!("cuvs distances to_host failed: {e:?}")))?;
+
+        let neighbors_row = neighbors_host.slice(s![0, ..]);
+        let distances_row = distances_host.slice(s![0, ..]);
+        let mut results = Vec::with_capacity(k);
+        for (id, dist) in neighbors_row.iter().zip(distances_row.iter()) {
+            results.push(SearchResult { id: *id, distance: *dist });
+        }
+        Ok(results)
+    }
+
+    #[cfg(not(feature = "gpu_cuvs"))]
     fn search(&self, _query: &[f32], _k: usize) -> Result<Vec<SearchResult>> {
-        Err(VedaError::Index(
-            "gpu_cuvs: search not implemented (see documentation/gpu-indexing.md)".into(),
-        ))
+        Err(feature_off_error("search"))
     }
 
     fn search_filtered(
         &self,
-        _query: &[f32],
-        _k: usize,
+        query: &[f32],
+        k: usize,
         _filter: &RoaringBitmap,
     ) -> Result<Vec<SearchResult>> {
-        self.search(_query, _k)
+        // cuVS exposes a filtered search via cuvsCagraSearchWithFilter, but
+        // the bitset format is cuvs-specific (`cuvsFilter`). For now,
+        // delegate to the unfiltered search; callers can post-filter
+        // against the returned ids. Wiring the cuvs bitset is a follow-up
+        // once the Rust binding stabilises that surface.
+        self.search(query, k)
     }
 
     fn insert(&mut self, _id: u32, _vector: &[f32]) -> Result<()> {
         Err(VedaError::Index(
-            "gpu_cuvs: insert not implemented; CAGRA is a batch-build index".into(),
+            "gpu_cuvs: CAGRA is a batch-build index — incremental insert not supported".into(),
         ))
     }
 
     fn delete(&mut self, _id: u32) -> Result<()> {
         Err(VedaError::Index(
-            "gpu_cuvs: delete not implemented".into(),
+            "gpu_cuvs: CAGRA delete not supported (immutable graph)".into(),
         ))
     }
 
     fn len(&self) -> usize {
-        0
+        self.count
     }
 
-    fn save(&self, _path: &Path) -> Result<()> {
-        Err(VedaError::Index(
-            "gpu_cuvs: save not implemented; export via export_hnsw and persist \
-             through HnswIndex::save instead"
-                .into(),
-        ))
+    fn save(&self, path: &Path) -> Result<()> {
+        self.serialize_to_hnswlib(path)
     }
 
-    fn load(_path: &Path, metric: DistanceMetric, dimension: u32) -> Result<Self>
+    fn load(path: &Path, metric: DistanceMetric, dimension: u32) -> Result<Self>
     where
         Self: Sized,
     {
-        Ok(Self::new(metric, dimension))
+        Self::deserialize_from_hnswlib(path, metric, dimension)
     }
 
     fn metric(&self) -> DistanceMetric {
@@ -175,6 +291,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(feature = "gpu_cuvs"))]
     fn feature_off_returns_clear_error() {
         let mut idx = CagraIndex::new(DistanceMetric::Cosine, 16);
         let err = idx.build(&[]).unwrap_err();
@@ -183,10 +300,42 @@ mod tests {
     }
 
     #[test]
-    fn export_hnsw_error_is_actionable() {
+    #[cfg(not(feature = "gpu_cuvs"))]
+    fn search_off_returns_clear_error() {
         let idx = CagraIndex::new(DistanceMetric::Cosine, 16);
-        let err = idx.export_hnsw().unwrap_err();
+        let err = idx.search(&[0.0; 16], 5).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("gpu_cuvs"), "got: {msg}");
+    }
+
+    // Smoke test for the real GPU path. Gated behind both the cargo
+    // feature and `--ignored` so it only runs on hosts with CUDA +
+    // an NVIDIA GPU: `cargo test --features gpu_cuvs -- --ignored`.
+    #[test]
+    #[cfg(feature = "gpu_cuvs")]
+    #[ignore]
+    fn build_and_search_roundtrip_on_gpu() {
+        let dim = 64u32;
+        let n = 1024usize;
+        let mut data: Vec<Vec<f32>> = (0..n)
+            .map(|i| {
+                let mut v = vec![0.0; dim as usize];
+                for (j, x) in v.iter_mut().enumerate() {
+                    *x = ((i * 31 + j * 17) % 1000) as f32 / 1000.0;
+                }
+                v
+            })
+            .collect();
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+
+        let mut idx = CagraIndex::new(DistanceMetric::Cosine, dim);
+        idx.build(&refs).expect("CAGRA build should succeed");
+        assert_eq!(idx.len(), n);
+
+        // Query with the first vector — its nearest neighbor should be itself.
+        let q = data.remove(0);
+        let hits = idx.search(&q, 5).expect("CAGRA search should succeed");
+        assert_eq!(hits.len(), 5);
+        assert_eq!(hits[0].id, 0, "self should be nearest neighbor; got {hits:?}");
     }
 }
