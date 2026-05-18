@@ -14,6 +14,7 @@ import {
   Layers,
   Search,
   Settings,
+  Sparkles,
   TerminalSquare,
   type LucideIcon,
 } from 'lucide-react'
@@ -21,6 +22,7 @@ import { useCollectionStore } from '../../stores/collectionStore'
 import { useSavedObjects, type SavedObject } from '../../stores/savedObjectStore'
 import { KBD, modKey } from '../primitives/KBD'
 import { cn } from '../../lib/cn'
+import { fetchCollection, llmComplete } from '../../api/collections'
 
 interface CmdItem {
   id: string
@@ -54,16 +56,49 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     [objectsMap],
   )
   const [query, setQuery] = useState('')
+  const [drafting, setDrafting] = useState<string | null>(null)
+  const [draftError, setDraftError] = useState<string | null>(null)
 
   useEffect(() => {
     if (open) fetchCollections()
   }, [open, fetchCollections])
 
   useEffect(() => {
-    if (!open) setQuery('')
+    if (!open) {
+      setQuery('')
+      setDrafting(null)
+      setDraftError(null)
+    }
   }, [open])
 
   const close = () => onOpenChange(false)
+
+  // When query starts with "?", treat it as NL → search-query draft.
+  const nlText = query.startsWith('?') ? query.slice(1).trim() : ''
+
+  const draftQuery = async (collectionName: string) => {
+    setDraftError(null)
+    setDrafting(collectionName)
+    try {
+      const { data: schema } = await fetchCollection(collectionName)
+      const fieldDescs = schema.fields
+        .map((f) => {
+          const tags: string[] = [f.type]
+          if (f.filterable) tags.push('filterable')
+          if (f.type === 'vector' && f.dimension) tags.push(`${f.dimension}d`)
+          return `- ${f.name} (${tags.join(', ')})`
+        })
+        .join('\n')
+      const draft = await callDraftLlm(collectionName, fieldDescs, nlText)
+      const url = buildSearchUrl(collectionName, draft, schema.fields)
+      navigate(url)
+      close()
+    } catch (e) {
+      setDraftError(e instanceof Error ? e.message : 'draft failed')
+    } finally {
+      setDrafting(null)
+    }
+  }
 
   const items = useMemo<CmdItem[]>(() => {
     const navItems: CmdItem[] = [
@@ -191,8 +226,30 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       },
     }))
 
+    // NL-draft mode — when the query begins with "?", offer one
+    // "Ask LLM" item per (top-N) collection. Selection runs the
+    // LLM call against that collection's schema.
+    const nlItems: CmdItem[] =
+      nlText.length > 0
+        ? collections.slice(0, 5).map((c) => ({
+            id: `nl-${c.name}`,
+            label: `Ask ${c.name}: ${nlText}`,
+            hint: drafting === c.name ? 'drafting…' : '↵ draft',
+            icon: Sparkles,
+            group: 'Ask Veda',
+            keywords: ['ask', 'nl', 'natural', c.name],
+            onSelect: () => {
+              if (drafting) return
+              void draftQuery(c.name)
+            },
+          }))
+        : []
+
+    if (nlItems.length > 0) {
+      return nlItems
+    }
     return [...recentItems, ...navItems, ...colItems, ...slashItems]
-  }, [collections, savedObjects, navigate, touch])
+  }, [collections, savedObjects, navigate, touch, nlText, drafting])
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -210,7 +267,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
           aria-label="Command palette"
         >
           <Dialog.Title className="sr-only">Command palette</Dialog.Title>
-          <Command label="Command Palette" loop>
+          <Command label="Command Palette" loop shouldFilter={nlText.length === 0}>
             <div className="flex items-center gap-2 px-3 h-11 border-b border-[var(--color-border)]">
               <Search
                 size={14}
@@ -267,15 +324,29 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               ))}
             </Command.List>
             <div className="flex items-center gap-3 px-3 h-7 border-t border-[var(--color-border)] text-[10.5px] text-[var(--color-text-subtle)]">
-              <span className="flex items-center gap-1">
-                <KBD>↑</KBD>
-                <KBD>↓</KBD>
-                navigate
-              </span>
-              <span className="flex items-center gap-1">
-                <KBD>↵</KBD>
-                select
-              </span>
+              {draftError ? (
+                <span className="text-[var(--color-error)]">
+                  ✗ {draftError}
+                </span>
+              ) : drafting ? (
+                <span className="text-[var(--color-accent-11)]">
+                  ✨ Drafting query for {drafting}…
+                </span>
+              ) : nlText.length > 0 ? (
+                <span>Tip: ↵ to ask the LLM</span>
+              ) : (
+                <>
+                  <span className="flex items-center gap-1">
+                    <KBD>↑</KBD>
+                    <KBD>↓</KBD>
+                    navigate
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <KBD>↵</KBD>
+                    select
+                  </span>
+                </>
+              )}
               <span className="flex items-center gap-1 ml-auto">
                 <KBD>{modKey()}</KBD>
                 <KBD>K</KBD>
@@ -326,6 +397,111 @@ function navigateToSaved(obj: SavedObject, nav: (to: string) => void) {
       nav(`/pipelines?saved=${obj.id}`)
       break
   }
+}
+
+interface DraftResult {
+  text: string
+  filter?: string
+  mode: 'dense' | 'hybrid' | 'bm25'
+}
+
+/**
+ * Ask the LLM to convert a natural-language question into Veda search
+ * parameters. Returns { text, filter?, mode }. The system prompt
+ * pins the JSON shape; the user prompt ships the collection schema +
+ * the question. Filter uses the SQL-like DSL the gateway already
+ * parses (e.g. `category = 'docs' AND year >= 2024`).
+ */
+async function callDraftLlm(
+  collectionName: string,
+  fieldDescs: string,
+  question: string,
+): Promise<DraftResult> {
+  const { data } = await llmComplete(
+    [
+      {
+        role: 'system',
+        content:
+          'You convert natural-language questions into Veda search ' +
+          'parameters. Reply with a single JSON object — no prose, no ' +
+          'markdown fence — with exactly these keys:\n' +
+          '  "text": string  // the semantic search text (required)\n' +
+          '  "filter": string or null  // optional SQL-like Veda filter, e.g. "category = \'pdf\' AND year >= 2024". Only reference filterable fields. Use null when no obvious filter is implied.\n' +
+          '  "mode": "dense"|"hybrid"|"bm25"  // pick "hybrid" by default; "bm25" only when the user explicitly asks for keyword/exact matching\n' +
+          'Filter operators supported: =, !=, >, >=, <, <=, AND, OR, ' +
+          'NOT, IN (...), BETWEEN, IS NULL, IS NOT NULL. Strings ' +
+          'use single quotes.',
+      },
+      {
+        role: 'user',
+        content:
+          `Collection: ${collectionName}\nFields:\n${fieldDescs}\n\n` +
+          `Question: ${question}`,
+      },
+    ],
+    { temperature: 0.1, max_tokens: 200, json_mode: true },
+  )
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(data.content)
+  } catch {
+    // Fallback — strip ```json fences if upstream ignored response_format.
+    const stripped = data.content
+      .trim()
+      .replace(/^```(?:json)?/i, '')
+      .replace(/```$/, '')
+      .trim()
+    parsed = JSON.parse(stripped)
+  }
+  const obj = parsed as Record<string, unknown>
+  const text = typeof obj.text === 'string' ? obj.text : question
+  const filter =
+    typeof obj.filter === 'string' && obj.filter.trim().length > 0
+      ? obj.filter
+      : undefined
+  const modeRaw = typeof obj.mode === 'string' ? obj.mode.toLowerCase() : ''
+  const mode: DraftResult['mode'] =
+    modeRaw === 'dense' || modeRaw === 'bm25' ? modeRaw : 'hybrid'
+  return { text, filter, mode }
+}
+
+interface FieldShape {
+  name: string
+  type: string
+}
+
+/**
+ * Build a /search/<col> URL with a hash that pre-fills the
+ * SearchPlayground useUrlState `s` key. The shape must match
+ * PlaygroundState in SearchPlayground.tsx.
+ */
+function buildSearchUrl(
+  collectionName: string,
+  draft: DraftResult,
+  fields: FieldShape[],
+): string {
+  const firstVec = fields.find((f) => f.type === 'vector')?.name ?? ''
+  const firstStr = fields.find((f) => f.type === 'string')?.name ?? ''
+  const state = {
+    collection: collectionName,
+    mode: draft.mode,
+    text: draft.text,
+    vectorField: firstVec,
+    bm25Field: firstStr,
+    filter: draft.filter ?? '',
+    topK: 10,
+    truncateTo: null,
+    fusion: 'rrf',
+    rrfK: 60,
+    vectorWeight: 0.5,
+    bm25Weight: 0.5,
+    rerankOn: false,
+    rerankField: firstStr,
+    explainOn: true,
+  }
+  const hash = new URLSearchParams()
+  hash.set('s', JSON.stringify(state))
+  return `/search/${encodeURIComponent(collectionName)}#${hash.toString()}`
 }
 
 function groupBy<T>(items: T[], key: keyof T): [string, T[]][] {

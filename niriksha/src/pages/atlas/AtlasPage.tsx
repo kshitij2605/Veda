@@ -6,7 +6,9 @@ import {
   Play,
   Lasso,
   Sparkles,
+  Tag,
 } from 'lucide-react'
+import { kmeans, labelClusters, type Cluster } from './clusters'
 import { useCollectionStore } from '../../stores/collectionStore'
 import {
   fetchCollection,
@@ -64,6 +66,8 @@ export function AtlasPage() {
   const [hoverPoint, setHoverPoint] = useState<AtlasPoint | null>(null)
   const [activePoint, setActivePoint] = useState<AtlasPoint | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [clusters, setClusters] = useState<Cluster[]>([])
+  const [labelingClusters, setLabelingClusters] = useState(false)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const [canvasSize, setCanvasSize] = useState({ w: 600, h: 500 })
@@ -184,6 +188,7 @@ export function AtlasPage() {
       }))
       setPoints(pts)
       setRecords(validRecs)
+      setClusters([])
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to generate atlas')
     } finally {
@@ -195,6 +200,40 @@ export function AtlasPage() {
     () => records.filter((r) => selectedIds.has(r.id)),
     [records, selectedIds],
   )
+
+  // Pick the most-content-y string field as the LLM label source.
+  const labelTextField = useMemo(() => {
+    if (!schema) return undefined
+    const strings = schema.fields.filter((f) => f.type === 'string')
+    // Heuristic: a field literally named "content" wins; otherwise the
+    // first string field that's actually populated on the first record.
+    const content = strings.find((f) => f.name === 'content')
+    if (content) return content.name
+    return strings[0]?.name
+  }, [schema])
+
+  const handleLabelClusters = useCallback(async () => {
+    if (points.length < 4) return
+    setLabelingClusters(true)
+    try {
+      // Pick k by rough size — small atlases get 4 clusters, bigger ones
+      // up to 12.
+      const k = Math.min(
+        12,
+        Math.max(3, Math.round(Math.sqrt(points.length) / 4)),
+      )
+      const coords = points.map((p): [number, number] => [p.x, p.y])
+      const raw = kmeans(coords, k)
+      // Show shells immediately, then back-fill labels asynchronously.
+      setClusters(raw)
+      if (labelTextField) {
+        const labeled = await labelClusters(raw, records, labelTextField)
+        setClusters(labeled)
+      }
+    } finally {
+      setLabelingClusters(false)
+    }
+  }, [points, records, labelTextField])
 
   const activeRecord = useMemo(
     () => (activePoint ? records.find((r) => r.id === activePoint.id) ?? null : null),
@@ -225,6 +264,9 @@ export function AtlasPage() {
         canGenerate={!!state.vectorField && !!state.collection}
         lassoMode={lassoMode}
         onToggleLasso={() => setLassoMode((v) => !v)}
+        onLabelClusters={handleLabelClusters}
+        labelingClusters={labelingClusters}
+        canLabelClusters={points.length >= 4 && !!labelTextField}
       />
       <div className="flex flex-1 min-h-0">
         <div ref={containerRef} className="relative flex-1 min-w-0">
@@ -260,6 +302,7 @@ export function AtlasPage() {
                 setLassoMode(false)
               }}
               selectedIds={selectedIds.size > 0 ? selectedIds : undefined}
+              clusters={clusters}
             />
           )}
           {/* Hover tooltip */}
@@ -322,6 +365,9 @@ function Header({
   canGenerate,
   lassoMode,
   onToggleLasso,
+  onLabelClusters,
+  labelingClusters,
+  canLabelClusters,
 }: {
   collection: string
   collections: string[]
@@ -339,6 +385,9 @@ function Header({
   canGenerate: boolean
   lassoMode: boolean
   onToggleLasso: () => void
+  onLabelClusters: () => void
+  labelingClusters: boolean
+  canLabelClusters: boolean
 }) {
   return (
     <header className="flex items-center gap-2 px-4 h-12 border-b border-[var(--color-border)] flex-none bg-[var(--color-bg)] overflow-x-auto">
@@ -379,6 +428,29 @@ function Header({
         <Badge label="PCA · 2D" variant="ghost" />
       </Tooltip>
       <div className="ml-auto flex items-center gap-1.5">
+        <Tooltip
+          label={
+            canLabelClusters
+              ? 'Cluster the points and label each via LLM'
+              : 'Generate an atlas first; LLM endpoint must be configured'
+          }
+        >
+          <Button
+            variant="ghost"
+            size="sm"
+            leading={
+              labelingClusters ? (
+                <Sparkles size={11} strokeWidth={2.25} className="animate-pulse" />
+              ) : (
+                <Tag size={11} strokeWidth={2.25} />
+              )
+            }
+            onClick={onLabelClusters}
+            disabled={!canLabelClusters || labelingClusters}
+          >
+            {labelingClusters ? 'Labeling…' : 'Label clusters'}
+          </Button>
+        </Tooltip>
         <Tooltip label={lassoMode ? 'Switch back to pan / zoom' : 'Lasso — drag to enclose points'}>
           <button
             onClick={onToggleLasso}
