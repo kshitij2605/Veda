@@ -1788,3 +1788,256 @@ async fn test_array_field_indexing() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["count"].as_u64().unwrap(), 0);
 }
+
+// ── Phase 5.5 — chunker A/B preview ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_chunk_preview_runs_each_strategy() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    let text = "# Section A\n\nFirst paragraph about cloud computing. Lots of \
+                detail here that goes on for a while to give the chunker \
+                something to work with.\n\nSecond paragraph here.\n\n# Section B\n\n\
+                Third paragraph on Kubernetes.";
+
+    let resp = c
+        .post(format!("{base}/v1/chunk/preview"))
+        .json(&json!({
+            "text": text,
+            "runs": [
+                { "label": "Default", "strategy_name": "markdown_recursive" },
+                { "label": "Fixed-80",  "strategy_name": "fixed_size", "chunk_size": 80, "chunk_overlap": 10 },
+                { "strategy_name": "page" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["input_chars"].as_u64().unwrap(), text.chars().count() as u64);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 3);
+
+    // Default run keeps the user-provided label.
+    assert_eq!(runs[0]["label"].as_str().unwrap(), "Default");
+    assert_eq!(runs[0]["strategy_name"].as_str().unwrap(), "markdown_recursive");
+    // Each run reports nonzero elapsed and a chunks vec.
+    for r in runs {
+        assert!(r["elapsed_ms"].as_f64().is_some());
+        assert!(r["chunks"].as_array().is_some());
+        let total = r["total_chunks"].as_u64().unwrap() as usize;
+        let returned = r["chunks"].as_array().unwrap().len();
+        // returned <= total, with truncated flag when ineq.
+        assert!(returned <= total);
+        assert_eq!(r["truncated"].as_bool().unwrap(), returned < total);
+    }
+    // Fixed-80 should split a 150-ish-char doc into more chunks than the
+    // markdown_recursive default (max 2000c per chunk).
+    assert!(
+        runs[1]["total_chunks"].as_u64().unwrap()
+            > runs[0]["total_chunks"].as_u64().unwrap(),
+        "fixed-80 ({}) should produce more chunks than markdown_recursive ({})",
+        runs[1]["total_chunks"], runs[0]["total_chunks"],
+    );
+}
+
+#[tokio::test]
+async fn test_chunk_preview_rejects_invalid_inputs() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    // empty text -> 400
+    let resp = c
+        .post(format!("{base}/v1/chunk/preview"))
+        .json(&json!({ "text": "", "runs": [{ "strategy_name": "fixed_size" }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // empty runs -> 400
+    let resp = c
+        .post(format!("{base}/v1/chunk/preview"))
+        .json(&json!({ "text": "hello", "runs": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // 7 runs (> 6 cap) -> 400
+    let runs: Vec<_> = (0..7)
+        .map(|i| json!({ "label": format!("r{i}"), "strategy_name": "fixed_size" }))
+        .collect();
+    let resp = c
+        .post(format!("{base}/v1/chunk/preview"))
+        .json(&json!({ "text": "hello world", "runs": runs }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+// ── Phase 5.8 — LLM connector ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_llm_complete_returns_503_when_not_configured() {
+    // Tests run with VEDA_LLM_ENDPOINT unset; the endpoint should
+    // refuse with 503 rather than panic or fall through.
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    let resp = c
+        .post(format!("{base}/v1/llm/complete"))
+        .json(&json!({
+            "messages": [
+                { "role": "user", "content": "hi" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+}
+
+// ── Phase 5.7 — coverage rollup ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_coverage_empty_then_after_search() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    c.post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "cov_col",
+            "fields": [
+                { "name": "embedding", "type": "vector", "dimension": 4, "metric": "cosine" }
+            ],
+            "shard_count": 1,
+            "replication_factor": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Empty corpus + empty log.
+    let resp = c
+        .get(format!("{base}/v1/collections/cov_col/coverage?window=1h"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["total_queries"].as_u64().unwrap(), 0);
+    assert_eq!(body["total_chunks"].as_u64().unwrap(), 0);
+    assert_eq!(body["retrieved_chunks"].as_u64().unwrap(), 0);
+    assert_eq!(body["orphan_count"].as_u64().unwrap(), 0);
+
+    // Insert a handful of records so there's something to be orphaned.
+    let records: Vec<_> = (0..5)
+        .map(|i| json!({ "embedding": seeded_vector(4, i) }))
+        .collect();
+    let resp = c
+        .post(format!("{base}/v1/collections/cov_col/insert"))
+        .json(&json!({ "records": records }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Before any search: 5 chunks, all orphans.
+    let resp = c
+        .get(format!("{base}/v1/collections/cov_col/coverage?window=1h"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["total_chunks"].as_u64().unwrap(), 5);
+    assert_eq!(body["orphan_count"].as_u64().unwrap(), 5);
+    assert_eq!(body["retrieved_chunks"].as_u64().unwrap(), 0);
+
+    // Run a search so the JSONL append fires.
+    let resp = c
+        .post(format!("{base}/v1/collections/cov_col/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": seeded_vector(4, 0) } },
+            "limit": 3
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let hit_count = body["results"].as_array().unwrap().len();
+    assert!(hit_count > 0);
+
+    // The query log writer is fire-and-forget on a spawn_blocking — give
+    // it a beat to land on disk before we read it back.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let resp = c
+        .get(format!("{base}/v1/collections/cov_col/coverage?window=1h"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["total_queries"].as_u64().unwrap(), 1);
+    assert_eq!(
+        body["retrieved_chunks"].as_u64().unwrap(),
+        hit_count as u64,
+        "retrieved_chunks should equal the number of hits the search returned"
+    );
+    assert_eq!(
+        body["orphan_count"].as_u64().unwrap(),
+        5 - hit_count as u64,
+    );
+    let top_hits = body["top_hits"].as_array().unwrap();
+    assert_eq!(top_hits.len(), hit_count);
+    for hit in top_hits {
+        assert_eq!(hit["count"].as_u64().unwrap(), 1);
+    }
+}
+
+#[tokio::test]
+async fn test_coverage_window_parsing() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    c.post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "win_col",
+            "fields": [
+                { "name": "embedding", "type": "vector", "dimension": 4, "metric": "cosine" }
+            ],
+            "shard_count": 1,
+            "replication_factor": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    for (window, expected_secs) in [("1h", 3600u64), ("7d", 7 * 86400), ("30m", 1800)] {
+        let resp = c
+            .get(format!(
+                "{base}/v1/collections/win_col/coverage?window={window}"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(
+            body["window_secs"].as_u64().unwrap(),
+            expected_secs,
+            "window={window} should parse to {expected_secs}s"
+        );
+    }
+
+    // Unknown collection -> 404.
+    let resp = c
+        .get(format!("{base}/v1/collections/no_such/coverage"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
