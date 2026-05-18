@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { useCollectionStore } from '../stores/collectionStore'
 import { fetchCollection, fetchRecords } from '../api/collections'
-import type { CollectionInfo, FieldSchema } from '../api/collections'
+import type { CollectionInfo } from '../api/collections'
 import { PageHeader } from '../components/PageHeader'
 import { LoadingSpinner } from '../components/LoadingSpinner'
 import { EmptyState } from '../components/EmptyState'
@@ -63,16 +63,25 @@ export function VectorAtlas() {
     fetchCollection(selectedCollection)
       .then(({ data }) => {
         setSchema(data)
-        const firstVector = data.fields.find((f: FieldSchema) => f.field_type === 'vector')
+        const firstVector = data.fields.find((f) => f.type === 'vector')
         if (firstVector) setVectorField(firstVector.name)
-        const firstScalar = data.fields.find((f: FieldSchema) => f.field_type !== 'vector' && f.field_type !== 'blob')
+        const firstScalar = data.fields.find(
+          (f) => f.type !== 'vector' && f.type !== 'blob' && f.type !== 'multi_vector' && f.type !== 'sparse_vector',
+        )
         if (firstScalar) setColorField(firstScalar.name)
       })
       .catch(() => setSchema(null))
   }, [selectedCollection])
 
-  const vectorFields = schema?.fields.filter((f) => f.field_type === 'vector') ?? []
-  const scalarFields = schema?.fields.filter((f) => f.field_type !== 'vector' && f.field_type !== 'blob') ?? []
+  const vectorFields = schema?.fields.filter((f) => f.type === 'vector') ?? []
+  const scalarFields =
+    schema?.fields.filter(
+      (f) =>
+        f.type !== 'vector' &&
+        f.type !== 'blob' &&
+        f.type !== 'multi_vector' &&
+        f.type !== 'sparse_vector',
+    ) ?? []
 
   const handleGenerate = useCallback(async () => {
     if (!selectedCollection || !vectorField) return
@@ -190,7 +199,7 @@ export function VectorAtlas() {
                   disabled
                   className="px-3 py-2 bg-bg-secondary border border-border rounded-lg text-sm text-text-primary focus:outline-none opacity-60"
                 >
-                  <option>First 2 dims</option>
+                  <option>PCA (2-D)</option>
                 </select>
               </div>
               <div>

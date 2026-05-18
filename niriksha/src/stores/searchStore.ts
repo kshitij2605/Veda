@@ -1,6 +1,10 @@
 import { create } from 'zustand'
 import { searchCollection } from '../api/collections'
-import type { SearchHit, SearchParams } from '../api/collections'
+import type {
+  ExplainTiming,
+  SearchHit,
+  SearchRequest,
+} from '../api/collections'
 
 interface SearchState {
   collection: string | null
@@ -8,8 +12,9 @@ interface SearchState {
   loading: boolean
   error: string | null
   tookMs: number
+  explain: ExplainTiming | null
   setCollection: (name: string | null) => void
-  search: (collection: string, params: SearchParams) => Promise<void>
+  search: (collection: string, body: SearchRequest) => Promise<void>
   clearResults: () => void
 }
 
@@ -19,18 +24,28 @@ export const useSearchStore = create<SearchState>((set) => ({
   loading: false,
   error: null,
   tookMs: 0,
+  explain: null,
 
   setCollection: (name) => set({ collection: name }),
 
-  search: async (collection, params) => {
-    set({ loading: true, error: null, results: [] })
+  search: async (collection, body) => {
+    set({ loading: true, error: null, results: [], explain: null })
     try {
-      const { data } = await searchCollection(collection, params)
-      set({ results: data.results, tookMs: data.took_ms, loading: false })
+      const { data } = await searchCollection(collection, body)
+      set({
+        results: data.results,
+        tookMs: data.took_ms,
+        explain: data.explain ?? null,
+        loading: false,
+      })
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : 'Search failed', loading: false })
+      set({
+        error: err instanceof Error ? err.message : 'Search failed',
+        loading: false,
+      })
     }
   },
 
-  clearResults: () => set({ results: [], tookMs: 0, error: null }),
+  clearResults: () =>
+    set({ results: [], tookMs: 0, explain: null, error: null }),
 }))

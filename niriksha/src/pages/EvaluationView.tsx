@@ -40,7 +40,7 @@ export function EvaluationView() {
     fetchCollection(selectedCollection)
       .then(({ data }) => {
         setSchema(data)
-        const firstVec = data.fields.find((f) => f.field_type === 'vector')
+        const firstVec = data.fields.find((f) => f.type === 'vector')
         setVectorField(firstVec?.name ?? '')
       })
       .catch(() => setSchema(null))
@@ -102,9 +102,13 @@ export function EvaluationView() {
                 className="w-full px-3 py-2 bg-bg-primary border border-border rounded text-sm"
               >
                 <option value="">— none —</option>
-                {schema?.fields.filter((f) => f.field_type === 'vector').map((f) => (
-                  <option key={f.name} value={f.name}>{f.name}</option>
-                ))}
+                {schema?.fields
+                  .filter((f) => f.type === 'vector')
+                  .map((f) => (
+                    <option key={f.name} value={f.name}>
+                      {f.name}
+                    </option>
+                  ))}
               </select>
             </div>
             <div>

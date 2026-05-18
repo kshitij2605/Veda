@@ -2,8 +2,18 @@ import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useCollectionStore } from '../stores/collectionStore'
-import { fetchCollection, fetchRecords, createCollection } from '../api/collections'
-import type { CollectionInfo, FieldSchema } from '../api/collections'
+import {
+  fetchCollection,
+  fetchRecords,
+  createCollection,
+  dropCollection,
+} from '../api/collections'
+import type {
+  CollectionInfo,
+  CollectionSummary,
+  CreateFieldDef,
+  FieldSchema,
+} from '../api/collections'
 import { PageHeader } from '../components/PageHeader'
 import { LoadingSpinner } from '../components/LoadingSpinner'
 import { EmptyState } from '../components/EmptyState'
@@ -86,10 +96,13 @@ function CollectionList() {
   )
 }
 
-function CollectionCard({ collection, onClick }: { collection: CollectionInfo; onClick: () => void }) {
-  const vectorFields = collection.fields.filter((f) => f.field_type === 'vector').length
-  const blobFields = collection.fields.filter((f) => f.field_type === 'blob').length
-
+function CollectionCard({
+  collection,
+  onClick,
+}: {
+  collection: CollectionSummary
+  onClick: () => void
+}) {
   return (
     <button
       onClick={onClick}
@@ -97,19 +110,16 @@ function CollectionCard({ collection, onClick }: { collection: CollectionInfo; o
     >
       <div className="font-medium text-text-primary">{collection.name}</div>
       <div className="flex items-center gap-3 mt-2 text-xs text-text-muted">
-        <span>{collection.fields.length} field{collection.fields.length !== 1 ? 's' : ''}</span>
+        <span>
+          {collection.field_count} field
+          {collection.field_count !== 1 ? 's' : ''}
+        </span>
         <span className="text-border">|</span>
-        <span>{vectorFields} vector</span>
-        {blobFields > 0 && (
-          <>
-            <span className="text-border">|</span>
-            <span>{blobFields} blob</span>
-          </>
-        )}
+        <span>
+          {collection.shard_count} shard
+          {collection.shard_count !== 1 ? 's' : ''}
+        </span>
       </div>
-      {collection.created_at && (
-        <div className="text-xs text-text-muted mt-1">Created: {collection.created_at}</div>
-      )}
     </button>
   )
 }
@@ -120,24 +130,45 @@ type DetailTab = 'schema' | 'data'
 
 function CollectionDetail({ name }: { name: string }) {
   const navigate = useNavigate()
+  const { fetchCollections } = useCollectionStore()
   const [tab, setTab] = useState<DetailTab>('schema')
   const [collection, setCollection] = useState<CollectionInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [dropping, setDropping] = useState(false)
+  const [dropError, setDropError] = useState<string | null>(null)
+  const [confirmDrop, setConfirmDrop] = useState(false)
 
   useEffect(() => {
     setLoading(true)
     setError(null)
     fetchCollection(name)
       .then(({ data }) => setCollection(data))
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load collection'))
+      .catch((err) =>
+        setError(err instanceof Error ? err.message : 'Failed to load collection'),
+      )
       .finally(() => setLoading(false))
   }, [name])
+
+  const handleDrop = async () => {
+    setDropping(true)
+    setDropError(null)
+    try {
+      await dropCollection(name)
+      fetchCollections()
+      navigate('/collections')
+    } catch (err) {
+      setDropError(err instanceof Error ? err.message : 'Failed to drop collection')
+      setDropping(false)
+    }
+  }
 
   if (loading) return <LoadingSpinner label={`Loading ${name}...`} />
   if (error) {
     return (
-      <div className="rounded-lg bg-error/10 border border-error/20 px-4 py-3 text-sm text-error">{error}</div>
+      <div className="rounded-lg bg-error/10 border border-error/20 px-4 py-3 text-sm text-error">
+        {error}
+      </div>
     )
   }
   if (!collection) return null
@@ -154,11 +185,56 @@ function CollectionDetail({ name }: { name: string }) {
             >
               &larr; Back
             </button>
-            <TabButton active={tab === 'schema'} onClick={() => setTab('schema')}>Schema</TabButton>
-            <TabButton active={tab === 'data'} onClick={() => setTab('data')}>Data</TabButton>
+            <TabButton
+              active={tab === 'schema'}
+              onClick={() => setTab('schema')}
+            >
+              Schema
+            </TabButton>
+            <TabButton active={tab === 'data'} onClick={() => setTab('data')}>
+              Data
+            </TabButton>
+            <button
+              onClick={() => setConfirmDrop(true)}
+              className="px-3 py-2 text-sm text-error hover:bg-error/10 rounded-lg transition-colors"
+            >
+              Drop
+            </button>
           </div>
         }
       />
+
+      <Modal
+        open={confirmDrop}
+        onClose={() => setConfirmDrop(false)}
+        title="Drop collection?"
+      >
+        <p className="text-sm text-text-secondary mb-4">
+          This will permanently delete{' '}
+          <span className="font-mono text-text-primary">{collection.name}</span>{' '}
+          and all its records.
+        </p>
+        {dropError && (
+          <div className="rounded-lg bg-error/10 border border-error/20 px-3 py-2 text-sm text-error mb-3">
+            {dropError}
+          </div>
+        )}
+        <div className="flex justify-end gap-3">
+          <button
+            onClick={() => setConfirmDrop(false)}
+            className="px-4 py-2 text-sm text-text-secondary hover:text-text-primary transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleDrop}
+            disabled={dropping}
+            className="px-4 py-2 bg-error hover:bg-error/80 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+          >
+            {dropping ? 'Dropping...' : 'Drop'}
+          </button>
+        </div>
+      </Modal>
 
       <AnimatePresence mode="wait">
         {tab === 'schema' ? (
@@ -192,7 +268,8 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
 
 function SchemaView({ fields }: { fields: FieldSchema[] }) {
   const typeVariant = (ft: string) => {
-    if (ft === 'vector') return 'accent' as const
+    if (ft === 'vector' || ft === 'multi_vector' || ft === 'sparse_vector')
+      return 'accent' as const
     if (ft === 'blob') return 'warning' as const
     return 'default' as const
   }
@@ -204,15 +281,31 @@ function SchemaView({ fields }: { fields: FieldSchema[] }) {
           <tr className="bg-bg-secondary text-text-muted text-left">
             <th className="px-4 py-3 font-medium">Field Name</th>
             <th className="px-4 py-3 font-medium">Type</th>
-            <th className="px-4 py-3 font-medium">Dimensions</th>
+            <th className="px-4 py-3 font-medium">Dimension</th>
+            <th className="px-4 py-3 font-medium">Metric</th>
+            <th className="px-4 py-3 font-medium">Model</th>
+            <th className="px-4 py-3 font-medium">Filterable</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
           {fields.map((f) => (
             <tr key={f.name}>
               <td className="px-4 py-3 font-medium text-text-primary">{f.name}</td>
-              <td className="px-4 py-3"><Badge label={f.field_type} variant={typeVariant(f.field_type)} /></td>
-              <td className="px-4 py-3 text-text-secondary">{f.dimensions ?? '--'}</td>
+              <td className="px-4 py-3">
+                <Badge label={f.type} variant={typeVariant(f.type)} />
+              </td>
+              <td className="px-4 py-3 text-text-secondary">
+                {f.dimension ?? '—'}
+              </td>
+              <td className="px-4 py-3 text-text-secondary">
+                {f.metric ?? '—'}
+              </td>
+              <td className="px-4 py-3 text-text-secondary font-mono text-xs">
+                {f.model ?? '—'}
+              </td>
+              <td className="px-4 py-3 text-text-secondary">
+                {f.filterable ? 'yes' : '—'}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -246,7 +339,16 @@ function RecordsTable({ collectionName, fields }: { collectionName: string; fiel
 
   const totalPages = Math.ceil(total / limit)
   const fieldNames = fields.map((f) => f.name)
-  const vectorFieldNames = new Set(fields.filter((f) => f.field_type === 'vector').map((f) => f.name))
+  const vectorFieldNames = new Set(
+    fields
+      .filter(
+        (f) =>
+          f.type === 'vector' ||
+          f.type === 'multi_vector' ||
+          f.type === 'sparse_vector',
+      )
+      .map((f) => f.name),
+  )
 
   if (loading) return <LoadingSpinner label="Loading records..." />
   if (error) {
@@ -345,15 +447,45 @@ function RecordsTable({ collectionName, fields }: { collectionName: string; fiel
 
 /* ── Create Collection Modal ────────────────────────────────── */
 
-function CreateCollectionModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
+const FIELD_TYPE_OPTIONS = [
+  'string',
+  'int32',
+  'int64',
+  'float32',
+  'float64',
+  'bool',
+  'timestamp',
+  'json',
+  'uuid',
+  'vector',
+  'sparse_vector',
+  'multi_vector',
+  'blob',
+] as const
+
+const METRIC_OPTIONS = ['cosine', 'euclidean', 'dot_product', 'manhattan']
+
+function CreateCollectionModal({
+  open,
+  onClose,
+  onCreated,
+}: {
+  open: boolean
+  onClose: () => void
+  onCreated: () => void
+}) {
   const [name, setName] = useState('')
-  const [fields, setFields] = useState<FieldSchema[]>([{ name: '', field_type: 'string' }])
+  const [fields, setFields] = useState<CreateFieldDef[]>([
+    { name: '', type: 'string' },
+  ])
+  const [shardCount, setShardCount] = useState(1)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const addField = () => setFields([...fields, { name: '', field_type: 'string' }])
+  const addField = () =>
+    setFields([...fields, { name: '', type: 'string' }])
 
-  const updateField = (i: number, patch: Partial<FieldSchema>) => {
+  const updateField = (i: number, patch: Partial<CreateFieldDef>) => {
     setFields(fields.map((f, idx) => (idx === i ? { ...f, ...patch } : f)))
   }
 
@@ -361,17 +493,43 @@ function CreateCollectionModal({ open, onClose, onCreated }: { open: boolean; on
     if (fields.length > 1) setFields(fields.filter((_, idx) => idx !== i))
   }
 
+  const isVectorLike = (t: string) =>
+    t === 'vector' || t === 'sparse_vector' || t === 'multi_vector'
+
   const handleSubmit = async () => {
     if (!name.trim()) return
+    // Strip empty optional fields so the server's serde defaults kick in.
+    const cleanFields: CreateFieldDef[] = fields
+      .filter((f) => f.name.trim())
+      .map((f) => {
+        const out: CreateFieldDef = { name: f.name.trim(), type: f.type }
+        if (isVectorLike(f.type)) {
+          out.dimension = f.dimension ?? 768
+          if (f.metric) out.metric = f.metric
+          if (f.model) out.model = f.model
+        }
+        if (f.filterable) out.filterable = true
+        return out
+      })
     setSubmitting(true)
     setError(null)
     try {
-      await createCollection({ name: name.trim(), fields })
+      await createCollection({
+        name: name.trim(),
+        fields: cleanFields,
+        shard_count: shardCount,
+      })
       setName('')
-      setFields([{ name: '', field_type: 'string' }])
+      setFields([{ name: '', type: 'string' }])
+      setShardCount(1)
       onCreated()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create collection')
+      const msg =
+        // Surface the server's error body if axios attached it.
+        (err as { response?: { data?: { error?: string } } })?.response?.data
+          ?.error ??
+        (err instanceof Error ? err.message : 'Failed to create collection')
+      setError(msg)
     } finally {
       setSubmitting(false)
     }
@@ -380,68 +538,172 @@ function CreateCollectionModal({ open, onClose, onCreated }: { open: boolean; on
   return (
     <Modal open={open} onClose={onClose} title="Create Collection">
       <div className="space-y-4">
-        <div>
-          <label className="block text-xs font-medium text-text-muted mb-1">Collection Name</label>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="my_collection"
-            className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
-          />
+        <div className="grid grid-cols-3 gap-3">
+          <div className="col-span-2">
+            <label className="block text-xs font-medium text-text-muted mb-1">
+              Collection Name
+            </label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="my_collection"
+              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-text-muted mb-1">
+              Shards
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={64}
+              value={shardCount}
+              onChange={(e) =>
+                setShardCount(Math.max(1, parseInt(e.target.value) || 1))
+              }
+              className="w-full px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
+            />
+          </div>
         </div>
 
         <div>
           <div className="flex items-center justify-between mb-2">
             <label className="text-xs font-medium text-text-muted">Fields</label>
-            <button onClick={addField} className="text-xs text-accent hover:text-accent-hover transition-colors">
+            <button
+              onClick={addField}
+              className="text-xs text-accent hover:text-accent-hover transition-colors"
+            >
               + Add field
             </button>
           </div>
           <div className="space-y-2">
             {fields.map((f, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <input
-                  value={f.name}
-                  onChange={(e) => updateField(i, { name: e.target.value })}
-                  placeholder="field_name"
-                  className="flex-1 px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
-                />
-                <select
-                  value={f.field_type}
-                  onChange={(e) => updateField(i, { field_type: e.target.value, dimensions: e.target.value === 'vector' ? 768 : undefined })}
-                  className="px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
-                >
-                  <option value="string">string</option>
-                  <option value="integer">integer</option>
-                  <option value="float">float</option>
-                  <option value="boolean">boolean</option>
-                  <option value="vector">vector</option>
-                  <option value="blob">blob</option>
-                </select>
-                {f.field_type === 'vector' && (
+              <div key={i} className="rounded-lg border border-border p-3 space-y-2">
+                <div className="flex items-center gap-2">
                   <input
-                    type="number"
-                    value={f.dimensions ?? 768}
-                    onChange={(e) => updateField(i, { dimensions: parseInt(e.target.value) || 768 })}
-                    className="w-20 px-2 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
-                    placeholder="dims"
+                    value={f.name}
+                    onChange={(e) => updateField(i, { name: e.target.value })}
+                    placeholder="field_name"
+                    className="flex-1 px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
                   />
+                  <select
+                    value={f.type}
+                    onChange={(e) => {
+                      const newType = e.target.value
+                      const patch: Partial<CreateFieldDef> = { type: newType }
+                      if (isVectorLike(newType)) {
+                        patch.dimension = f.dimension ?? 768
+                        patch.metric = f.metric ?? 'cosine'
+                      } else {
+                        patch.dimension = undefined
+                        patch.metric = undefined
+                        patch.model = undefined
+                      }
+                      updateField(i, patch)
+                    }}
+                    className="px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary focus:outline-none focus:border-accent"
+                  >
+                    {FIELD_TYPE_OPTIONS.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => removeField(i)}
+                    title="Remove field"
+                    className="text-text-muted hover:text-error transition-colors p-1"
+                  >
+                    <svg
+                      className="w-4 h-4"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                </div>
+
+                {isVectorLike(f.type) && (
+                  <div className="grid grid-cols-3 gap-2 pl-1">
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-wider text-text-muted mb-0.5">
+                        Dimension
+                      </label>
+                      <input
+                        type="number"
+                        value={f.dimension ?? 768}
+                        onChange={(e) =>
+                          updateField(i, {
+                            dimension: parseInt(e.target.value) || 768,
+                          })
+                        }
+                        className="w-full px-2 py-1.5 bg-bg-primary border border-border rounded text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-wider text-text-muted mb-0.5">
+                        Metric
+                      </label>
+                      <select
+                        value={f.metric ?? 'cosine'}
+                        onChange={(e) =>
+                          updateField(i, { metric: e.target.value })
+                        }
+                        className="w-full px-2 py-1.5 bg-bg-primary border border-border rounded text-sm"
+                      >
+                        {METRIC_OPTIONS.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-wider text-text-muted mb-0.5">
+                        Model (optional)
+                      </label>
+                      <input
+                        value={f.model ?? ''}
+                        onChange={(e) =>
+                          updateField(i, {
+                            model: e.target.value || undefined,
+                          })
+                        }
+                        placeholder="BAAI/bge-m3"
+                        className="w-full px-2 py-1.5 bg-bg-primary border border-border rounded text-sm placeholder:text-text-muted"
+                      />
+                    </div>
+                  </div>
                 )}
-                <button
-                  onClick={() => removeField(i)}
-                  className="text-text-muted hover:text-error transition-colors p-1"
-                >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                  </svg>
-                </button>
+
+                {!isVectorLike(f.type) && f.type !== 'blob' && (
+                  <label className="flex items-center gap-2 pl-1 text-xs text-text-secondary">
+                    <input
+                      type="checkbox"
+                      checked={!!f.filterable}
+                      onChange={(e) =>
+                        updateField(i, { filterable: e.target.checked })
+                      }
+                    />
+                    Filterable
+                  </label>
+                )}
               </div>
             ))}
           </div>
         </div>
 
         {error && (
-          <div className="rounded-lg bg-error/10 border border-error/20 px-3 py-2 text-sm text-error">{error}</div>
+          <div className="rounded-lg bg-error/10 border border-error/20 px-3 py-2 text-sm text-error whitespace-pre-wrap break-words">
+            {error}
+          </div>
         )}
 
         <div className="flex justify-end gap-3 pt-2">

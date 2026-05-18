@@ -1,9 +1,9 @@
 import { create } from 'zustand'
 import { fetchCollections, fetchHealth } from '../api/collections'
-import type { CollectionInfo, HealthResponse } from '../api/collections'
+import type { CollectionSummary, HealthResponse } from '../api/collections'
 
 interface CollectionState {
-  collections: CollectionInfo[]
+  collections: CollectionSummary[]
   health: HealthResponse | null
   loading: boolean
   error: string | null

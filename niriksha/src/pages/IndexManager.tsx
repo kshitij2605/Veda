@@ -8,6 +8,8 @@ import { LoadingSpinner } from '../components/LoadingSpinner'
 import { EmptyState } from '../components/EmptyState'
 import { Badge } from '../components/Badge'
 
+const VECTOR_TYPES = new Set(['vector', 'sparse_vector', 'multi_vector'])
+
 export function IndexManager() {
   const { collections, fetchCollections } = useCollectionStore()
   const [selectedCollection, setSelectedCollection] = useState('')
@@ -28,13 +30,18 @@ export function IndexManager() {
     setError(null)
     fetchCollection(selectedCollection)
       .then(({ data }) => setSchema(data))
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load collection'))
+      .catch((err) =>
+        setError(err instanceof Error ? err.message : 'Failed to load collection'),
+      )
       .finally(() => setLoading(false))
   }, [selectedCollection])
 
-  const vectorFields = schema?.fields.filter((f) => f.field_type === 'vector') ?? []
-  const scalarFields = schema?.fields.filter((f) => f.field_type !== 'vector' && f.field_type !== 'blob') ?? []
-  const blobFields = schema?.fields.filter((f) => f.field_type === 'blob') ?? []
+  const vectorFields = schema?.fields.filter((f) => VECTOR_TYPES.has(f.type)) ?? []
+  const scalarFields =
+    schema?.fields.filter(
+      (f) => !VECTOR_TYPES.has(f.type) && f.type !== 'blob',
+    ) ?? []
+  const blobFields = schema?.fields.filter((f) => f.type === 'blob') ?? []
 
   return (
     <motion.div
@@ -53,14 +60,19 @@ export function IndexManager() {
           >
             <option value="">Select collection...</option>
             {collections.map((c) => (
-              <option key={c.name} value={c.name}>{c.name}</option>
+              <option key={c.name} value={c.name}>
+                {c.name}
+              </option>
             ))}
           </select>
         }
       />
 
       {!selectedCollection && (
-        <EmptyState title="Select a collection" description="Choose a collection to view its index configuration." />
+        <EmptyState
+          title="Select a collection"
+          description="Choose a collection to view its index configuration."
+        />
       )}
 
       {loading && <LoadingSpinner label="Loading schema..." />}
@@ -73,10 +85,24 @@ export function IndexManager() {
 
       {schema && !loading && !error && (
         <div className="space-y-6">
-          {/* Vector Fields */}
+          <div className="rounded-lg border border-border bg-bg-secondary p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <Stat label="Shards" value={String(schema.shard_count)} />
+            <Stat
+              label="Replication"
+              value={String(schema.replication_factor)}
+            />
+            <Stat label="Total Fields" value={String(schema.fields.length)} />
+            <Stat
+              label="Vector Fields"
+              value={String(vectorFields.length)}
+            />
+          </div>
+
           {vectorFields.length > 0 && (
             <div>
-              <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider mb-3">Vector Fields</h2>
+              <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider mb-3">
+                Vector Fields
+              </h2>
               <div className="space-y-3">
                 {vectorFields.map((f) => (
                   <VectorFieldCard key={f.name} field={f} />
@@ -85,28 +111,34 @@ export function IndexManager() {
             </div>
           )}
 
-          {/* Scalar Fields */}
           {scalarFields.length > 0 && (
             <div>
-              <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider mb-3">Scalar Fields</h2>
+              <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider mb-3">
+                Scalar Fields
+              </h2>
               <div className="rounded-lg border border-border overflow-hidden">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-bg-secondary text-text-muted text-left">
                       <th className="px-4 py-3 font-medium">Field</th>
                       <th className="px-4 py-3 font-medium">Type</th>
-                      <th className="px-4 py-3 font-medium">Index</th>
+                      <th className="px-4 py-3 font-medium">Filterable</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
                     {scalarFields.map((f) => (
-                      <tr key={f.name} className="hover:bg-bg-tertiary transition-colors">
-                        <td className="px-4 py-3 font-medium text-text-primary">{f.name}</td>
+                      <tr
+                        key={f.name}
+                        className="hover:bg-bg-tertiary transition-colors"
+                      >
+                        <td className="px-4 py-3 font-medium text-text-primary">
+                          {f.name}
+                        </td>
                         <td className="px-4 py-3">
-                          <Badge label={f.field_type} variant="default" />
+                          <Badge label={f.type} variant="default" />
                         </td>
                         <td className="px-4 py-3 text-text-secondary">
-                          {inferScalarIndex(f.field_type)}
+                          {f.filterable ? 'yes' : '—'}
                         </td>
                       </tr>
                     ))}
@@ -116,10 +148,11 @@ export function IndexManager() {
             </div>
           )}
 
-          {/* Blob Fields */}
           {blobFields.length > 0 && (
             <div>
-              <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider mb-3">Blob Fields</h2>
+              <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider mb-3">
+                Blob Fields
+              </h2>
               <div className="rounded-lg border border-border overflow-hidden">
                 <table className="w-full text-sm">
                   <thead>
@@ -130,8 +163,13 @@ export function IndexManager() {
                   </thead>
                   <tbody className="divide-y divide-border">
                     {blobFields.map((f) => (
-                      <tr key={f.name} className="hover:bg-bg-tertiary transition-colors">
-                        <td className="px-4 py-3 font-medium text-text-primary">{f.name}</td>
+                      <tr
+                        key={f.name}
+                        className="hover:bg-bg-tertiary transition-colors"
+                      >
+                        <td className="px-4 py-3 font-medium text-text-primary">
+                          {f.name}
+                        </td>
                         <td className="px-4 py-3">
                           <Badge label="blob" variant="warning" />
                         </td>
@@ -143,58 +181,70 @@ export function IndexManager() {
             </div>
           )}
 
-          {vectorFields.length === 0 && scalarFields.length === 0 && blobFields.length === 0 && (
-            <EmptyState title="No fields" description="This collection has no fields defined." />
-          )}
+          {vectorFields.length === 0 &&
+            scalarFields.length === 0 &&
+            blobFields.length === 0 && (
+              <EmptyState
+                title="No fields"
+                description="This collection has no fields defined."
+              />
+            )}
         </div>
       )}
     </motion.div>
   )
 }
 
-function VectorFieldCard({ field }: { field: FieldSchema }) {
-  const dims = field.dimensions ?? 0
-  // Infer reasonable defaults for display
-  const metric = 'Cosine'
-  const indexType = dims > 512 ? 'HNSW' : 'DiskANN'
-  const quantization = dims > 512 ? 'RaBitQ 4-bit' : 'SQ8'
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-xs text-text-muted uppercase tracking-wider">
+        {label}
+      </div>
+      <div className="text-text-primary font-semibold mt-0.5">{value}</div>
+    </div>
+  )
+}
 
+function VectorFieldCard({ field }: { field: FieldSchema }) {
   return (
     <div className="rounded-lg border border-border bg-bg-secondary p-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="font-medium text-text-primary">{field.name}</h3>
-        <Badge label="Ready" variant="success" />
+        <Badge label={field.type} variant="accent" />
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-        <div>
-          <span className="text-xs text-text-muted">Type</span>
-          <div className="text-text-primary">
-            <Badge label={`Vector(${dims})`} variant="accent" />
-          </div>
-        </div>
-        <div>
-          <span className="text-xs text-text-muted">Metric</span>
-          <div className="text-text-primary">{metric}</div>
-        </div>
-        <div>
-          <span className="text-xs text-text-muted">Index</span>
-          <div className="text-text-primary">{indexType}</div>
-        </div>
-        <div>
-          <span className="text-xs text-text-muted">Quantization</span>
-          <div className="text-text-primary">{quantization}</div>
-        </div>
+        <Cell
+          label="Dimension"
+          value={field.dimension ? String(field.dimension) : '—'}
+        />
+        <Cell label="Metric" value={field.metric ?? '—'} />
+        <Cell label="Model" value={field.model ?? '—'} mono={!!field.model} />
+        <Cell label="Filterable" value={field.filterable ? 'yes' : '—'} />
       </div>
     </div>
   )
 }
 
-function inferScalarIndex(fieldType: string): string {
-  switch (fieldType) {
-    case 'string': return 'Inverted Index'
-    case 'integer':
-    case 'float': return 'Range Index'
-    case 'boolean': return 'Bitmap Index'
-    default: return 'None'
-  }
+function Cell({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+}) {
+  return (
+    <div>
+      <span className="text-xs text-text-muted">{label}</span>
+      <div
+        className={`text-text-primary ${
+          mono ? 'font-mono text-xs break-all' : ''
+        }`}
+      >
+        {value}
+      </div>
+    </div>
+  )
 }
