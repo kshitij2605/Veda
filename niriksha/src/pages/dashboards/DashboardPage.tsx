@@ -11,7 +11,6 @@ import {
   Plus,
   Search,
   TerminalSquare,
-  Trash2,
   X,
 } from 'lucide-react'
 import {

@@ -159,6 +159,27 @@ export const fetchCoverage = (collection: string, window: string = '7d') =>
     `/collections/${encodeURIComponent(collection)}/coverage?window=${encodeURIComponent(window)}`,
   )
 
+// ── SavedObjects (Phase 6.5 follow-up) ──────────────────────────────────
+export interface SavedObjectDTO {
+  id: string
+  type: string
+  name: string
+  body: unknown
+  owner?: string
+  created_at: number
+  updated_at: number
+  last_used_at?: number
+}
+export const listSavedObjects = () =>
+  api.get<{ objects: SavedObjectDTO[] }>('/saved_objects')
+export const putSavedObject = (id: string, obj: SavedObjectDTO) =>
+  api.put<SavedObjectDTO>(
+    `/saved_objects/${encodeURIComponent(id)}`,
+    obj,
+  )
+export const deleteSavedObject = (id: string) =>
+  api.delete<void>(`/saved_objects/${encodeURIComponent(id)}`)
+
 export const llmComplete = (
   messages: ChatMessage[],
   opts?: { temperature?: number; max_tokens?: number; json_mode?: boolean },

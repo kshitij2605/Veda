@@ -4,9 +4,11 @@ import { Breadcrumbs } from './Breadcrumbs'
 import { TrustBadges } from './TrustBadges'
 import { CommandPalette } from '../palette/CommandPalette'
 import { Toaster, TooltipProvider } from '../primitives'
+import { useHydrateSavedObjects } from '../../stores/savedObjectStore'
 
 export function AppShell({ children }: { children: ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false)
+  useHydrateSavedObjects()
 
   // Cmd/Ctrl+K toggles the palette anywhere
   useEffect(() => {

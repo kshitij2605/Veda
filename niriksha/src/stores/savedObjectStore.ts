@@ -1,6 +1,12 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
+import {
+  deleteSavedObject,
+  listSavedObjects,
+  putSavedObject,
+  type SavedObjectDTO,
+} from '../api/collections'
 
 /**
  * Saved Object — Kibana-style. Every search / atlas view / eval run /
@@ -48,6 +54,46 @@ interface SavedObjectState {
 const genId = (type: SavedObjectType) =>
   `${type}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
 
+function toDto(o: SavedObject): SavedObjectDTO {
+  return {
+    id: o.id,
+    type: o.type,
+    name: o.name,
+    body: o.body,
+    owner: o.owner,
+    created_at: o.createdAt,
+    updated_at: o.updatedAt,
+    last_used_at: o.lastUsedAt,
+  }
+}
+
+function fromDto(d: SavedObjectDTO): SavedObject {
+  return {
+    id: d.id,
+    type: d.type as SavedObjectType,
+    name: d.name,
+    body: d.body,
+    owner: d.owner,
+    createdAt: d.created_at,
+    updatedAt: d.updated_at,
+    lastUsedAt: d.last_used_at,
+  }
+}
+
+/** Fire-and-forget server write. Failures are logged, never thrown —
+ *  the in-memory + localStorage copy already reflects the change, so
+ *  the user's action never blocks on the gateway. */
+function pushUpsert(obj: SavedObject) {
+  putSavedObject(obj.id, toDto(obj)).catch((e) => {
+    console.warn('saved_objects: PUT failed', obj.id, e)
+  })
+}
+function pushDelete(id: string) {
+  deleteSavedObject(id).catch((e) => {
+    console.warn('saved_objects: DELETE failed', id, e)
+  })
+}
+
 export const useSavedObjects = create<SavedObjectState>()(
   persist(
     (set, get) => ({
@@ -63,19 +109,24 @@ export const useSavedObjects = create<SavedObjectState>()(
           updatedAt: now,
         }
         set((s) => ({ objects: { ...s.objects, [id]: next as SavedObject } }))
+        pushUpsert(next as SavedObject)
         return next
       },
-      remove: (id) =>
+      remove: (id) => {
         set((s) => {
           const { [id]: _, ...rest } = s.objects
           return { objects: rest }
-        }),
+        })
+        pushDelete(id)
+      },
       touch: (id) =>
         set((s) => {
           const obj = s.objects[id]
           if (!obj) return s
+          const next = { ...obj, lastUsedAt: Date.now() }
+          pushUpsert(next)
           return {
-            objects: { ...s.objects, [id]: { ...obj, lastUsedAt: Date.now() } },
+            objects: { ...s.objects, [id]: next },
           }
         }),
       list: (type) => {
@@ -94,6 +145,43 @@ export const useSavedObjects = create<SavedObjectState>()(
     },
   ),
 )
+
+/**
+ * One-shot hook: on app boot, fetch the server's SavedObject snapshot
+ * and merge it into the local store. Server-side timestamps win when
+ * they're newer than the localStorage cache (handles multi-device).
+ * Failures are silent — the localStorage cache is still authoritative.
+ *
+ * Call once from AppShell. Cheap enough to skip a "loaded" gate: the
+ * UI renders instantly off the cache and reconciles when the GET
+ * returns.
+ */
+export function useHydrateSavedObjects() {
+  useEffect(() => {
+    let cancelled = false
+    listSavedObjects()
+      .then(({ data }) => {
+        if (cancelled) return
+        const incoming = data.objects.map(fromDto)
+        useSavedObjects.setState((s) => {
+          const merged = { ...s.objects }
+          for (const o of incoming) {
+            const local = merged[o.id]
+            if (!local || o.updatedAt >= local.updatedAt) {
+              merged[o.id] = o
+            }
+          }
+          return { objects: merged }
+        })
+      })
+      .catch((e) => {
+        console.warn('saved_objects: hydrate failed, using local cache only', e)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+}
 
 /**
  * Recent-items hook for the palette. Selects the raw `objects` map (a
