@@ -374,6 +374,11 @@ pub async fn search(
         .record(start.elapsed().as_secs_f64());
     let count = results.len();
 
+    // Coverage telemetry — fire-and-forget JSONL append per /search.
+    // Powers GET /v1/collections/{name}/coverage (orphan + monoculture).
+    let doc_ids: Vec<String> = results.iter().map(|h| h.id.clone()).collect();
+    super::query_log::record_search(&state, &name, final_limit, doc_ids, took_ms);
+
     Ok(Json(SearchResponse {
         results,
         count,

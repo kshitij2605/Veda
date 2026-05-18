@@ -133,6 +133,27 @@ export interface LlmCompleteResponse {
   total_tokens: number
   elapsed_ms: number
 }
+export interface CoverageHit {
+  doc_id: string
+  count: number
+  fraction: number
+}
+
+export interface CoverageResponse {
+  window_secs: number
+  total_queries: number
+  total_chunks: number
+  retrieved_chunks: number
+  orphan_count: number
+  top_hits: CoverageHit[]
+  orphan_sample: string[]
+}
+
+export const fetchCoverage = (collection: string, window: string = '7d') =>
+  api.get<CoverageResponse>(
+    `/collections/${encodeURIComponent(collection)}/coverage?window=${encodeURIComponent(window)}`,
+  )
+
 export const llmComplete = (
   messages: ChatMessage[],
   opts?: { temperature?: number; max_tokens?: number; json_mode?: boolean },

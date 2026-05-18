@@ -23,6 +23,7 @@ import {
   Skeleton,
   toast,
 } from '../components/primitives'
+import { CoverageView } from './collections/CoverageView'
 import { FieldStats } from './collections/FieldStats'
 import { RecordsBrowser } from './collections/RecordsBrowser'
 import { isScalarField, isVectorField } from './collections/types'
@@ -203,7 +204,7 @@ function EmptyState({
    Detail mode — object-with-views
    ──────────────────────────────────────────────────────────────────── */
 
-type DetailTab = 'records' | 'schema' | 'stats' | 'settings'
+type DetailTab = 'records' | 'schema' | 'stats' | 'coverage' | 'settings'
 
 function CollectionDetail({ name }: { name: string }) {
   const navigate = useNavigate()
@@ -257,6 +258,7 @@ function CollectionDetail({ name }: { name: string }) {
         {tab === 'records' && <RecordsBrowser collection={collection} />}
         {tab === 'schema' && <SchemaView fields={collection.fields} />}
         {tab === 'stats' && <FieldStats collection={collection} />}
+        {tab === 'coverage' && <CoverageView collection={collection.name} />}
         {tab === 'settings' && <SettingsView collection={collection} />}
       </div>
       <Modal
@@ -357,6 +359,7 @@ function DetailHeader({
           <TabBtn value="records" current={tab}>Records</TabBtn>
           <TabBtn value="schema" current={tab}>Schema</TabBtn>
           <TabBtn value="stats" current={tab}>Statistics</TabBtn>
+          <TabBtn value="coverage" current={tab}>Coverage</TabBtn>
           <TabBtn value="settings" current={tab}>Settings</TabBtn>
         </Tabs.List>
       </Tabs.Root>
