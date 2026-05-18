@@ -807,14 +807,21 @@ function ResultRow({
         .join('  ·  ')
 
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={() => setOpen((v) => !v)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          setOpen((v) => !v)
+        }
+      }}
       className={cn(
         'group w-full text-left rounded-[var(--radius-sm)] border border-[var(--color-border)]',
         'bg-[var(--color-bg-elevated)] hover:border-[var(--color-border-strong)]',
         'transition-[border-color,background] duration-[var(--duration-fast)]',
-        'p-3',
+        'p-3 cursor-pointer',
       )}
     >
       <div className="flex items-start gap-3">
@@ -827,7 +834,12 @@ function ResultRow({
               {hit.id}
             </span>
             <DistanceBadge distance={hit.distance} />
-            <CopyButton value={hit.id} className="ml-auto opacity-0 group-hover:opacity-100" />
+            <span
+              onClick={(e) => e.stopPropagation()}
+              className="ml-auto opacity-0 group-hover:opacity-100"
+            >
+              <CopyButton value={hit.id} />
+            </span>
           </div>
           <div
             className="text-[12.5px] text-[var(--color-text)] leading-relaxed line-clamp-2"
@@ -843,7 +855,7 @@ function ResultRow({
           {JSON.stringify(hit, null, 2)}
         </pre>
       )}
-    </button>
+    </div>
   )
 }
 
@@ -896,12 +908,14 @@ function buildSearchRequest(
       return null
     case 'hybrid':
       if (!vectorValues || !state.vectorField || !state.bm25Field) return null
+      // UI exposes "rrf" | "weighted" — the gateway speaks
+      // "rrf" | "weighted_sum". Translate at the boundary.
       body.query.hybrid = {
         dense: { field: state.vectorField, values: vectorValues },
         bm25: { field: state.bm25Field, query: state.text },
         dense_weight:
-          state.fusion === 'weighted_sum' ? state.vectorWeight : 0.5,
-        fusion: state.fusion === 'weighted_sum' ? 'weighted_sum' : 'rrf',
+          state.fusion === 'weighted' ? state.vectorWeight : 0.5,
+        fusion: state.fusion === 'weighted' ? 'weighted_sum' : 'rrf',
       }
       return body
   }
