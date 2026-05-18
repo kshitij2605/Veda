@@ -3,7 +3,7 @@ use std::collections::{BinaryHeap, HashSet};
 
 use roaring::RoaringBitmap;
 
-use crate::distance::compute_distance;
+use crate::hnsw::distance_provider::DistanceProvider;
 use crate::hnsw::graph::HnswGraph;
 use crate::traits::SearchResult;
 use veda_core::types::DistanceMetric;
@@ -111,8 +111,7 @@ impl HnswSearcher {
         ef: usize,
         layer: usize,
         graph: &HnswGraph,
-        vectors: &[Vec<f32>],
-        metric: DistanceMetric,
+        dp: &dyn DistanceProvider,
         deleted: &HashSet<u32>,
     ) -> Vec<(u32, f32)> {
         let mut visited: HashSet<u32> = HashSet::new();
@@ -146,7 +145,7 @@ impl HnswSearcher {
                 }
                 visited.insert(neighbor_id);
 
-                let n_dist = compute_distance(query, &vectors[neighbor_id as usize], metric);
+                let n_dist = dp.distance(query, neighbor_id);
 
                 let farthest_dist = results.peek().map(|r| r.distance).unwrap_or(f32::MAX);
 
@@ -185,17 +184,16 @@ impl HnswSearcher {
         entry_point: u32,
         layer: usize,
         graph: &HnswGraph,
-        vectors: &[Vec<f32>],
-        metric: DistanceMetric,
+        dp: &dyn DistanceProvider,
     ) -> (u32, f32) {
         let mut current_id = entry_point;
-        let mut current_dist = compute_distance(query, &vectors[current_id as usize], metric);
+        let mut current_dist = dp.distance(query, current_id);
 
         loop {
             let mut changed = false;
             let neighbors = graph.get_neighbors(current_id, layer);
             for &neighbor_id in neighbors {
-                let n_dist = compute_distance(query, &vectors[neighbor_id as usize], metric);
+                let n_dist = dp.distance(query, neighbor_id);
                 if n_dist < current_dist {
                     current_id = neighbor_id;
                     current_dist = n_dist;
@@ -227,17 +225,16 @@ impl HnswSearcher {
     #[allow(clippy::too_many_arguments)]
     pub fn search_layer_filtered(
         graph: &HnswGraph,
-        vectors: &[Vec<f32>],
+        dp: &dyn DistanceProvider,
         query: &[f32],
         entry_points: &[(u32, f32)],
         ef: usize,
         layer: usize,
-        metric: DistanceMetric,
         deleted: &HashSet<u32>,
         filter: &RoaringBitmap,
         k: usize,
     ) -> Vec<SearchResult> {
-        let total_count = vectors.len() as u64;
+        let total_count = dp.len() as u64;
         let filter_count = filter.len();
 
         match select_strategy(filter_count, total_count) {
@@ -250,8 +247,7 @@ impl HnswSearcher {
                     adjusted_ef,
                     layer,
                     graph,
-                    vectors,
-                    metric,
+                    dp,
                     deleted,
                 );
                 results
@@ -263,7 +259,7 @@ impl HnswSearcher {
             }
             FilterStrategy::InAlgorithm => {
                 Self::search_layer_in_algorithm_filter(
-                    graph, vectors, query, entry_points, ef, layer, metric, deleted, filter, k,
+                    graph, dp, query, entry_points, ef, layer, deleted, filter, k,
                 )
             }
             FilterStrategy::PostFilter => {
@@ -275,8 +271,7 @@ impl HnswSearcher {
                     adjusted_ef,
                     layer,
                     graph,
-                    vectors,
-                    metric,
+                    dp,
                     deleted,
                 );
                 let filtered: Vec<SearchResult> = results
@@ -291,7 +286,7 @@ impl HnswSearcher {
                 }
 
                 // Fallback: brute-force scan of filtered IDs only.
-                Self::brute_force_filtered(vectors, query, metric, deleted, filter, k)
+                Self::brute_force_filtered(dp, query, deleted, filter, k)
             }
         }
     }
@@ -302,17 +297,16 @@ impl HnswSearcher {
     #[allow(clippy::too_many_arguments)]
     fn search_layer_in_algorithm_filter(
         graph: &HnswGraph,
-        vectors: &[Vec<f32>],
+        dp: &dyn DistanceProvider,
         query: &[f32],
         entry_points: &[(u32, f32)],
         ef: usize,
         layer: usize,
-        metric: DistanceMetric,
         deleted: &HashSet<u32>,
         filter: &RoaringBitmap,
         k: usize,
     ) -> Vec<SearchResult> {
-        let total_count = vectors.len() as u64;
+        let total_count = dp.len() as u64;
         let filter_count = filter.len();
         let selectivity = if total_count > 0 {
             filter_count as f64 / total_count as f64
@@ -370,8 +364,7 @@ impl HnswSearcher {
                 }
                 visited.insert(neighbor_id);
 
-                let n_dist =
-                    compute_distance(query, &vectors[neighbor_id as usize], metric);
+                let n_dist = dp.distance(query, neighbor_id);
 
                 let farthest_working =
                     working.peek().map(|r| r.distance).unwrap_or(f32::MAX);
@@ -414,9 +407,8 @@ impl HnswSearcher {
 
     /// Brute-force scan over only the IDs in the filter bitmap.
     fn brute_force_filtered(
-        vectors: &[Vec<f32>],
+        dp: &dyn DistanceProvider,
         query: &[f32],
-        metric: DistanceMetric,
         deleted: &HashSet<u32>,
         filter: &RoaringBitmap,
         k: usize,
@@ -427,10 +419,10 @@ impl HnswSearcher {
             if deleted.contains(&id) {
                 continue;
             }
-            if (id as usize) >= vectors.len() {
+            if (id as usize) >= dp.len() {
                 continue;
             }
-            let distance = compute_distance(query, &vectors[id as usize], metric);
+            let distance = dp.distance(query, id);
             if heap.len() < k {
                 heap.push(MaxCandidate { id, distance });
             } else if let Some(worst) = heap.peek()

@@ -59,6 +59,14 @@ fn build_vector_index(
             idx.build(&refs)?;
             Ok(Box::new(idx))
         }
+        IndexType::HnswRaBitQ => {
+            // Deep-quantized HNSW: graph + RaBitQ codes, no raw f32.
+            // See `crates/veda-index/src/hnsw/quantized.rs`.
+            use veda_index::hnsw::quantized::QuantizedHnswIndex;
+            let mut idx = QuantizedHnswIndex::new(metric, dimension);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
         // Flat (or anything else that isn't a recognised vector index type).
         _ => {
             let mut idx = FlatIndex::new(metric, dimension);

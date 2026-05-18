@@ -122,6 +122,11 @@ pub enum IndexType {
     /// of the result set; useful when quality matters more than
     /// memory footprint.
     RaBitQRerank,
+    /// Deep-quantized HNSW: graph trained on raw vectors but
+    /// persisted and searched with RaBitQ codes. ~32× smaller than
+    /// raw HNSW; graph pruning preserves search latency. Use above
+    /// ~10M rows where raw f32 vectors blow past L3 cache.
+    HnswRaBitQ,
     SuffixArray,
     Inverted,
     Range,
