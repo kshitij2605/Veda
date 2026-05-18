@@ -16,6 +16,12 @@ export type SavedObjectType =
   | 'eval_run'
   | 'console_query'
   | 'pipeline'
+  | 'dashboard'
+
+/** Phase 6.5 — body shape for SavedObject<DashboardBody>. */
+export interface DashboardBody {
+  items: Array<{ savedObjectId: string }>
+}
 
 export interface SavedObject<T = unknown> {
   id: string

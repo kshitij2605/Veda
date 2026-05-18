@@ -8,6 +8,7 @@ import {
   FlaskConical,
   GitBranch,
   Layers,
+  LayoutDashboard,
   Search,
   Settings,
   TerminalSquare,
@@ -42,6 +43,7 @@ const GROUPS: NavGroup[] = [
       { to: '/atlas', label: 'Atlas', icon: Atom, hint: 'A' },
       { to: '/quality', label: 'Quality Lab', icon: FlaskConical },
       { to: '/evaluation', label: 'Evaluation', icon: Beaker },
+      { to: '/dashboards', label: 'Dashboards', icon: LayoutDashboard },
     ],
   },
   {
