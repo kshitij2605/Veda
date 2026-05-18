@@ -605,7 +605,7 @@ fn record_to_response(rec: &Record) -> GetRecordResponse {
     }
 }
 
-fn field_value_to_json(fv: &FieldValue) -> serde_json::Value {
+pub(crate) fn field_value_to_json(fv: &FieldValue) -> serde_json::Value {
     match fv {
         FieldValue::String(s) => serde_json::Value::String(s.clone()),
         FieldValue::Int32(n) => serde_json::json!(*n),
