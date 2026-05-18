@@ -54,6 +54,12 @@ services:
       MULTIMODAL_EMBEDDING_ENDPOINT: ${MULTIMODAL_EMBEDDING_ENDPOINT:-http://multimodal-embedding:8000}
       MULTIMODAL_EMBEDDING_MODEL: ${MULTIMODAL_EMBEDDING_MODEL:-Qwen/Qwen3-VL-Embedding-8B}
       MULTIMODAL_EMBEDDING_DIMENSION: ${MULTIMODAL_EMBEDDING_DIMENSION:-2048}
+      # OpenAI-compatible LLM endpoint (used by /v1/llm/complete and
+      # the dashboard's cluster-labels / NL→DSL / failure classifier).
+      # Unset = LLM-backed UI affordances hide cleanly.
+      VEDA_LLM_ENDPOINT: ${VEDA_LLM_ENDPOINT:-}
+      VEDA_LLM_API_KEY: ${VEDA_LLM_API_KEY:-}
+      VEDA_LLM_MODEL: ${VEDA_LLM_MODEL:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-veda}
       NO_PROXY: localhost,127.0.0.1,minio,nats,embedding,multimodal-embedding,flashparse,vlm,glm-ocr

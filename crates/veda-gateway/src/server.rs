@@ -20,6 +20,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let app_state = AppState::with_prometheus(&config.data_dir, prometheus_handle);
     app_state.load_embedding_from_env().await;
     app_state.load_splade_from_env().await;
+    app_state.load_llm_from_env().await;
     app_state.load_blob_store_from_env().await;
     let recovered = app_state.recover_collections_from_disk().await;
     if recovered > 0 {
