@@ -229,7 +229,61 @@ revision of this doc called out has shipped except pre-vote
   "deferred indefinitely" rather than "deferred until
   upstream lands it."
 
-What was added in the follow-up pass (commits `4a3408e`,
+What was added in the second follow-up pass (commits `98a09a3`,
+linearisability checker, soak harness wrapper):
+
+- **Inserts routed through Raft**: `POST
+  /v1/collections/{name}/insert` now submits
+  `ClusterCommand::InsertRecord` per record. On apply each
+  node materialises the record via its SegmentManager
+  through the existing reconcile path. State machine carries
+  every record so chunked snapshots have substance. Wire
+  trade-off explicitly documented inline:
+  single-cluster-Raft scaling cap. Verified end-to-end:
+  inserts on the leader appear with byte-identical UUIDs
+  on all three follower nodes within the reconcile window.
+
+- **Linearisability history checker + harness**:
+  `crates/veda-coordinator/src/linearisability_checker.rs`
+  records every operation's `(start_ns, end_ns, outcome)`
+  and offline-checks every Read against the set of Inserts
+  that could have completed by the Read's start. Three
+  violation classes detected: `stale_read` (Read returned
+  None after a confirmed Insert), `payload_mismatch` (Read
+  saw a value no Insert produced), `ghost_read` (Read saw
+  a value with no overlapping Insert). Four unit tests.
+  Companion harness binary `veda-linearisability-harness`
+  drives concurrent inserts + reads against the cluster
+  and prints a JSONL history + a check report.
+
+  **Honest findings from running it**:
+    - Single-node (all ops against the leader): 3,524 ops,
+      1,760 reads, **0 violations**. Confirms the
+      Raft-replicated record store is linearisable WHEN
+      every client lands on the node that processed its
+      latest insert.
+    - Cross-node (ops randomly distributed across 3 nodes):
+      ~2,290 stale_read violations across ~29,000 ops in
+      a 30s run. These are NOT correctness bugs — they
+      are the visible 2s reconcile-interval window
+      between insert-on-leader and follower-side
+      SegmentManager materialisation. The system is
+      eventually consistent across nodes; making it
+      linearisable across nodes needs either a
+      barrier-on-read (see linearisable_query_state
+      pattern) or replacing follower reads with
+      consultations of the Raft state machine. Documented
+      as a follow-up.
+
+- **24-hour soak workflow**: `scripts/raft-soak-24h.sh`
+  wraps the existing fault-injection harness with the
+  nohup-detach + structured-log pattern used by an operator
+  for hours-long runs. Pre-flight check picks up the
+  cluster's leader, validates every node responds, writes
+  a header (git commit, parameters, host) into LOG_DIR,
+  detaches the soak. PID + log paths printed for monitoring.
+
+What was added in the first follow-up pass (commits `4a3408e`,
 `967f5c0`, `26c4eda`, `126a8ac`):
 
 - **WAL compaction**: `MemLogState::compact()` + a periodic
