@@ -213,38 +213,82 @@ revision of this doc called out has shipped except pre-vote
   `RaftCoordinator::linearisable_query_state()` issues a
   `Noop` barrier write before reading; the test asserts
   `last_applied_index` advances through the barrier.
-- ❌ **Pre-vote** — genuinely not available in openraft
-  0.9.24 (`grep -irn pre.vote` finds zero hits in the
-  crate source + changelog). Requires upgrading to an
-  openraft version that ships it, or swapping the
-  consensus crate. Either is a separate engagement.
+- ❌ **Pre-vote** — *deliberately not coming* in openraft.
+  Earlier investigation confirmed zero references in the
+  0.9.24 source + changelog; a follow-up read of the
+  upstream README's roadmap reveals the project has
+  explicitly decided to "get rid of pre-vote RPC" rather
+  than implement it, with the `single-term-leader` feature
+  used as the simpler alternative. Conclusion: not a
+  "needs an upstream version bump" item — it's an upstream
+  design decision. Achieving pre-vote semantics in Veda
+  would require either swapping consensus crates entirely
+  (raft-rs, etc., multi-week project) or implementing it on
+  top of openraft as a layer above the public API (invasive
+  and fragile). Both are out of scope and tracked as
+  "deferred indefinitely" rather than "deferred until
+  upstream lands it."
 
-What still needs production-scale work, in honest terms:
+What was added in the follow-up pass (commits `4a3408e`,
+`967f5c0`, `26c4eda`, `126a8ac`):
 
-- **Hours-long soak** under continuous concurrent load with
-  random kill timings. The harnesses here run a single pass
-  each — they're correctness checks, not endurance tests.
-- **Asymmetric partition + packet-loss fault injection**.
-  `tc qdisc` and `iptables -j DROP` require `NET_ADMIN`
-  inside containers, which the existing compose stack
-  doesn't grant. A separate test rig with privileged
-  containers is the right vehicle.
-- **WAL compaction**. The append-only WAL grows even when
-  entries get truncated/purged because the markers stay on
-  disk. A periodic rewrite-from-live-state pass is the
-  next follow-up.
-- **Large-state snapshot streaming**. NOOP_COUNT=200 keeps
-  the state machine tiny; chunked-snapshot stress wants
-  entries that materially grow the state, which means
-  routing real `CreateCollection`s through Raft (a separate
-  wiring engagement).
-- **Pre-vote** when openraft adds it.
+- **WAL compaction**: `MemLogState::compact()` + a periodic
+  background task (`VEDA_RAFT_WAL_COMPACT_INTERVAL_SECS`,
+  `VEDA_RAFT_WAL_COMPACT_THRESHOLD_BYTES`). The append-only
+  WAL now rewrites itself when it grows past 16 MB (default).
+  Round-trip test in `raft_wal::tests`.
+- **`tc qdisc` fault-injection rig**: `cap_add: [NET_ADMIN]`
+  on every raft-cluster container, `iproute2` shipped in
+  the runtime image, and `scripts/raft-fault-inject.sh`
+  exposing loss / delay / asymmetric-partition / smoke. Real
+  10% packet-loss smoke passes.
+- **`CreateCollection` routed through Raft**:
+  `POST /v1/collections` (and `DELETE`) now submit
+  `ClusterCommand::CreateCollection { schema_json }` to the
+  log; every node materialises locally on apply. A periodic
+  reconcile task (every 2s by default) catches followers up
+  after restart. Verified end-to-end: collection created on
+  leader, visible on all 3 nodes within the reconcile window.
+- **Sustained-load soak harness**: `scripts/raft-soak.sh`
+  runs continuous Noops from 3 writer processes while
+  randomly applying one of {kill, restart, loss, latency,
+  partition} per iteration. 2-minute demo run with
+  ITERATION_SECS=30 passed 4/4 iterations with writes
+  flowing throughout (last_applied climbed 194 -> 3041).
+  Designed for the operator to run for hours.
 
-A team can deploy multi-node Veda today and expect a 3-node
-cluster to survive single-node failures, restarts, and clean
-network partitions. They should not yet run it in environments
-with sustained packet-loss / asymmetric-partition conditions
-until the fault-injection rig lands.
+What is genuinely still deferred (production engineering
+budget, not session-scope):
+
+- **Hours-long soak runs.** The harness exists; the run
+  itself is the operator's decision. A 24-hour soak with
+  this harness is the Jepsen-style operator-confidence
+  baseline.
+- **Jepsen-class linearisability checker.** The soak
+  harness asserts "all nodes agree on last_applied after
+  each fault clears" — catches gross divergence, not
+  subtle linearisability violations on individual writes.
+  Adding a real client-history checker is a separate
+  project.
+- **Pre-vote.** Confirmed upstream openraft has decided
+  not to implement it; achieving the semantics in Veda
+  would require swapping consensus crates or layering
+  above openraft's public API. Both out of scope.
+- **Per-shard data routing through Raft.** Inserts
+  (`POST /v1/collections/{name}/insert`) still hit one
+  node's local segment manager directly. Routing inserts
+  through Raft is the natural next step but is a bigger
+  refactor (record IDs, ownership, etc.).
+- **Follower-to-leader request forwarding.** A `POST`
+  to a follower currently submits to its local raft handle
+  which forwards via openraft; ideally we'd 307-redirect to
+  the current leader's REST address so clients see the
+  fast path directly.
+
+A team can deploy multi-node Veda today and let
+`scripts/raft-soak.sh` run continuously against a
+production-shape cluster to build operational confidence
+before launch.
 
 ## Why not openraft today
 
