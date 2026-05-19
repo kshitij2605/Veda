@@ -1,0 +1,17 @@
+[package]
+name = "veda-coordinator-raftrs"
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "DESIGN ARTIFACT — surface-area-only stub showing what a swap to tikv/raft-rs would touch. Not built. Not used. See documentation/consensus-swap-decision.md."
+
+[dependencies]
+# Pinned to the last release that ships pre_vote (`Config.pre_vote`)
+# without committing to its `Storage` trait API yet. raft-rs has
+# been in maintenance mode since 2023-03-07; if the swap ever
+# happens, the version is the first thing to re-evaluate.
+raft = { version = "0.7", default-features = false, features = ["protobuf-codec"] }
+prost = "0.11"
+slog = "2"
+thiserror = "2"

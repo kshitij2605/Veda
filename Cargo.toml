@@ -9,6 +9,12 @@ members = [
     "crates/veda-gateway",
     "crates/veda-server",
 ]
+# `crates/veda-coordinator-raftrs` exists as a *decision artifact*
+# (see documentation/consensus-swap-decision.md). It's deliberately
+# excluded from the workspace so it doesn't pull raft-rs into every
+# `cargo build`. To examine the swap surface:
+#   cd crates/veda-coordinator-raftrs && cargo build
+exclude = ["crates/veda-coordinator-raftrs"]
 
 [workspace.package]
 version = "0.1.0"
