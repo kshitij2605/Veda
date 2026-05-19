@@ -191,6 +191,68 @@ pub async fn list_nodes(
     })
 }
 
+// ── Raft membership API (Phase 6 of the migration) ─────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct JoinRequest {
+    pub node_id: u64,
+    pub address: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClusterMembershipError {
+    pub error: String,
+}
+
+/// `POST /v1/admin/cluster/join` — add a voter to the Raft cluster.
+/// Body: `{node_id, address}`. Returns 503 when the gateway is not
+/// running in Raft mode.
+pub async fn cluster_join(
+    State(state): State<AppState>,
+    Json(req): Json<JoinRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ClusterMembershipError>)> {
+    let guard = state.inner.raft.read().await;
+    let Some(coord) = guard.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ClusterMembershipError {
+                error: "raft coordinator not configured (set VEDA_COORDINATOR=raft)".into(),
+            }),
+        ));
+    };
+    coord.add_voter(req.node_id, req.address).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ClusterMembershipError { error: e }),
+        )
+    })?;
+    Ok(StatusCode::CREATED)
+}
+
+/// `DELETE /v1/admin/cluster/nodes/{id}` — remove a voter from the
+/// Raft cluster.
+pub async fn cluster_remove(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<u64>,
+) -> Result<StatusCode, (StatusCode, Json<ClusterMembershipError>)> {
+    let guard = state.inner.raft.read().await;
+    let Some(coord) = guard.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ClusterMembershipError {
+                error: "raft coordinator not configured".into(),
+            }),
+        ));
+    };
+    coord.remove_voter(id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ClusterMembershipError { error: e }),
+        )
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,

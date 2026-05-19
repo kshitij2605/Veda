@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package veda.raft;
+
+// Veda's Raft transport intentionally avoids re-defining every openraft
+// type in protobuf. Each RPC's request and response are bincode-encoded
+// openraft types (AppendEntriesRequest, VoteRequest,
+// InstallSnapshotRequest and the matching responses, all with serde
+// derives via openraft's `serde` feature) wrapped in a single `payload`
+// bytes field.
+//
+// Pros: zero schema drift between Rust and the wire, no manual struct
+// porting, snapshot data flows through unchanged.
+// Cons: the wire format is opaque to anything that isn't a Veda peer.
+// That's a trade-off we make consciously — Raft RPCs are internal.
+
+service VedaRaft {
+  rpc AppendEntries(RawRpc) returns (RawRpc);
+  rpc Vote(RawRpc) returns (RawRpc);
+  rpc InstallSnapshot(RawRpc) returns (RawRpc);
+}
+
+message RawRpc {
+  bytes payload = 1;
+}
