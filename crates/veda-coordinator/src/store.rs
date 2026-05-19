@@ -130,6 +130,13 @@ pub struct ClusterStateMachine {
     /// doc). Last-writer-wins on commit collisions.
     #[serde(default)]
     open_txns: HashMap<String, PendingTxn>,
+    /// Current TSO lease, if granted. Phase A scaffolding — populated
+    /// by `GrantTsLease` / `RenewTsLease`. Phase C wires
+    /// `MetaLeasedTso` to read this. See
+    /// `.claude/plans/structured-mixing-turing.md` and
+    /// `crates/veda-time/src/lease.rs`.
+    #[serde(default)]
+    ts_lease: Option<veda_time::TsLease>,
 }
 
 /// Staged writes for an open transaction. v0 holds them in memory
@@ -342,6 +349,57 @@ impl ClusterStateMachine {
                 self.open_txns.remove(txn_id);
                 ClusterResponse::Ok
             }
+
+            ClusterCommand::GrantTsLease {
+                epoch,
+                holder_node_id,
+                ceiling_ns,
+            } => {
+                // Reject any grant whose epoch isn't strictly newer
+                // than the current lease. This is the fencing
+                // invariant for Phase A: one holder per epoch.
+                if let Some(current) = &self.ts_lease
+                    && current.epoch >= *epoch
+                {
+                    return ClusterResponse::Error(format!(
+                        "GrantTsLease epoch {epoch} not strictly newer than current {}",
+                        current.epoch
+                    ));
+                }
+                self.ts_lease = Some(veda_time::TsLease::new(
+                    *epoch,
+                    *holder_node_id,
+                    *ceiling_ns,
+                ));
+                ClusterResponse::Ok
+            }
+
+            ClusterCommand::RenewTsLease { epoch, ceiling_ns } => {
+                // Renew requires the epoch to match the current
+                // lease. Older epoch => the renewer was fenced.
+                // Newer epoch => caller should issue GrantTsLease.
+                match &mut self.ts_lease {
+                    Some(current) if current.epoch == *epoch => {
+                        // Ceiling must only move forward.
+                        if *ceiling_ns >= current.ceiling_ns {
+                            current.ceiling_ns = *ceiling_ns;
+                            ClusterResponse::Ok
+                        } else {
+                            ClusterResponse::Error(format!(
+                                "RenewTsLease ceiling {ceiling_ns} below current {}",
+                                current.ceiling_ns
+                            ))
+                        }
+                    }
+                    Some(current) => ClusterResponse::Error(format!(
+                        "RenewTsLease epoch {epoch} != current {}",
+                        current.epoch
+                    )),
+                    None => ClusterResponse::Error(
+                        "RenewTsLease has no current lease to renew".into(),
+                    ),
+                }
+            }
         }
     }
 
@@ -355,8 +413,14 @@ impl ClusterStateMachine {
             shard_assignments: self.shard_assignments.clone(),
             records: self.records.clone(),
             open_txns: self.open_txns.keys().cloned().collect(),
+            ts_lease: self.ts_lease.clone(),
             last_applied_index: self.last_applied,
         }
+    }
+
+    /// Borrow the current TSO lease, if any.
+    pub fn ts_lease(&self) -> Option<&veda_time::TsLease> {
+        self.ts_lease.as_ref()
     }
 
     /// Index of the last applied log entry.
@@ -648,6 +712,125 @@ mod tests {
             ],
         );
         assert_eq!(sm.snapshot().open_txns, vec!["T1".to_owned()]);
+    }
+
+    #[test]
+    fn grant_ts_lease_then_renew() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [
+                ClusterCommand::GrantTsLease {
+                    epoch: 1,
+                    holder_node_id: 7,
+                    ceiling_ns: 1_000,
+                },
+                ClusterCommand::RenewTsLease {
+                    epoch: 1,
+                    ceiling_ns: 2_000,
+                },
+            ],
+        );
+        let lease = sm.ts_lease().expect("lease present");
+        assert_eq!(lease.epoch, 1);
+        assert_eq!(lease.holder_node_id, 7);
+        assert_eq!(lease.ceiling_ns, 2_000);
+    }
+
+    #[test]
+    fn grant_with_lower_or_equal_epoch_is_error() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [ClusterCommand::GrantTsLease {
+                epoch: 5,
+                holder_node_id: 1,
+                ceiling_ns: 100,
+            }],
+        );
+        // Try same epoch -> error
+        let entry = LogEntry {
+            index: sm.last_applied + 1,
+            command: ClusterCommand::GrantTsLease {
+                epoch: 5,
+                holder_node_id: 2,
+                ceiling_ns: 200,
+            },
+        };
+        assert!(matches!(sm.apply(&entry), ClusterResponse::Error(_)));
+        // Try lower epoch -> error
+        let entry = LogEntry {
+            index: sm.last_applied + 1,
+            command: ClusterCommand::GrantTsLease {
+                epoch: 1,
+                holder_node_id: 2,
+                ceiling_ns: 200,
+            },
+        };
+        assert!(matches!(sm.apply(&entry), ClusterResponse::Error(_)));
+        // Lease unchanged
+        assert_eq!(sm.ts_lease().unwrap().holder_node_id, 1);
+    }
+
+    #[test]
+    fn renew_wrong_epoch_is_error() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [ClusterCommand::GrantTsLease {
+                epoch: 5,
+                holder_node_id: 1,
+                ceiling_ns: 100,
+            }],
+        );
+        let entry = LogEntry {
+            index: sm.last_applied + 1,
+            command: ClusterCommand::RenewTsLease {
+                epoch: 4,
+                ceiling_ns: 200,
+            },
+        };
+        assert!(matches!(sm.apply(&entry), ClusterResponse::Error(_)));
+    }
+
+    #[test]
+    fn renew_ceiling_cannot_go_backwards() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [ClusterCommand::GrantTsLease {
+                epoch: 1,
+                holder_node_id: 1,
+                ceiling_ns: 1_000,
+            }],
+        );
+        let entry = LogEntry {
+            index: sm.last_applied + 1,
+            command: ClusterCommand::RenewTsLease {
+                epoch: 1,
+                ceiling_ns: 500,
+            },
+        };
+        assert!(matches!(sm.apply(&entry), ClusterResponse::Error(_)));
+        assert_eq!(sm.ts_lease().unwrap().ceiling_ns, 1_000);
+    }
+
+    #[test]
+    fn ts_lease_round_trips_through_snapshot() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [ClusterCommand::GrantTsLease {
+                epoch: 9,
+                holder_node_id: 42,
+                ceiling_ns: 12_345,
+            }],
+        );
+        let snap = sm.snapshot();
+        let lease = snap.ts_lease.unwrap();
+        assert_eq!(lease.epoch, 9);
+        assert_eq!(lease.holder_node_id, 42);
+        assert_eq!(lease.ceiling_ns, 12_345);
     }
 
     #[test]

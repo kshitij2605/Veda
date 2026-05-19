@@ -4548,6 +4548,7 @@ dependencies = [
  "tracing",
  "uuid",
  "veda-core",
+ "veda-time",
 ]
 
 [[package]]
@@ -4572,6 +4573,7 @@ dependencies = [
  "async-nats",
  "axum 0.8.8",
  "base64",
+ "bytes",
  "futures",
  "jsonwebtoken",
  "metrics",
@@ -4591,8 +4593,10 @@ dependencies = [
  "veda-coordinator",
  "veda-core",
  "veda-index",
+ "veda-log",
  "veda-query",
  "veda-storage",
+ "veda-time",
  "zip",
 ]
 
@@ -4612,6 +4616,22 @@ dependencies = [
  "thiserror 2.0.18",
  "veda-core",
  "veda-storage",
+]
+
+[[package]]
+name = "veda-log"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "bytes",
+ "crc32fast",
+ "futures",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "veda-time",
 ]
 
 [[package]]
@@ -4676,6 +4696,17 @@ dependencies = [
  "tracing",
  "uuid",
  "veda-core",
+]
+
+[[package]]
+name = "veda-time"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

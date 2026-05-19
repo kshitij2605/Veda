@@ -86,6 +86,14 @@ pub struct Invocation {
     pub client_id: usize,
     pub op: OpKind,
     pub outcome: OpOutcome,
+    /// HLC commit_ts the server assigned to the operation, when
+    /// the server returns one. Phase A scaffolding — the harness
+    /// records `None` today; Phase C plumbs the commit_ts back
+    /// through the REST response so this becomes the witness used
+    /// by the Phase G snapshot-isolation checker. See
+    /// `.claude/plans/structured-mixing-turing.md`.
+    #[serde(default)]
+    pub commit_ts: Option<u128>,
 }
 
 #[derive(Debug, Default)]
@@ -122,6 +130,7 @@ impl History {
             client_id,
             op,
             outcome,
+            commit_ts: None,
         };
         self.invocations.lock().await.push(inv);
     }
@@ -402,6 +411,7 @@ mod tests {
             client_id: 0,
             op,
             outcome,
+            commit_ts: None,
         }
     }
 

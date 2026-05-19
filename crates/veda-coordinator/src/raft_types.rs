@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use veda_time::TsLease;
 
 // ---------------------------------------------------------------------------
 // ClusterCommand — commands that modify cluster state
@@ -132,6 +133,28 @@ pub enum ClusterCommand {
     AbortTxn {
         txn_id: String,
     },
+
+    // -- TSO lease (Phase A scaffolding — see
+    //    `.claude/plans/structured-mixing-turing.md`)
+    //
+    // The metadata Raft is the source of truth for which node holds
+    // the TSO right-to-vend. A lease is `(epoch, holder, ceiling)`.
+    // Phase A applies these commands on the SM but no consumer reads
+    // the lease state yet — Phase C wires `MetaLeasedTso` to it.
+    /// Grant the TSO lease to `holder` at `epoch`, valid until
+    /// `ceiling_ns`. Rejected if `epoch` does not strictly exceed
+    /// the current lease's epoch.
+    GrantTsLease {
+        epoch: u64,
+        holder_node_id: u64,
+        ceiling_ns: u64,
+    },
+    /// Extend the current lease's ceiling. Rejected unless `epoch`
+    /// equals the current lease's epoch.
+    RenewTsLease {
+        epoch: u64,
+        ceiling_ns: u64,
+    },
 }
 
 impl fmt::Display for ClusterCommand {
@@ -161,6 +184,12 @@ impl fmt::Display for ClusterCommand {
             }
             Self::CommitTxn { txn_id } => write!(f, "CommitTxn({txn_id})"),
             Self::AbortTxn { txn_id } => write!(f, "AbortTxn({txn_id})"),
+            Self::GrantTsLease { epoch, holder_node_id, .. } => {
+                write!(f, "GrantTsLease(epoch={epoch}, holder={holder_node_id})")
+            }
+            Self::RenewTsLease { epoch, ceiling_ns } => {
+                write!(f, "RenewTsLease(epoch={epoch}, ceiling_ns={ceiling_ns})")
+            }
         }
     }
 }
@@ -231,6 +260,11 @@ pub struct ClusterState {
     /// round-trip.
     #[serde(default)]
     pub open_txns: Vec<String>,
+    /// Current TSO lease, if granted. Phase A populates this via
+    /// `GrantTsLease` / `RenewTsLease`; Phase C consumers read it
+    /// to decide whether to honour requests from a given holder.
+    #[serde(default)]
+    pub ts_lease: Option<TsLease>,
     /// Index of the last applied log entry (0 = none applied).
     pub last_applied_index: u64,
 }
