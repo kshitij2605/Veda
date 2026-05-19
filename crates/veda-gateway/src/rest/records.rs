@@ -357,9 +357,24 @@ pub async fn list_records(
     Ok(Json(ListRecordsResponse { records, total }))
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct GetRecordQuery {
+    /// When true and the gateway is in Raft mode, read the
+    /// record from the Raft state machine after a barrier
+    /// `Noop` client_write. This gives linearisable
+    /// semantics: the returned value reflects every Insert
+    /// that committed before this GET arrived. Without the
+    /// flag, the read goes straight to the local SegmentManager
+    /// — fast but bounded by the reconcile interval on
+    /// followers.
+    #[serde(default)]
+    pub linearisable: bool,
+}
+
 pub async fn get_record(
     State(state): State<AppState>,
     Path((name, id_str)): Path<(String, String)>,
+    Query(q): Query<GetRecordQuery>,
 ) -> Result<Json<GetRecordResponse>, (StatusCode, Json<ErrorResponse>)> {
     let record_id: Uuid = id_str.parse().map_err(|_| {
         (
@@ -369,6 +384,59 @@ pub async fn get_record(
             }),
         )
     })?;
+
+    // Linearisable read path. Issue a Noop barrier through
+    // Raft, then consult the state machine's records map. This
+    // bypasses the local SegmentManager (which lags behind the
+    // Raft state by up to VEDA_RAFT_RECONCILE_INTERVAL_SECS on
+    // followers) and gives strict linearisability at the cost
+    // of one Raft round trip per read.
+    if q.linearisable {
+        let raft_guard = state.inner.raft.read().await;
+        if let Some(coord) = raft_guard.as_ref() {
+            let cs = coord.linearisable_query_state().await.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("linearisable read: {e}"),
+                    }),
+                )
+            })?;
+            if !cs.collections.contains_key(&name) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: format!("collection '{name}' not found"),
+                    }),
+                ));
+            }
+            if let Some(records) = cs.records.get(&name) {
+                if let Some(rjson) = records.get(&record_id.to_string()) {
+                    let rec: veda_core::record::Record = serde_json::from_str(rjson)
+                        .map_err(|e| {
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(ErrorResponse {
+                                    error: format!(
+                                        "raft record deserialise: {e}"
+                                    ),
+                                }),
+                            )
+                        })?;
+                    return Ok(Json(record_to_response(&rec)));
+                }
+            }
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("record '{record_id}' not found"),
+                }),
+            ));
+        }
+        // Raft not configured — fall through to the local path
+        // (linearisability flag is effectively a no-op when
+        // there's only one node).
+    }
 
     // Check collection exists
     {
