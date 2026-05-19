@@ -228,13 +228,19 @@ impl AppState {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
-        match RaftCoordinator::start_single_node(node_id).await {
+        // Durable storage path under {data_dir}/raft. When this dir
+        // already contains a log/state, the coordinator recovers
+        // instead of re-initialising.
+        let raft_dir = self.inner.data_dir.join("raft");
+        let res = RaftCoordinator::start_single_node_with_dir(node_id, &raft_dir).await;
+        match res {
             Ok(coord) => {
                 let mut guard = self.inner.raft.write().await;
                 *guard = Some(coord);
                 tracing::info!(
                     node_id,
-                    "raft coordinator started in single-node mode"
+                    raft_dir = %raft_dir.display(),
+                    "raft coordinator started (single-node, durable)",
                 );
             }
             Err(e) => {

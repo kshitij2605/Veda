@@ -1,4 +1,4 @@
-//! In-memory storage for openraft.
+//! Storage for openraft.
 //!
 //! - [`MemLogState`] — log entries, vote, purge marker.
 //! - [`MemStateMachine`] — last-applied, membership, current snapshot.
@@ -10,15 +10,27 @@
 //! - [`MemSnapshotBuilder`] — companion [`openraft::RaftSnapshotBuilder`]
 //!   that clones the state machine to build a snapshot off the apply path.
 //!
-//! Storage is in-memory only — durability lives in the next pass (file or
-//! WAL-backed log + vote). The trait surface is complete enough for
-//! single-node bootstrap, the `Adaptor` round-trip, and the upstream
-//! `StorageHelper::get_initial_state` flow that `Raft::new` exercises.
+//! ## Persistence
+//!
+//! Default: in-memory only (legacy). When
+//! [`MemRaftStorage::with_dir`] is used, every mutation
+//! write-through to two files under the given directory:
+//!
+//!   {dir}/raft_log.bin   — bincode-serialised LogInnerData
+//!   {dir}/raft_state.bin — bincode-serialised StateInnerData
+//!
+//! Atomic file rewrite uses the standard write-tmp-then-rename
+//! pattern with fsync on the file before rename. On startup,
+//! `with_dir` reads both files and reconstructs the in-memory
+//! state. This is the smallest honest durable layer we can ship in
+//! one session: not a per-entry WAL, but correct under "kill -9 +
+//! restart" between operations.
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::io::Cursor;
 use std::ops::{Bound, RangeBounds};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openraft::storage::{LogState, Snapshot};
@@ -34,8 +46,53 @@ use crate::raft::{NodeId, VedaSnapshot, VedaTypeConfig};
 use crate::raft_types::ClusterResponse;
 
 // ---------------------------------------------------------------------------
-// MemLogState — in-memory log entries + vote + purge marker.
+// Atomic write helper. Writes `bytes` to `{path}.tmp`, fsyncs the file,
+// then renames to `path`. The rename is atomic on POSIX. We do this on a
+// blocking task so the Tokio runtime isn't stalled on a syscall.
 // ---------------------------------------------------------------------------
+
+fn atomic_write_blocking(path: &Path, bytes: Vec<u8>) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
+async fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> Result<(), std::io::Error> {
+    tokio::task::spawn_blocking(move || atomic_write_blocking(&path, bytes))
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+}
+
+// ---------------------------------------------------------------------------
+// MemLogState — log entries + vote + purge marker. In-memory by default;
+// optionally write-through to a single bincode file under {dir}/raft_log.bin.
+// ---------------------------------------------------------------------------
+
+/// On-disk shape — the parts of `LogInner` we durably store. `Entry`,
+/// `LogId`, and `Vote` already implement `Serialize` via openraft's
+/// `serde` feature, so the bincode round-trip is mechanical.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LogPersistedData {
+    entries: BTreeMap<u64, Entry<VedaTypeConfig>>,
+    last_purged: Option<LogId<NodeId>>,
+    last_log_id: Option<LogId<NodeId>>,
+    vote: Option<Vote<NodeId>>,
+    committed: Option<LogId<NodeId>>,
+}
 
 #[derive(Debug, Default)]
 struct LogInner {
@@ -44,6 +101,38 @@ struct LogInner {
     last_log_id: Option<LogId<NodeId>>,
     vote: Option<Vote<NodeId>>,
     committed: Option<LogId<NodeId>>,
+    path: Option<PathBuf>,
+}
+
+impl LogInner {
+    fn to_persisted(&self) -> LogPersistedData {
+        LogPersistedData {
+            entries: self.entries.clone(),
+            last_purged: self.last_purged,
+            last_log_id: self.last_log_id,
+            vote: self.vote,
+            committed: self.committed,
+        }
+    }
+
+    /// Re-snapshot the log to disk. No-op when no path is configured.
+    /// Errors are tracing-logged but never bubbled — the in-memory copy
+    /// is already updated; a write failure means the next restart will
+    /// see slightly stale data, not a crash. (A proper WAL design would
+    /// fail-fast here; the simplification is conscious for v1.)
+    async fn persist(&self) {
+        let Some(path) = self.path.clone() else { return };
+        let bytes = match bincode::serialize(&self.to_persisted()) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(error = %e, "raft log serialise failed");
+                return;
+            }
+        };
+        if let Err(e) = atomic_write(path.clone(), bytes).await {
+            tracing::error!(error = %e, path = %path.display(), "raft log persist failed");
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,8 +145,48 @@ impl MemLogState {
         Self::default()
     }
 
+    /// Recover (or initialise) the log state from a directory. Reads
+    /// `{dir}/raft_log.bin` if it exists; otherwise starts empty. All
+    /// future mutations write-through to the same file.
+    pub async fn with_dir(dir: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("raft_log.bin");
+        let mut inner = LogInner::default();
+        inner.path = Some(path.clone());
+        if path.exists() {
+            let bytes = std::fs::read(&path)?;
+            match bincode::deserialize::<LogPersistedData>(&bytes) {
+                Ok(d) => {
+                    inner.entries = d.entries;
+                    inner.last_purged = d.last_purged;
+                    inner.last_log_id = d.last_log_id;
+                    inner.vote = d.vote;
+                    inner.committed = d.committed;
+                    tracing::info!(
+                        path = %path.display(),
+                        last_log_id = ?inner.last_log_id,
+                        entries = inner.entries.len(),
+                        "raft log recovered from disk",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "raft log deserialise failed, starting empty",
+                    );
+                }
+            }
+        }
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+        })
+    }
+
     pub async fn save_vote(&self, vote: Vote<NodeId>) {
-        self.inner.write().await.vote = Some(vote);
+        let mut guard = self.inner.write().await;
+        guard.vote = Some(vote);
+        guard.persist().await;
     }
 
     pub async fn read_vote(&self) -> Option<Vote<NodeId>> {
@@ -69,6 +198,7 @@ impl MemLogState {
         let id = entry.log_id;
         guard.entries.insert(id.index, entry);
         guard.last_log_id = Some(id);
+        guard.persist().await;
     }
 
     pub async fn last_log_id(&self) -> Option<LogId<NodeId>> {
@@ -86,6 +216,7 @@ impl MemLogState {
         let mut guard = self.inner.write().await;
         guard.entries.retain(|&idx, _| idx < log_id.index);
         guard.last_log_id = guard.entries.iter().next_back().map(|(_, e)| e.log_id);
+        guard.persist().await;
     }
 
     /// Remove all entries with `index <= log_id.index` (post-snapshot compaction).
@@ -93,10 +224,13 @@ impl MemLogState {
         let mut guard = self.inner.write().await;
         guard.entries.retain(|&idx, _| idx > log_id.index);
         guard.last_purged = Some(log_id);
+        guard.persist().await;
     }
 
     pub async fn save_committed(&self, committed: Option<LogId<NodeId>>) {
-        self.inner.write().await.committed = committed;
+        let mut guard = self.inner.write().await;
+        guard.committed = committed;
+        guard.persist().await;
     }
 
     pub async fn read_committed(&self) -> Option<LogId<NodeId>> {
@@ -115,8 +249,17 @@ impl MemLogState {
 }
 
 // ---------------------------------------------------------------------------
-// MemStateMachine — wraps ClusterStateMachine.
+// MemStateMachine — wraps ClusterStateMachine. In-memory by default;
+// optionally write-through to {dir}/raft_state.bin.
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct StatePersistedData {
+    applied_log: Option<LogId<NodeId>>,
+    membership: StoredMembership<NodeId, BasicNode>,
+    state: crate::store::ClusterStateMachine,
+    current_snapshot: Option<StoredSnapshot>,
+}
 
 #[derive(Debug, Default)]
 struct StateInner {
@@ -124,6 +267,32 @@ struct StateInner {
     membership: StoredMembership<NodeId, BasicNode>,
     state: crate::store::ClusterStateMachine,
     current_snapshot: Option<StoredSnapshot>,
+    path: Option<PathBuf>,
+}
+
+impl StateInner {
+    fn to_persisted(&self) -> StatePersistedData {
+        StatePersistedData {
+            applied_log: self.applied_log,
+            membership: self.membership.clone(),
+            state: self.state.clone(),
+            current_snapshot: self.current_snapshot.clone(),
+        }
+    }
+
+    async fn persist(&self) {
+        let Some(path) = self.path.clone() else { return };
+        let bytes = match bincode::serialize(&self.to_persisted()) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(error = %e, "raft state serialise failed");
+                return;
+            }
+        };
+        if let Err(e) = atomic_write(path.clone(), bytes).await {
+            tracing::error!(error = %e, path = %path.display(), "raft state persist failed");
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +309,39 @@ pub struct MemStateMachine {
 impl MemStateMachine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub async fn with_dir(dir: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("raft_state.bin");
+        let mut inner = StateInner::default();
+        inner.path = Some(path.clone());
+        if path.exists() {
+            let bytes = std::fs::read(&path)?;
+            match bincode::deserialize::<StatePersistedData>(&bytes) {
+                Ok(d) => {
+                    inner.applied_log = d.applied_log;
+                    inner.membership = d.membership;
+                    inner.state = d.state;
+                    inner.current_snapshot = d.current_snapshot;
+                    tracing::info!(
+                        path = %path.display(),
+                        applied_log = ?inner.applied_log,
+                        "raft state machine recovered from disk",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "raft state deserialise failed, starting empty",
+                    );
+                }
+            }
+        }
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+        })
     }
 
     pub async fn applied_log(&self) -> Option<LogId<NodeId>> {
@@ -165,6 +367,7 @@ impl MemStateMachine {
         };
         let resp = guard.state.apply(&entry);
         guard.applied_log = Some(log_id);
+        guard.persist().await;
         resp
     }
 
@@ -207,6 +410,7 @@ impl MemStateMachine {
         guard.applied_log = snap.meta.last_log_id;
         guard.membership = snap.meta.last_membership.clone();
         guard.current_snapshot = Some(snap);
+        guard.persist().await;
         Ok(())
     }
 
@@ -219,6 +423,7 @@ impl MemStateMachine {
         let mut guard = self.inner.write().await;
         guard.state.skip_apply(log_id.index);
         guard.applied_log = Some(log_id);
+        guard.persist().await;
     }
 
     /// Record a Raft Membership entry. Updates `membership` + applied marker.
@@ -231,11 +436,14 @@ impl MemStateMachine {
         guard.state.skip_apply(log_id.index);
         guard.applied_log = Some(log_id);
         guard.membership = StoredMembership::new(Some(log_id), membership);
+        guard.persist().await;
     }
 
     /// Cache a snapshot as the current one. Used after `build_snapshot`.
     pub async fn set_current_snapshot(&self, snap: StoredSnapshot) {
-        self.inner.write().await.current_snapshot = Some(snap);
+        let mut guard = self.inner.write().await;
+        guard.current_snapshot = Some(snap);
+        guard.persist().await;
     }
 
     /// Lock-free read of the underlying `ClusterState`. Used by
@@ -262,6 +470,19 @@ pub struct MemRaftStorage {
 impl MemRaftStorage {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Recover a `MemRaftStorage` from a directory. Reads
+    /// `{dir}/raft_log.bin` and `{dir}/raft_state.bin` if they exist;
+    /// future mutations write-through to those same files.
+    pub async fn with_dir(dir: &Path) -> std::io::Result<Self> {
+        let log = MemLogState::with_dir(dir).await?;
+        let sm = MemStateMachine::with_dir(dir).await?;
+        Ok(Self {
+            log,
+            sm,
+            snapshot_counter: Arc::new(RwLock::new(0)),
+        })
     }
 }
 
