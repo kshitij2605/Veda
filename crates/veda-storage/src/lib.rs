@@ -13,6 +13,7 @@ pub mod inverted_index;
 pub mod range_index;
 pub mod cold_storage;
 pub mod multivector_storage;
+pub mod mvcc;
 pub mod segment;
 pub mod segment_manager;
 pub mod sparse_storage;
