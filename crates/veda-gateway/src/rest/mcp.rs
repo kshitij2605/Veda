@@ -94,13 +94,14 @@ fn err(id: serde_json::Value, code: i32, message: impl Into<String>) -> JsonRpcR
 
 pub async fn handle_mcp(
     State(state): State<AppState>,
+    crate::tenant::Tenant(tenant): crate::tenant::Tenant,
     Json(req): Json<JsonRpcRequest>,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
     let id = req.id.unwrap_or(serde_json::Value::Null);
     let resp = match req.method.as_str() {
         "initialize" => handle_initialize(),
         "tools/list" => handle_tools_list(),
-        "tools/call" => handle_tools_call(&state, req.params).await,
+        "tools/call" => handle_tools_call(&state, &tenant, req.params).await,
         "ping" => Ok(serde_json::json!({})),
         other => Err((-32601, format!("method not found: {other}"))),
     };
@@ -189,6 +190,7 @@ fn handle_tools_list() -> Result<serde_json::Value, (i32, String)> {
 
 async fn handle_tools_call(
     state: &AppState,
+    tenant: &crate::tenant::TenantId,
     params: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, (i32, String)> {
     let params = params.ok_or((-32602, "missing params".into()))?;
@@ -199,10 +201,10 @@ async fn handle_tools_call(
         .unwrap_or_else(|| serde_json::json!({}));
 
     let content = match tool_name {
-        "list_collections" => tool_list_collections(state).await?,
-        "describe_collection" => tool_describe_collection(state, &args).await?,
-        "search" => tool_search(state, &args).await?,
-        "upsert_record" => tool_upsert_record(state, &args).await?,
+        "list_collections" => tool_list_collections(state, tenant).await?,
+        "describe_collection" => tool_describe_collection(state, tenant, &args).await?,
+        "search" => tool_search(state, tenant, &args).await?,
+        "upsert_record" => tool_upsert_record(state, tenant, &args).await?,
         other => return Err((-32601, format!("unknown tool: {other}"))),
     };
 
@@ -216,29 +218,37 @@ async fn handle_tools_call(
 // Tool implementations
 // ---------------------------------------------------------------------------
 
-async fn tool_list_collections(state: &AppState) -> Result<serde_json::Value, (i32, String)> {
+async fn tool_list_collections(
+    state: &AppState,
+    tenant: &crate::tenant::TenantId,
+) -> Result<serde_json::Value, (i32, String)> {
     let schemas = state.inner.schemas.read().await;
-    let names: Vec<String> = schemas.keys().cloned().collect();
+    let names: Vec<String> = schemas
+        .keys()
+        .filter_map(|k| crate::tenant::strip_prefix(tenant, k).map(str::to_owned))
+        .collect();
     Ok(serde_json::json!({ "collections": names, "count": names.len() }))
 }
 
 async fn tool_describe_collection(
     state: &AppState,
+    tenant: &crate::tenant::TenantId,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, (i32, String)> {
-    let name = args["name"]
+    let user_name = args["name"]
         .as_str()
         .ok_or((-32602, "name is required".into()))?;
+    let name = crate::tenant::scope(tenant, user_name);
     let schema = {
         let schemas = state.inner.schemas.read().await;
         schemas
-            .get(name)
+            .get(&name)
             .cloned()
-            .ok_or((-32602, format!("collection '{name}' not found")))?
+            .ok_or((-32602, format!("collection '{user_name}' not found")))?
     };
     let managers = state.inner.segment_managers.read().await;
     let total: u64 = managers
-        .get(name)
+        .get(&name)
         .map(|m| m.values().map(|sm| sm.total_records()).sum())
         .unwrap_or(0);
 
@@ -271,7 +281,7 @@ async fn tool_describe_collection(
         .collect();
 
     Ok(serde_json::json!({
-        "name": schema.name(),
+        "name": user_name,
         "fields": fields,
         "record_count": total,
         "shard_count": schema.shard_count(),
@@ -280,11 +290,14 @@ async fn tool_describe_collection(
 
 async fn tool_search(
     state: &AppState,
+    tenant: &crate::tenant::TenantId,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, (i32, String)> {
-    let collection = args["collection"]
+    let user_collection = args["collection"]
         .as_str()
         .ok_or((-32602, "collection is required".into()))?;
+    let collection = crate::tenant::scope(tenant, user_collection);
+    let collection = collection.as_str();
     let query = args["query"]
         .as_str()
         .ok_or((-32602, "query is required".into()))?;
@@ -374,11 +387,14 @@ async fn tool_search(
 
 async fn tool_upsert_record(
     state: &AppState,
+    tenant: &crate::tenant::TenantId,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, (i32, String)> {
-    let collection = args["collection"]
+    let user_collection = args["collection"]
         .as_str()
         .ok_or((-32602, "collection is required".into()))?;
+    let collection = crate::tenant::scope(tenant, user_collection);
+    let collection = collection.as_str();
     let raw = args["record"]
         .as_object()
         .ok_or((-32602, "record must be an object".into()))?;

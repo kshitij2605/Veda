@@ -16,6 +16,7 @@ use veda_storage::blob_store::{ArcBlobStore, BlobStore};
 
 use super::records::rebuild_executors;
 use super::state::AppState;
+use crate::tenant::{self, Tenant};
 
 // ── Response types ──────────────────────────────────────────────────────
 
@@ -64,10 +65,11 @@ pub struct OcrError {
 #[instrument(name = "process_document", skip(state, multipart), fields(collection = %name))]
 pub async fn process_document(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<ProcessDocumentResponse>), (StatusCode, Json<OcrErrorResponse>)> {
-    // Check that the collection exists.
+    let name = tenant::scope(&tenant, &name);
     let schema = {
         let schemas = state.inner.schemas.read().await;
         schemas.get(&name).cloned().ok_or_else(|| {
@@ -176,10 +178,11 @@ pub async fn process_document(
 #[instrument(name = "process_documents_batch", skip(state, multipart), fields(collection = %name))]
 pub async fn process_documents_batch(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<BatchProcessResponse>), (StatusCode, Json<OcrErrorResponse>)> {
-    // Check that the collection exists.
+    let name = tenant::scope(&tenant, &name);
     let schema = {
         let schemas = state.inner.schemas.read().await;
         schemas.get(&name).cloned().ok_or_else(|| {

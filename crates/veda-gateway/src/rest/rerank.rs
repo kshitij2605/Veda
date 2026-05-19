@@ -24,6 +24,7 @@ use veda_core::record::FieldValue;
 
 use super::collections::ErrorResponse;
 use super::state::AppState;
+use crate::tenant::{self, Tenant};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RerankConfig {
@@ -75,9 +76,11 @@ pub struct RerankHit {
 
 pub async fn rerank(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
     Json(req): Json<RerankRequest>,
 ) -> Result<Json<RerankResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let name = tenant::scope(&tenant, &name);
     let start = Instant::now();
 
     // Decide what we're reranking: literal documents or fetched-by-id.

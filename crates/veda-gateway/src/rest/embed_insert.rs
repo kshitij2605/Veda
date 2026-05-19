@@ -16,6 +16,7 @@ use veda_core::vector::DenseVector;
 use super::collections::ErrorResponse;
 use super::records::rebuild_executors;
 use super::state::AppState;
+use crate::tenant::{self, Tenant};
 
 // ── Request / Response types ─────────────────────────────────────────────
 
@@ -49,9 +50,11 @@ pub struct RecordError {
 #[instrument(name = "embed_insert", skip(state, req), fields(collection = %name, record_count = req.records.len()))]
 pub async fn embed_insert(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
     Json(req): Json<EmbedInsertRequest>,
 ) -> Result<(StatusCode, Json<EmbedInsertResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let name = tenant::scope(&tenant, &name);
     let start = Instant::now();
     let schema = {
         let schemas = state.inner.schemas.read().await;

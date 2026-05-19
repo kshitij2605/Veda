@@ -12,6 +12,7 @@ use veda_query::local_shard::LocalShardSearcher;
 use veda_storage::segment_manager::SegmentManager;
 
 use super::state::AppState;
+use crate::tenant::{self, Tenant};
 
 /// 307 Temporary Redirect pointing at `{leader_base}{path}`.
 /// Used by mutating handlers when this node is a Raft follower.
@@ -166,24 +167,22 @@ pub struct ErrorResponse {
 
 pub async fn create_collection(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Json(req): Json<CreateCollectionRequest>,
 ) -> axum::response::Response {
-    // Follower-to-leader 307: if this node is a Raft follower
-    // and we know the leader's REST address, redirect the
-    // client there. Saves a forward-and-back round trip
-    // through openraft for every mutation.
     if let Some(leader_url) = state.leader_rest_address().await {
         return raft_redirect(&leader_url, "/v1/collections");
     }
-    create_collection_inner(state, req).await
+    create_collection_inner(state, tenant, req).await
 }
 
 async fn create_collection_inner(
     state: AppState,
+    tenant: tenant::TenantId,
     req: CreateCollectionRequest,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    match create_collection_impl(state, req).await {
+    match create_collection_impl(state, tenant, req).await {
         Ok((status, body)) => (status, body).into_response(),
         Err((status, body)) => (status, body).into_response(),
     }
@@ -191,10 +190,12 @@ async fn create_collection_inner(
 
 async fn create_collection_impl(
     state: AppState,
+    tenant: tenant::TenantId,
     req: CreateCollectionRequest,
 ) -> Result<(StatusCode, Json<CreateCollectionResponse>), (StatusCode, Json<ErrorResponse>)> {
-    // Validate name
-    if req.name.trim().is_empty() {
+    // Validate user-facing name first.
+    let user_name = req.name.trim();
+    if user_name.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -202,29 +203,29 @@ async fn create_collection_impl(
             }),
         ));
     }
+    // Scope the name to the caller's tenant. Two tenants with the
+    // same user-facing name get distinct collections internally.
+    let scoped_name = tenant::scope(&tenant, user_name);
 
     // Check for duplicate — in-memory state OR an existing on-disk
-    // collection directory with our schema marker. The on-disk check
-    // closes Gap D: previously, after a Veda restart with empty
-    // in-memory state, POST /v1/collections silently orphaned the
-    // existing sealed segments under data_dir/{name}/ by overwriting
-    // the segment-manager view of the world.
-    let collection_dir = state.inner.data_dir.join(&req.name);
+    // collection directory with our schema marker.
+    let collection_dir = state.inner.data_dir.join(&scoped_name);
     let schema_marker = collection_dir.join("collection.json");
     {
         let schemas = state.inner.schemas.read().await;
-        if schemas.contains_key(&req.name) || schema_marker.exists() {
+        if schemas.contains_key(&scoped_name) || schema_marker.exists() {
             return Err((
                 StatusCode::CONFLICT,
                 Json(ErrorResponse {
-                    error: format!("collection '{}' already exists", req.name),
+                    error: format!("collection '{user_name}' already exists"),
                 }),
             ));
         }
     }
 
-    // Build schema
-    let mut builder = CollectionSchema::builder(&req.name)
+    // Build schema under the scoped name. schema.name() will return
+    // the scoped name; responses strip it back to user_name.
+    let mut builder = CollectionSchema::builder(&scoped_name)
         .shard_count(req.shard_count)
         .replication_factor(req.replication_factor);
     if let Some(fmt) = req.stored_format.as_deref() {
@@ -291,17 +292,13 @@ async fn create_collection_impl(
     })?;
 
     // Raft mode: route the creation through the consensus log
-    // BEFORE materializing locally. coord.execute returns once
-    // the entry is committed AND applied; on every node the
-    // ClusterStateMachine then carries the new collection.
-    // After that, this node materializes the local Veda objects
-    // (segment managers, executor). Followers reconcile via the
-    // background task spawned in start_server.
+    // BEFORE materializing locally. Raft sees the scoped name —
+    // it stays tenant-oblivious; the gateway is what binds tenants.
     {
         let raft_guard = state.inner.raft.read().await;
         if let Some(coord) = raft_guard.as_ref() {
             let cmd = veda_coordinator::raft_types::ClusterCommand::CreateCollection {
-                name: req.name.clone(),
+                name: scoped_name.clone(),
                 schema_json: String::from_utf8(schema_json.clone()).unwrap_or_default(),
             };
             if let Err(e) = coord.execute(cmd).await {
@@ -312,9 +309,6 @@ async fn create_collection_impl(
                     }),
                 ));
             }
-            // Fall through to local materialization — same code
-            // path the non-Raft mode uses, and the same code path
-            // the periodic reconcile task uses on followers.
         }
     }
 
@@ -326,7 +320,7 @@ async fn create_collection_impl(
     Ok((
         StatusCode::CREATED,
         Json(CreateCollectionResponse {
-            name: req.name,
+            name: user_name.to_owned(),
             status: "created".into(),
         }),
     ))
@@ -582,14 +576,17 @@ pub async fn reconcile_collections_from_raft(
 
 pub async fn list_collections(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
 ) -> Json<ListCollectionsResponse> {
     let schemas = state.inner.schemas.read().await;
     let collections = schemas
-        .values()
-        .map(|s| CollectionSummary {
-            name: s.name().to_owned(),
-            field_count: s.fields().len(),
-            shard_count: s.shard_count(),
+        .iter()
+        .filter_map(|(key, s)| {
+            tenant::strip_prefix(&tenant, key).map(|user_name| CollectionSummary {
+                name: user_name.to_owned(),
+                field_count: s.fields().len(),
+                shard_count: s.shard_count(),
+            })
         })
         .collect();
 
@@ -598,10 +595,12 @@ pub async fn list_collections(
 
 pub async fn describe_collection(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
 ) -> Result<Json<DescribeCollectionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let scoped = tenant::scope(&tenant, &name);
     let schemas = state.inner.schemas.read().await;
-    let schema = schemas.get(&name).ok_or_else(|| {
+    let schema = schemas.get(&scoped).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -617,7 +616,7 @@ pub async fn describe_collection(
         .collect();
 
     Ok(Json(DescribeCollectionResponse {
-        name: schema.name().to_owned(),
+        name,
         fields,
         shard_count: schema.shard_count(),
         replication_factor: schema.replication_factor(),
@@ -626,13 +625,14 @@ pub async fn describe_collection(
 
 pub async fn drop_collection(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
 ) -> axum::response::Response {
     if let Some(leader_url) = state.leader_rest_address().await {
         return raft_redirect(&leader_url, &format!("/v1/collections/{name}"));
     }
     use axum::response::IntoResponse;
-    match drop_collection_impl(state, name).await {
+    match drop_collection_impl(state, tenant, name).await {
         Ok(body) => body.into_response(),
         Err((status, body)) => (status, body).into_response(),
     }
@@ -640,17 +640,19 @@ pub async fn drop_collection(
 
 async fn drop_collection_impl(
     state: AppState,
+    tenant: tenant::TenantId,
     name: String,
 ) -> Result<Json<DropCollectionResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Raft mode: submit the drop to the consensus log first.
     // After the entry commits + applies on every node, the local
     // reconcile (here or in the periodic task) tears down
     // segment managers + executors.
+    let scoped = tenant::scope(&tenant, &name);
     {
         let raft_guard = state.inner.raft.read().await;
         if let Some(coord) = raft_guard.as_ref() {
             let cmd = veda_coordinator::raft_types::ClusterCommand::DropCollection {
-                name: name.clone(),
+                name: scoped.clone(),
             };
             if let Err(e) = coord.execute(cmd).await {
                 return Err((
@@ -665,7 +667,7 @@ async fn drop_collection_impl(
 
     let removed = {
         let mut schemas = state.inner.schemas.write().await;
-        schemas.remove(&name)
+        schemas.remove(&scoped)
     };
 
     if removed.is_none() {
@@ -677,25 +679,20 @@ async fn drop_collection_impl(
         ));
     }
 
-    // Clean up segment managers and executors
     {
         let mut managers = state.inner.segment_managers.write().await;
-        managers.remove(&name);
+        managers.remove(&scoped);
     }
     {
         let mut executors = state.inner.query_executors.write().await;
-        executors.remove(&name);
+        executors.remove(&scoped);
     }
 
-    // Remove the on-disk collection dir so a subsequent POST with the
-    // same name doesn't trip the dedup guard and so disk space is
-    // actually reclaimed.
-    let collection_dir = state.inner.data_dir.join(&name);
+    let collection_dir = state.inner.data_dir.join(&scoped);
     if collection_dir.exists() {
         let _ = std::fs::remove_dir_all(&collection_dir);
     }
 
-    // Update active collections gauge.
     let collection_count = {
         let schemas = state.inner.schemas.read().await;
         schemas.len()
