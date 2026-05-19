@@ -44,6 +44,7 @@ use tokio::sync::RwLock;
 
 use crate::raft::{NodeId, VedaSnapshot, VedaTypeConfig};
 use crate::raft_types::ClusterResponse;
+use crate::raft_wal::{WalLog, WalRecord};
 
 // ---------------------------------------------------------------------------
 // Atomic write helper. Writes `bytes` to `{path}.tmp`, fsyncs the file,
@@ -77,6 +78,39 @@ async fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> Result<(), std::io::Erro
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
 }
 
+/// Apply one WAL record to the in-memory LogInner during recovery.
+/// The order matters — recovery replays records in append order so
+/// later truncates/purges win over earlier entries.
+fn apply_wal_record_to(inner: &mut LogInner, record: WalRecord) {
+    match record {
+        WalRecord::Entry(e) => {
+            let id = e.log_id;
+            inner.entries.insert(id.index, e);
+            // last_log_id always advances to the latest index seen.
+            // Truncate may roll it back later in the replay.
+            inner.last_log_id = Some(id);
+        }
+        WalRecord::Truncate(log_id) => {
+            inner.entries.retain(|&idx, _| idx < log_id.index);
+            inner.last_log_id = inner
+                .entries
+                .iter()
+                .next_back()
+                .map(|(_, e)| e.log_id);
+        }
+        WalRecord::Purge(log_id) => {
+            inner.entries.retain(|&idx, _| idx > log_id.index);
+            inner.last_purged = Some(log_id);
+        }
+        WalRecord::Committed(lid) => {
+            inner.committed = Some(lid);
+        }
+        WalRecord::Vote(v) => {
+            inner.vote = Some(v);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MemLogState — log entries + vote + purge marker. In-memory by default;
 // optionally write-through to a single bincode file under {dir}/raft_log.bin.
@@ -101,36 +135,21 @@ struct LogInner {
     last_log_id: Option<LogId<NodeId>>,
     vote: Option<Vote<NodeId>>,
     committed: Option<LogId<NodeId>>,
-    path: Option<PathBuf>,
+    /// When `Some`, mutations append a WAL record before returning.
+    /// The WAL replaces the old "rewrite the entire log on every
+    /// mutation" approach — O(N²) bytes written → O(N).
+    wal: Option<WalLog>,
 }
 
 impl LogInner {
-    fn to_persisted(&self) -> LogPersistedData {
-        LogPersistedData {
-            entries: self.entries.clone(),
-            last_purged: self.last_purged,
-            last_log_id: self.last_log_id,
-            vote: self.vote,
-            committed: self.committed,
-        }
-    }
-
-    /// Re-snapshot the log to disk. No-op when no path is configured.
-    /// Errors are tracing-logged but never bubbled — the in-memory copy
-    /// is already updated; a write failure means the next restart will
-    /// see slightly stale data, not a crash. (A proper WAL design would
-    /// fail-fast here; the simplification is conscious for v1.)
-    async fn persist(&self) {
-        let Some(path) = self.path.clone() else { return };
-        let bytes = match bincode::serialize(&self.to_persisted()) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::error!(error = %e, "raft log serialise failed");
-                return;
-            }
-        };
-        if let Err(e) = atomic_write(path.clone(), bytes).await {
-            tracing::error!(error = %e, path = %path.display(), "raft log persist failed");
+    /// Append a record to the WAL. No-op when no WAL is configured
+    /// (legacy in-memory mode). Errors here are fatal — losing a
+    /// log/vote append breaks Raft invariants. The caller is
+    /// expected to crash; we just log + return.
+    async fn wal_append(&self, record: WalRecord) {
+        let Some(wal) = &self.wal else { return };
+        if let Err(e) = wal.append(&record).await {
+            tracing::error!(error = %e, "raft WAL append failed — log durability is broken");
         }
     }
 }
@@ -145,39 +164,56 @@ impl MemLogState {
         Self::default()
     }
 
-    /// Recover (or initialise) the log state from a directory. Reads
-    /// `{dir}/raft_log.bin` if it exists; otherwise starts empty. All
-    /// future mutations write-through to the same file.
+    /// Recover (or initialise) the log state from a directory. Opens
+    /// (creating if needed) `{dir}/raft_log.wal` and replays it to
+    /// rebuild the in-memory log. Each subsequent mutation appends
+    /// one WAL record.
+    ///
+    /// Compatible with the previous snapshot format: if a
+    /// `raft_log.bin` is present (from before the WAL landed), it's
+    /// read as a one-time migration, then renamed to `.legacy` so
+    /// the next boot uses only the WAL.
     pub async fn with_dir(dir: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let path = dir.join("raft_log.bin");
         let mut inner = LogInner::default();
-        inner.path = Some(path.clone());
-        if path.exists() {
-            let bytes = std::fs::read(&path)?;
-            match bincode::deserialize::<LogPersistedData>(&bytes) {
-                Ok(d) => {
-                    inner.entries = d.entries;
-                    inner.last_purged = d.last_purged;
-                    inner.last_log_id = d.last_log_id;
-                    inner.vote = d.vote;
-                    inner.committed = d.committed;
-                    tracing::info!(
-                        path = %path.display(),
-                        last_log_id = ?inner.last_log_id,
-                        entries = inner.entries.len(),
-                        "raft log recovered from disk",
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        path = %path.display(),
-                        "raft log deserialise failed, starting empty",
-                    );
-                }
+
+        // One-time migration from the legacy snapshot file.
+        let legacy = dir.join("raft_log.bin");
+        if legacy.exists() {
+            let bytes = std::fs::read(&legacy)?;
+            if let Ok(d) = bincode::deserialize::<LogPersistedData>(&bytes) {
+                inner.entries = d.entries;
+                inner.last_purged = d.last_purged;
+                inner.last_log_id = d.last_log_id;
+                inner.vote = d.vote;
+                inner.committed = d.committed;
+                tracing::info!(
+                    legacy = %legacy.display(),
+                    entries = inner.entries.len(),
+                    "raft log migrated from legacy snapshot to WAL",
+                );
             }
+            // Rename so the migration is one-shot.
+            let _ = std::fs::rename(&legacy, dir.join("raft_log.bin.legacy"));
         }
+
+        // Open the WAL and replay any records it already has.
+        let wal = WalLog::open(dir)?;
+        let mut wal_record_count = 0usize;
+        for record in wal.replay().await? {
+            wal_record_count += 1;
+            apply_wal_record_to(&mut inner, record);
+        }
+        if wal_record_count > 0 {
+            tracing::info!(
+                wal_records = wal_record_count,
+                entries = inner.entries.len(),
+                last_log_id = ?inner.last_log_id,
+                "raft WAL replayed",
+            );
+        }
+        inner.wal = Some(wal);
+
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),
         })
@@ -186,7 +222,7 @@ impl MemLogState {
     pub async fn save_vote(&self, vote: Vote<NodeId>) {
         let mut guard = self.inner.write().await;
         guard.vote = Some(vote);
-        guard.persist().await;
+        guard.wal_append(WalRecord::Vote(vote)).await;
     }
 
     pub async fn read_vote(&self) -> Option<Vote<NodeId>> {
@@ -196,9 +232,9 @@ impl MemLogState {
     pub async fn append_entry(&self, entry: Entry<VedaTypeConfig>) {
         let mut guard = self.inner.write().await;
         let id = entry.log_id;
-        guard.entries.insert(id.index, entry);
+        guard.entries.insert(id.index, entry.clone());
         guard.last_log_id = Some(id);
-        guard.persist().await;
+        guard.wal_append(WalRecord::Entry(entry)).await;
     }
 
     pub async fn last_log_id(&self) -> Option<LogId<NodeId>> {
@@ -216,7 +252,7 @@ impl MemLogState {
         let mut guard = self.inner.write().await;
         guard.entries.retain(|&idx, _| idx < log_id.index);
         guard.last_log_id = guard.entries.iter().next_back().map(|(_, e)| e.log_id);
-        guard.persist().await;
+        guard.wal_append(WalRecord::Truncate(log_id)).await;
     }
 
     /// Remove all entries with `index <= log_id.index` (post-snapshot compaction).
@@ -224,13 +260,15 @@ impl MemLogState {
         let mut guard = self.inner.write().await;
         guard.entries.retain(|&idx, _| idx > log_id.index);
         guard.last_purged = Some(log_id);
-        guard.persist().await;
+        guard.wal_append(WalRecord::Purge(log_id)).await;
     }
 
     pub async fn save_committed(&self, committed: Option<LogId<NodeId>>) {
         let mut guard = self.inner.write().await;
         guard.committed = committed;
-        guard.persist().await;
+        if let Some(lid) = committed {
+            guard.wal_append(WalRecord::Committed(lid)).await;
+        }
     }
 
     pub async fn read_committed(&self) -> Option<LogId<NodeId>> {
