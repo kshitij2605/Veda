@@ -118,31 +118,43 @@ pub async fn list_nodes(
         (cols, shards)
     };
 
-    // Raft path: fan out over the cluster state from openraft, then
-    // overlay the "this node" details (status/uptime/shards) from
-    // local-process knowledge. Peer status remains "unknown" until
-    // the Tonic transport lands — we know membership but not health.
-    let raft_state = {
+    // Raft path: read the membership view (voters, current leader)
+    // from openraft directly. The peer address book has the
+    // host:port we dial each peer at; for the local node we use
+    // VEDA_NODE_ADDRESS. Peer status is "unknown" until we wire a
+    // cross-node /admin/health probe — deferred.
+    let raft_view = {
         let guard = state.inner.raft.read().await;
         match guard.as_ref() {
-            Some(c) => c.query_state().await.ok(),
+            Some(c) => {
+                let peers_book = c.peers().snapshot().await;
+                Some((c.membership_snapshot(), peers_book))
+            }
             None => None,
         }
     };
-    if let Some(cs) = raft_state {
+    if let Some((mem, peers_book)) = raft_view {
         let self_nid: u64 = std::env::var("VEDA_NODE_ID")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
-        let mut nodes: Vec<NodeInfo> = cs
-            .nodes
-            .into_iter()
-            .map(|(nid, info)| {
+        let nodes: Vec<NodeInfo> = mem
+            .voters
+            .iter()
+            .copied()
+            .map(|nid| {
                 let is_self = nid == self_nid;
+                let address = if is_self {
+                    self_addr_env.clone()
+                } else {
+                    peers_book.get(&nid).cloned().unwrap_or_default()
+                };
+                let is_leader = mem.current_leader == Some(nid);
+                let role = if is_leader { "leader" } else { "follower" };
                 NodeInfo {
                     id: format!("node-{nid}"),
-                    address: info.address,
-                    role: if is_self { "leader".into() } else { "follower".into() },
+                    address,
+                    role: role.into(),
                     status: if is_self { self_status.clone() } else { "unknown".into() },
                     version: "0.1.0".into(),
                     uptime_secs: if is_self { uptime_secs } else { 0 },
@@ -152,23 +164,6 @@ pub async fn list_nodes(
                 }
             })
             .collect();
-        // ClusterState.nodes is populated by RegisterNode commands;
-        // if nothing has registered yet (the common single-node
-        // bootstrap case), still surface ourselves so the table is
-        // never empty.
-        if !nodes.iter().any(|n| n.is_self) {
-            nodes.push(NodeInfo {
-                id: format!("node-{self_nid}"),
-                address: self_addr_env.clone(),
-                role: "leader".into(),
-                status: self_status.clone(),
-                version: "0.1.0".into(),
-                uptime_secs,
-                shard_count,
-                collection_count,
-                is_self: true,
-            });
-        }
         return Json(ListNodesResponse {
             mode: "raft".into(),
             nodes,
