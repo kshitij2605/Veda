@@ -232,6 +232,37 @@ pub async fn cluster_join(
     Ok(StatusCode::CREATED)
 }
 
+/// `POST /v1/admin/cluster/noop` — submit a `ClusterCommand::Noop`
+/// through the Raft log. Used by the snapshot-soak smoke test and
+/// the partition-recovery harness to drive log replication without
+/// needing a Raft-routed collection-creation API. Returns 503 when
+/// Raft is not configured.
+pub async fn cluster_noop(
+    State(state): State<AppState>,
+) -> Result<StatusCode, (StatusCode, Json<ClusterMembershipError>)> {
+    let guard = state.inner.raft.read().await;
+    let Some(coord) = guard.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ClusterMembershipError {
+                error: "raft coordinator not configured".into(),
+            }),
+        ));
+    };
+    coord
+        .execute(veda_coordinator::raft_types::ClusterCommand::Noop)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ClusterMembershipError {
+                    error: format!("{e}"),
+                }),
+            )
+        })?;
+    Ok(StatusCode::CREATED)
+}
+
 /// `DELETE /v1/admin/cluster/nodes/{id}` — remove a voter from the
 /// Raft cluster.
 pub async fn cluster_remove(

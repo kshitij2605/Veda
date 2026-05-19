@@ -46,6 +46,12 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/admin/cluster/nodes/{id}",
             delete(admin::cluster_remove),
         )
+        // Submit a Noop command — drives the Raft log for test
+        // harnesses (snapshot soak, load gen).
+        .route(
+            "/v1/admin/cluster/noop",
+            post(admin::cluster_noop),
+        )
         // Collections
         .route("/v1/collections", post(collections::create_collection))
         .route("/v1/collections", get(collections::list_collections))
