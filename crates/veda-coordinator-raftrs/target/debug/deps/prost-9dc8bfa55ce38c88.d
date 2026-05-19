@@ -1,0 +1,12 @@
+/home/mac/test/project-mdb/crates/veda-coordinator-raftrs/target/debug/deps/prost-9dc8bfa55ce38c88.d: /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/lib.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/error.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/message.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/types.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/encoding.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/../README.md
+
+/home/mac/test/project-mdb/crates/veda-coordinator-raftrs/target/debug/deps/libprost-9dc8bfa55ce38c88.rlib: /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/lib.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/error.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/message.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/types.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/encoding.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/../README.md
+
+/home/mac/test/project-mdb/crates/veda-coordinator-raftrs/target/debug/deps/libprost-9dc8bfa55ce38c88.rmeta: /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/lib.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/error.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/message.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/types.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/encoding.rs /home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/../README.md
+
+/home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/lib.rs:
+/home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/error.rs:
+/home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/message.rs:
+/home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/types.rs:
+/home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/encoding.rs:
+/home/mac/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/prost-0.11.9/src/../README.md:
