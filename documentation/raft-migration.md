@@ -16,6 +16,7 @@ distributed Raft consensus layer backed by [openraft](https://github.com/datafus
 | `raft` module (openraft scaffolding) | Type config + aliases declared |
 | `raft_storage` module | `MemLogState` + `MemStateMachine` data structures, snapshot round-trip tested. `MemRaftStorage` implements v1 `RaftStorage<VedaTypeConfig>` end-to-end; `MemSnapshotBuilder` implements `RaftSnapshotBuilder`. `Adaptor::new(MemRaftStorage::new())` produces the v2 `(RaftLogStorage, RaftStateMachine)` pair `Raft::new` expects. |
 | `raft_network` module | `NodeAddressBook` + `InProcessNetwork` channel-based transport. `RaftNetwork` trait impl deferred. |
+| `GET /v1/admin/nodes` consumer (Phase 6.4 dashboard) | ✅ Ships single-node payload today, response shape is the multi-node Raft shape so no UI change is needed when Raft lands. |
 
 The async traits and types in `crates/veda-coordinator/src/raft.rs` exist so
 the rest of the codebase can refer to a real Raft type and so the migration
@@ -115,6 +116,15 @@ selection via env var `VEDA_COORDINATOR=raft` switches to the Raft path.
 
 - Expose `POST /v1/admin/cluster/join` and `DELETE
   /v1/admin/cluster/nodes/{id}` in `veda-gateway`.
+- Extend the existing `GET /v1/admin/nodes` handler (currently in
+  `crates/veda-gateway/src/rest/admin.rs::list_nodes`) to fan out
+  over Raft peers. The handler already returns the multi-node JSON
+  shape (`{mode, nodes: [{id, address, role, status, version,
+  uptime_secs, shard_count, collection_count, is_self}]}`) — the
+  only change is the `mode` field flips from `"single"` to `"raft"`
+  and the `nodes` array grows. The Niriksha "Cluster Nodes" table
+  (Phase 6.4, on `/health`) consumes this directly and needs zero
+  changes.
 - Add Prometheus metrics for `raft_term`, `raft_leader_id`,
   `raft_last_applied`, `raft_log_lag`.
 - Tracing spans on each Raft RPC.
@@ -142,6 +152,21 @@ selection via env var `VEDA_COORDINATOR=raft` switches to the Raft path.
 
 **Total: ~3-4 weeks of focused engineering**, dominated by phases 2-3 and
 production hardening in phase 7.
+
+### When to start
+
+The dashboard surface (Phase 6.4 — `GET /v1/admin/nodes` + the
+"Cluster Nodes" table on `/health`) shipped in commit `3dd972c`
+without waiting on Raft. It returns a single-node payload today
+and the `mode` field reads `"single"` with an explicit
+"Raft consensus not yet wired" caption in the UI. That means
+nothing on the user-facing side is *blocking* on this migration.
+
+The migration should start when the team has 3-4 uninterrupted
+weeks AND a concrete reason to need quorum (multi-region
+deployments, hot failover SLA, or the first customer for whom a
+single-VM Veda is unacceptable). Until then, the scaffolding +
+this doc are the right amount of state to hold.
 
 ## Why not openraft today
 
