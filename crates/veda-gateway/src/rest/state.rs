@@ -72,6 +72,10 @@ pub struct AppStateInner {
     /// and the gateway runs without consensus. The admin nodes view
     /// reads this to flip `mode` between `"single"` and `"raft"`.
     pub raft: RwLock<Option<RaftCoordinator>>,
+    /// Per-collection set of record IDs already materialised into
+    /// the local SegmentManager from a Raft-replicated apply. The
+    /// reconcile task uses this to skip records it's already seen.
+    pub raft_materialized_records: RwLock<HashMap<String, std::collections::HashSet<String>>>,
 }
 
 impl AppState {
@@ -97,6 +101,7 @@ impl AppState {
                 saved_objects: SavedObjectStore::new(data_dir),
                 started_at: Instant::now(),
                 raft: RwLock::new(None),
+                raft_materialized_records: RwLock::new(HashMap::new()),
             }),
         }
     }
@@ -131,6 +136,7 @@ impl AppState {
                 saved_objects: SavedObjectStore::new(data_dir),
                 started_at: Instant::now(),
                 raft: RwLock::new(None),
+                raft_materialized_records: RwLock::new(HashMap::new()),
             }),
         }
     }
@@ -161,6 +167,7 @@ impl AppState {
                 saved_objects: SavedObjectStore::new(data_dir),
                 started_at: Instant::now(),
                 raft: RwLock::new(None),
+                raft_materialized_records: RwLock::new(HashMap::new()),
             }),
         }
     }
@@ -210,15 +217,18 @@ impl AppState {
     }
 
     /// Spawn a background task that periodically reconciles the
-    /// local Veda state (schemas + segment managers + executors)
-    /// against the Raft state machine's view of which collections
-    /// exist. Each tick:
-    ///   - reads `coord.query_state().collections`
+    /// local Veda state (schemas + segment managers + executors +
+    /// per-collection record stores) against the Raft state
+    /// machine's view. Each tick:
+    ///   - reads `coord.query_state()`
     ///   - materializes any collection present in Raft state but
     ///     missing locally (followers catching up after restart;
     ///     leader handles its own creates synchronously)
     ///   - drops any collection present locally but missing from
     ///     Raft state (covers DropCollection replicas)
+    ///   - applies any record in Raft state but not yet
+    ///     materialized in the node's SegmentManager (follower
+    ///     catch-up of Raft-routed inserts)
     ///
     /// Runs only when raft mode is on. Idempotent — safe to call
     /// multiple times, but we only spawn once per start_server boot.
