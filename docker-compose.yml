@@ -60,6 +60,13 @@ services:
       VEDA_LLM_ENDPOINT: ${VEDA_LLM_ENDPOINT:-}
       VEDA_LLM_API_KEY: ${VEDA_LLM_API_KEY:-}
       VEDA_LLM_MODEL: ${VEDA_LLM_MODEL:-}
+      # Phase 6.4 / Raft migration: set VEDA_COORDINATOR=raft to
+      # boot a single-node openraft loop. The dashboard's Cluster
+      # Nodes table then reports mode="raft". Unset = legacy
+      # single-process consensus.
+      VEDA_COORDINATOR: ${VEDA_COORDINATOR:-}
+      VEDA_NODE_ID: ${VEDA_NODE_ID:-}
+      VEDA_NODE_ADDRESS: ${VEDA_NODE_ADDRESS:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-veda}
       NO_PROXY: localhost,127.0.0.1,minio,nats,embedding,multimodal-embedding,flashparse,vlm,glm-ocr

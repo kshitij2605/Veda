@@ -92,25 +92,23 @@ pub async fn readiness(
 
 /// Phase 6.4 — Admin Nodes view.
 ///
-/// Single-node mode: returns one entry describing this process, with
-/// role = "leader" and status derived from /admin/health. The
-/// response shape (and the `mode` field) is intentionally what a
-/// future N-node Raft cluster would return — when veda-coordinator's
-/// Raft layer wires up, this handler grows a fan-out and the
-/// frontend reads the same JSON.
+/// In Raft mode (when `VEDA_COORDINATOR=raft`), reports peers from
+/// `ClusterState.nodes` and flips `mode` to `"raft"`. Otherwise
+/// returns a single entry describing this process — same shape, so
+/// the dashboard table doesn't move when Raft turns on.
 pub async fn list_nodes(
     State(state): State<AppState>,
 ) -> Json<ListNodesResponse> {
-    let id = std::env::var("VEDA_NODE_ID")
+    let self_id_env = std::env::var("VEDA_NODE_ID")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "node-0".to_owned());
-    let address = std::env::var("VEDA_NODE_ADDRESS")
+    let self_addr_env = std::env::var("VEDA_NODE_ADDRESS")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "0.0.0.0:6340".to_owned());
     let checks = run_health_checks().await;
-    let status = compute_status(&checks);
+    let self_status = compute_status(&checks);
     let uptime_secs = state.inner.started_at.elapsed().as_secs();
 
     let (collection_count, shard_count) = {
@@ -120,13 +118,70 @@ pub async fn list_nodes(
         (cols, shards)
     };
 
+    // Raft path: fan out over the cluster state from openraft, then
+    // overlay the "this node" details (status/uptime/shards) from
+    // local-process knowledge. Peer status remains "unknown" until
+    // the Tonic transport lands — we know membership but not health.
+    let raft_state = {
+        let guard = state.inner.raft.read().await;
+        match guard.as_ref() {
+            Some(c) => c.query_state().await.ok(),
+            None => None,
+        }
+    };
+    if let Some(cs) = raft_state {
+        let self_nid: u64 = std::env::var("VEDA_NODE_ID")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let mut nodes: Vec<NodeInfo> = cs
+            .nodes
+            .into_iter()
+            .map(|(nid, info)| {
+                let is_self = nid == self_nid;
+                NodeInfo {
+                    id: format!("node-{nid}"),
+                    address: info.address,
+                    role: if is_self { "leader".into() } else { "follower".into() },
+                    status: if is_self { self_status.clone() } else { "unknown".into() },
+                    version: "0.1.0".into(),
+                    uptime_secs: if is_self { uptime_secs } else { 0 },
+                    shard_count: if is_self { shard_count } else { 0 },
+                    collection_count: if is_self { collection_count } else { 0 },
+                    is_self,
+                }
+            })
+            .collect();
+        // ClusterState.nodes is populated by RegisterNode commands;
+        // if nothing has registered yet (the common single-node
+        // bootstrap case), still surface ourselves so the table is
+        // never empty.
+        if !nodes.iter().any(|n| n.is_self) {
+            nodes.push(NodeInfo {
+                id: format!("node-{self_nid}"),
+                address: self_addr_env.clone(),
+                role: "leader".into(),
+                status: self_status.clone(),
+                version: "0.1.0".into(),
+                uptime_secs,
+                shard_count,
+                collection_count,
+                is_self: true,
+            });
+        }
+        return Json(ListNodesResponse {
+            mode: "raft".into(),
+            nodes,
+        });
+    }
+
     Json(ListNodesResponse {
         mode: "single".into(),
         nodes: vec![NodeInfo {
-            id,
-            address,
+            id: self_id_env,
+            address: self_addr_env,
             role: "leader".into(),
-            status,
+            status: self_status,
             version: "0.1.0".into(),
             uptime_secs,
             shard_count,
