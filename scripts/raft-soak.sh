@@ -61,8 +61,14 @@ failures=0
 log() { echo "[soak $(date +%H:%M:%S) iter=${iteration}] $*"; }
 
 leader_of() {
-  curl -fsS --max-time 2 "http://localhost:${1}/v1/admin/metrics" 2>/dev/null \
-    | awk '/^veda_raft_leader_id /{print $2; exit}'
+  # Return "0" when the leader_id gauge is missing — awk's
+  # exit-code-on-no-match doesn't propagate through the pipe,
+  # so `|| echo 0` in the caller can't catch the empty-output
+  # case. Default through ${v:-0} instead.
+  local v
+  v=$(curl -fsS --max-time 2 "http://localhost:${1}/v1/admin/metrics" 2>/dev/null \
+      | awk '/^veda_raft_leader_id /{print $2; exit}')
+  echo "${v:-0}"
 }
 last_applied_of() {
   curl -fsS --max-time 2 "http://localhost:${1}/v1/admin/metrics" 2>/dev/null \
@@ -122,12 +128,21 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-# Pre-flight: cluster must already be up.
+# Pre-flight: cluster must already be up. The Prometheus
+# metrics task is spawned alongside the Raft loop but the
+# initial veda_raft_leader_id gauge isn't published until the
+# first metrics tick — give it a generous window.
 log "soak start; checking cluster..."
-sleep 2
-initial_leader="$(leader_port)"
-if [[ "$initial_leader" == "0" ]]; then
-  log "FATAL: no leader at boot — is the cluster up?"
+initial_leader=0
+for _ in $(seq 1 30); do
+  sleep 1
+  initial_leader="$(leader_port)"
+  if [[ "$initial_leader" != "0" && -n "$initial_leader" ]]; then
+    break
+  fi
+done
+if [[ "$initial_leader" == "0" || -z "$initial_leader" ]]; then
+  log "FATAL: no leader within 30s — is the cluster up?"
   exit 1
 fi
 log "initial leader on port $initial_leader"
