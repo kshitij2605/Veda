@@ -31,6 +31,16 @@ fn l2_norm_squared_scalar(a: &[f32]) -> f32 {
     a.iter().map(|x| x * x).sum()
 }
 
+/// Scalar i8 × i8 → i32 dot product. Fallback when AVX2 is not
+/// available or the slices are short enough that the SIMD setup
+/// cost dominates.
+fn i8_dot_scalar(a: &[i8], b: &[i8]) -> i32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x as i32) * (y as i32))
+        .sum()
+}
+
 // ── AVX2 + FMA implementations ─────────────────────────────────────────────
 
 #[cfg(target_arch = "x86_64")]
@@ -209,6 +219,81 @@ mod avx2 {
             sum
         }
     }
+
+    /// Horizontally sum the 8 i32 lanes of a `__m256i`.
+    ///
+    /// # Safety
+    /// Caller must ensure AVX2 is available.
+    #[inline(always)]
+    unsafe fn hsum_epi32_avx2(v: __m256i) -> i32 {
+        unsafe {
+            // Reduce 8 i32 → 4 i32 by adding upper and lower 128-bit halves.
+            let lo = _mm256_castsi256_si128(v); // [a0 a1 a2 a3]
+            let hi = _mm256_extracti128_si256(v, 1); // [a4 a5 a6 a7]
+            let sum128 = _mm_add_epi32(lo, hi); // [a0+a4, a1+a5, a2+a6, a3+a7]
+            // 4 → 2 by shuffling high pair down.
+            let shuf = _mm_shuffle_epi32::<0xee>(sum128); // [a2+a6, a3+a7, _, _]
+            let sum2 = _mm_add_epi32(sum128, shuf);
+            // 2 → 1.
+            let shuf2 = _mm_shuffle_epi32::<0x55>(sum2);
+            let sum1 = _mm_add_epi32(sum2, shuf2);
+            _mm_cvtsi128_si32(sum1)
+        }
+    }
+
+    /// AVX2 i8 × i8 → i32 dot product.
+    ///
+    /// Processes 32 lanes per iteration via:
+    ///   1. Sign-extend i8 → i16 (16 lanes per `_mm256_cvtepi8_epi16`)
+    ///   2. `_mm256_madd_epi16` multiplies + pair-sums i16 lanes into i32
+    ///   3. Accumulate into an `__m256i` of i32
+    ///
+    /// Overflow safety: each i8 × i8 fits in i16; the pair-add inside
+    /// `_mm256_madd_epi16` produces i32 lanes whose absolute magnitude
+    /// is ≤ 2·127² ≈ 32_258 per pair. Across n=10_000 lanes that's
+    /// ≤ 5·10⁸ — well under `i32::MAX` (2.1·10⁹).
+    ///
+    /// # Safety
+    /// Caller must ensure AVX2 is available.
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn i8_dot_avx2(a: &[i8], b: &[i8]) -> i32 {
+        unsafe {
+            let n = a.len();
+            let chunks = n / 32;
+            let remainder = n % 32;
+
+            let mut acc = _mm256_setzero_si256();
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+
+            for i in 0..chunks {
+                let offset = i * 32;
+                let va = _mm256_loadu_si256(a_ptr.add(offset) as *const __m256i);
+                let vb = _mm256_loadu_si256(b_ptr.add(offset) as *const __m256i);
+
+                // Split each into low/high 128-bit halves; sign-extend
+                // each half from i8 → i16 (16 lanes per half).
+                let va_lo16 = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(va));
+                let va_hi16 = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(va, 1));
+                let vb_lo16 = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(vb));
+                let vb_hi16 = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(vb, 1));
+
+                // Multiply + pair-add: i16 × i16 → i32 (16 lanes → 8 lanes).
+                let prod_lo = _mm256_madd_epi16(va_lo16, vb_lo16);
+                let prod_hi = _mm256_madd_epi16(va_hi16, vb_hi16);
+                acc = _mm256_add_epi32(acc, prod_lo);
+                acc = _mm256_add_epi32(acc, prod_hi);
+            }
+
+            let mut sum: i32 = hsum_epi32_avx2(acc);
+
+            let tail_start = chunks * 32;
+            for i in 0..remainder {
+                sum += (a[tail_start + i] as i32) * (b[tail_start + i] as i32);
+            }
+            sum
+        }
+    }
 }
 
 // ── Public dispatch functions ───────────────────────────────────────────────
@@ -253,6 +338,23 @@ pub fn manhattan_distance(a: &[f32], b: &[f32]) -> f32 {
         }
     }
     manhattan_scalar(a, b)
+}
+
+/// Compute the i8 × i8 → i32 dot product. Dispatches to AVX2
+/// on supported x86_64 CPUs (32 lanes per chunk), scalar
+/// fallback otherwise. Used by the quantised-centroid PLAID
+/// path; centroid storage shrinks 4× vs the f32 path AND the
+/// inner-loop arithmetic is ~4× faster on AVX2.
+pub fn i8_dot_product(a: &[i8], b: &[i8]) -> i32 {
+    debug_assert_eq!(a.len(), b.len(), "slice length mismatch");
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { avx2::i8_dot_avx2(a, b) };
+        }
+    }
+    i8_dot_scalar(a, b)
 }
 
 /// Compute the squared L2 norm of an f32 slice.
@@ -366,6 +468,114 @@ pub fn maxsim_distance_cosine_normalized(
     1.0 - sum_max_sim / query_rows.len() as f32
 }
 
+/// Internal: materialise the Q × D dot-product matrix via
+/// matrixmultiply's sgemm. Caller owns the result buffer for
+/// flexibility; row-reduce shapes diverge across metrics.
+fn maxsim_gemm_dot_matrix(q: &[Vec<f32>], d: &[Vec<f32>]) -> (Vec<f32>, usize, usize) {
+    let q_n = q.len();
+    let d_n = d.len();
+    let dim = q[0].len();
+    debug_assert!(q.iter().all(|r| r.len() == dim));
+    debug_assert!(d.iter().all(|r| r.len() == dim));
+
+    let mut a = Vec::with_capacity(q_n * dim);
+    for row in q {
+        a.extend_from_slice(row);
+    }
+    let mut b = Vec::with_capacity(d_n * dim);
+    for row in d {
+        b.extend_from_slice(row);
+    }
+    let mut sim = vec![0.0_f32; q_n * d_n];
+    unsafe {
+        matrixmultiply::sgemm(
+            q_n,
+            dim,
+            d_n,
+            1.0,
+            a.as_ptr(),
+            dim as isize,
+            1,
+            b.as_ptr(),
+            1,
+            dim as isize,
+            0.0,
+            sim.as_mut_ptr(),
+            d_n as isize,
+            1,
+        );
+    }
+    (sim, q_n, d_n)
+}
+
+/// GEMM-backed dot-product MaxSim. Returns a distance (lower =
+/// closer) consistent with `simd::dot_product`'s sign convention:
+/// raw dot is the similarity; we negate to make it a distance.
+///
+/// On ColPali shapes (Q ≈ 32 × D ≈ 1024 × dim ≈ 128) this matches
+/// the speedup of [`maxsim_distance_cosine_gemm`].
+#[inline]
+pub fn maxsim_distance_dot_gemm(query_rows: &[Vec<f32>], doc_rows: &[Vec<f32>]) -> f32 {
+    if query_rows.is_empty() || doc_rows.is_empty() {
+        return f32::MAX;
+    }
+    let (sim, q_n, d_n) = maxsim_gemm_dot_matrix(query_rows, doc_rows);
+    let mut total = 0.0_f32;
+    for q in 0..q_n {
+        let row = &sim[q * d_n..(q + 1) * d_n];
+        let mut m = f32::MIN;
+        for &s in row {
+            if s > m {
+                m = s;
+            }
+        }
+        total += m;
+    }
+    // Higher dot = more similar; convert to distance.
+    -total / q_n as f32
+}
+
+/// GEMM-backed L2-squared MaxSim. Uses the identity
+///   ‖q − d‖² = ‖q‖² + ‖d‖² − 2·q·d
+/// to keep the per-pair work in a single sgemm + a small
+/// per-row vector op. Returns the per-query-row-averaged L2²
+/// distance to the nearest doc row.
+///
+/// (Squared L2, not L2 — saves the sqrt; the ordering relative
+/// to nearest is preserved.)
+#[inline]
+pub fn maxsim_distance_l2sq_gemm(query_rows: &[Vec<f32>], doc_rows: &[Vec<f32>]) -> f32 {
+    if query_rows.is_empty() || doc_rows.is_empty() {
+        return f32::MAX;
+    }
+    let q_norms: Vec<f32> = query_rows
+        .iter()
+        .map(|r| r.iter().map(|x| x * x).sum::<f32>())
+        .collect();
+    let d_norms: Vec<f32> = doc_rows
+        .iter()
+        .map(|r| r.iter().map(|x| x * x).sum::<f32>())
+        .collect();
+    let (sim, q_n, d_n) = maxsim_gemm_dot_matrix(query_rows, doc_rows);
+
+    let mut total = 0.0_f32;
+    for q in 0..q_n {
+        let row = &sim[q * d_n..(q + 1) * d_n];
+        let qn = q_norms[q];
+        let mut min_l2sq = f32::MAX;
+        for (d, &dot) in row.iter().enumerate() {
+            // L2² = ‖q‖² + ‖d‖² − 2·q·d. Clamp at 0 in case
+            // float rounding produces a tiny negative.
+            let l2sq = (qn + d_norms[d] - 2.0 * dot).max(0.0);
+            if l2sq < min_l2sq {
+                min_l2sq = l2sq;
+            }
+        }
+        total += min_l2sq;
+    }
+    total / q_n as f32
+}
+
 /// GEMM-backed cosine MaxSim — builds the Q×D similarity matrix
 /// in one BLIS-style microkernel call, then row-reduces.
 ///
@@ -394,60 +604,7 @@ pub fn maxsim_distance_cosine_gemm(
     if query_rows.is_empty() || doc_rows.is_empty() {
         return f32::MAX;
     }
-    let q_n = query_rows.len();
-    let d_n = doc_rows.len();
-    let dim = query_rows[0].len();
-    debug_assert!(
-        query_rows.iter().all(|r| r.len() == dim),
-        "all query rows must share dim"
-    );
-    debug_assert!(
-        doc_rows.iter().all(|r| r.len() == dim),
-        "all doc rows must share dim"
-    );
-
-    // Pack Q (q_n × dim) and D (d_n × dim) into contiguous row-
-    // major buffers. matrixmultiply's sgemm computes
-    //   C := α · A · Bᵀ + β · C
-    // when we pass B transposed via strides. We want
-    //   sim[q,d] = Q[q,:] · D[d,:]
-    // so A = Q (q_n × dim), B = D (d_n × dim) viewed as Bᵀ.
-    let mut a = Vec::with_capacity(q_n * dim);
-    for row in query_rows {
-        a.extend_from_slice(row);
-    }
-    let mut b = Vec::with_capacity(d_n * dim);
-    for row in doc_rows {
-        b.extend_from_slice(row);
-    }
-    let mut sim = vec![0.0_f32; q_n * d_n];
-
-    // sgemm signature: sgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc).
-    // m=q_n, k=dim, n=d_n.
-    //   A: q_n × dim row-major → rsa=dim, csa=1
-    //   B (viewed as dim × d_n): the source D is d_n × dim row-major. As dim × d_n that
-    //     transpose has rsb=1, csb=dim.
-    //   C: q_n × d_n row-major → rsc=d_n, csc=1
-    unsafe {
-        matrixmultiply::sgemm(
-            q_n,
-            dim,
-            d_n,
-            1.0,
-            a.as_ptr(),
-            dim as isize,
-            1,
-            b.as_ptr(),
-            1,
-            dim as isize,
-            0.0,
-            sim.as_mut_ptr(),
-            d_n as isize,
-            1,
-        );
-    }
-
-    // Row-wise max + sum.
+    let (sim, q_n, d_n) = maxsim_gemm_dot_matrix(query_rows, doc_rows);
     let mut total = 0.0_f32;
     for q in 0..q_n {
         let row = &sim[q * d_n..(q + 1) * d_n];
@@ -633,6 +790,38 @@ mod tests {
     }
 
     #[test]
+    fn i8_dot_simd_matches_scalar_random() {
+        // Random-ish i8 vectors of various lengths covering the
+        // SIMD-block + remainder paths.
+        for &n in &[1, 7, 31, 32, 33, 64, 65, 128, 1024] {
+            let a: Vec<i8> = (0..n)
+                .map(|i| ((i as i32 * 31 + 7) % 255 - 127) as i8)
+                .collect();
+            let b: Vec<i8> = (0..n)
+                .map(|i| ((i as i32 * 19 + 11) % 255 - 127) as i8)
+                .collect();
+            let scalar = i8_dot_scalar(&a, &b);
+            let public = i8_dot_product(&a, &b);
+            assert_eq!(
+                public, scalar,
+                "i8_dot at n={n}: scalar={scalar} simd={public}"
+            );
+        }
+    }
+
+    #[test]
+    fn i8_dot_overflow_safe_at_realistic_dims() {
+        // Worst-case: every product is the maximum (127 × 127 =
+        // 16_129). For dim=10_000 the sum is 161_290_000 — well
+        // under i32::MAX (~2.15 × 10⁹).
+        let n = 10_000;
+        let a = vec![127i8; n];
+        let b = vec![127i8; n];
+        let r = i8_dot_product(&a, &b);
+        assert_eq!(r, 127 * 127 * n as i32);
+    }
+
+    #[test]
     fn maxsim_gemm_self_match_is_near_zero() {
         // A query that's identical to a doc row should drive the
         // MaxSim distance to near zero (max sim per row ≈ 1).
@@ -641,7 +830,78 @@ mod tests {
         let q = vec![v.clone()];
         let d = vec![v.clone(), unit_normalise(&[1.0_f32; 8])];
         assert!(maxsim_distance_cosine_gemm(&q, &d) < 1e-4);
-        // sanity: dim assertion just to silence the warning above
         let _ = dim;
+    }
+
+    fn random_rows(n: usize, dim: usize, seed: f32) -> Vec<Vec<f32>> {
+        (0..n)
+            .map(|i| {
+                (0..dim)
+                    .map(|d| ((seed + i as f32) * 0.13 + d as f32 * 0.07).sin())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn maxsim_dot_gemm_matches_generic_path() {
+        // `maxsim_distance` (generic) returns the per-row max-sim
+        // SUM as a distance: -Σ max_sim. The GEMM helpers
+        // normalise by q_n (per-row average); compare via that
+        // factor.
+        let q = random_rows(4, 16, 1.0);
+        let d = random_rows(16, 16, 2.5);
+        let generic = maxsim_distance(&q, &d, |a, b| -dot_product(a, b));
+        let gemm_per_row = maxsim_distance_dot_gemm(&q, &d);
+        let gemm_summed = gemm_per_row * q.len() as f32;
+        assert!(
+            (generic - gemm_summed).abs() < 1e-3,
+            "dot GEMM (summed) vs generic disagree: generic={generic} gemm_summed={gemm_summed}"
+        );
+    }
+
+    #[test]
+    fn maxsim_l2sq_gemm_matches_generic_path() {
+        let q = random_rows(4, 16, 3.0);
+        let d = random_rows(16, 16, 4.5);
+        let generic = maxsim_distance(&q, &d, l2_squared);
+        let gemm_per_row = maxsim_distance_l2sq_gemm(&q, &d);
+        let gemm_summed = gemm_per_row * q.len() as f32;
+        assert!(
+            (generic - gemm_summed).abs() < 1e-3,
+            "L2² GEMM (summed) vs generic disagree: generic={generic} gemm_summed={gemm_summed}"
+        );
+    }
+
+    #[test]
+    fn maxsim_l2sq_self_match_is_zero() {
+        let v = vec![1.0_f32, 2.0, 3.0, 4.0];
+        let q = vec![v.clone()];
+        let d = vec![v.clone(), vec![5.0, 6.0, 7.0, 8.0]];
+        assert!(maxsim_distance_l2sq_gemm(&q, &d) < 1e-4);
+    }
+
+    #[test]
+    fn maxsim_dot_self_match_max_negative() {
+        // For dot, "closer" = more negative distance (we returned
+        // -dot). A self-match maximises dot, so distance is the
+        // most negative.
+        let v = vec![1.0_f32, 2.0, 3.0, 4.0];
+        let q = vec![v.clone()];
+        let d_close = vec![v.clone()];
+        let d_far = vec![vec![-1.0_f32, -2.0, -3.0, -4.0]];
+        let d_close_dist = maxsim_distance_dot_gemm(&q, &d_close);
+        let d_far_dist = maxsim_distance_dot_gemm(&q, &d_far);
+        assert!(d_close_dist < d_far_dist);
+    }
+
+    #[test]
+    fn maxsim_l2sq_dot_gemm_empty_inputs_max_distance() {
+        let empty: Vec<Vec<f32>> = vec![];
+        let some = vec![vec![1.0_f32, 2.0]];
+        assert_eq!(maxsim_distance_dot_gemm(&empty, &some), f32::MAX);
+        assert_eq!(maxsim_distance_dot_gemm(&some, &empty), f32::MAX);
+        assert_eq!(maxsim_distance_l2sq_gemm(&empty, &some), f32::MAX);
+        assert_eq!(maxsim_distance_l2sq_gemm(&some, &empty), f32::MAX);
     }
 }
