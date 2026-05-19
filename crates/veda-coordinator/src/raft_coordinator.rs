@@ -86,6 +86,43 @@ impl RaftCoordinator {
         Self::start_with_storage(node_id, storage, needs_init).await
     }
 
+    /// Spawn a periodic WAL-compaction task. Runs every
+    /// `VEDA_RAFT_WAL_COMPACT_INTERVAL_SECS` (default 60s) and
+    /// compacts when the WAL file size exceeds
+    /// `VEDA_RAFT_WAL_COMPACT_THRESHOLD_BYTES` (default 16 MB).
+    /// Idempotent — multiple spawns would compete; we spawn once
+    /// per RaftCoordinator construction.
+    fn spawn_compaction(storage: MemRaftStorage) {
+        let interval_secs = std::env::var("VEDA_RAFT_WAL_COMPACT_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60)
+            .max(5);
+        let threshold = std::env::var("VEDA_RAFT_WAL_COMPACT_THRESHOLD_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(16 * 1024 * 1024);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let size = storage.log.wal_bytes().await;
+                if size < threshold {
+                    continue;
+                }
+                tracing::info!(
+                    wal_bytes = size,
+                    threshold,
+                    "raft WAL exceeded compaction threshold; compacting",
+                );
+                if let Err(e) = storage.log.compact().await {
+                    tracing::error!(error = %e, "raft WAL compaction failed");
+                }
+            }
+        });
+    }
+
     async fn start_with_storage(
         node_id: NodeId,
         storage: MemRaftStorage,
@@ -115,6 +152,7 @@ impl RaftCoordinator {
                 .map_err(|e| BootstrapError::Initialize(e.to_string()))?;
         }
 
+        Self::spawn_compaction(storage.clone());
         Ok(Self {
             raft: Arc::new(raft),
             storage,
@@ -211,6 +249,7 @@ impl RaftCoordinator {
         // Spawn the peer health probe loop. Background task lives
         // for the runtime; reads back through `peer_health` accessor.
         let peer_health = spawn_probe(node_id, address_book.clone());
+        Self::spawn_compaction(storage.clone());
 
         Ok(Self {
             raft,

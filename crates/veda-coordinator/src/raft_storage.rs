@@ -284,6 +284,57 @@ impl MemLogState {
             .map(|(_, e)| e.clone())
             .collect()
     }
+
+    /// Number of bytes the WAL file is currently using. Used by
+    /// the compaction trigger to decide when to rewrite.
+    pub async fn wal_bytes(&self) -> u64 {
+        let guard = self.inner.read().await;
+        match &guard.wal {
+            Some(wal) => wal.bytes_written().await,
+            None => 0,
+        }
+    }
+
+    /// Compact the WAL: rewrite it with only the records implied
+    /// by the live state (entries currently in `self.entries`,
+    /// plus the current vote and committed marker, plus a Purge
+    /// record reflecting `last_purged` so the marker survives).
+    ///
+    /// Safe to call concurrently with reads. Holds the write lock
+    /// for the duration so appends queue rather than race.
+    pub async fn compact(&self) -> std::io::Result<()> {
+        let mut guard = self.inner.write().await;
+        let Some(wal) = guard.wal.clone() else { return Ok(()) };
+
+        let mut surviving: Vec<WalRecord> = Vec::new();
+        if let Some(lid) = guard.last_purged {
+            surviving.push(WalRecord::Purge(lid));
+        }
+        if let Some(v) = guard.vote {
+            surviving.push(WalRecord::Vote(v));
+        }
+        for entry in guard.entries.values() {
+            surviving.push(WalRecord::Entry(entry.clone()));
+        }
+        if let Some(lid) = guard.committed {
+            surviving.push(WalRecord::Committed(lid));
+        }
+
+        let before = wal.bytes_written().await;
+        wal.rewrite(&surviving).await?;
+        let after = wal.bytes_written().await;
+        tracing::info!(
+            before_bytes = before,
+            after_bytes = after,
+            entries = guard.entries.len(),
+            "raft WAL compacted",
+        );
+        // We still hold the write lock, so no concurrent append
+        // landed during rewrite. Future appends append to the new
+        // (compacted) WAL file via the handle that `rewrite` swapped in.
+        let _ = guard;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
