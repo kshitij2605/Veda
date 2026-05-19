@@ -481,6 +481,7 @@ async fn apply_rerank(
         &texts,
         cfg.top_k.min(final_limit),
         cfg.model.as_deref(),
+        cfg.instruction.as_deref(),
     )
     .await?;
 

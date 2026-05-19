@@ -3,17 +3,30 @@
 //! Wraps any rerank API that follows the Voyage/Cohere/ZeroEntropy shape:
 //!
 //!   POST {RERANK_ENDPOINT}/v1/rerank
-//!   { "model": "...", "query": "...", "documents": ["doc 1", "doc 2", ...], "top_k": N }
+//!   {
+//!     "model": "...",
+//!     "query": "...",
+//!     "documents": ["doc 1", "doc 2", ...],
+//!     "top_k": N,
+//!     "instruction": "..."  // optional, see below
+//!   }
 //!
 //!   → { "data": [ { "index": i, "relevance_score": s }, ... ] }
+//!
+//! `instruction` is forwarded only when the caller provides it.
+//! Required to unlock instruction-following rerankers — Voyage
+//! rerank-2.5 (Aug 2025), Cohere rerank-3.5, Qwen3-Reranker.
+//! Classic cross-encoders (older rerank-2, bge-reranker-v2-m3)
+//! ignore unknown fields.
 //!
 //! Exposed two ways:
 //! 1. **Standalone**: `POST /v1/collections/{name}/rerank` — caller sends the
 //!    query and a list of candidate IDs; gateway fetches their text from a
 //!    declared field, reranks, returns ordered IDs + scores.
 //! 2. **Inline**: `POST /v1/collections/{name}/search` with
-//!    `"rerank": { "field": "content", "top_k": 10 }` — the gateway runs
-//!    the normal search (oversampled), then reranks results in place.
+//!    `"rerank": { "field": "content", "top_k": 10, "instruction": "..." }`
+//!    — the gateway runs the normal search (oversampled), then reranks
+//!    results in place.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -39,6 +52,14 @@ pub struct RerankConfig {
     pub top_k: usize,
     /// Optional override of the rerank model name. Defaults to env RERANK_MODEL.
     pub model: Option<String>,
+    /// Optional natural-language instruction to the reranker. Passed
+    /// through as `instruction:` in the upstream body. Required to
+    /// unlock instruction-following rerankers — Voyage rerank-2.5
+    /// (Aug 2025), Cohere rerank-3.5 with `instructions:` field,
+    /// Qwen3-Reranker with instruction prefix. Optional for
+    /// classic cross-encoders (Cohere rerank-3, mxbai-rerank-v2)
+    /// that ignore it.
+    pub instruction: Option<String>,
 }
 
 fn default_top_k() -> usize {
@@ -57,6 +78,9 @@ pub struct RerankRequest {
     #[serde(default = "default_top_k")]
     pub top_k: usize,
     pub model: Option<String>,
+    /// Optional natural-language instruction for the reranker. See
+    /// `RerankConfig::instruction` for context.
+    pub instruction: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,7 +130,14 @@ pub async fn rerank(
         ));
     };
 
-    let scored = call_reranker(&req.query, &texts, req.top_k, req.model.as_deref()).await?;
+    let scored = call_reranker(
+        &req.query,
+        &texts,
+        req.top_k,
+        req.model.as_deref(),
+        req.instruction.as_deref(),
+    )
+    .await?;
 
     let results: Vec<RerankHit> = scored
         .into_iter()
@@ -184,11 +215,17 @@ async fn fetch_candidate_texts(
 
 /// Call the configured rerank endpoint. Returns `(original_index, score)`
 /// pairs sorted by score descending, truncated to `top_k`.
+///
+/// `instruction` is forwarded to the upstream as `instruction:`.
+/// Instruction-following rerankers (Voyage rerank-2.5, Cohere
+/// rerank-3.5, Qwen3-Reranker) honour it; classic cross-encoders
+/// (older rerank-2, bge-reranker-v2-m3) ignore unknown fields.
 pub async fn call_reranker(
     query: &str,
     documents: &[String],
     top_k: usize,
     model_override: Option<&str>,
+    instruction: Option<&str>,
 ) -> Result<Vec<(usize, f32)>, (StatusCode, Json<ErrorResponse>)> {
     let endpoint = std::env::var("RERANK_ENDPOINT").unwrap_or_default();
     if endpoint.is_empty() || documents.is_empty() {
@@ -208,12 +245,18 @@ pub async fn call_reranker(
 
     let url = format!("{}/v1/rerank", endpoint.trim_end_matches('/'));
     let client = reqwest::Client::new();
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "query": query,
         "documents": documents,
         "top_k": top_k,
     });
+    if let Some(inst) = instruction
+        && !inst.is_empty()
+        && let Some(obj) = body.as_object_mut()
+    {
+        obj.insert("instruction".to_owned(), serde_json::Value::String(inst.to_owned()));
+    }
 
     let mut req_builder = client
         .post(&url)

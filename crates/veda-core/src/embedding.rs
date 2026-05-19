@@ -81,6 +81,137 @@ pub struct EmbeddingModelConfig {
     pub batch_size: u32,
 }
 
+impl EmbeddingModelConfig {
+    /// Curated catalog of 2026 text embedding presets.
+    ///
+    /// Each preset ships the model's dimension / modality / size
+    /// envelope — everything but `endpoint` and `api_key`, which
+    /// the deployment supplies. See
+    /// `research/2026-05-19-sota-audit/03-text-embeddings.md` for
+    /// the per-model rationale.
+    pub fn text_presets() -> Vec<Self> {
+        vec![
+            // BAAI/bge-m3 — the default. Uniquely ships dense +
+            // sparse + multi-vector from one forward pass.
+            Self {
+                name: "bge-m3".to_owned(),
+                endpoint: String::new(),
+                api_key: String::new(),
+                supported_modalities: vec![Modality::Text],
+                output_dimension: 1024,
+                max_input_size_bytes: 32 * 1024,
+                timeout_seconds: 30,
+                batch_size: 32,
+            },
+            // Qwen/Qwen3-Embedding-8B — 2026 open-weights frontier.
+            // MTEB-EN 70.58, Apache-2.0, 32K context, MRL.
+            Self {
+                name: "qwen3-embedding-8b".to_owned(),
+                endpoint: String::new(),
+                api_key: String::new(),
+                supported_modalities: vec![Modality::Text],
+                output_dimension: 4096,
+                max_input_size_bytes: 128 * 1024,
+                timeout_seconds: 60,
+                batch_size: 16,
+            },
+            // Qwen3-Embedding-4B — smaller sibling, ~3x cheaper at
+            // similar MTEB-EN scores. Apache-2.0.
+            Self {
+                name: "qwen3-embedding-4b".to_owned(),
+                endpoint: String::new(),
+                api_key: String::new(),
+                supported_modalities: vec![Modality::Text],
+                output_dimension: 2560,
+                max_input_size_bytes: 128 * 1024,
+                timeout_seconds: 30,
+                batch_size: 32,
+            },
+            // Qwen3-Embedding-0.6B — small, CPU-deployable.
+            Self {
+                name: "qwen3-embedding-0.6b".to_owned(),
+                endpoint: String::new(),
+                api_key: String::new(),
+                supported_modalities: vec![Modality::Text],
+                output_dimension: 1024,
+                max_input_size_bytes: 128 * 1024,
+                timeout_seconds: 30,
+                batch_size: 64,
+            },
+            // voyage-3-large — proprietary frontier (Anthropic-
+            // recommended). 32K context, int8/binary quantization-
+            // aware. Endpoint = Voyage API base URL.
+            Self {
+                name: "voyage-3-large".to_owned(),
+                endpoint: String::new(),
+                api_key: String::new(),
+                supported_modalities: vec![Modality::Text],
+                output_dimension: 1024,
+                max_input_size_bytes: 128 * 1024,
+                timeout_seconds: 30,
+                batch_size: 128,
+            },
+            // voyage-3.5 — newer + cheaper than voyage-3-large.
+            Self {
+                name: "voyage-3.5".to_owned(),
+                endpoint: String::new(),
+                api_key: String::new(),
+                supported_modalities: vec![Modality::Text],
+                output_dimension: 1024,
+                max_input_size_bytes: 128 * 1024,
+                timeout_seconds: 30,
+                batch_size: 128,
+            },
+        ]
+    }
+
+    /// Curated catalog of 2026 multimodal embedding presets. See
+    /// `research/2026-05-19-sota-audit/04-multimodal-embeddings.md`.
+    pub fn multimodal_presets() -> Vec<Self> {
+        vec![
+            // Qwen/Qwen3-VL-Embedding-2B — the existing default.
+            Self {
+                name: "qwen3-vl-embedding-2b".to_owned(),
+                endpoint: String::new(),
+                api_key: String::new(),
+                supported_modalities: vec![Modality::Text, Modality::Image, Modality::Video],
+                output_dimension: 2048,
+                max_input_size_bytes: 20 * 1024 * 1024,
+                timeout_seconds: 60,
+                batch_size: 8,
+            },
+            // Qwen3-VL-Embedding-8B — opt-in "quality" tier. Same
+            // Apache-2.0, ~4x VRAM. MMEB-V2 77.8.
+            Self {
+                name: "qwen3-vl-embedding-8b".to_owned(),
+                endpoint: String::new(),
+                api_key: String::new(),
+                supported_modalities: vec![Modality::Text, Modality::Image, Modality::Video],
+                output_dimension: 3584,
+                max_input_size_bytes: 32 * 1024 * 1024,
+                timeout_seconds: 120,
+                batch_size: 4,
+            },
+        ]
+    }
+
+    /// Look up a preset by name across both text and multimodal
+    /// catalogs. Returns a clone with empty endpoint/api_key.
+    pub fn preset(name: &str) -> Option<Self> {
+        Self::text_presets()
+            .into_iter()
+            .chain(Self::multimodal_presets())
+            .find(|c| c.name == name)
+    }
+
+    /// Builder-style override for endpoint + api_key on a preset.
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>, api_key: impl Into<String>) -> Self {
+        self.endpoint = endpoint.into();
+        self.api_key = api_key.into();
+        self
+    }
+}
+
 /// Registry of configured embedding models.
 #[derive(Debug, Clone, Default)]
 pub struct EmbeddingModelRegistry {
@@ -198,4 +329,51 @@ pub fn validate_auto_embed_config(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    #[test]
+    fn known_presets_resolve() {
+        assert!(EmbeddingModelConfig::preset("bge-m3").is_some());
+        assert!(EmbeddingModelConfig::preset("qwen3-embedding-8b").is_some());
+        assert!(EmbeddingModelConfig::preset("qwen3-embedding-4b").is_some());
+        assert!(EmbeddingModelConfig::preset("qwen3-embedding-0.6b").is_some());
+        assert!(EmbeddingModelConfig::preset("voyage-3-large").is_some());
+        assert!(EmbeddingModelConfig::preset("voyage-3.5").is_some());
+        assert!(EmbeddingModelConfig::preset("qwen3-vl-embedding-2b").is_some());
+        assert!(EmbeddingModelConfig::preset("qwen3-vl-embedding-8b").is_some());
+    }
+
+    #[test]
+    fn unknown_preset_is_none() {
+        assert!(EmbeddingModelConfig::preset("not-a-real-model").is_none());
+    }
+
+    #[test]
+    fn preset_has_dimensions_set() {
+        let qwen = EmbeddingModelConfig::preset("qwen3-embedding-8b").unwrap();
+        assert_eq!(qwen.output_dimension, 4096);
+        assert!(qwen.supported_modalities.contains(&Modality::Text));
+        assert!(qwen.endpoint.is_empty(), "preset endpoint must be deployment-supplied");
+    }
+
+    #[test]
+    fn with_endpoint_builder_fills_deployment_fields() {
+        let cfg = EmbeddingModelConfig::preset("voyage-3-large")
+            .unwrap()
+            .with_endpoint("https://api.voyageai.com", "sk-test");
+        assert_eq!(cfg.endpoint, "https://api.voyageai.com");
+        assert_eq!(cfg.api_key, "sk-test");
+        assert_eq!(cfg.output_dimension, 1024);
+    }
+
+    #[test]
+    fn multimodal_preset_supports_image_and_text() {
+        let cfg = EmbeddingModelConfig::preset("qwen3-vl-embedding-2b").unwrap();
+        assert!(cfg.supported_modalities.contains(&Modality::Text));
+        assert!(cfg.supported_modalities.contains(&Modality::Image));
+    }
 }

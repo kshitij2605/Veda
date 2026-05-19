@@ -745,6 +745,9 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
                     "hnsw_rabitq" | "hnsw_rabit_q" | "quantized_hnsw" => {
                         veda_core::types::IndexType::HnswRaBitQ
                     }
+                    "cagra" | "gpu_cagra" | "gpu" => {
+                        veda_core::types::IndexType::Cagra
+                    }
                     other => {
                         return Err(format!(
                             "field '{}': unknown vector index type '{other}'",

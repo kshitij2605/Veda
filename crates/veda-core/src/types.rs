@@ -132,6 +132,14 @@ pub enum IndexType {
     /// raw HNSW; graph pruning preserves search latency. Use above
     /// ~10M rows where raw f32 vectors blow past L3 cache.
     HnswRaBitQ,
+    /// CAGRA — NVIDIA cuVS GPU-native graph ANN. Build + search
+    /// on GPU; serialises to a hnswlib-compatible format for cold
+    /// storage. First-class as of 2026-05-19 per the SOTA audit
+    /// (`research/2026-05-19-sota-audit/01-vector-indexes.md`).
+    /// Requires the `gpu_cuvs` Cargo feature at compile time and
+    /// an NVIDIA GPU + driver ≥535 at runtime; without the feature
+    /// the index returns a clear error on build/search.
+    Cagra,
     SuffixArray,
     Inverted,
     Range,
