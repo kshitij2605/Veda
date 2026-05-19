@@ -37,7 +37,7 @@ pub mod tso;
 
 pub use hlc::{Hlc, HlcClock};
 pub use lease::TsLease;
-pub use tso::{LocalTso, Tso, TsoError};
+pub use tso::{LocalTso, TsRange, Tso, TsoError};
 
 /// A timestamp = an `Hlc`. Re-exported as `Ts` because that's
 /// what downstream call sites read more naturally.

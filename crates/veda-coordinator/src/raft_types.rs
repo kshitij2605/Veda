@@ -155,6 +155,41 @@ pub enum ClusterCommand {
         epoch: u64,
         ceiling_ns: u64,
     },
+
+    // -- Phase E: slim metadata Raft ----------------------------
+    //
+    // The cluster-wide records HashMap stays present in v0 for
+    // backwards-compat; new deployments use these commands to
+    // register per-shard ensembles + record txn commits without
+    // routing record bodies through the metadata Raft.
+    /// Register / update the BookKeeper-style ensemble for a
+    /// shard's data-plane log. Stored in `ClusterStateMachine::
+    /// ensembles[shard_id]`. Carried as JSON to keep the
+    /// metadata SM independent of `veda-log` types (avoids a
+    /// dep cycle).
+    RegisterShardEnsemble {
+        shard_id: String,
+        ensemble_json: String,
+    },
+    /// Transfer writer leadership for a shard's data-plane log
+    /// to `new_writer` at `new_epoch`. The state machine apply
+    /// path rejects any non-strictly-newer epoch.
+    ChangeShardWriter {
+        shard_id: String,
+        new_writer: u64,
+        new_epoch: u64,
+    },
+    /// Record that a transaction has committed. Replaces the
+    /// per-write `TxnWrite` + `CommitTxn` chatter for production
+    /// transactions; carries one small record per committed
+    /// txn, not per write. Phase G consumes this; Phase E just
+    /// stores it.
+    RecordTxnCommit {
+        txn_id: String,
+        commit_ts_ns: u64,
+        primary_shard: String,
+        shards_touched: Vec<String>,
+    },
 }
 
 impl fmt::Display for ClusterCommand {
@@ -189,6 +224,18 @@ impl fmt::Display for ClusterCommand {
             }
             Self::RenewTsLease { epoch, ceiling_ns } => {
                 write!(f, "RenewTsLease(epoch={epoch}, ceiling_ns={ceiling_ns})")
+            }
+            Self::RegisterShardEnsemble { shard_id, .. } => {
+                write!(f, "RegisterShardEnsemble({shard_id})")
+            }
+            Self::ChangeShardWriter { shard_id, new_writer, new_epoch } => {
+                write!(
+                    f,
+                    "ChangeShardWriter({shard_id} -> {new_writer} @ epoch {new_epoch})"
+                )
+            }
+            Self::RecordTxnCommit { txn_id, commit_ts_ns, .. } => {
+                write!(f, "RecordTxnCommit({txn_id} @ {commit_ts_ns})")
             }
         }
     }
@@ -265,6 +312,28 @@ pub struct ClusterState {
     /// to decide whether to honour requests from a given holder.
     #[serde(default)]
     pub ts_lease: Option<TsLease>,
+    /// Per-shard BookKeeper-style ensembles. Keyed by
+    /// `{collection}:{shard_id}`. Values are JSON-encoded
+    /// `veda_log::LogEnsemble`s — JSON rather than the typed
+    /// shape so `veda-coordinator` doesn't depend on `veda-log`
+    /// (would be a cycle once Phase D wires the data plane in).
+    /// Phase E ships the field; Phase F+ consumers will read it.
+    #[serde(default)]
+    pub shard_ensembles: HashMap<String, String>,
+    /// Committed transactions, keyed by txn_id. One row per
+    /// txn — NOT one row per write (those live in the per-shard
+    /// logs). Populated by `RecordTxnCommit`. Phase G consumes
+    /// during snapshot reads.
+    #[serde(default)]
+    pub txn_commits: HashMap<String, CommitRecord>,
     /// Index of the last applied log entry (0 = none applied).
     pub last_applied_index: u64,
+}
+
+/// One committed transaction, as recorded in the metadata Raft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitRecord {
+    pub commit_ts_ns: u64,
+    pub primary_shard: String,
+    pub shards_touched: Vec<String>,
 }

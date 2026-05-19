@@ -124,6 +124,15 @@ async fn insert_impl(
         })?
     };
 
+    // Phase C: when `VEDA_LOG_PRIMARY=1` is set, the per-shard
+    // veda-log is the source of truth and the cluster-wide Raft
+    // is bypassed for record writes. Schemas + transactions still
+    // go through `_meta`; only the data plane moves.
+    if log_primary_enabled() {
+        let _ = start;
+        return insert_via_log(state, name, txn_id, req, schema).await;
+    }
+
     // Raft mode: submit each record as a ClusterCommand::InsertRecord
     // and return. All materialisation (local segment manager
     // inserts) happens uniformly through the reconcile task on
@@ -706,6 +715,135 @@ fn dark_write_enabled() -> bool {
         std::env::var("VEDA_LOG_DARK_WRITE").as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE")
     )
+}
+
+/// True when `VEDA_LOG_PRIMARY=1` (Phase C cutover) is set. When
+/// on, record writes bypass the cluster-wide Raft and go through
+/// the per-shard `veda-log` instead; the SegmentManager is fed by
+/// the direct apply path in [`insert_via_log`].
+fn log_primary_enabled() -> bool {
+    matches!(
+        std::env::var("VEDA_LOG_PRIMARY").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
+/// Phase C primary write path. Each record:
+///   1. Parses + serialises (same shape the Raft path used).
+///   2. Acquires a commit_ts from the TSO (if a TSO is configured).
+///   3. Appends to the per-shard `ShardLog` — this is the
+///      durability ack point.
+///   4. Inserts into the local `SegmentManager` — immediate
+///      visibility for follow-up reads.
+///
+/// `TxnWrite` enrollment via `X-Veda-Txn-Id` still routes through
+/// the cluster-wide Raft because the txn coordinator state still
+/// lives in the metadata SM. Phase G moves it.
+async fn insert_via_log(
+    state: AppState,
+    name: String,
+    txn_id: Option<String>,
+    req: InsertRequest,
+    schema: veda_core::schema::CollectionSchema,
+) -> Result<(StatusCode, Json<InsertResponse>), (StatusCode, Json<ErrorResponse>)> {
+    if txn_id.is_some() {
+        // Txn writes still go through the cluster-wide path until
+        // Phase G. Surface a clear error instead of silently
+        // applying without commit barriers.
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "X-Veda-Txn-Id writes not yet supported in VEDA_LOG_PRIMARY mode (Phase G)".into(),
+            }),
+        ));
+    }
+    let shard_count = schema.shard_count();
+    let mut applied_ids: Vec<String> = Vec::with_capacity(req.records.len());
+    let mut managers = state.inner.segment_managers.write().await;
+    let shard_map = managers.get_mut(&name).ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("no segment managers for collection '{name}'"),
+            }),
+        )
+    })?;
+
+    for raw in req.records.iter() {
+        let record = parse_record_public(raw, &schema).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+        let rid = record.id().to_string();
+        let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
+            &record.id(),
+            shard_count,
+        );
+
+        // (1) Acquire commit_ts from the TSO.
+        let hlc = state.inner.tso.now().await.unwrap_or_default();
+
+        // (2) Append to the per-shard log (durability).
+        let log = ensure_shard_log(&state, &name, shard_id).await.ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("VEDA_LOG_PRIMARY: failed to open shard log for {name}:{shard_id}"),
+                }),
+            )
+        })?;
+        let payload = bytes::Bytes::from(
+            serde_json::to_vec(&record).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("serialize record: {e}"),
+                    }),
+                )
+            })?,
+        );
+        let key = bytes::Bytes::from(record.id().as_bytes().to_vec());
+        log.append_one(hlc, 0, key, veda_log::LogOp::Put, payload)
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("VEDA_LOG_PRIMARY: log append failed: {e}"),
+                    }),
+                )
+            })?;
+
+        // (3) Apply to local SegmentManager (visibility).
+        let sm = shard_map.get_mut(&shard_id).ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("shard {shard_id} not found for '{name}'"),
+                }),
+            )
+        })?;
+        sm.insert(record).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("VEDA_LOG_PRIMARY: segment insert failed: {e}"),
+                }),
+            )
+        })?;
+
+        applied_ids.push(rid);
+    }
+
+    let inserted = applied_ids.len();
+    Ok((
+        StatusCode::CREATED,
+        Json(InsertResponse {
+            inserted,
+            ids: applied_ids,
+        }),
+    ))
 }
 
 /// Look up or create a ShardLog for `(collection_scoped, shard_id)`.

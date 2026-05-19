@@ -137,6 +137,15 @@ pub struct ClusterStateMachine {
     /// `crates/veda-time/src/lease.rs`.
     #[serde(default)]
     ts_lease: Option<veda_time::TsLease>,
+    /// Phase E: per-shard BookKeeper-style ensembles for the
+    /// data-plane log. Keyed by `{collection}:{shard_id}`. Values
+    /// are JSON-encoded `veda_log::LogEnsemble`s.
+    #[serde(default)]
+    shard_ensembles: HashMap<String, String>,
+    /// Phase E: committed-transaction registry. One small row
+    /// per txn; the per-write log entries live in per-shard logs.
+    #[serde(default)]
+    txn_commits: HashMap<String, crate::raft_types::CommitRecord>,
 }
 
 /// Staged writes for an open transaction. v0 holds them in memory
@@ -400,6 +409,80 @@ impl ClusterStateMachine {
                     ),
                 }
             }
+
+            ClusterCommand::RegisterShardEnsemble {
+                shard_id,
+                ensemble_json,
+            } => {
+                self.shard_ensembles
+                    .insert(shard_id.clone(), ensemble_json.clone());
+                ClusterResponse::Ok
+            }
+
+            ClusterCommand::ChangeShardWriter {
+                shard_id,
+                new_writer,
+                new_epoch,
+            } => {
+                // Read current ensemble (if any), enforce strict
+                // epoch monotonicity, write new writer + epoch.
+                let new_ensemble_json = match self.shard_ensembles.get(shard_id) {
+                    Some(existing) => match serde_json::from_str::<serde_json::Value>(existing) {
+                        Ok(mut v) => {
+                            let cur_epoch = v
+                                .get("epoch")
+                                .and_then(|e| e.as_u64())
+                                .unwrap_or(0);
+                            if *new_epoch <= cur_epoch {
+                                return ClusterResponse::Error(format!(
+                                    "ChangeShardWriter new_epoch {new_epoch} not strictly > {cur_epoch}"
+                                ));
+                            }
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert(
+                                    "writer_leader".to_owned(),
+                                    serde_json::Value::Number((*new_writer).into()),
+                                );
+                                obj.insert(
+                                    "epoch".to_owned(),
+                                    serde_json::Value::Number((*new_epoch).into()),
+                                );
+                            }
+                            serde_json::to_string(&v).unwrap_or_else(|_| existing.clone())
+                        }
+                        Err(_) => {
+                            return ClusterResponse::Error(format!(
+                                "shard_ensembles[{shard_id}] is not valid JSON"
+                            ));
+                        }
+                    },
+                    None => {
+                        return ClusterResponse::Error(format!(
+                            "ChangeShardWriter: no ensemble registered for {shard_id}"
+                        ));
+                    }
+                };
+                self.shard_ensembles
+                    .insert(shard_id.clone(), new_ensemble_json);
+                ClusterResponse::Ok
+            }
+
+            ClusterCommand::RecordTxnCommit {
+                txn_id,
+                commit_ts_ns,
+                primary_shard,
+                shards_touched,
+            } => {
+                self.txn_commits.insert(
+                    txn_id.clone(),
+                    crate::raft_types::CommitRecord {
+                        commit_ts_ns: *commit_ts_ns,
+                        primary_shard: primary_shard.clone(),
+                        shards_touched: shards_touched.clone(),
+                    },
+                );
+                ClusterResponse::Ok
+            }
         }
     }
 
@@ -414,6 +497,8 @@ impl ClusterStateMachine {
             records: self.records.clone(),
             open_txns: self.open_txns.keys().cloned().collect(),
             ts_lease: self.ts_lease.clone(),
+            shard_ensembles: self.shard_ensembles.clone(),
+            txn_commits: self.txn_commits.clone(),
             last_applied_index: self.last_applied,
         }
     }
@@ -813,6 +898,74 @@ mod tests {
         };
         assert!(matches!(sm.apply(&entry), ClusterResponse::Error(_)));
         assert_eq!(sm.ts_lease().unwrap().ceiling_ns, 1_000);
+    }
+
+    #[test]
+    fn register_shard_ensemble_stores_json_blob() {
+        let mut sm = ClusterStateMachine::new();
+        let ensemble_json = r#"{"writers":[1,2,3],"write_quorum":3,"ack_quorum":2,"epoch":1,"writer_leader":1}"#;
+        drive(
+            &mut sm,
+            [ClusterCommand::RegisterShardEnsemble {
+                shard_id: "docs:0".into(),
+                ensemble_json: ensemble_json.to_owned(),
+            }],
+        );
+        let snap = sm.snapshot();
+        assert_eq!(snap.shard_ensembles.get("docs:0"), Some(&ensemble_json.to_owned()));
+    }
+
+    #[test]
+    fn change_shard_writer_requires_strictly_newer_epoch() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [
+                ClusterCommand::RegisterShardEnsemble {
+                    shard_id: "docs:0".into(),
+                    ensemble_json: r#"{"writers":[1,2,3],"write_quorum":3,"ack_quorum":2,"epoch":3,"writer_leader":1}"#.to_owned(),
+                },
+                ClusterCommand::ChangeShardWriter {
+                    shard_id: "docs:0".into(),
+                    new_writer: 2,
+                    new_epoch: 4,
+                },
+            ],
+        );
+        let snap = sm.snapshot();
+        let stored = snap.shard_ensembles.get("docs:0").unwrap();
+        let v: serde_json::Value = serde_json::from_str(stored).unwrap();
+        assert_eq!(v["writer_leader"].as_u64(), Some(2));
+        assert_eq!(v["epoch"].as_u64(), Some(4));
+
+        // Same-epoch ChangeShardWriter must be rejected.
+        let entry = LogEntry {
+            index: sm.last_applied + 1,
+            command: ClusterCommand::ChangeShardWriter {
+                shard_id: "docs:0".into(),
+                new_writer: 3,
+                new_epoch: 4,
+            },
+        };
+        assert!(matches!(sm.apply(&entry), ClusterResponse::Error(_)));
+    }
+
+    #[test]
+    fn record_txn_commit_stores_metadata() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [ClusterCommand::RecordTxnCommit {
+                txn_id: "T1".into(),
+                commit_ts_ns: 1_700_000_000_000_000_000,
+                primary_shard: "docs:0".into(),
+                shards_touched: vec!["docs:0".into(), "docs:1".into()],
+            }],
+        );
+        let snap = sm.snapshot();
+        let rec = snap.txn_commits.get("T1").unwrap();
+        assert_eq!(rec.commit_ts_ns, 1_700_000_000_000_000_000);
+        assert_eq!(rec.shards_touched.len(), 2);
     }
 
     #[test]

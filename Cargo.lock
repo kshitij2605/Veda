@@ -4534,6 +4534,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bincode",
+ "bytes",
  "crc32fast",
  "openraft",
  "prost",
@@ -4548,6 +4549,7 @@ dependencies = [
  "tracing",
  "uuid",
  "veda-core",
+ "veda-storage",
  "veda-time",
 ]
 
@@ -4623,11 +4625,13 @@ dependencies = [
 name = "veda-log"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bincode",
  "bytes",
  "crc32fast",
  "futures",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4683,6 +4687,7 @@ dependencies = [
  "async-nats",
  "base64",
  "bincode",
+ "bytes",
  "futures",
  "lindera",
  "memmap2",
