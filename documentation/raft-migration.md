@@ -213,21 +213,74 @@ revision of this doc called out has shipped except pre-vote
   `RaftCoordinator::linearisable_query_state()` issues a
   `Noop` barrier write before reading; the test asserts
   `last_applied_index` advances through the barrier.
-- ❌ **Pre-vote** — *deliberately not coming* in openraft.
-  Earlier investigation confirmed zero references in the
-  0.9.24 source + changelog; a follow-up read of the
-  upstream README's roadmap reveals the project has
-  explicitly decided to "get rid of pre-vote RPC" rather
-  than implement it, with the `single-term-leader` feature
-  used as the simpler alternative. Conclusion: not a
-  "needs an upstream version bump" item — it's an upstream
-  design decision. Achieving pre-vote semantics in Veda
-  would require either swapping consensus crates entirely
-  (raft-rs, etc., multi-week project) or implementing it on
-  top of openraft as a layer above the public API (invasive
-  and fragile). Both are out of scope and tracked as
-  "deferred indefinitely" rather than "deferred until
-  upstream lands it."
+- ❌ **Pre-vote** — *available only via consensus-library swap.*
+  Investigation v3 confirms:
+    - openraft 0.9.24 source + changelog + roadmap: zero
+      pre-vote support. Upstream has explicitly decided to
+      "get rid of pre-vote RPC" in favour of the
+      `single-term-leader` feature.
+    - tikv/raft-rs 0.7.0: `Config::pre_vote: bool` exists
+      and is documented as "Enables the Pre-Vote algorithm
+      described in raft thesis section 9.6. This prevents
+      disruption when a node that has been partitioned away
+      rejoins the cluster."
+  So pre-vote IS available in the Rust ecosystem — it just
+  is not available in the consensus library Veda has built
+  around. Getting it requires swapping openraft for raft-rs.
+  Cost estimate:
+    - raft-rs is lower-level than openraft (caller brings
+      Log + State Machine + Transport — openraft provides
+      these as trait implementations).
+    - Our MemRaftStorage / TonicRaftNetwork / WAL would
+      need to be rewritten against raft-rs traits.
+    - raft-rs has not released since 2023; not necessarily
+      abandoned, but slower-moving than openraft.
+    - Realistic effort: 2–4 weeks of focused engineering.
+  Verdict: this is a separate project, not a session-scope
+  item. Filed as "deferred to a consensus-crate swap
+  engagement"; in the meantime, the failure mode pre-vote
+  prevents (partitioned node disrupting the cluster on
+  rejoin) is partially mitigated by the Tonic
+  channel-eviction-on-error fix from commit 79c1e95 — when
+  the disrupted node rejoins, its outbound channels
+  reconnect cleanly and openraft's existing term-comparison
+  logic handles the rejoin via AppendEntries rather than a
+  forced re-election.
+
+What was added in the third follow-up pass (commits `d544634`,
+`bf16879`):
+
+- **Cross-node linearisable reads** (`?linearisable=true`):
+  GET /v1/collections/{name}/records/{id}?linearisable=true
+  in raft mode issues a Noop barrier client_write and then
+  reads from `ClusterState.records` directly, bypassing the
+  local SegmentManager. Verified with the linearisability
+  harness in multi-node mode (3 nodes, 3 clients, 30 s,
+  VEDA_LIN_BARRIER=1): 7,065 invocations, **0 violations**
+  (vs ~2,290 stale_read without the flag). Cost: one Raft
+  round-trip per read.
+
+- **MultiGroupCoordinator v1**
+  (`crates/veda-coordinator/src/multi_group.rs`): a
+  coordinator that hosts N openraft instances per process
+  keyed by `GroupId = String`. Lets a single Veda process
+  carry the `_meta` cluster-wide group AND any number of
+  per-(collection, shard) data-plane groups. Each group has
+  its own data dir, own Tonic listener (or in-process for
+  tests), own log + state machine. Two unit tests prove
+  isolation. **What this ships is the architecture; the
+  insert path is not yet rewired through per-shard groups**
+  — that's a separate commit because it touches every
+  REST handler that mutates collection data. See the module
+  doc for the explicit "what this does not yet do" list
+  (auto-spawn from CreateCollection, REST routing,
+  cross-group transactions, multi-group recovery).
+
+- **24-hour soak running**: `scripts/raft-soak-24h.sh` is
+  in flight against the 3-node compose cluster on iitgpu11
+  as of commit `d544634`. PID + monitoring command paths
+  are in `/tmp/veda-soak-24h-wrapper.log`. Result tally
+  available via `grep -c 'iter PASS' /tmp/veda-soak-24h/soak.log`.
 
 What was added in the second follow-up pass (commits `98a09a3`,
 linearisability checker, soak harness wrapper):
