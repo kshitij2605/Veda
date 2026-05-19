@@ -96,6 +96,12 @@ leader_port() {
 writer_loop() {
   local id="$1"
   while :; do
+    # Honour the pause flag so the iteration's convergence
+    # check sees a quiescent cluster.
+    if [[ -f "/tmp/raft-soak-pause.$$" ]]; then
+      sleep 0.1
+      continue
+    fi
     local lp
     lp="$(leader_port)"
     if [[ "$lp" != "0" ]]; then
@@ -110,6 +116,9 @@ writer_loop() {
   done 9>/tmp/raft-soak-lock.$$
 }
 
+pause_writers() { touch "/tmp/raft-soak-pause.$$"; }
+resume_writers() { rm -f "/tmp/raft-soak-pause.$$"; }
+
 cleanup() {
   log "stopping writers + clearing faults..."
   for pid in "${WRITER_PIDS[@]:-}"; do
@@ -119,7 +128,7 @@ cleanup() {
     docker exec "$c" tc qdisc del dev eth0 root 2>/dev/null || true
     docker start "$c" >/dev/null 2>&1 || true
   done
-  rm -f /tmp/raft-soak-writes.$$ /tmp/raft-soak-lock.$$ 2>/dev/null || true
+  rm -f /tmp/raft-soak-writes.$$ /tmp/raft-soak-lock.$$ /tmp/raft-soak-pause.$$ 2>/dev/null || true
   if [[ -f /tmp/raft-soak-writes.$$ ]]; then
     total_writes=$(wc -l < /tmp/raft-soak-writes.$$ 2>/dev/null || echo 0)
   fi
@@ -222,7 +231,14 @@ iteration_loop() {
         ;;
     esac
 
-    log "clearing fault, waiting up to ${HEAL_SECS}s for convergence..."
+    # Pause writers during the convergence assertion so a few
+    # in-flight writes don't artifact as "divergence." We
+    # still want to test that the cluster CAN reach a steady
+    # state after a fault — under continuous load it just
+    # never has a moment of zero lag.
+    pause_writers
+    sleep 1
+    log "clearing fault + writers paused; waiting up to ${HEAL_SECS}s for convergence..."
     local converged=0 vals=()
     for _ in $(seq 1 "$HEAL_SECS"); do
       sleep 1
@@ -239,10 +255,11 @@ iteration_loop() {
         break
       fi
     done
+    resume_writers
     if [[ "$converged" -eq 1 ]]; then
       log "iter PASS — all nodes at last_applied=${vals[0]}"
     else
-      log "iter FAIL — divergent state: ${vals[*]}"
+      log "iter FAIL — divergent state after heal window: ${vals[*]}"
       failures=$((failures + 1))
     fi
 
