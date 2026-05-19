@@ -14,6 +14,7 @@ use veda_storage::blob_store::{BlobStore, LocalBlobStore, ObjectBlobStore, Objec
 use veda_storage::segment_manager::SegmentManager;
 
 use crate::auth::Role;
+use crate::auth_oidc::AuthMode;
 use crate::rest::saved_objects::SavedObjectStore;
 use veda_coordinator::multi_group::MultiGroupCoordinator;
 use veda_coordinator::raft_coordinator::RaftCoordinator;
@@ -54,10 +55,18 @@ pub struct AppStateInner {
     pub data_dir: PathBuf,
     /// FlashParse OCR endpoint (None = document processing disabled).
     pub flashparse_endpoint: Option<String>,
-    /// Whether JWT authentication is enabled.
+    /// Whether JWT authentication is enabled. Legacy `Static`-mode
+    /// flag; the active auth dispatcher reads `auth_mode` below.
+    /// Kept so existing tests/callers that set this directly via
+    /// `with_auth` continue to behave.
     pub auth_enabled: bool,
-    /// Secret used for JWT signing and verification.
+    /// Secret used for JWT signing and verification (Static mode).
     pub jwt_secret: String,
+    /// Active authentication mode. Set from `VEDA_AUTH_MODE` via
+    /// [`AppState::load_auth_from_env`]; defaults match `auth_enabled`
+    /// (true → Static, false → Disabled) so constructors stay
+    /// backwards compatible.
+    pub auth_mode: RwLock<AuthMode>,
     /// In-memory user store: username -> UserRecord.
     pub users: HashMap<String, UserRecord>,
     /// Blob storage backend.
@@ -112,6 +121,7 @@ impl AppState {
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: false,
                 jwt_secret: "default-test-secret".to_owned(),
+                auth_mode: RwLock::new(AuthMode::Disabled),
                 users: HashMap::new(),
                 blob_store: RwLock::new(Arc::new(
                     LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
@@ -149,6 +159,7 @@ impl AppState {
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: true,
                 jwt_secret: jwt_secret.to_owned(),
+                auth_mode: RwLock::new(AuthMode::Static),
                 users,
                 blob_store: RwLock::new(Arc::new(
                     LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
@@ -182,6 +193,7 @@ impl AppState {
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: true,
                 jwt_secret: jwt_secret.to_owned(),
+                auth_mode: RwLock::new(AuthMode::Static),
                 users,
                 blob_store: RwLock::new(Arc::new(
                     LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
@@ -239,6 +251,68 @@ impl AppState {
         let mut guard = self.inner.splade_client.write().await;
         *guard = Some(SpladeClient::new(cfg));
         tracing::info!(model = %model, endpoint = %endpoint, "registered SPLADE encoder from environment");
+    }
+
+    /// Read `VEDA_AUTH_MODE` + `VEDA_OIDC_*` and install the
+    /// matching `AuthMode`. Called once at server startup. If
+    /// `VEDA_AUTH_MODE=oidc` is set but a required var is missing
+    /// or JWKS discovery fails, logs an error and leaves the
+    /// existing mode in place (i.e. fail closed in production
+    /// because the server will then reject incoming traffic at the
+    /// next middleware hop if Static was unset, or fall back to
+    /// Static if it was set).
+    pub async fn load_auth_from_env(&self) {
+        let mode = std::env::var("VEDA_AUTH_MODE").unwrap_or_default();
+        match mode.as_str() {
+            "" | "disabled" => {
+                // honor the legacy flag for backwards compat: if
+                // auth_enabled is true (Static), leave the
+                // constructor-set mode alone.
+            }
+            "static" => {
+                let mut guard = self.inner.auth_mode.write().await;
+                *guard = crate::auth_oidc::AuthMode::Static;
+                tracing::info!("auth mode: static (HS256 shared-secret)");
+            }
+            "oidc" => match crate::auth_oidc::OidcConfig::from_env().await {
+                Ok(Some(cfg)) => {
+                    let issuer = cfg.issuer.clone();
+                    let audience = cfg.audience.clone();
+                    let jwks_url = cfg.jwks_url.clone();
+                    let ctx = std::sync::Arc::new(crate::auth_oidc::OidcContext::new(cfg));
+                    // Best-effort prime — failure here is logged
+                    // but not fatal; the cache will retry on first
+                    // request.
+                    if let Err(e) = ctx.jwks.refresh().await {
+                        tracing::warn!(
+                            error = %e,
+                            "initial JWKS refresh failed; cache will refresh on first auth"
+                        );
+                    }
+                    let mut guard = self.inner.auth_mode.write().await;
+                    *guard = crate::auth_oidc::AuthMode::Oidc(ctx);
+                    tracing::info!(
+                        issuer = %issuer,
+                        audience = %audience,
+                        jwks_url = %jwks_url,
+                        "auth mode: oidc (IdP-delegated JWT)"
+                    );
+                }
+                Ok(None) => unreachable!(),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "VEDA_AUTH_MODE=oidc but config is incomplete; auth mode unchanged"
+                    );
+                }
+            },
+            other => {
+                tracing::warn!(
+                    mode = %other,
+                    "unknown VEDA_AUTH_MODE; expected disabled|static|oidc"
+                );
+            }
+        }
     }
 
     /// Spawn a background task that periodically reconciles the
