@@ -97,9 +97,9 @@ impl QuantizedCentroids {
         Self { codes, code_norms, scales }
     }
 
-    /// Cosine distance from a query (f32) to centroid `idx`.
-    /// Quantises the query once per `cosine_to_centroid_batch`
-    /// (the caller); per-call here just does the int dot + scale.
+    /// Cosine distance from a quantised query to centroid `idx`.
+    /// Uses [`simd::i8_dot_product`] for the int dot — AVX2 path
+    /// on x86_64, scalar fallback elsewhere.
     fn cosine_distance(
         &self,
         q_codes: &[i8],
@@ -108,15 +108,7 @@ impl QuantizedCentroids {
         idx: usize,
     ) -> f32 {
         let c_codes = &self.codes[idx];
-        let dim = c_codes.len();
-        debug_assert_eq!(q_codes.len(), dim);
-        // i32 accumulator avoids overflow at dim ≤ ~2^16 (each
-        // product fits in i16; 16-bit sum across dim=128 max
-        // ≈ 128 × 127² ≈ 2M ≪ i32::MAX).
-        let mut dot_int: i32 = 0;
-        for i in 0..dim {
-            dot_int += (q_codes[i] as i32) * (c_codes[i] as i32);
-        }
+        let dot_int = simd::i8_dot_product(q_codes, c_codes);
         let dot_f = (dot_int as f32) * q_scale * self.scales[idx];
         let denom = q_norm * self.code_norms[idx];
         if denom < 1e-12 {
