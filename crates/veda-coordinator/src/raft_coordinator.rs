@@ -271,6 +271,26 @@ impl RaftCoordinator {
         self.raft.metrics()
     }
 
+    /// Snapshot of the cluster membership configuration: who is a
+    /// voter, who is the current leader. Drives the dashboard's
+    /// /admin/nodes table when Raft is the source of truth (the
+    /// ClusterState.nodes map only sees RegisterNode commands).
+    pub fn membership_snapshot(&self) -> RaftMembershipSnapshot {
+        let m = self.raft.metrics().borrow().clone();
+        let voters: Vec<NodeId> = m
+            .membership_config
+            .membership()
+            .voter_ids()
+            .collect();
+        RaftMembershipSnapshot {
+            current_term: m.current_term,
+            current_leader: m.current_leader,
+            voters,
+            last_applied_index: m.last_applied.map(|l| l.index).unwrap_or(0),
+            last_log_index: m.last_log_index.unwrap_or(0),
+        }
+    }
+
     /// Submit a `ClusterCommand` to the Raft leader and wait for it to
     /// be committed and applied. Returns the `ClusterResponse` from
     /// the state machine.
@@ -316,6 +336,19 @@ impl RaftCoordinator {
     pub fn raft(&self) -> &Raft<VedaTypeConfig> {
         &self.raft
     }
+}
+
+/// Lightweight cluster-membership view returned by
+/// `RaftCoordinator::membership_snapshot()`. Decoupled from
+/// `openraft::RaftMetrics` so callers (the gateway) don't have to
+/// depend on openraft directly.
+#[derive(Debug, Clone)]
+pub struct RaftMembershipSnapshot {
+    pub current_term: u64,
+    pub current_leader: Option<NodeId>,
+    pub voters: Vec<NodeId>,
+    pub last_applied_index: u64,
+    pub last_log_index: u64,
 }
 
 /// Errors that can stop us from constructing a `RaftCoordinator`.

@@ -1,5 +1,9 @@
 # Stage 1: Build Rust binary
 FROM rust:bookworm AS rust-builder
+# protoc for the Tonic Raft transport in veda-coordinator.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends protobuf-compiler \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/

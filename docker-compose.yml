@@ -1,5 +1,23 @@
 version: '3.8'
 
+# Top-level anchor so the 3 raft-cluster services can share most of
+# their env (everything except VEDA_NODE_ID / VEDA_NODE_ADDRESS).
+x-raft-env: &raft-env
+  RUST_LOG: "info,openraft=info,veda_coordinator=debug"
+  VEDA_STORAGE_ENDPOINT: "minio:9000"
+  VEDA_STORAGE_ACCESS_KEY: "veda"
+  VEDA_STORAGE_SECRET_KEY: "${MINIO_PASSWORD:-vedapassword}"
+  VEDA_MQ_ENDPOINT: "nats:4222"
+  VEDA_BLOB_BACKEND: "minio"
+  VEDA_BLOB_ENDPOINT: "http://minio:9000"
+  VEDA_BLOB_BUCKET: "veda-blobs"
+  VEDA_BLOB_ACCESS_KEY: "veda"
+  VEDA_BLOB_SECRET_KEY: "${MINIO_PASSWORD:-vedapassword}"
+  VEDA_COORDINATOR: "raft"
+  VEDA_RAFT_PEERS: "1@veda-1:6341,2@veda-2:6341,3@veda-3:6341"
+  VEDA_RAFT_LISTEN: "0.0.0.0:6341"
+  VEDA_RAFT_BOOTSTRAP: "1"
+
 services:
   minio:
     image: minio/minio:latest
@@ -76,6 +94,64 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
+
+  # --- 3-node Raft cluster (optional, enabled with --profile raft-cluster) ---
+  #
+  # Spins up three Veda processes that form a real openraft quorum
+  # over Tonic gRPC. They share MinIO and NATS with the default `veda`
+  # service so collection data still lands somewhere durable.
+  #
+  # Usage:
+  #   docker compose --profile raft-cluster up -d veda-1 veda-2 veda-3
+  # Then on the host:
+  #   curl http://localhost:6340/v1/admin/nodes  # node-1
+  #   curl http://localhost:6342/v1/admin/nodes  # node-2
+  #   curl http://localhost:6344/v1/admin/nodes  # node-3
+  veda-1:
+    profiles: ["raft-cluster"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: project-mdb-veda
+    ports:
+      - "6340:6340"
+    volumes:
+      - veda-1-data:/var/veda/data
+    environment:
+      <<: *raft-env
+      VEDA_NODE_ID: "1"
+      VEDA_NODE_ADDRESS: "veda-1:6340"
+    depends_on:
+      minio: { condition: service_healthy }
+      nats:  { condition: service_started }
+
+  veda-2:
+    profiles: ["raft-cluster"]
+    image: project-mdb-veda
+    ports:
+      - "6342:6340"
+    volumes:
+      - veda-2-data:/var/veda/data
+    environment:
+      <<: *raft-env
+      VEDA_NODE_ID: "2"
+      VEDA_NODE_ADDRESS: "veda-2:6340"
+    depends_on:
+      veda-1: { condition: service_started }
+
+  veda-3:
+    profiles: ["raft-cluster"]
+    image: project-mdb-veda
+    ports:
+      - "6344:6340"
+    volumes:
+      - veda-3-data:/var/veda/data
+    environment:
+      <<: *raft-env
+      VEDA_NODE_ID: "3"
+      VEDA_NODE_ADDRESS: "veda-3:6340"
+    depends_on:
+      veda-1: { condition: service_started }
 
   # --- OCR Services (optional, enabled with --profile ocr) ---
   flashparse:
@@ -368,6 +444,9 @@ volumes:
   minio-data:
   nats-data:
   veda-data:
+  veda-1-data:
+  veda-2-data:
+  veda-3-data:
   flashparse-data:
   embedding-model-cache:
   vlm-model-cache:
