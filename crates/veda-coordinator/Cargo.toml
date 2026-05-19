@@ -31,3 +31,9 @@ tonic-build = "0.12"
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true }
+
+# Linearisability harness — drives the cluster and runs the
+# checker module against the recorded history.
+[[bin]]
+name = "veda-linearisability-harness"
+path = "src/bin/linearisability_harness.rs"
