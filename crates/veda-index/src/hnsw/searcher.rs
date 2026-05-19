@@ -320,6 +320,15 @@ impl HnswSearcher {
         } else {
             ef * 10
         };
+        // ACORN 2-hop expansion through filter-failing nodes can
+        // blow up the visit count when selectivity is very low and
+        // the working heap stays small (so `farthest_working` is
+        // f32::MAX and the cheap termination check never fires).
+        // Hard cap on visits as a safety net — generous enough that
+        // we don't trip it under normal operation but tight enough
+        // that an adversarial selectivity can't degenerate to a
+        // brute-force scan.
+        let max_visits = adjusted_ef.saturating_mul(4).max(1_024);
 
         let mut visited: HashSet<u32> = HashSet::new();
         let mut candidates: BinaryHeap<MinCandidate> = BinaryHeap::new();
@@ -352,6 +361,9 @@ impl HnswSearcher {
             distance: c_dist,
         }) = candidates.pop()
         {
+            if visited.len() >= max_visits {
+                break;
+            }
             let farthest_working = working.peek().map(|r| r.distance).unwrap_or(f32::MAX);
             if c_dist > farthest_working {
                 break;
@@ -369,7 +381,26 @@ impl HnswSearcher {
                 let farthest_working =
                     working.peek().map(|r| r.distance).unwrap_or(f32::MAX);
 
-                if working.len() < adjusted_ef || n_dist < farthest_working {
+                let passes_filter =
+                    !deleted.contains(&neighbor_id) && filter.contains(neighbor_id);
+
+                // ACORN-1-style expansion (arXiv:2403.04871, shipped by
+                // Qdrant 1.16 Nov 2025 / Weaviate 1.27 / Vespa Sep 2025).
+                // Two cases:
+                //  - Filter-passing neighbours go through the usual
+                //    "admit if better than the worst working candidate"
+                //    test that bounds the working heap.
+                //  - Filter-failing neighbours are enqueued for 2-hop
+                //    expansion *unconditionally* (modulo dedup via
+                //    `visited`). They do NOT enter the working heap —
+                //    so they can't extend the traversal indefinitely
+                //    via the `c_dist > farthest_working` termination
+                //    check — but they DO get popped from `candidates`
+                //    so the search can find filter-passing rows in
+                //    their neighbourhood. This is what stops selective
+                //    filters from dead-ending in unfiltered regions of
+                //    the graph.
+                if passes_filter && (working.len() < adjusted_ef || n_dist < farthest_working) {
                     candidates.push(MinCandidate {
                         id: neighbor_id,
                         distance: n_dist,
@@ -381,14 +412,17 @@ impl HnswSearcher {
                     if working.len() > adjusted_ef {
                         working.pop();
                     }
-
-                    // Only add to results if the neighbor passes both checks.
-                    if !deleted.contains(&neighbor_id) && filter.contains(neighbor_id) {
-                        results.push(MaxCandidate {
-                            id: neighbor_id,
-                            distance: n_dist,
-                        });
-                    }
+                    results.push(MaxCandidate {
+                        id: neighbor_id,
+                        distance: n_dist,
+                    });
+                } else if !passes_filter {
+                    // ACORN 2-hop bypass: enqueue for traversal but
+                    // don't admit into the working heap or results.
+                    candidates.push(MinCandidate {
+                        id: neighbor_id,
+                        distance: n_dist,
+                    });
                 }
             }
         }

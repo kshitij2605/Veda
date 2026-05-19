@@ -77,6 +77,16 @@ fn build_vector_index(
             idx.build(&refs)?;
             Ok(Box::new(idx))
         }
+        IndexType::RaBitQExtRerank => {
+            // 1-bit RaBitQ for coarse candidates, 4-bit
+            // Extended-RaBitQ for rerank. ~8× less rerank memory
+            // than the raw-float `RaBitQRerank` at similar recall.
+            // See `crates/veda-index/src/quantization/rabitq_ext_rerank.rs`.
+            use veda_index::quantization::rabitq_ext_rerank::RaBitQExtRerankIndex;
+            let mut idx = RaBitQExtRerankIndex::new(metric);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
         // Flat (or anything else that isn't a recognised vector index type).
         _ => {
             let mut idx = FlatIndex::new(metric, dimension);

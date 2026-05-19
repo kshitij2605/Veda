@@ -140,6 +140,13 @@ pub enum IndexType {
     /// an NVIDIA GPU + driver ≥535 at runtime; without the feature
     /// the index returns a clear error on build/search.
     Cagra,
+    /// RaBitQ (1-bit coarse) + Extended-RaBitQ (4-bit rerank).
+    /// Recommended default rerank stage per the 2026 SOTA audit
+    /// (`research/2026-05-19-sota-audit/02-quantization.md`) —
+    /// ~8× less rerank memory than `RaBitQRerank` (which keeps
+    /// full f32) at the same recall envelope for typical
+    /// embedding distributions.
+    RaBitQExtRerank,
     SuffixArray,
     Inverted,
     Range,
