@@ -15,8 +15,10 @@ distributed Raft consensus layer backed by [openraft](https://github.com/datafus
 | `ChannelNetwork` | Placeholder, multi-node transport stub |
 | `raft` module (openraft scaffolding) | Type config + aliases declared |
 | `raft_storage` module | `MemLogState` + `MemStateMachine` data structures, snapshot round-trip tested. `MemRaftStorage` implements v1 `RaftStorage<VedaTypeConfig>` end-to-end; `MemSnapshotBuilder` implements `RaftSnapshotBuilder`. `Adaptor::new(MemRaftStorage::new())` produces the v2 `(RaftLogStorage, RaftStateMachine)` pair `Raft::new` expects. |
-| `raft_network` module | `NodeAddressBook` + `InProcessNetwork` channel-based transport. `RaftNetwork` trait impl deferred. |
-| `GET /v1/admin/nodes` consumer (Phase 6.4 dashboard) | ✅ Ships single-node payload today, response shape is the multi-node Raft shape so no UI change is needed when Raft lands. |
+| `raft_network` module | ✅ `Arc<InProcessNetwork>` now implements `RaftNetworkFactory<VedaTypeConfig>`; `InProcessConn` implements `RaftNetwork`. All three RPCs (append_entries / install_snapshot / vote) return `Unreachable` for any non-self peer — correct for single-node, recoverable behaviour for any future multi-node attempt over this transport. Tonic cross-process transport still deferred. |
+| `raft_coordinator` module (Phase 4) | ✅ `RaftCoordinator` wraps `openraft::Raft<VedaTypeConfig>` with the same `execute / query_state / shutdown` API as the channel coordinator. `start_single_node(node_id)` bootstraps. Two tests pin the end-to-end CreateCollection round-trip. |
+| `veda-gateway` env switch (Phase 5) | ✅ `VEDA_COORDINATOR=raft` boots a single-node Raft loop at startup via `AppState::load_raft_from_env()`. `VEDA_NODE_ID` / `VEDA_NODE_ADDRESS` env vars plumbed. |
+| `GET /v1/admin/nodes` Raft fan-out (Phase 6 UI side) | ✅ When the gateway runs in raft mode, `list_nodes` reads peers from `ClusterState.nodes` via the coordinator and flips `mode` to `"raft"`. Peer status is `"unknown"` until the Tonic transport reports liveness. |
 
 The async traits and types in `crates/veda-coordinator/src/raft.rs` exist so
 the rest of the codebase can refer to a real Raft type and so the migration
@@ -76,9 +78,16 @@ implement v1 `RaftStorage` and wrap with
 `openraft::storage::Adaptor<C, S>`. Our `MemRaftStorage` is exactly that
 implementation; the Adaptor round-trip test pins the contract.
 
-### Phase 3 — Network transport
+### Phase 3 — Network transport (in-process done; Tonic deferred)
 
-Replace `ChannelNetwork` with a real `RaftNetwork` implementation:
+In-process `RaftNetwork` / `RaftNetworkFactory` traits are now
+implemented on `Arc<InProcessNetwork>` (commit `d4aebff`). All three
+trait methods return `Unreachable` when asked to talk to a non-self
+peer — correct semantics for single-node Raft (the leader never RPCs
+itself) and recoverable for any future multi-node attempt over the
+in-process transport (openraft marks the peer dead and backs off).
+
+The remaining work for true multi-node Raft replication:
 
 - gRPC service exposing the openraft RPCs (`AppendEntries`, `InstallSnapshot`,
   `Vote`).
@@ -89,21 +98,33 @@ Replace `ChannelNetwork` with a real `RaftNetwork` implementation:
 For testing, retain `ChannelNetwork` as the in-process transport so unit
 tests don't need real TCP sockets.
 
-### Phase 4 — Coordinator replacement
+### Phase 4 — Coordinator replacement ✅
 
-Add a `RaftCoordinator` that wraps `openraft::Raft<VedaTypeConfig>` and
-exposes the same `CoordinatorHandle` API:
+Landed in commit `d4aebff`:
 
-- `execute(ClusterCommand) -> Result<ClusterResponse>` → submits to the
-  Raft client.
-- `query_state() -> Result<ClusterState>` → reads from the local state
-  machine snapshot (read-only, no Raft round-trip required for follower-safe
-  reads).
+- `RaftCoordinator` wraps `Arc<openraft::Raft<VedaTypeConfig>>` and
+  exposes the same `execute / query_state / shutdown` API as
+  `CoordinatorHandle`.
+- `execute` calls `raft.client_write(command)` and returns the
+  applied `ClusterResponse`.
+- `query_state` is a local read off `MemRaftStorage.sm.snapshot()`
+  — follower-safe, no Raft round-trip. Linearisable reads would
+  need a no-op `client_write` first; that is a follow-up if a
+  caller needs them.
+- The existing channel-based `Coordinator` stays the default. The
+  switch lives in `AppState::load_raft_from_env()`:
+  `VEDA_COORDINATOR=raft` boots the Raft path with
+  `VEDA_NODE_ID` (default 1).
 
-The existing channel-based `Coordinator` stays as the single-node default;
-selection via env var `VEDA_COORDINATOR=raft` switches to the Raft path.
+### Phase 5 — Cluster bootstrap (single-node done; multi-node deferred)
 
-### Phase 5 — Cluster bootstrap
+Single-node bootstrap done in commit `d4aebff`:
+`RaftCoordinator::start_single_node(node_id)` constructs the type
+config + storage + network, builds the Raft handle, and calls
+`raft.initialize({node_id => BasicNode::default()})`. After this
+returns, the node is leader.
+
+Multi-node bootstrap (still TODO):
 
 - `veda-server` startup: read `VEDA_RAFT_PEERS` (comma-separated
   `id@host:port`).
@@ -112,22 +133,30 @@ selection via env var `VEDA_COORDINATOR=raft` switches to the Raft path.
 - On subsequent launches, just `raft.add_voter(...)` is unnecessary —
   state is already in the durable log.
 
-### Phase 6 — Membership changes & observability
+Multi-node bootstrap is blocked on the Tonic transport landing,
+since `raft.initialize` with N > 1 voters immediately triggers
+RPCs the in-process transport cannot deliver.
+
+### Phase 6 — Membership changes & observability (UI side done; rest TODO)
+
+`GET /v1/admin/nodes` now reads from `ClusterState.nodes` via the
+Raft coordinator when one is configured, and flips `mode` to
+`"raft"` in the response (commit `d4aebff`). The Niriksha
+"Cluster Nodes" table needs zero changes — it already consumes
+this shape.
+
+Remaining:
 
 - Expose `POST /v1/admin/cluster/join` and `DELETE
-  /v1/admin/cluster/nodes/{id}` in `veda-gateway`.
-- Extend the existing `GET /v1/admin/nodes` handler (currently in
-  `crates/veda-gateway/src/rest/admin.rs::list_nodes`) to fan out
-  over Raft peers. The handler already returns the multi-node JSON
-  shape (`{mode, nodes: [{id, address, role, status, version,
-  uptime_secs, shard_count, collection_count, is_self}]}`) — the
-  only change is the `mode` field flips from `"single"` to `"raft"`
-  and the `nodes` array grows. The Niriksha "Cluster Nodes" table
-  (Phase 6.4, on `/health`) consumes this directly and needs zero
-  changes.
+  /v1/admin/cluster/nodes/{id}` in `veda-gateway`. Backed by
+  `raft.add_voter(...)` / `raft.change_membership(...)`.
 - Add Prometheus metrics for `raft_term`, `raft_leader_id`,
-  `raft_last_applied`, `raft_log_lag`.
-- Tracing spans on each Raft RPC.
+  `raft_last_applied`, `raft_log_lag`. Most of these are
+  available on `Raft::metrics()` already; the wiring is a
+  background task that reads the metrics stream and pushes to
+  the existing Prometheus recorder.
+- Tracing spans on each Raft RPC (Tonic-layer concern; folds
+  into Phase 3 completion).
 
 ### Phase 7 — Production hardening
 
@@ -140,33 +169,46 @@ selection via env var `VEDA_COORDINATOR=raft` switches to the Raft path.
 
 ## Estimated effort
 
-| Phase | Estimate |
-|---|---|
-| 1 (done) | 1 hour |
-| 2 (storage) | 1-2 days |
-| 3 (network) | 2-3 days |
-| 4 (coordinator) | 1 day |
-| 5 (bootstrap) | 0.5 day |
-| 6 (membership + observability) | 1 day |
-| 7 (hardening) | 1-2 weeks (mostly testing) |
+| Phase | Estimate | Status |
+|---|---|---|
+| 1 (scaffolding) | 1 hour | ✅ done |
+| 2 (storage, in-memory) | 1-2 days | ✅ done |
+| 3 (network, in-process) | 2-3 days | ✅ in-process done; Tonic deferred |
+| 4 (coordinator) | 1 day | ✅ done |
+| 5 (single-node bootstrap) | 0.5 day | ✅ done |
+| 6 (membership + observability) | 1 day | ⚠ UI fan-out done; join/leave + Prom metrics deferred |
+| 7 (production hardening) | 1-2 weeks | ❌ deferred (Tonic, durable log, snapshot streaming, pre-vote, partition tests) |
 
-**Total: ~3-4 weeks of focused engineering**, dominated by phases 2-3 and
-production hardening in phase 7.
+**Original estimate: ~3-4 weeks of focused engineering**, dominated
+by phases 2-3 and production hardening in phase 7.
 
-### When to start
+**Status today** (after commit `d4aebff`): single-node openraft is
+running end-to-end. Phases 1, 2, 4, 5 (single-node) are complete;
+Phase 3 (in-process portion) and Phase 6 (UI fan-out) are
+complete. The remaining work is the multi-node hardening pass:
 
-The dashboard surface (Phase 6.4 — `GET /v1/admin/nodes` + the
-"Cluster Nodes" table on `/health`) shipped in commit `3dd972c`
-without waiting on Raft. It returns a single-node payload today
-and the `mode` field reads `"single"` with an explicit
-"Raft consensus not yet wired" caption in the UI. That means
-nothing on the user-facing side is *blocking* on this migration.
+- **Tonic gRPC transport** (~2-3 days). Replace the in-process
+  `RaftNetwork` impl with a real cross-process one. Service the
+  three openraft RPCs (`AppendEntries`, `InstallSnapshot`, `Vote`)
+  + the chunked-snapshot path.
+- **Durable storage** (~3-5 days). The current `MemRaftStorage`
+  loses cluster state on restart. A file-backed log + fsync'd vote
+  is the minimum honest durability story. Snapshot streaming on
+  top of that.
+- **Multi-node bootstrap** (~0.5 day after transport lands).
+  `VEDA_RAFT_PEERS=1@host1,2@host2,3@host3` + a `--bootstrap` flag
+  that calls `raft.initialize(...)` on first boot.
+- **Membership API** (~0.5 day). `POST /v1/admin/cluster/join` +
+  `DELETE /v1/admin/cluster/nodes/{id}`.
+- **Observability** (~0.5 day). Raft Prometheus metrics scraping
+  `Raft::metrics()` stream.
+- **Production hardening** (1-2 weeks, mostly testing). Pre-vote,
+  partition tests, snapshot soak, leader transfer.
 
-The migration should start when the team has 3-4 uninterrupted
-weeks AND a concrete reason to need quorum (multi-region
-deployments, hot failover SLA, or the first customer for whom a
-single-VM Veda is unacceptable). Until then, the scaffolding +
-this doc are the right amount of state to hold.
+A team can use the current single-node path in production
+deployments where consensus matters less than "does it boot
+cleanly under VEDA_COORDINATOR=raft" — but should not deploy
+multi-node until the durable-storage + Tonic items land.
 
 ## Why not openraft today
 
