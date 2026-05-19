@@ -238,10 +238,20 @@ async fn read_record(
     collection: &str,
     id: &str,
 ) -> OpOutcome {
-    let url = format!(
-        "{}/v1/collections/{}/records/{}",
-        node, collection, id
-    );
+    let linearisable = std::env::var("VEDA_LIN_BARRIER")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let url = if linearisable {
+        format!(
+            "{}/v1/collections/{}/records/{}?linearisable=true",
+            node, collection, id
+        )
+    } else {
+        format!(
+            "{}/v1/collections/{}/records/{}",
+            node, collection, id
+        )
+    };
     match client.get(&url).send().await {
         Ok(resp) => {
             let s = resp.status();
