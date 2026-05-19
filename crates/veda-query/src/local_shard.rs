@@ -67,6 +67,16 @@ fn build_vector_index(
             idx.build(&refs)?;
             Ok(Box::new(idx))
         }
+        IndexType::Cagra => {
+            // NVIDIA cuVS GPU-native graph ANN. Builds + searches
+            // on the GPU; falls back to a clear runtime error if
+            // the binary was built without `--features veda-index/gpu_cuvs`.
+            // See `crates/veda-index/src/gpu_cuvs.rs`.
+            use veda_index::gpu_cuvs::CagraIndex;
+            let mut idx = CagraIndex::new(metric, dimension);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
         // Flat (or anything else that isn't a recognised vector index type).
         _ => {
             let mut idx = FlatIndex::new(metric, dimension);

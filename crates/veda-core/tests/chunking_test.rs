@@ -8,8 +8,9 @@ fn default_strategy_is_markdown_recursive() {
             max_chunk_size,
             chunk_overlap,
         } => {
-            assert_eq!(max_chunk_size, 2000);
-            assert_eq!(chunk_overlap, 300);
+            // Retuned 2026-05-19 per research/2026-05-19-sota-audit/07-chunking-ocr.md
+            assert_eq!(max_chunk_size, 1500);
+            assert_eq!(chunk_overlap, 0);
         }
         _ => panic!("default should be MarkdownRecursive"),
     }

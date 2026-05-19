@@ -197,9 +197,28 @@ impl TimeWindowPlan {
 
 impl Default for ChunkingStrategy {
     fn default() -> Self {
+        // Defaults tuned per the Jan 2026 systematic chunking
+        // study (arXiv:2601.14123, plus the Firecrawl 2026 chunking
+        // survey and voyage-context-3 work).
+        //
+        //  - 1500 chars ≈ 375 tokens is inside the 256-512 token
+        //    sweet spot for non-contextualised embedders (BGE-M3,
+        //    Qwen3-Embedding-8B). Going past ~2.5k tokens
+        //    (~10k chars) hits the "context cliff" the study
+        //    surfaced — relevance drops sharply.
+        //  - 0 overlap matches the "minimal or zero overlap is
+        //    best for retrieval" finding across BEIR replications.
+        //    Overlap helps generation, not retrieval; the
+        //    relevant chunk is found either way, and the
+        //    duplicated text just inflates the corpus.
+        //
+        // The previous `{2000, 300}` were the LangChain /
+        // LlamaIndex 2023 tutorial defaults that 2024-2026
+        // empirical work moved past.
+        // See research/2026-05-19-sota-audit/07-chunking-ocr.md
         ChunkingStrategy::MarkdownRecursive {
-            max_chunk_size: 2000,
-            chunk_overlap: 300,
+            max_chunk_size: 1500,
+            chunk_overlap: 0,
         }
     }
 }
