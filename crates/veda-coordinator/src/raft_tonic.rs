@@ -229,6 +229,15 @@ impl TonicRaftNetwork {
         self.channels.write().await.insert(target, channel.clone());
         Some(channel)
     }
+
+    /// Evict a cached channel — called after an RPC failure so the
+    /// next call dials a fresh connection. Without this, a peer
+    /// that recovered from a partition can stay "stuck" because
+    /// the cached channel points at a TCP socket that's been
+    /// closed on the other end.
+    async fn drop_channel(&self, target: NodeId) {
+        self.channels.write().await.remove(&target);
+    }
 }
 
 #[derive(Clone)]
@@ -302,9 +311,16 @@ impl TonicRaftNetworkConn {
             .await
             .ok_or_else(|| unreachable(self.target, format!("no route or dial failed ({verb})")))?;
         let client = VedaRaftClient::new(channel);
-        let resp = send(client, RawRpc { payload: bytes })
-            .await
-            .map_err(|s| net_err(self.target, format!("rpc {verb}: {s}")))?;
+        let resp = match send(client, RawRpc { payload: bytes }).await {
+            Ok(r) => r,
+            Err(s) => {
+                // Drop the cached channel so the next call dials
+                // fresh — handles partition heal where the
+                // long-lived Channel never recovers.
+                self.factory.drop_channel(self.target).await;
+                return Err(net_err(self.target, format!("rpc {verb}: {s}")));
+            }
+        };
         let resp_bytes = resp.into_inner().payload;
         let decoded: Resp = bincode::deserialize(&resp_bytes)
             .map_err(|e| net_err(self.target, format!("decode {verb} response: {e}")))?;
