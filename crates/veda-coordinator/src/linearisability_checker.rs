@@ -145,6 +145,109 @@ impl History {
         }
         std::fs::write(path, buf)
     }
+
+    /// Serialise the history to an Elle-compatible JSONL file.
+    ///
+    /// Format matches what Kingsbury's `elle-cli` expects: each
+    /// line is one event, and each Veda Invocation emits two
+    /// events — an `:invoke` at `start_ns` and an `:ok` / `:fail`
+    /// / `:info` at `end_ns`.
+    ///
+    /// We model the (collection, record_id) tuple as an rw-register
+    /// key `"{collection}/{record_id}"`. An Insert becomes a `:w`
+    /// mop; a Read becomes an `:r` mop. Single-mop ops keep the
+    /// model close to the simple register-history shape Elle uses
+    /// for linearisability checks.
+    ///
+    /// Run the checker offline:
+    ///   elle-cli check --model rw-register --consistency-models linearizable history.elle.jsonl
+    pub async fn dump_elle_jsonl(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let inv = self.invocations.lock().await;
+        let mut buf = String::new();
+        // Events are interleaved in (start, end) order so the
+        // checker sees them in the same wall-clock order they
+        // actually happened.
+        let mut events: Vec<EllEvent<'_>> = Vec::with_capacity(inv.len() * 2);
+        for (idx, i) in inv.iter().enumerate() {
+            let key = match &i.op {
+                OpKind::Insert { collection, record_id, .. }
+                | OpKind::Read { collection, record_id } => {
+                    format!("{collection}/{record_id}")
+                }
+            };
+            let (f, invoke_mop, complete_mop) = match (&i.op, &i.outcome) {
+                (OpKind::Insert { payload, .. }, _) => (
+                    "write",
+                    serde_json::json!([":w", key, payload]),
+                    serde_json::json!([":w", key, payload]),
+                ),
+                (OpKind::Read { .. }, OpOutcome::Ok(observed)) => (
+                    "read",
+                    serde_json::json!([":r", key, null]),
+                    serde_json::json!([":r", key, observed]),
+                ),
+                (OpKind::Read { .. }, _) => (
+                    "read",
+                    serde_json::json!([":r", key, null]),
+                    serde_json::json!([":r", key, null]),
+                ),
+            };
+            let invoke_idx = (idx * 2) as u64;
+            let complete_idx = invoke_idx + 1;
+            events.push(EllEvent {
+                index: invoke_idx,
+                time: i.start_ns,
+                process: i.client_id,
+                kind: "invoke",
+                f,
+                value: vec![invoke_mop],
+                error: None,
+            });
+            let (kind, error) = match &i.outcome {
+                OpOutcome::Ok(_) => ("ok", None),
+                OpOutcome::Err(e) => ("fail", Some(e.as_str())),
+                OpOutcome::Timeout => ("info", Some("timeout")),
+            };
+            events.push(EllEvent {
+                index: complete_idx,
+                time: i.end_ns,
+                process: i.client_id,
+                kind,
+                f,
+                value: vec![complete_mop],
+                error,
+            });
+        }
+        events.sort_by_key(|e| (e.time, e.index));
+        for e in &events {
+            let line = serde_json::to_string(e).map_err(|err| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, err)
+            })?;
+            buf.push_str(&line);
+            buf.push('\n');
+        }
+        std::fs::write(path, buf)
+    }
+}
+
+/// Serialised shape consumed by `elle-cli`. Field names + the use
+/// of `:invoke` / `:ok` / `:fail` / `:info` follow Jepsen's
+/// historical conventions so the same JSONL works with both
+/// `elle-cli` and the Java/Clojure Jepsen tooling.
+#[derive(Debug, Serialize)]
+struct EllEvent<'a> {
+    index: u64,
+    time: u128,
+    process: usize,
+    /// One of "invoke" / "ok" / "fail" / "info". Serialized as the
+    /// JSON string (Elle's loaders accept both the bare keyword
+    /// shape and quoted strings).
+    #[serde(rename = "type")]
+    kind: &'a str,
+    f: &'a str,
+    value: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
 }
 
 /// Findings from a linearisability check.
@@ -358,6 +461,72 @@ mod tests {
         let r = check_history(&h);
         assert_eq!(r.violations.len(), 1);
         assert_eq!(r.violations[0].kind, "payload_mismatch");
+    }
+
+    #[tokio::test]
+    async fn elle_jsonl_round_trip_shape() {
+        let history = History::new();
+        let started = Instant::now();
+        // Insert + matching read.
+        history
+            .record(
+                0,
+                OpKind::Insert {
+                    collection: "c".into(),
+                    record_id: "1".into(),
+                    payload: "v1".into(),
+                },
+                OpOutcome::Ok(None),
+                started,
+            )
+            .await;
+        history
+            .record(
+                1,
+                OpKind::Read {
+                    collection: "c".into(),
+                    record_id: "1".into(),
+                },
+                OpOutcome::Ok(Some("v1".into())),
+                started,
+            )
+            .await;
+        // One failed read so we exercise the "fail" branch too.
+        history
+            .record(
+                1,
+                OpKind::Read {
+                    collection: "c".into(),
+                    record_id: "missing".into(),
+                },
+                OpOutcome::Err("404".into()),
+                started,
+            )
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("history.elle.jsonl");
+        history.dump_elle_jsonl(&path).await.unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        // 3 invocations × 2 events each = 6 lines
+        assert_eq!(lines.len(), 6);
+        // Every line round-trips through serde_json::Value.
+        for l in &lines {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            assert!(v.get("type").is_some(), "missing type field");
+            assert!(v.get("f").is_some(), "missing f field");
+            assert!(v.get("value").is_some(), "missing value field");
+        }
+        // First line should be an "invoke".
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["type"], "invoke");
+        // The "fail" branch must propagate the error string.
+        let any_fail = lines.iter().any(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            v["type"] == "fail" && v["error"] == "404"
+        });
+        assert!(any_fail, "expected a fail event with error=\"404\"");
     }
 
     #[test]

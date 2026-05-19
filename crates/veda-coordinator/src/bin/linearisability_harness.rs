@@ -13,8 +13,17 @@
 //!   VEDA_LIN_DURATION_SECS run time (default 60)
 //!   VEDA_LIN_CLIENTS       concurrent client tasks (default 4)
 //!   VEDA_LIN_COLLECTION    collection name (default lin_smoke)
-//!   VEDA_LIN_HISTORY_OUT   where to dump the JSONL history
+//!   VEDA_LIN_HISTORY_OUT   where to dump the native JSONL history
 //!                         (default ./linearisability-history.jsonl)
+//!   VEDA_LIN_ELLE_OUT      where to dump the Elle-format JSONL
+//!                         (default $VEDA_LIN_HISTORY_OUT.elle.jsonl)
+//!
+//! Cross-checking with elle-cli:
+//!   docker run --rm -v "$PWD:/w" -w /w jepsen/elle-cli \
+//!     lein run check --model rw-register \
+//!       --consistency-models linearizable \
+//!       linearisability-history.jsonl.elle.jsonl
+//! (See documentation/raft-migration.md for the full recipe.)
 //!
 //! The harness:
 //!   1. Ensures the collection exists (create if missing).
@@ -147,6 +156,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[lin] history has {} invocations", inv.len());
     history.dump_jsonl(std::path::Path::new(&history_out)).await?;
     eprintln!("[lin] history dumped to {history_out}");
+
+    // Elle-compatible JSONL: feed straight into `elle-cli` for an
+    // independent cycle-detection check. Default path mirrors the
+    // native dump so both files live side-by-side.
+    let elle_out = std::env::var("VEDA_LIN_ELLE_OUT")
+        .unwrap_or_else(|_| format!("{history_out}.elle.jsonl"));
+    history
+        .dump_elle_jsonl(std::path::Path::new(&elle_out))
+        .await?;
+    eprintln!("[lin] elle-format history dumped to {elle_out}");
 
     let report = check_history(&inv);
     eprintln!("[lin] report:");

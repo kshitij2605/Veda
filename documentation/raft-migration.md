@@ -508,3 +508,71 @@ round-trip integration test
 proves the in-memory log + state machine pieces compose into a
 consistent snapshot before any openraft trait surface is in play.
 The implementer can build on top of that contract.
+
+## Linearisability harness — Elle cross-check
+
+The native `linearisability_harness` binary records every insert /
+read against the cluster and runs Veda's own sequential checker
+(see `linearisability_checker::check_history`). To get an independent
+read with a different algorithm, dump the history in Elle format
+and feed it to `elle-cli` — Kingsbury's cycle-detection consistency
+checker.
+
+The harness now emits two files:
+
+```
+$ VEDA_LIN_DURATION_SECS=120 cargo run --release \
+    -p veda-coordinator --bin veda-linearisability-harness
+
+[lin] history has 4382 invocations
+[lin] history dumped to linearisability-history.jsonl
+[lin] elle-format history dumped to linearisability-history.jsonl.elle.jsonl
+[lin] report:
+  ...
+[lin] PASS
+```
+
+### Run elle-cli against the Elle dump
+
+`elle-cli` is published as a JAR + Docker image; running via Docker is
+the lowest-friction path:
+
+```
+docker run --rm -v "$PWD:/w" -w /w jepsen/elle-cli \
+  lein run check --model rw-register \
+    --consistency-models linearizable \
+    linearisability-history.jsonl.elle.jsonl
+```
+
+A passing run prints `{:valid? true}`. A failing run prints one or
+more anomaly classes (`:G0`, `:G1a`, `:G1b`, `:G2-item`,
+`:lost-update`, etc.) along with the implicated operations.
+
+### Why both checkers
+
+The native check_history is a simple "every read observes a
+linearisable insert" sequential model — fast, in-process, runs in
+unit tests. elle-cli is a graph-based cycle detector — slower,
+independent algorithm, catches anomaly classes the simple model
+doesn't enumerate (e.g. read-only G2 cycles).
+
+When the two agree we have high confidence. When they disagree the
+delta names exactly what's missing from the simple model. The Veda
+checker is **not** intended to replace Elle — it's the smoke test
+that runs every soak iteration; Elle is the offline weapon for
+hunting subtle anomalies.
+
+### Format we emit
+
+Each Veda Invocation becomes two events (`:invoke` then `:ok` /
+`:fail` / `:info`), keyed by `process` = client id. The mop shape
+is single-key rw-register:
+
+```
+{"index":0,"time":1700000000000,"process":0,"type":"invoke","f":"write","value":[[":w","lin_smoke/abc","payload-7"]]}
+{"index":1,"time":1700000000812,"process":0,"type":"ok","f":"write","value":[[":w","lin_smoke/abc","payload-7"]]}
+{"index":2,"time":1700000000900,"process":1,"type":"invoke","f":"read","value":[[":r","lin_smoke/abc",null]]}
+{"index":3,"time":1700000001050,"process":1,"type":"ok","f":"read","value":[[":r","lin_smoke/abc","payload-7"]]}
+```
+
+Same JSONL is consumable by Jepsen's Clojure tooling.
