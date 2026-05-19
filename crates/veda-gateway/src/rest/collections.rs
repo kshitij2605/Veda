@@ -239,48 +239,38 @@ pub async fn create_collection(
         )
     })?;
 
-    // Create segment managers and query executor for all shards
-    let mut shard_managers: HashMap<u32, SegmentManager> = HashMap::new();
-    let mut executor = DistributedQueryExecutor::new();
-
-    for shard_id in 0..schema.shard_count() {
-        let sm = SegmentManager::new(schema.clone(), shard_id, &collection_dir, 512 * 1024 * 1024)
-            .map_err(|e| {
-                (
+    // Raft mode: route the creation through the consensus log
+    // BEFORE materializing locally. coord.execute returns once
+    // the entry is committed AND applied; on every node the
+    // ClusterStateMachine then carries the new collection.
+    // After that, this node materializes the local Veda objects
+    // (segment managers, executor). Followers reconcile via the
+    // background task spawned in start_server.
+    {
+        let raft_guard = state.inner.raft.read().await;
+        if let Some(coord) = raft_guard.as_ref() {
+            let cmd = veda_coordinator::raft_types::ClusterCommand::CreateCollection {
+                name: req.name.clone(),
+                schema_json: String::from_utf8(schema_json.clone()).unwrap_or_default(),
+            };
+            if let Err(e) = coord.execute(cmd).await {
+                return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
-                        error: format!("failed to create segment manager: {e}"),
+                        error: format!("raft submit: {e}"),
                     }),
-                )
-            })?;
-        let searcher = LocalShardSearcher::new(
-            SegmentManager::new(schema.clone(), shard_id, &collection_dir, 512 * 1024 * 1024)
-                .unwrap(),
-        );
-        executor.register_shard(shard_id, Box::new(searcher));
-        shard_managers.insert(shard_id, sm);
+                ));
+            }
+            // Fall through to local materialization — same code
+            // path the non-Raft mode uses, and the same code path
+            // the periodic reconcile task uses on followers.
+        }
     }
 
-    // Store everything
+    if let Err((status, e)) = materialize_collection_locally(&state, &schema, &collection_dir).await
     {
-        let mut schemas = state.inner.schemas.write().await;
-        schemas.insert(req.name.clone(), schema);
+        return Err((status, e));
     }
-    {
-        let mut managers = state.inner.segment_managers.write().await;
-        managers.insert(req.name.clone(), shard_managers);
-    }
-    {
-        let mut executors = state.inner.query_executors.write().await;
-        executors.insert(req.name.clone(), executor);
-    }
-
-    // Update active collections gauge.
-    let collection_count = {
-        let schemas = state.inner.schemas.read().await;
-        schemas.len()
-    };
-    metrics::gauge!(m::ACTIVE_COLLECTIONS).set(collection_count as f64);
 
     Ok((
         StatusCode::CREATED,
@@ -289,6 +279,134 @@ pub async fn create_collection(
             status: "created".into(),
         }),
     ))
+}
+
+/// Wire a parsed `CollectionSchema` into the local in-process
+/// state: segment managers + query executor per shard, then insert
+/// into `state.inner.schemas`. Idempotent — a collection already
+/// present locally is left alone.
+///
+/// This is the shared code path between:
+///   - direct REST creation (non-Raft mode)
+///   - REST creation after a Raft commit (leader)
+///   - the background reconcile task picking up entries from the
+///     Raft state machine (followers)
+pub(crate) async fn materialize_collection_locally(
+    state: &AppState,
+    schema: &CollectionSchema,
+    collection_dir: &std::path::Path,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let name = schema.name().to_owned();
+    {
+        let schemas = state.inner.schemas.read().await;
+        if schemas.contains_key(&name) {
+            return Ok(()); // already materialized
+        }
+    }
+    let mut shard_managers: HashMap<u32, SegmentManager> = HashMap::new();
+    let mut executor = DistributedQueryExecutor::new();
+    for shard_id in 0..schema.shard_count() {
+        let sm =
+            SegmentManager::new(schema.clone(), shard_id, collection_dir, 512 * 1024 * 1024)
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("failed to create segment manager: {e}"),
+                        }),
+                    )
+                })?;
+        let searcher = LocalShardSearcher::new(
+            SegmentManager::new(schema.clone(), shard_id, collection_dir, 512 * 1024 * 1024)
+                .unwrap(),
+        );
+        executor.register_shard(shard_id, Box::new(searcher));
+        shard_managers.insert(shard_id, sm);
+    }
+    {
+        let mut schemas = state.inner.schemas.write().await;
+        schemas.insert(name.clone(), schema.clone());
+    }
+    {
+        let mut managers = state.inner.segment_managers.write().await;
+        managers.insert(name.clone(), shard_managers);
+    }
+    {
+        let mut executors = state.inner.query_executors.write().await;
+        executors.insert(name.clone(), executor);
+    }
+    let collection_count = state.inner.schemas.read().await.len();
+    metrics::gauge!(m::ACTIVE_COLLECTIONS).set(collection_count as f64);
+    Ok(())
+}
+
+/// Reconcile the local Veda state with the Raft state machine's
+/// view. Materializes any collection that exists in Raft state
+/// but not locally; drops any local collection no longer in Raft
+/// state. Called by the periodic reconcile task in raft mode and
+/// also (synchronously, fall-through) by the create/drop handlers
+/// so the leader's response reflects the new state.
+pub async fn reconcile_collections_from_raft(
+    state: &AppState,
+) -> Result<(), String> {
+    let raft_state = {
+        let guard = state.inner.raft.read().await;
+        match guard.as_ref() {
+            Some(c) => c.query_state().await.map_err(|e| format!("{e}"))?,
+            None => return Ok(()),
+        }
+    };
+
+    let local_names: std::collections::HashSet<String> = {
+        let schemas = state.inner.schemas.read().await;
+        schemas.keys().cloned().collect()
+    };
+    let raft_names: std::collections::HashSet<String> =
+        raft_state.collections.keys().cloned().collect();
+
+    // Materialize: in Raft, not in local.
+    for name in raft_names.difference(&local_names) {
+        let Some(schema_json) = raft_state.collections.get(name) else {
+            continue;
+        };
+        let schema: CollectionSchema = match serde_json::from_str(schema_json) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    collection = %name,
+                    error = %e,
+                    "reconcile: schema JSON parse failed; skipping",
+                );
+                continue;
+            }
+        };
+        let collection_dir = state.inner.data_dir.join(name);
+        // Persist the schema marker so a restart can recover the
+        // collection from disk independently of the Raft log.
+        let _ = std::fs::create_dir_all(&collection_dir);
+        let _ = std::fs::write(
+            collection_dir.join("collection.json"),
+            schema_json.as_bytes(),
+        );
+        if let Err(e) = materialize_collection_locally(state, &schema, &collection_dir).await {
+            tracing::warn!(
+                collection = %name,
+                error = ?e.1.0.error,
+                "reconcile: materialize failed",
+            );
+        } else {
+            tracing::info!(collection = %name, "reconcile: materialized from raft state");
+        }
+    }
+
+    // Drop: in local, not in Raft.
+    for name in local_names.difference(&raft_names) {
+        tracing::info!(collection = %name, "reconcile: dropping (no longer in raft state)");
+        let _ = state.inner.schemas.write().await.remove(name);
+        let _ = state.inner.segment_managers.write().await.remove(name);
+        let _ = state.inner.query_executors.write().await.remove(name);
+    }
+    Ok(())
 }
 
 pub async fn list_collections(
@@ -339,6 +457,27 @@ pub async fn drop_collection(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<DropCollectionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Raft mode: submit the drop to the consensus log first.
+    // After the entry commits + applies on every node, the local
+    // reconcile (here or in the periodic task) tears down
+    // segment managers + executors.
+    {
+        let raft_guard = state.inner.raft.read().await;
+        if let Some(coord) = raft_guard.as_ref() {
+            let cmd = veda_coordinator::raft_types::ClusterCommand::DropCollection {
+                name: name.clone(),
+            };
+            if let Err(e) = coord.execute(cmd).await {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("raft submit: {e}"),
+                    }),
+                ));
+            }
+        }
+    }
+
     let removed = {
         let mut schemas = state.inner.schemas.write().await;
         schemas.remove(&name)
