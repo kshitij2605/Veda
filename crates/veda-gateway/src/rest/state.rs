@@ -15,6 +15,7 @@ use veda_storage::segment_manager::SegmentManager;
 
 use crate::auth::Role;
 use crate::rest::saved_objects::SavedObjectStore;
+use veda_coordinator::raft_coordinator::RaftCoordinator;
 
 /// Represents a user in the in-memory user store.
 #[derive(Clone)]
@@ -66,6 +67,11 @@ pub struct AppStateInner {
     pub saved_objects: SavedObjectStore,
     /// Process start time — used by `/v1/admin/nodes` to report uptime.
     pub started_at: Instant,
+    /// When `VEDA_COORDINATOR=raft` is set, this holds a running
+    /// `RaftCoordinator` (single-node bootstrapped). Otherwise `None`
+    /// and the gateway runs without consensus. The admin nodes view
+    /// reads this to flip `mode` between `"single"` and `"raft"`.
+    pub raft: RwLock<Option<RaftCoordinator>>,
 }
 
 impl AppState {
@@ -90,6 +96,7 @@ impl AppState {
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
                 started_at: Instant::now(),
+                raft: RwLock::new(None),
             }),
         }
     }
@@ -123,6 +130,7 @@ impl AppState {
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
                 started_at: Instant::now(),
+                raft: RwLock::new(None),
             }),
         }
     }
@@ -152,6 +160,7 @@ impl AppState {
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
                 started_at: Instant::now(),
+                raft: RwLock::new(None),
             }),
         }
     }
@@ -198,6 +207,40 @@ impl AppState {
         let mut guard = self.inner.splade_client.write().await;
         *guard = Some(SpladeClient::new(cfg));
         tracing::info!(model = %model, endpoint = %endpoint, "registered SPLADE encoder from environment");
+    }
+
+    /// Optionally bootstrap a single-node `RaftCoordinator` from the
+    /// env. Activated when `VEDA_COORDINATOR=raft` is set. The node
+    /// id is read from `VEDA_NODE_ID` (defaults to 1). No-op
+    /// otherwise; the gateway keeps running without consensus.
+    ///
+    /// This is the Phase 4 + Phase 5 hook from
+    /// `documentation/raft-migration.md`. The actual Raft loop and
+    /// log/state-machine live inside `veda-coordinator`.
+    pub async fn load_raft_from_env(&self) {
+        let want_raft = std::env::var("VEDA_COORDINATOR")
+            .map(|v| v.eq_ignore_ascii_case("raft"))
+            .unwrap_or(false);
+        if !want_raft {
+            return;
+        }
+        let node_id: u64 = std::env::var("VEDA_NODE_ID")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        match RaftCoordinator::start_single_node(node_id).await {
+            Ok(coord) => {
+                let mut guard = self.inner.raft.write().await;
+                *guard = Some(coord);
+                tracing::info!(
+                    node_id,
+                    "raft coordinator started in single-node mode"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to start raft coordinator");
+            }
+        }
     }
 
     /// Load an OpenAI-compatible LLM endpoint from `VEDA_LLM_*` env

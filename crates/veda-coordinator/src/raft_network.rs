@@ -1,29 +1,33 @@
-//! Network transport scaffolding for openraft.
+//! Network transport for openraft — in-process only (single-node + tests).
 //!
 //! ## Status
 //!
-//! This file holds the data-plumbing pieces a real `RaftNetwork` /
-//! `RaftNetworkFactory` would build on:
+//! Implements [`openraft::RaftNetworkFactory`] and [`openraft::RaftNetwork`]
+//! on top of [`InProcessNetwork`]. This is sufficient for:
+//!   - 1-node Raft clusters (the production path until cross-process
+//!     transport lands).
+//!   - Multi-node unit tests where every "peer" lives in the same Tokio
+//!     runtime and we route bytes through `tokio::sync::mpsc`.
 //!
-//! - [`NodeAddressBook`] — `NodeId -> address` lookup, populated from the
-//!   existing [`crate::raft_types::ClusterState::nodes`] view.
-//! - [`InProcessNetwork`] — channel-based RPC for unit tests, mirrored
-//!   from the existing [`crate::network::ChannelNetwork`].
-//!
-//! The actual `RaftNetwork` trait impl is deferred for the same reason as
-//! the storage traits (see `raft_storage.rs`): producing a correct
-//! AppendEntries/InstallSnapshot/Vote implementation needs careful
-//! review against openraft's expected error semantics, and a real
-//! production deployment wants Tonic/gRPC rather than mpsc channels.
-//!
-//! See `documentation/raft-migration.md` Phase 3.
+//! A cross-process Tonic/gRPC transport is still deferred — see
+//! `documentation/raft-migration.md` for the Phase 3-onwards roadmap.
+//! In single-node mode the RaftNetwork methods are unreachable in practice
+//! (openraft never asks a leader to talk to itself), but they must
+//! compile and return reasonable errors when called.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use openraft::error::{InstallSnapshotError, RPCError, RaftError, Unreachable};
+use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
+use openraft::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
+    InstallSnapshotResponse, VoteRequest, VoteResponse,
+};
+use openraft::BasicNode;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
-use crate::raft::NodeId;
+use crate::raft::{NodeId, VedaTypeConfig};
 
 /// `NodeId -> address` mapping used by the network factory to resolve a
 /// peer's address. Populated by the coordinator when nodes register via
@@ -100,6 +104,107 @@ impl InProcessNetwork {
 
     pub async fn node_count(&self) -> usize {
         self.routes.lock().await.len()
+    }
+}
+
+/// Per-target RaftNetwork client. Owned by openraft and reused across
+/// many RPC calls to the same peer.
+///
+/// In the single-node path this never actually transmits anything — the
+/// leader is the only voter, so openraft never invokes these methods
+/// after the initial `initialize()`. The methods are there because the
+/// trait requires them.
+pub struct InProcessConn {
+    target: NodeId,
+    network: Arc<InProcessNetwork>,
+}
+
+impl RaftNetworkFactory<VedaTypeConfig> for Arc<InProcessNetwork> {
+    type Network = InProcessConn;
+
+    async fn new_client(
+        &mut self,
+        target: NodeId,
+        _node: &BasicNode,
+    ) -> Self::Network {
+        InProcessConn {
+            target,
+            network: self.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NoRoute {
+    node: NodeId,
+    msg: &'static str,
+}
+
+impl std::fmt::Display for NoRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "node {}: {}", self.node, self.msg)
+    }
+}
+impl std::error::Error for NoRoute {}
+
+fn unreachable<E: std::error::Error>(
+    node: NodeId,
+    msg: &'static str,
+) -> RPCError<NodeId, BasicNode, E> {
+    RPCError::Unreachable(Unreachable::new(&NoRoute { node, msg }))
+}
+
+impl RaftNetwork<VedaTypeConfig> for InProcessConn {
+    async fn append_entries(
+        &mut self,
+        _rpc: AppendEntriesRequest<VedaTypeConfig>,
+        _option: RPCOption,
+    ) -> Result<
+        AppendEntriesResponse<NodeId>,
+        RPCError<NodeId, BasicNode, RaftError<NodeId>>,
+    > {
+        // The in-process transport never delivers responses across
+        // tasks today — it is a fire-and-forget byte router. In
+        // single-node mode openraft never asks the leader to talk to
+        // itself so this method is unreachable; we surface
+        // `Unreachable` rather than panicking so a future
+        // misconfiguration (e.g. accidentally booting a 2-node
+        // cluster with this transport) gets a recoverable error
+        // instead of a crash.
+        let _ = &self.network;
+        Err(unreachable(
+            self.target,
+            "in-process transport: cross-process reply routing is the \
+             deferred Tonic layer",
+        ))
+    }
+
+    async fn install_snapshot(
+        &mut self,
+        _rpc: InstallSnapshotRequest<VedaTypeConfig>,
+        _option: RPCOption,
+    ) -> Result<
+        InstallSnapshotResponse<NodeId>,
+        RPCError<NodeId, BasicNode, RaftError<NodeId, InstallSnapshotError>>,
+    > {
+        Err(unreachable(
+            self.target,
+            "InstallSnapshot via in-process transport not routed",
+        ))
+    }
+
+    async fn vote(
+        &mut self,
+        _rpc: VoteRequest<NodeId>,
+        _option: RPCOption,
+    ) -> Result<
+        VoteResponse<NodeId>,
+        RPCError<NodeId, BasicNode, RaftError<NodeId>>,
+    > {
+        Err(unreachable(
+            self.target,
+            "Vote via in-process transport not routed",
+        ))
     }
 }
 

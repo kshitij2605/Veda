@@ -20,6 +20,7 @@
 
 pub mod network;
 pub mod raft;
+pub mod raft_coordinator;
 pub mod raft_network;
 pub mod raft_storage;
 pub mod raft_types;

@@ -237,6 +237,13 @@ impl MemStateMachine {
     pub async fn set_current_snapshot(&self, snap: StoredSnapshot) {
         self.inner.write().await.current_snapshot = Some(snap);
     }
+
+    /// Lock-free read of the underlying `ClusterState`. Used by
+    /// `RaftCoordinator::query_state()` so a status read does not need
+    /// to round-trip through Raft.
+    pub async fn snapshot(&self) -> crate::raft_types::ClusterState {
+        self.inner.read().await.state.snapshot()
+    }
 }
 
 // ---------------------------------------------------------------------------
