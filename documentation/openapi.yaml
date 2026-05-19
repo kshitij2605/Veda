@@ -1,0 +1,591 @@
+openapi: 3.0.3
+info:
+  title: Veda REST API
+  version: 0.1.0
+  description: |
+    REST API exposed by `veda-gateway`. The shape mirrors what
+    `crates/veda-gateway/src/rest/` actually serves; this file is
+    hand-maintained rather than generated, so when adding a route
+    update the relevant section here. Routes prefixed `/v1/admin`
+    require the bearer token when `auth_enabled=true`.
+
+    Conventions:
+      - All bodies are JSON unless noted.
+      - Standard error envelope: `{ "error": "<message>" }`.
+      - When the gateway is in Raft mode and the caller hits a
+        follower for a mutating request, the response is a
+        `307 Temporary Redirect` with `Location:` pointing at
+        the current leader.
+
+servers:
+  - url: http://localhost:6340
+    description: default single-node dev port
+  - url: http://localhost:6342
+    description: node-2 in the 3-node raft-cluster compose profile
+  - url: http://localhost:6344
+    description: node-3 in the 3-node raft-cluster compose profile
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+    HealthResponse:
+      type: object
+      properties:
+        status: { type: string, enum: [healthy, degraded, unhealthy] }
+        version: { type: string }
+        checks:
+          type: object
+          additionalProperties: { type: string }
+    NodeInfo:
+      type: object
+      properties:
+        id: { type: string }
+        address: { type: string }
+        role: { type: string, enum: [leader, follower, candidate, unknown] }
+        status: { type: string }
+        version: { type: string }
+        uptime_secs: { type: integer }
+        shard_count: { type: integer }
+        collection_count: { type: integer }
+        is_self: { type: boolean }
+    ListNodesResponse:
+      type: object
+      properties:
+        mode: { type: string, enum: [single, raft] }
+        nodes:
+          type: array
+          items: { $ref: '#/components/schemas/NodeInfo' }
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string }
+    LoginResponse:
+      type: object
+      properties:
+        token: { type: string }
+    FieldDef:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string }
+        type:
+          type: string
+          enum: [vector, string, int64, float64, bool, blob, sparse]
+        dimension: { type: integer, description: "Required for vector type" }
+        metric:
+          type: string
+          enum: [cosine, dot_product, euclidean, manhattan]
+        filterable: { type: boolean }
+    CreateCollectionRequest:
+      type: object
+      required: [name, fields]
+      properties:
+        name: { type: string }
+        fields:
+          type: array
+          items: { $ref: '#/components/schemas/FieldDef' }
+        shard_count: { type: integer, default: 1 }
+        replication_factor: { type: integer, default: 1 }
+    InsertRequest:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          items: { type: object, additionalProperties: true }
+    InsertResponse:
+      type: object
+      properties:
+        inserted: { type: integer }
+        ids:
+          type: array
+          items: { type: string }
+          description: "Per-record UUIDs assigned by the gateway (Raft mode only)."
+    SearchHit:
+      type: object
+      properties:
+        id: { type: string }
+        distance: { type: number }
+        fields:
+          type: object
+          additionalProperties: true
+    SearchRequest:
+      type: object
+      required: [query, limit]
+      properties:
+        query:
+          type: object
+          description: |
+            One of `vector`, `bm25`, `sparse_vector`, `hybrid`,
+            `colpali`, `multi_vector` — see the Rust types in
+            `crates/veda-gateway/src/rest/search.rs`.
+        filter: { type: string, description: "SQL-like filter DSL." }
+        limit: { type: integer }
+        explain: { type: boolean }
+        truncate_to: { type: integer, nullable: true }
+        rerank:
+          type: object
+          nullable: true
+          properties:
+            field: { type: string }
+            query: { type: string }
+            top_k: { type: integer }
+            model: { type: string, nullable: true }
+    SearchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/SearchHit' }
+        count: { type: integer }
+        took_ms: { type: integer }
+        explain: { type: object, nullable: true }
+        hybrid_explain: { type: object, nullable: true }
+    ChunkPreviewRequest:
+      type: object
+      required: [text, runs]
+      properties:
+        text: { type: string }
+        runs:
+          type: array
+          items:
+            type: object
+            required: [strategy_name]
+            properties:
+              label: { type: string }
+              strategy_name: { type: string }
+              chunk_size: { type: integer }
+              chunk_overlap: { type: integer }
+    ChunkPreviewResponse:
+      type: object
+      properties:
+        input_chars: { type: integer }
+        runs:
+          type: array
+          items:
+            type: object
+            properties:
+              label: { type: string }
+              strategy_name: { type: string }
+              elapsed_ms: { type: number }
+              total_chunks: { type: integer }
+              total_chars: { type: integer }
+              avg_chars: { type: number }
+              min_chars: { type: integer }
+              max_chars: { type: integer }
+              truncated: { type: boolean }
+              chunks:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    index: { type: integer }
+                    text: { type: string }
+                    char_count: { type: integer }
+                    start_offset: { type: integer }
+                    end_offset: { type: integer }
+                    heading_path:
+                      type: array
+                      items: { type: string }
+                    page_number: { type: integer, nullable: true }
+    CoverageResponse:
+      type: object
+      properties:
+        window_secs: { type: integer }
+        total_queries: { type: integer }
+        total_chunks: { type: integer }
+        retrieved_chunks: { type: integer }
+        orphan_count: { type: integer }
+        top_hits:
+          type: array
+          items:
+            type: object
+            properties:
+              doc_id: { type: string }
+              count: { type: integer }
+              fraction: { type: number }
+        orphan_sample:
+          type: array
+          items: { type: string }
+
+paths:
+  /v1/admin/health:
+    get:
+      summary: Health probe.
+      description: Always 200; payload describes per-subsystem health.
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+
+  /v1/admin/readiness:
+    get:
+      summary: Readiness probe.
+      description: 200 when healthy/degraded, 503 when unhealthy.
+      responses:
+        '200':
+          description: ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+        '503':
+          description: unhealthy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+
+  /v1/auth/login:
+    post:
+      summary: Issue a JWT.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '401':
+          description: bad credentials
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/admin/nodes:
+    get:
+      summary: Cluster membership view.
+      description: |
+        In single-node mode, returns one entry describing this
+        process. In Raft mode, returns one entry per voter from
+        the Raft membership configuration; the responding node's
+        entry has is_self=true and accurate uptime/shard counts.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListNodesResponse' }
+
+  /v1/admin/metrics:
+    get:
+      summary: Prometheus metrics scrape.
+      description: |
+        Plain-text Prometheus exposition format. Includes
+        Veda's request counters / latencies plus the Raft
+        gauges (veda_raft_term / leader_id / last_applied_index
+        / last_log_index / is_leader).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            text/plain: { schema: { type: string } }
+
+  /v1/admin/cluster/join:
+    post:
+      summary: Add a voter to the Raft cluster.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [node_id, address]
+              properties:
+                node_id: { type: integer }
+                address: { type: string }
+      responses:
+        '201': { description: voter added }
+        '503': { description: raft not configured }
+
+  /v1/admin/cluster/nodes/{id}:
+    delete:
+      summary: Remove a voter from the Raft cluster.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '204': { description: voter removed }
+        '503': { description: raft not configured }
+
+  /v1/admin/cluster/noop:
+    post:
+      summary: Submit a Raft Noop command (debugging / load gen).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '201': { description: committed }
+        '503': { description: raft not configured }
+
+  /v1/collections:
+    get:
+      summary: List collections on this node.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+    post:
+      summary: Create a collection.
+      description: |
+        In Raft mode, this submits a `CreateCollection`
+        command through the consensus log; the response only
+        returns after the entry commits + applies on this node.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCollectionRequest' }
+      responses:
+        '201': { description: created }
+        '307': { description: follower; resubmit at Location: }
+        '409': { description: already exists }
+
+  /v1/collections/{name}:
+    get:
+      summary: Describe a collection.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: ok }
+        '404': { description: not found }
+    delete:
+      summary: Drop a collection.
+      description: |
+        Raft-routed in raft mode. Same 307 redirect behaviour on
+        followers as POST /v1/collections.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: dropped }
+        '307': { description: follower; resubmit at Location: }
+        '404': { description: not found }
+
+  /v1/collections/{name}/insert:
+    post:
+      summary: Insert one or more records.
+      description: |
+        Raft-routed in raft mode: submits one
+        `InsertRecord` per record. The response's `ids`
+        field has the assigned UUIDs.
+        Per-shard routing happens via ShardRouter; the same
+        record is also written through the cluster-wide
+        `_meta` group until the multi-group transport ships.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InsertRequest' }
+      responses:
+        '201':
+          description: inserted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InsertResponse' }
+        '307': { description: follower; resubmit at Location: }
+        '404': { description: collection not found }
+
+  /v1/collections/{name}/records/{id}:
+    get:
+      summary: Fetch a record by id.
+      description: |
+        Append `?linearisable=true` in raft mode to issue a
+        `Noop` barrier write before reading from the Raft state
+        machine instead of the local SegmentManager. One extra
+        Raft round-trip; guarantees the response reflects every
+        Insert that committed before this request arrived.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: linearisable
+          required: false
+          schema: { type: boolean, default: false }
+      responses:
+        '200': { description: ok }
+        '404': { description: not found }
+
+  /v1/collections/{name}/records:
+    get:
+      summary: List records in a collection.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0 }
+      responses:
+        '200': { description: ok }
+    delete:
+      summary: Delete records by filter.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200': { description: ok }
+
+  /v1/collections/{name}/search:
+    post:
+      summary: Search a collection.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SearchRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SearchResponse' }
+
+  /v1/collections/{name}/coverage:
+    get:
+      summary: Coverage / orphan-chunk rollup.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+        - in: query
+          name: window
+          schema: { type: string, default: 7d, description: "1h|24h|7d|30d|<N><unit>" }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoverageResponse' }
+
+  /v1/embed:
+    post:
+      summary: Embed text or image to a vector.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200': { description: ok }
+
+  /v1/llm/complete:
+    post:
+      summary: OpenAI-compatible chat-completion proxy.
+      description: |
+        Used by the dashboard's cluster-labels, NL→DSL agent,
+        and failure-mode classifier. Returns 503 when no LLM
+        endpoint is configured.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200': { description: ok }
+        '503': { description: LLM not configured }
+
+  /v1/chunk/preview:
+    post:
+      summary: Compare chunking strategies on a single text.
+      description: |
+        Pure dry-run — no storage / no embedding. Used by the
+        Chunker A/B page in Niriksha.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChunkPreviewRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChunkPreviewResponse' }
+        '400': { description: invalid request }
+
+  /v1/route:
+    post:
+      summary: Adaptive query router — recommends Dense / Sparse / BM25 / Hybrid.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200': { description: ok }
+
+  /v1/mcp:
+    post:
+      summary: Model Context Protocol entry point.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200': { description: ok }
+
+  /v1/saved_objects:
+    get:
+      summary: List server-side SavedObjects.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200': { description: ok }
+
+  /v1/saved_objects/{id}:
+    put:
+      summary: Upsert a SavedObject (search, atlas, eval, dashboard, ...).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: stored }
+        '400': { description: bad request }
+    delete:
+      summary: Delete a SavedObject (idempotent).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: removed }

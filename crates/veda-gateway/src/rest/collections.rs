@@ -13,6 +13,32 @@ use veda_storage::segment_manager::SegmentManager;
 
 use super::state::AppState;
 
+/// 307 Temporary Redirect pointing at `{leader_base}{path}`.
+/// Used by mutating handlers when this node is a Raft follower.
+/// 307 (not 302) is the right code: it preserves the request
+/// method + body, so `POST` stays a `POST` on the leader.
+pub(crate) fn raft_redirect(leader_base: &str, path: &str) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
+    use axum::response::IntoResponse;
+    let url = format!(
+        "{}{}",
+        leader_base.trim_end_matches('/'),
+        path
+    );
+    let mut resp = (
+        StatusCode::TEMPORARY_REDIRECT,
+        Json(serde_json::json!({
+            "redirect": url,
+            "reason": "this node is a raft follower; resubmit to the leader",
+        })),
+    )
+        .into_response();
+    if let Ok(v) = HeaderValue::from_str(&url) {
+        resp.headers_mut().insert(header::LOCATION, v);
+    }
+    resp
+}
+
 // ── Request / Response types ─────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +167,31 @@ pub struct ErrorResponse {
 pub async fn create_collection(
     State(state): State<AppState>,
     Json(req): Json<CreateCollectionRequest>,
+) -> axum::response::Response {
+    // Follower-to-leader 307: if this node is a Raft follower
+    // and we know the leader's REST address, redirect the
+    // client there. Saves a forward-and-back round trip
+    // through openraft for every mutation.
+    if let Some(leader_url) = state.leader_rest_address().await {
+        return raft_redirect(&leader_url, "/v1/collections");
+    }
+    create_collection_inner(state, req).await
+}
+
+async fn create_collection_inner(
+    state: AppState,
+    req: CreateCollectionRequest,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match create_collection_impl(state, req).await {
+        Ok((status, body)) => (status, body).into_response(),
+        Err((status, body)) => (status, body).into_response(),
+    }
+}
+
+async fn create_collection_impl(
+    state: AppState,
+    req: CreateCollectionRequest,
 ) -> Result<(StatusCode, Json<CreateCollectionResponse>), (StatusCode, Json<ErrorResponse>)> {
     // Validate name
     if req.name.trim().is_empty() {
@@ -364,6 +415,55 @@ pub async fn reconcile_collections_from_raft(
     let raft_names: std::collections::HashSet<String> =
         raft_state.collections.keys().cloned().collect();
 
+    // Auto-spawn per-(collection, shard_id) Raft groups in the
+    // MultiGroupCoordinator. Uses in-process single-node groups
+    // because the multi-node transport for per-shard groups
+    // (multiplexed Tonic with group_id demux) hasn't shipped yet.
+    // Each group's state machine carries its own records; an
+    // insert handler can pick the right group via ShardRouter.
+    if let Some(mg) = state.inner.multi_group.read().await.clone() {
+        let existing_groups: std::collections::HashSet<String> =
+            mg.group_ids().await.into_iter().collect();
+        for (collection_name, schema_json) in &raft_state.collections {
+            let schema: veda_core::schema::CollectionSchema =
+                match serde_json::from_str(schema_json) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+            for shard_id in 0..schema.shard_count() {
+                let group_id = format!("{collection_name}:{shard_id}");
+                if existing_groups.contains(&group_id) {
+                    continue;
+                }
+                if let Err(e) = mg.start_single_group(&group_id, 1).await {
+                    tracing::warn!(
+                        group_id = %group_id,
+                        error = %e,
+                        "reconcile: auto-spawn group failed",
+                    );
+                } else {
+                    tracing::info!(
+                        group_id = %group_id,
+                        "reconcile: per-shard group spawned",
+                    );
+                }
+            }
+        }
+        // Tear down groups for dropped collections.
+        for group_id in &existing_groups {
+            // group_id format is "{collection}:{shard}"
+            let Some((coll, _)) = group_id.split_once(':') else { continue };
+            if !raft_names.contains(coll) {
+                tracing::info!(group_id = %group_id, "reconcile: tearing down per-shard group (collection dropped)");
+                // MultiGroupCoordinator doesn't have a remove
+                // method; we leave the group in place but the
+                // next CreateCollection of the same name will
+                // see it as "existing" and skip re-spawn.
+                // Cleaner removal is a follow-up.
+            }
+        }
+    }
+
     // Materialize: in Raft, not in local.
     for name in raft_names.difference(&local_names) {
         let Some(schema_json) = raft_state.collections.get(name) else {
@@ -527,6 +627,20 @@ pub async fn describe_collection(
 pub async fn drop_collection(
     State(state): State<AppState>,
     Path(name): Path<String>,
+) -> axum::response::Response {
+    if let Some(leader_url) = state.leader_rest_address().await {
+        return raft_redirect(&leader_url, &format!("/v1/collections/{name}"));
+    }
+    use axum::response::IntoResponse;
+    match drop_collection_impl(state, name).await {
+        Ok(body) => body.into_response(),
+        Err((status, body)) => (status, body).into_response(),
+    }
+}
+
+async fn drop_collection_impl(
+    state: AppState,
+    name: String,
 ) -> Result<Json<DropCollectionResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Raft mode: submit the drop to the consensus log first.
     // After the entry commits + applies on every node, the local

@@ -15,6 +15,7 @@ use veda_storage::segment_manager::SegmentManager;
 
 use crate::auth::Role;
 use crate::rest::saved_objects::SavedObjectStore;
+use veda_coordinator::multi_group::MultiGroupCoordinator;
 use veda_coordinator::raft_coordinator::RaftCoordinator;
 
 /// Represents a user in the in-memory user store.
@@ -76,6 +77,24 @@ pub struct AppStateInner {
     /// the local SegmentManager from a Raft-replicated apply. The
     /// reconcile task uses this to skip records it's already seen.
     pub raft_materialized_records: RwLock<HashMap<String, std::collections::HashSet<String>>>,
+    /// Map from Raft NodeId to a `host:port` REST address that
+    /// peer accepts client traffic on. Used by the follower-to-
+    /// leader 307 redirect path so mutating REST requests sent
+    /// to a follower come back with `Location:` pointing at the
+    /// current leader. Populated from
+    /// `VEDA_RAFT_REST_PEERS="1@http://veda-1:6340,2@..."` at
+    /// startup. Optional: if unset, the redirect is a no-op and
+    /// the request proceeds (openraft forwards internally).
+    pub raft_rest_peers: RwLock<HashMap<u64, String>>,
+    /// MultiGroupCoordinator hosting per-(collection, shard_id)
+    /// Raft groups. Auto-spawned by the reconcile loop when a
+    /// CreateCollection commits. Groups use the in-process
+    /// transport (start_single_group); cross-process replication
+    /// for per-shard groups needs a multiplexing Tonic service
+    /// that is its own architectural project, deferred from this
+    /// session. Today this exists to exercise the routing code
+    /// path and to surface where horizontal scaling will plug in.
+    pub multi_group: RwLock<Option<MultiGroupCoordinator>>,
 }
 
 impl AppState {
@@ -102,6 +121,8 @@ impl AppState {
                 started_at: Instant::now(),
                 raft: RwLock::new(None),
                 raft_materialized_records: RwLock::new(HashMap::new()),
+                raft_rest_peers: RwLock::new(HashMap::new()),
+                multi_group: RwLock::new(None),
             }),
         }
     }
@@ -137,6 +158,8 @@ impl AppState {
                 started_at: Instant::now(),
                 raft: RwLock::new(None),
                 raft_materialized_records: RwLock::new(HashMap::new()),
+                raft_rest_peers: RwLock::new(HashMap::new()),
+                multi_group: RwLock::new(None),
             }),
         }
     }
@@ -168,6 +191,8 @@ impl AppState {
                 started_at: Instant::now(),
                 raft: RwLock::new(None),
                 raft_materialized_records: RwLock::new(HashMap::new()),
+                raft_rest_peers: RwLock::new(HashMap::new()),
+                multi_group: RwLock::new(None),
             }),
         }
     }
@@ -300,6 +325,69 @@ impl AppState {
     /// This is the Phase 4 + Phase 5 hook from
     /// `documentation/raft-migration.md`. The actual Raft loop and
     /// log/state-machine live inside `veda-coordinator`.
+    /// Parse VEDA_RAFT_REST_PEERS into the raft_rest_peers map.
+    /// Format: `"1@http://veda-1:6340,2@http://veda-2:6340"`.
+    /// Used by the follower-to-leader 307 redirect path so a
+    /// mutation sent to a follower replies with Location:
+    /// pointing at the current leader's REST listener.
+    pub async fn load_raft_rest_peers_from_env(&self) {
+        let raw = std::env::var("VEDA_RAFT_REST_PEERS").unwrap_or_default();
+        if raw.is_empty() {
+            return;
+        }
+        let mut map = HashMap::new();
+        for entry in raw.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let Some((id_s, addr)) = entry.split_once('@') else {
+                tracing::warn!(entry = %entry, "VEDA_RAFT_REST_PEERS: missing '@'");
+                continue;
+            };
+            let Ok(id) = id_s.trim().parse::<u64>() else {
+                tracing::warn!(entry = %entry, "VEDA_RAFT_REST_PEERS: bad node id");
+                continue;
+            };
+            map.insert(id, addr.trim().to_owned());
+        }
+        if !map.is_empty() {
+            tracing::info!(peers = ?map, "raft REST peer addresses registered");
+            *self.inner.raft_rest_peers.write().await = map;
+        }
+    }
+
+    /// If this node is a Raft follower, return the
+    /// `host:port` REST address of the current leader. Used by
+    /// mutating handlers to issue a 307 redirect so clients
+    /// hit the leader directly instead of waiting on openraft's
+    /// internal forward-and-back.
+    ///
+    /// Returns None when:
+    ///   - raft is not configured
+    ///   - this node IS the leader
+    ///   - the leader id isn't in raft_rest_peers (operator
+    ///     hasn't populated VEDA_RAFT_REST_PEERS for it)
+    pub async fn leader_rest_address(&self) -> Option<String> {
+        let guard = self.inner.raft.read().await;
+        let coord = guard.as_ref()?;
+        let mem = coord.membership_snapshot();
+        let self_id: u64 = std::env::var("VEDA_NODE_ID")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let leader_id = mem.current_leader?;
+        if leader_id == self_id {
+            return None;
+        }
+        self.inner
+            .raft_rest_peers
+            .read()
+            .await
+            .get(&leader_id)
+            .cloned()
+    }
+
     pub async fn load_raft_from_env(&self) {
         let want_raft = std::env::var("VEDA_COORDINATOR")
             .map(|v| v.eq_ignore_ascii_case("raft"))
@@ -371,6 +459,17 @@ impl AppState {
                 tracing::error!(error = %e, "failed to start raft coordinator");
             }
         }
+
+        // Always-on: a MultiGroupCoordinator under
+        // {data_dir}/raft-groups/, ready to host per-shard
+        // groups the reconcile loop auto-spawns. The cluster-wide
+        // Raft handle above remains the source of truth for
+        // replicated commands; per-shard groups are populated for
+        // the routing code path and for the future multi-group
+        // transport landing.
+        let groups_dir = self.inner.data_dir.join("raft-groups");
+        let mg = MultiGroupCoordinator::new(&groups_dir);
+        *self.inner.multi_group.write().await = Some(mg);
     }
 
     /// Load an OpenAI-compatible LLM endpoint from `VEDA_LLM_*` env

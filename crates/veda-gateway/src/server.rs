@@ -22,6 +22,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     app_state.load_splade_from_env().await;
     app_state.load_llm_from_env().await;
     app_state.load_raft_from_env().await;
+    app_state.load_raft_rest_peers_from_env().await;
     app_state.spawn_raft_metrics_publisher().await;
     app_state.spawn_raft_reconcile().await;
     app_state.load_blob_store_from_env().await;
