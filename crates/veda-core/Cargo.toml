@@ -17,6 +17,10 @@ base64 = "0.22"
 # AVX2+FMA + scalar implementations remain the default; enabling this
 # feature provides a richer set of architectures.
 simsimd = { version = "6", optional = true }
+# BLIS-style microkernel for SGEMM. Used by the GEMM-backed
+# MaxSim path to materialise the Q×D similarity matrix in one
+# pass. Apache-2.0 / MIT.
+matrixmultiply = "0.3"
 
 [features]
 default = []
