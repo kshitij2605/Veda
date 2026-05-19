@@ -159,6 +159,26 @@ export const fetchCoverage = (collection: string, window: string = '7d') =>
     `/collections/${encodeURIComponent(collection)}/coverage?window=${encodeURIComponent(window)}`,
   )
 
+// ── Admin Nodes (Phase 6.4) ──────────────────────────────────────────────
+export interface NodeInfo {
+  id: string
+  address: string
+  role: string
+  status: string
+  version: string
+  uptime_secs: number
+  shard_count: number
+  collection_count: number
+  is_self: boolean
+}
+export interface ListNodesResponse {
+  /** "single" (no Raft) or "raft" (quorum). */
+  mode: string
+  nodes: NodeInfo[]
+}
+export const listNodes = () =>
+  api.get<ListNodesResponse>('/admin/nodes')
+
 // ── SavedObjects (Phase 6.5 follow-up) ──────────────────────────────────
 export interface SavedObjectDTO {
   id: string
