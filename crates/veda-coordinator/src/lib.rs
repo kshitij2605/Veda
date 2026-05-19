@@ -18,6 +18,7 @@
 //! The types and state machine are designed so that the openraft layer can
 //! take over without changing the command/response interface.
 
+pub mod linearisability_checker;
 pub mod network;
 pub mod peer_health;
 pub mod raft;

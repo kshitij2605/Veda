@@ -30,6 +30,12 @@ pub struct InsertRequest {
 #[derive(Debug, Serialize)]
 pub struct InsertResponse {
     pub inserted: usize,
+    /// IDs assigned to the inserted records. Populated in the
+    /// Raft-routed path (so the linearisability harness can read
+    /// exactly the rows it just wrote). May be empty on the
+    /// non-Raft path until that's threaded similarly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,6 +103,7 @@ pub async fn insert(
         let raft_guard = state.inner.raft.read().await;
         if let Some(coord) = raft_guard.as_ref() {
             let mut applied = 0usize;
+            let mut applied_ids: Vec<String> = Vec::with_capacity(req.records.len());
             for raw in req.records.iter() {
                 let record = parse_record_public(raw, &schema).map_err(|e| {
                     (
@@ -115,7 +122,7 @@ pub async fn insert(
                 })?;
                 let cmd = veda_coordinator::raft_types::ClusterCommand::InsertRecord {
                     collection: name.clone(),
-                    record_id: rid,
+                    record_id: rid.clone(),
                     record_json: rjson,
                 };
                 if let Err(e) = coord.execute(cmd).await {
@@ -126,6 +133,7 @@ pub async fn insert(
                         }),
                     ));
                 }
+                applied_ids.push(rid);
                 applied += 1;
             }
             // Trigger an immediate reconcile so the receiver's
@@ -137,7 +145,10 @@ pub async fn insert(
             let _ = start;
             return Ok((
                 StatusCode::CREATED,
-                Json(InsertResponse { inserted: applied }),
+                Json(InsertResponse {
+                    inserted: applied,
+                    ids: applied_ids,
+                }),
             ));
         }
     }
@@ -270,7 +281,13 @@ pub async fn insert(
         }
     }
 
-    Ok((StatusCode::CREATED, Json(InsertResponse { inserted })))
+    Ok((
+        StatusCode::CREATED,
+        Json(InsertResponse {
+            inserted,
+            ids: Vec::new(),
+        }),
+    ))
 }
 
 #[instrument(name = "list_records", skip(state), fields(collection = %name, limit = q.limit, offset = q.offset))]
