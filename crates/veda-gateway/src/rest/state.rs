@@ -209,6 +209,45 @@ impl AppState {
         tracing::info!(model = %model, endpoint = %endpoint, "registered SPLADE encoder from environment");
     }
 
+    /// Spawn a background task that periodically reconciles the
+    /// local Veda state (schemas + segment managers + executors)
+    /// against the Raft state machine's view of which collections
+    /// exist. Each tick:
+    ///   - reads `coord.query_state().collections`
+    ///   - materializes any collection present in Raft state but
+    ///     missing locally (followers catching up after restart;
+    ///     leader handles its own creates synchronously)
+    ///   - drops any collection present locally but missing from
+    ///     Raft state (covers DropCollection replicas)
+    ///
+    /// Runs only when raft mode is on. Idempotent — safe to call
+    /// multiple times, but we only spawn once per start_server boot.
+    pub async fn spawn_raft_reconcile(&self) {
+        let guard = self.inner.raft.read().await;
+        if guard.is_none() {
+            return;
+        }
+        let state_clone = self.clone();
+        let interval = std::env::var("VEDA_RAFT_RECONCILE_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(2)
+            .max(1);
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(interval));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if let Err(e) =
+                    crate::rest::collections::reconcile_collections_from_raft(&state_clone).await
+                {
+                    tracing::warn!(error = ?e, "raft reconcile failed");
+                }
+            }
+        });
+    }
+
     /// Spawn a background task that subscribes to the Raft metrics
     /// watch channel and publishes the interesting numbers to the
     /// existing Prometheus recorder. Idempotent — only spawns when
