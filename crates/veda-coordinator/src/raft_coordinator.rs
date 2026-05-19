@@ -56,9 +56,31 @@ impl RaftCoordinator {
     /// 1-node cluster (membership = {node_id}). After this returns the
     /// instance is a leader and ready to accept commands.
     ///
-    /// Multi-node bootstrap (a join-an-existing-cluster path) is
-    /// deferred — see `documentation/raft-migration.md` Phase 5.
+    /// Storage is in-memory only.
     pub async fn start_single_node(node_id: NodeId) -> Result<Self, BootstrapError> {
+        Self::start_with_storage(node_id, MemRaftStorage::new(), true).await
+    }
+
+    /// Variant that persists log + state machine under `data_dir`.
+    /// Recovers existing state on construction so a restart preserves
+    /// applied commands. Skips `initialize()` when the on-disk state
+    /// already reflects an initialized cluster (last_log_id is set).
+    pub async fn start_single_node_with_dir(
+        node_id: NodeId,
+        data_dir: &std::path::Path,
+    ) -> Result<Self, BootstrapError> {
+        let storage = MemRaftStorage::with_dir(data_dir)
+            .await
+            .map_err(|e| BootstrapError::RaftConstruct(format!("storage init: {e}")))?;
+        let needs_init = storage.log.last_log_id().await.is_none();
+        Self::start_with_storage(node_id, storage, needs_init).await
+    }
+
+    async fn start_with_storage(
+        node_id: NodeId,
+        storage: MemRaftStorage,
+        bootstrap: bool,
+    ) -> Result<Self, BootstrapError> {
         let config = Config {
             heartbeat_interval: 250,
             election_timeout_min: 1500,
@@ -66,11 +88,8 @@ impl RaftCoordinator {
             ..Default::default()
         };
         let config = Arc::new(config.validate().map_err(BootstrapError::Config)?);
-        let storage = MemRaftStorage::new();
         let network = Arc::new(InProcessNetwork::new());
 
-        // Wrap our v1 RaftStorage in the v2 Adaptor that
-        // `Raft::new` expects.
         let (log_store, state_machine) =
             Adaptor::<VedaTypeConfig, MemRaftStorage>::new(storage.clone());
 
@@ -78,15 +97,13 @@ impl RaftCoordinator {
             .await
             .map_err(|e| BootstrapError::RaftConstruct(e.to_string()))?;
 
-        // Single-node bootstrap: declare the cluster contains exactly
-        // this node. After this returns, openraft starts an election
-        // (which it wins trivially with no peers) and the node
-        // becomes leader.
-        let mut members = BTreeMap::new();
-        members.insert(node_id, BasicNode::default());
-        raft.initialize(members)
-            .await
-            .map_err(|e| BootstrapError::Initialize(e.to_string()))?;
+        if bootstrap {
+            let mut members = BTreeMap::new();
+            members.insert(node_id, BasicNode::default());
+            raft.initialize(members)
+                .await
+                .map_err(|e| BootstrapError::Initialize(e.to_string()))?;
+        }
 
         Ok(Self {
             raft: Arc::new(raft),
@@ -201,5 +218,60 @@ mod tests {
         assert!(state.collections.is_empty());
         assert!(state.nodes.is_empty());
         coord.shutdown().await.ok();
+    }
+
+    /// Durable storage survives a coordinator restart: bootstrap with
+    /// a tempdir, write a command, drop the coordinator, build a
+    /// fresh coordinator pointed at the same tempdir, verify the
+    /// command is still applied.
+    #[tokio::test(flavor = "current_thread")]
+    async fn raft_coordinator_disk_persistence_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_owned();
+
+        // First boot — bootstrap, write a command, shut down.
+        {
+            let coord = RaftCoordinator::start_single_node_with_dir(7, &dir)
+                .await
+                .expect("first bootstrap");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let resp = coord
+                .execute(ClusterCommand::CreateCollection {
+                    name: "durable_smoke".into(),
+                    schema_json: "{\"name\":\"durable_smoke\"}".into(),
+                })
+                .await
+                .expect("execute");
+            assert_eq!(resp, ClusterResponse::Ok);
+            // Make sure persist tasks have a chance to land before
+            // we shutdown. The persist call is awaited inside the
+            // mutator, but RAS the openraft state machine apply may
+            // schedule extra work — give it a beat.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            coord.shutdown().await.expect("shutdown");
+        }
+
+        // Second boot — recover from the same dir, expect the
+        // collection still present without any new client_write.
+        {
+            let coord = RaftCoordinator::start_single_node_with_dir(7, &dir)
+                .await
+                .expect("recovery bootstrap");
+            // Allow openraft to settle (it may need to re-elect since
+            // the vote/log are loaded but the runtime is fresh).
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let state = coord.query_state().await.expect("query_state");
+            assert!(
+                state.collections.contains_key("durable_smoke"),
+                "durable_smoke should survive coordinator restart: {:?}",
+                state.collections,
+            );
+            assert!(
+                state.last_applied_index >= 1,
+                "last_applied_index should be >= 1 after recovery, got {}",
+                state.last_applied_index,
+            );
+            coord.shutdown().await.ok();
+        }
     }
 }
