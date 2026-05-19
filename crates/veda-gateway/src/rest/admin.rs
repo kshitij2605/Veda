@@ -17,6 +17,10 @@ pub struct HealthResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ListNodesResponse {
+    /// Cluster mode: "single" (no Raft) or "raft". Distinguished
+    /// because in single mode there is no quorum, no leader
+    /// election, and the only entry is always this process.
+    pub mode: String,
     pub nodes: Vec<NodeInfo>,
 }
 
@@ -24,6 +28,21 @@ pub struct ListNodesResponse {
 pub struct NodeInfo {
     pub id: String,
     pub address: String,
+    /// "leader" | "follower" | "candidate" | "unknown". In single
+    /// mode this is always "leader" — the lone process owns
+    /// everything.
+    pub role: String,
+    /// Derived from /admin/health checks for this process.
+    /// "healthy" | "degraded" | "unhealthy" | "unreachable".
+    pub status: String,
+    pub version: String,
+    pub uptime_secs: u64,
+    /// Sum of shards across all owned collections.
+    pub shard_count: u32,
+    /// Number of collections owned by this node.
+    pub collection_count: u32,
+    /// Whether this node is the one answering the current request.
+    pub is_self: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,8 +90,50 @@ pub async fn readiness(
     }
 }
 
-pub async fn list_nodes() -> Json<ListNodesResponse> {
-    Json(ListNodesResponse { nodes: vec![] })
+/// Phase 6.4 — Admin Nodes view.
+///
+/// Single-node mode: returns one entry describing this process, with
+/// role = "leader" and status derived from /admin/health. The
+/// response shape (and the `mode` field) is intentionally what a
+/// future N-node Raft cluster would return — when veda-coordinator's
+/// Raft layer wires up, this handler grows a fan-out and the
+/// frontend reads the same JSON.
+pub async fn list_nodes(
+    State(state): State<AppState>,
+) -> Json<ListNodesResponse> {
+    let id = std::env::var("VEDA_NODE_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "node-0".to_owned());
+    let address = std::env::var("VEDA_NODE_ADDRESS")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "0.0.0.0:6340".to_owned());
+    let checks = run_health_checks().await;
+    let status = compute_status(&checks);
+    let uptime_secs = state.inner.started_at.elapsed().as_secs();
+
+    let (collection_count, shard_count) = {
+        let segs = state.inner.segment_managers.read().await;
+        let cols = segs.len() as u32;
+        let shards: u32 = segs.values().map(|m| m.len() as u32).sum();
+        (cols, shards)
+    };
+
+    Json(ListNodesResponse {
+        mode: "single".into(),
+        nodes: vec![NodeInfo {
+            id,
+            address,
+            role: "leader".into(),
+            status,
+            version: "0.1.0".into(),
+            uptime_secs,
+            shard_count,
+            collection_count,
+            is_self: true,
+        }],
+    })
 }
 
 pub async fn login(

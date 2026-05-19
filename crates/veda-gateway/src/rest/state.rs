@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::RwLock;
 use veda_core::embedding::{EmbeddingModelConfig, EmbeddingModelRegistry, Modality};
@@ -63,6 +64,8 @@ pub struct AppStateInner {
     pub prometheus_handle: Option<PrometheusHandle>,
     /// SavedObject store, persisted to `{data_dir}/_saved_objects.json`.
     pub saved_objects: SavedObjectStore,
+    /// Process start time — used by `/v1/admin/nodes` to report uptime.
+    pub started_at: Instant,
 }
 
 impl AppState {
@@ -86,6 +89,7 @@ impl AppState {
                 )),
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
+                started_at: Instant::now(),
             }),
         }
     }
@@ -118,6 +122,7 @@ impl AppState {
                 )),
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
+                started_at: Instant::now(),
             }),
         }
     }
@@ -146,6 +151,7 @@ impl AppState {
                 )),
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
+                started_at: Instant::now(),
             }),
         }
     }

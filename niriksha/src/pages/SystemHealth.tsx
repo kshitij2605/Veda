@@ -5,6 +5,7 @@ import { PageHeader } from '../components/PageHeader'
 import { LoadingSpinner } from '../components/LoadingSpinner'
 import { Badge } from '../components/Badge'
 import api from '../api/client'
+import { listNodes, type ListNodesResponse } from '../api/collections'
 
 interface MetricEntry {
   name: string
@@ -31,6 +32,18 @@ export function SystemHealth() {
   const [metrics, setMetrics] = useState<MetricEntry[]>([])
   const [metricsLoading, setMetricsLoading] = useState(false)
   const [metricsError, setMetricsError] = useState<string | null>(null)
+  const [nodes, setNodes] = useState<ListNodesResponse | null>(null)
+  const [nodesError, setNodesError] = useState<string | null>(null)
+
+  const loadNodes = useCallback(async () => {
+    setNodesError(null)
+    try {
+      const { data } = await listNodes()
+      setNodes(data)
+    } catch (err) {
+      setNodesError(err instanceof Error ? err.message : 'Failed to fetch nodes')
+    }
+  }, [])
 
   const loadMetrics = useCallback(async () => {
     setMetricsLoading(true)
@@ -49,7 +62,8 @@ export function SystemHealth() {
     fetchHealth()
     fetchCollections()
     loadMetrics()
-  }, [fetchHealth, fetchCollections, loadMetrics])
+    loadNodes()
+  }, [fetchHealth, fetchCollections, loadMetrics, loadNodes])
 
   const statusVariant = health?.status === 'healthy' ? 'success' as const : 'error' as const
   const statusLabel = health?.status === 'healthy' ? 'Healthy' : health ? 'Unhealthy' : 'Unknown'
@@ -75,11 +89,111 @@ export function SystemHealth() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
             <InfoCell label="Version" value={health?.version ?? '--'} />
             <InfoCell label="Status" value={statusLabel} />
-            <InfoCell label="Uptime" value="--" />
+            <InfoCell
+              label="Uptime"
+              value={
+                nodes?.nodes[0]?.uptime_secs !== undefined
+                  ? formatUptime(nodes.nodes[0].uptime_secs)
+                  : '--'
+              }
+            />
             <InfoCell label="API" value="/v1" />
           </div>
         </div>
       </div>
+
+      {/* Cluster nodes — Phase 6.4. Single-node today; Raft-ready
+          shape so adding peers later doesn't change the UI. */}
+      {nodes && (
+        <div className="mb-6">
+          <div className="flex items-baseline gap-3 mb-3">
+            <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider">
+              Cluster Nodes
+            </h2>
+            <span className="text-[10.5px] uppercase tracking-[0.08em] text-text-muted font-mono">
+              mode: {nodes.mode}
+            </span>
+            {nodes.mode === 'single' && (
+              <span className="text-[10.5px] text-text-muted italic">
+                Raft consensus not yet wired — this is the lone leader.
+              </span>
+            )}
+          </div>
+          <div className="rounded-lg border border-border overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-bg-secondary text-text-muted text-left">
+                  <th className="px-4 py-3 font-medium">Node</th>
+                  <th className="px-4 py-3 font-medium">Role</th>
+                  <th className="px-4 py-3 font-medium">Status</th>
+                  <th className="px-4 py-3 font-medium">Address</th>
+                  <th className="px-4 py-3 font-medium">Version</th>
+                  <th className="px-4 py-3 font-medium">Uptime</th>
+                  <th className="px-4 py-3 font-medium text-right">
+                    Collections
+                  </th>
+                  <th className="px-4 py-3 font-medium text-right">Shards</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {nodes.nodes.map((n) => (
+                  <tr
+                    key={n.id}
+                    className="hover:bg-bg-tertiary transition-colors"
+                  >
+                    <td className="px-4 py-3 font-mono text-xs text-text-primary">
+                      {n.id}
+                      {n.is_self && (
+                        <span className="ml-2 text-[9.5px] uppercase tracking-[0.08em] text-text-muted">
+                          this node
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <Badge
+                        label={n.role}
+                        variant={n.role === 'leader' ? 'accent' : 'default'}
+                      />
+                    </td>
+                    <td className="px-4 py-3">
+                      <Badge
+                        label={n.status}
+                        variant={
+                          n.status === 'healthy'
+                            ? 'success'
+                            : n.status === 'degraded'
+                              ? 'warning'
+                              : 'error'
+                        }
+                      />
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-text-secondary">
+                      {n.address}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-text-secondary">
+                      v{n.version}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-text-secondary tabular-nums">
+                      {formatUptime(n.uptime_secs)}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums text-text-secondary">
+                      {n.collection_count}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums text-text-secondary">
+                      {n.shard_count}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      {nodesError && (
+        <div className="mb-6 rounded-lg bg-error/10 border border-error/20 px-4 py-3 text-sm text-error">
+          Nodes lookup failed: {nodesError}
+        </div>
+      )}
 
       {/* Subsystem checks from /admin/health */}
       {health?.checks && Object.keys(health.checks).length > 0 && (
@@ -216,4 +330,14 @@ function InfoCell({ label, value }: { label: string; value: string }) {
       <div className="text-text-primary font-medium">{value}</div>
     </div>
   )
+}
+
+function formatUptime(secs: number): string {
+  if (secs < 60) return `${secs}s`
+  const m = Math.floor(secs / 60)
+  if (m < 60) return `${m}m ${secs % 60}s`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ${m % 60}m`
+  const d = Math.floor(h / 24)
+  return `${d}d ${h % 24}h`
 }
