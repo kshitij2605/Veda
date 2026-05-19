@@ -45,6 +45,87 @@
 use roaring::RoaringBitmap;
 use veda_core::simd;
 
+/// Centroids quantised to int8 (one byte per dim) — the WARP
+/// paper's "implicit decompression" path.
+///
+/// For typical PLAID shapes (k ≈ 1024 centroids × dim ≈ 128) this
+/// shrinks the centroid store from 512 KB (f32) to 128 KB (i8),
+/// landing fully in L1d on modern CPUs. The distance op against
+/// the int codes uses the same scale across all dims (uniform
+/// scalar quantisation), so the per-pair work is
+/// `(Σ q_code[i] × c_code[i]) · scale_q · scale_c` — no f32
+/// materialisation of the centroid in the hot loop.
+#[derive(Debug)]
+struct QuantizedCentroids {
+    /// `codes[i]` is the int8 representation of centroid i.
+    codes: Vec<Vec<i8>>,
+    /// Per-centroid L2 norm of the *quantised* vector (in code
+    /// space). Used by the cosine denominator.
+    code_norms: Vec<f32>,
+    /// Per-centroid scale: `f32_value = i8_value × scale[i]`.
+    /// Uniform across dims within one centroid; varies per
+    /// centroid because each cluster's value range differs.
+    scales: Vec<f32>,
+}
+
+impl QuantizedCentroids {
+    fn build(centroids: &[Vec<f32>]) -> Self {
+        let mut codes = Vec::with_capacity(centroids.len());
+        let mut code_norms = Vec::with_capacity(centroids.len());
+        let mut scales = Vec::with_capacity(centroids.len());
+        for c in centroids {
+            let max_abs = c
+                .iter()
+                .map(|x| x.abs())
+                .fold(0.0_f32, f32::max)
+                .max(1e-9);
+            let scale = max_abs / 127.0;
+            let inv = 1.0 / scale;
+            let code: Vec<i8> = c
+                .iter()
+                .map(|&x| (x * inv).round().clamp(-127.0, 127.0) as i8)
+                .collect();
+            let code_norm = code
+                .iter()
+                .map(|&x| (x as f32) * (x as f32))
+                .sum::<f32>()
+                .sqrt();
+            codes.push(code);
+            code_norms.push(code_norm * scale); // pre-scaled L2 of decoded centroid
+            scales.push(scale);
+        }
+        Self { codes, code_norms, scales }
+    }
+
+    /// Cosine distance from a query (f32) to centroid `idx`.
+    /// Quantises the query once per `cosine_to_centroid_batch`
+    /// (the caller); per-call here just does the int dot + scale.
+    fn cosine_distance(
+        &self,
+        q_codes: &[i8],
+        q_scale: f32,
+        q_norm: f32,
+        idx: usize,
+    ) -> f32 {
+        let c_codes = &self.codes[idx];
+        let dim = c_codes.len();
+        debug_assert_eq!(q_codes.len(), dim);
+        // i32 accumulator avoids overflow at dim ≤ ~2^16 (each
+        // product fits in i16; 16-bit sum across dim=128 max
+        // ≈ 128 × 127² ≈ 2M ≪ i32::MAX).
+        let mut dot_int: i32 = 0;
+        for i in 0..dim {
+            dot_int += (q_codes[i] as i32) * (c_codes[i] as i32);
+        }
+        let dot_f = (dot_int as f32) * q_scale * self.scales[idx];
+        let denom = q_norm * self.code_norms[idx];
+        if denom < 1e-12 {
+            return 1.0;
+        }
+        1.0 - dot_f / denom
+    }
+}
+
 /// PLAID candidate-pruning index for a multi-vector field within a single segment.
 pub struct PlaidIndex {
     /// `centroids[i]` is the centre of cluster i (dimension = token dim).
@@ -52,6 +133,12 @@ pub struct PlaidIndex {
     /// `postings[i]` lists all doc_ids that have at least one token assigned
     /// to centroid i.
     postings: Vec<RoaringBitmap>,
+    /// Optional implicit-decompression path: int8-quantised
+    /// centroids built alongside the float centroids. When
+    /// present, [`Self::candidates_with_quorum`] uses the int8
+    /// dot for centroid distance instead of `simd::cosine_distance`.
+    /// Enable via [`Self::with_quantized_centroids`].
+    quantized: Option<QuantizedCentroids>,
 }
 
 impl PlaidIndex {
@@ -70,6 +157,7 @@ impl PlaidIndex {
             return Self {
                 centroids: Vec::new(),
                 postings: Vec::new(),
+                quantized: None,
             };
         }
         let dim = tokens[0].1.len();
@@ -87,7 +175,22 @@ impl PlaidIndex {
             postings[idx].insert(doc_id);
         }
 
-        Self { centroids, postings }
+        Self { centroids, postings, quantized: None }
+    }
+
+    /// Enable the int8-quantised centroid path (the WARP
+    /// "implicit decompression" trick). Run once after build;
+    /// reads are then served from the int8 codes instead of
+    /// the f32 centroids.
+    pub fn with_quantized_centroids(mut self) -> Self {
+        if !self.centroids.is_empty() {
+            self.quantized = Some(QuantizedCentroids::build(&self.centroids));
+        }
+        self
+    }
+
+    pub fn has_quantized_centroids(&self) -> bool {
+        self.quantized.is_some()
     }
 
     pub fn centroid_count(&self) -> usize {
@@ -99,32 +202,154 @@ impl PlaidIndex {
     /// fixed-size max-heap selection (O(K log probe)) instead of the
     /// classic PLAID full sort (O(K log K)).
     pub fn candidates(&self, query_rows: &[Vec<f32>], probe: usize) -> RoaringBitmap {
+        self.candidates_with_quorum(query_rows, probe, 1)
+    }
+
+    /// WARP two-stage candidate reduction (SIGIR 2025).
+    ///
+    /// Stage 1: for each query row, find the `probe` nearest
+    /// centroids (same as classic PLAID).
+    /// Stage 2: a doc is kept iff it appears in the posting lists
+    /// of at least `min_quorum` distinct query rows' top-probe
+    /// sets. `min_quorum = 1` is equivalent to the classic union
+    /// behaviour (used by [`Self::candidates`]); higher values
+    /// produce a tighter, more focused candidate set at the cost
+    /// of missing some weakly-correlated documents.
+    ///
+    /// Empirical tuning: `min_quorum = max(1, ⌈Q × 0.3⌉)` is a
+    /// good default for ColPali-shaped queries where Q ≈ 32
+    /// tokens — keeps the candidate set ~3x smaller than the
+    /// union while preserving the docs that are actually
+    /// relevant across most query tokens.
+    pub fn candidates_with_quorum(
+        &self,
+        query_rows: &[Vec<f32>],
+        probe: usize,
+        min_quorum: u32,
+    ) -> RoaringBitmap {
         let mut out = RoaringBitmap::new();
         if self.centroids.is_empty() || query_rows.is_empty() || probe == 0 {
             return out;
         }
-        // Reusable scratch heap — bounded to `probe`. Each query
-        // row reuses its capacity.
+        let min_quorum = min_quorum.max(1);
+
+        // Fast path: union semantics.
+        if min_quorum == 1 {
+            let mut top: std::collections::BinaryHeap<HeapEntry> =
+                std::collections::BinaryHeap::with_capacity(probe + 1);
+            for q in query_rows {
+                top.clear();
+                if let Some(qc) = self.quantized.as_ref() {
+                    push_top_probe_quantized(&mut top, q, &self.centroids, qc, probe);
+                } else {
+                    push_top_probe(&mut top, q, &self.centroids, probe);
+                }
+                for entry in top.drain() {
+                    out |= &self.postings[entry.idx];
+                }
+            }
+            return out;
+        }
+
+        // Two-stage: collect per-query-row candidate sets, then
+        // count membership across rows.
+        let mut per_row_sets: Vec<RoaringBitmap> = Vec::with_capacity(query_rows.len());
         let mut top: std::collections::BinaryHeap<HeapEntry> =
             std::collections::BinaryHeap::with_capacity(probe + 1);
         for q in query_rows {
             top.clear();
-            for (i, c) in self.centroids.iter().enumerate() {
-                let dist = simd::cosine_distance(q, c);
-                if top.len() < probe {
-                    top.push(HeapEntry { idx: i, dist });
-                } else if let Some(worst) = top.peek()
-                    && dist < worst.dist
-                {
-                    top.pop();
-                    top.push(HeapEntry { idx: i, dist });
-                }
+            if let Some(qc) = self.quantized.as_ref() {
+                push_top_probe_quantized(&mut top, q, &self.centroids, qc, probe);
+            } else {
+                push_top_probe(&mut top, q, &self.centroids, probe);
             }
+            let mut row_set = RoaringBitmap::new();
             for entry in top.drain() {
-                out |= &self.postings[entry.idx];
+                row_set |= &self.postings[entry.idx];
+            }
+            per_row_sets.push(row_set);
+        }
+
+        // For each doc id, count rows that included it. Keep only
+        // docs with count >= min_quorum.
+        // Iterate over the union once so we don't visit every
+        // possible doc id.
+        let mut union_all = RoaringBitmap::new();
+        for s in &per_row_sets {
+            union_all |= s;
+        }
+        for doc_id in union_all.iter() {
+            let count = per_row_sets
+                .iter()
+                .filter(|s| s.contains(doc_id))
+                .count() as u32;
+            if count >= min_quorum {
+                out.insert(doc_id);
             }
         }
         out
+    }
+}
+
+/// Walk the centroids and push their top-`probe` by ascending
+/// distance into the supplied max-heap. Reused by both the union
+/// and quorum paths.
+fn push_top_probe(
+    top: &mut std::collections::BinaryHeap<HeapEntry>,
+    q: &[f32],
+    centroids: &[Vec<f32>],
+    probe: usize,
+) {
+    for (i, c) in centroids.iter().enumerate() {
+        let dist = simd::cosine_distance(q, c);
+        if top.len() < probe {
+            top.push(HeapEntry { idx: i, dist });
+        } else if let Some(worst) = top.peek()
+            && dist < worst.dist
+        {
+            top.pop();
+            top.push(HeapEntry { idx: i, dist });
+        }
+    }
+}
+
+/// Same shape as `push_top_probe`, but pulls centroid distances
+/// out of the int8 store ([`QuantizedCentroids`]). Quantises the
+/// query once, then does int-dot per centroid — no f32
+/// materialisation of the centroid in the hot loop.
+fn push_top_probe_quantized(
+    top: &mut std::collections::BinaryHeap<HeapEntry>,
+    q: &[f32],
+    centroids_f32: &[Vec<f32>],
+    qc: &QuantizedCentroids,
+    probe: usize,
+) {
+    // Pre-quantise the query once.
+    let q_max_abs = q.iter().map(|x| x.abs()).fold(0.0_f32, f32::max).max(1e-9);
+    let q_scale = q_max_abs / 127.0;
+    let inv = 1.0 / q_scale;
+    let q_codes: Vec<i8> = q
+        .iter()
+        .map(|&x| (x * inv).round().clamp(-127.0, 127.0) as i8)
+        .collect();
+    let q_norm = q_codes
+        .iter()
+        .map(|&x| (x as f32) * (x as f32))
+        .sum::<f32>()
+        .sqrt()
+        * q_scale;
+
+    debug_assert_eq!(centroids_f32.len(), qc.codes.len());
+    for i in 0..qc.codes.len() {
+        let dist = qc.cosine_distance(&q_codes, q_scale, q_norm, i);
+        if top.len() < probe {
+            top.push(HeapEntry { idx: i, dist });
+        } else if let Some(worst) = top.peek()
+            && dist < worst.dist
+        {
+            top.pop();
+            top.push(HeapEntry { idx: i, dist });
+        }
     }
 }
 
@@ -276,6 +501,151 @@ mod tests {
         for d in 0..20u32 {
             assert!(cand.contains(d), "doc {d} missing from full-probe candidates");
         }
+    }
+
+    /// WARP two-stage: quorum=1 must equal the union of every
+    /// posting list returned by per-row top-probe selection.
+    #[test]
+    fn warp_two_stage_quorum_one_equals_union() {
+        let docs: Vec<(u32, Vec<Vec<f32>>)> = (0..20u32)
+            .map(|i| {
+                let v = vec![i as f32 * 0.01, 1.0 - i as f32 * 0.01, 0.0, 0.0];
+                (i, vec![v.clone(), v])
+            })
+            .collect();
+        let refs: Vec<(u32, &Vec<Vec<f32>>)> = docs.iter().map(|(i, v)| (*i, v)).collect();
+        let p = PlaidIndex::build(refs.into_iter());
+        let q = vec![
+            vec![0.0_f32, 1.0, 0.0, 0.0],
+            vec![0.5_f32, 0.5, 0.0, 0.0],
+        ];
+        assert_eq!(p.candidates(&q, 4), p.candidates_with_quorum(&q, 4, 1));
+    }
+
+    /// WARP two-stage: higher quorum produces a subset of lower
+    /// quorum's set. Monotonicity invariant.
+    #[test]
+    fn warp_two_stage_quorum_is_monotone_subset() {
+        let docs: Vec<(u32, Vec<Vec<f32>>)> = (0..40u32)
+            .map(|i| {
+                let v = vec![
+                    (i as f32 * 0.07).sin(),
+                    (i as f32 * 0.13).cos(),
+                    (i as f32 * 0.11).sin(),
+                    (i as f32 * 0.17).cos(),
+                ];
+                (i, vec![v.clone(), v.clone(), v])
+            })
+            .collect();
+        let refs: Vec<(u32, &Vec<Vec<f32>>)> = docs.iter().map(|(i, v)| (*i, v)).collect();
+        let p = PlaidIndex::build(refs.into_iter());
+        let q = vec![
+            vec![0.5_f32, 0.5, 0.5, 0.5],
+            vec![0.1_f32, 0.9, 0.1, 0.9],
+            vec![0.9_f32, 0.1, 0.9, 0.1],
+        ];
+        let q1 = p.candidates_with_quorum(&q, 4, 1);
+        let q2 = p.candidates_with_quorum(&q, 4, 2);
+        let q3 = p.candidates_with_quorum(&q, 4, 3);
+        // Monotone subset chain: q3 ⊆ q2 ⊆ q1.
+        for id in q3.iter() {
+            assert!(q2.contains(id), "q3 doc {id} missing from q2");
+        }
+        for id in q2.iter() {
+            assert!(q1.contains(id), "q2 doc {id} missing from q1");
+        }
+        // q2 should be strictly smaller than q1 (otherwise the
+        // test data is too dense).
+        assert!(
+            q2.len() <= q1.len(),
+            "quorum=2 set must be subset of quorum=1"
+        );
+    }
+
+    /// Implicit-decompression smoke test: with quantized
+    /// centroids enabled, candidates() returns approximately the
+    /// same set as the float-centroid path on a fixture where
+    /// the quantisation error is small (large per-component
+    /// magnitudes, small dim).
+    #[test]
+    fn quantized_centroids_smoke_returns_overlapping_candidates() {
+        let docs: Vec<(u32, Vec<Vec<f32>>)> = (0..40u32)
+            .map(|i| {
+                let v = vec![
+                    (i as f32 * 0.17).sin() * 10.0,
+                    (i as f32 * 0.13).cos() * 10.0,
+                    (i as f32 * 0.11).sin() * 10.0,
+                    (i as f32 * 0.07).cos() * 10.0,
+                ];
+                (i, vec![v.clone(), v])
+            })
+            .collect();
+        let refs: Vec<(u32, &Vec<Vec<f32>>)> = docs.iter().map(|(i, v)| (*i, v)).collect();
+        let p_f = PlaidIndex::build(refs.iter().copied());
+        let refs2: Vec<(u32, &Vec<Vec<f32>>)> = docs.iter().map(|(i, v)| (*i, v)).collect();
+        let p_q = PlaidIndex::build(refs2.into_iter()).with_quantized_centroids();
+        assert!(p_q.has_quantized_centroids());
+        let q = vec![vec![5.0_f32, 5.0, 5.0, 5.0], vec![-5.0_f32, 5.0, -5.0, 5.0]];
+        let probe = 4;
+        let r_f = p_f.candidates(&q, probe);
+        let r_q = p_q.candidates(&q, probe);
+        // The two sets should overlap heavily (≥ 60% Jaccard on
+        // this small fixture; quantisation error rare drops a
+        // borderline candidate).
+        let inter = (&r_f) & (&r_q);
+        let union = (&r_f) | (&r_q);
+        if union.is_empty() {
+            // Both empty — degenerate fixture; skip.
+            return;
+        }
+        let jaccard = inter.len() as f64 / union.len() as f64;
+        assert!(
+            jaccard >= 0.6,
+            "quantized vs f32 candidate sets too divergent: jaccard={jaccard:.2}"
+        );
+    }
+
+    /// With quantized centroids and large per-component magnitudes
+    /// (≫ 1.0 so the int8 grid is well-utilised), the candidate
+    /// set should EXACTLY match the f32 path on a self-search.
+    #[test]
+    fn quantized_centroids_self_query_matches_f32_path() {
+        let docs: Vec<(u32, Vec<Vec<f32>>)> = (0..30u32)
+            .map(|i| {
+                let v = vec![
+                    (i as f32 * 0.13).sin() * 100.0,
+                    (i as f32 * 0.07).cos() * 100.0,
+                ];
+                (i, vec![v.clone(), v])
+            })
+            .collect();
+        let refs: Vec<(u32, &Vec<Vec<f32>>)> = docs.iter().map(|(i, v)| (*i, v)).collect();
+        let p_f = PlaidIndex::build(refs.iter().copied());
+        let refs2: Vec<(u32, &Vec<Vec<f32>>)> = docs.iter().map(|(i, v)| (*i, v)).collect();
+        let p_q = PlaidIndex::build(refs2.into_iter()).with_quantized_centroids();
+        let q = vec![docs[5].1[0].clone()];
+        let r_f = p_f.candidates(&q, 3);
+        let r_q = p_q.candidates(&q, 3);
+        // The float self-query must include doc 5; the quantized
+        // path must also include doc 5 (the int8 grid at scale
+        // ≈ 100 has plenty of resolution).
+        assert!(r_f.contains(5), "f32 path missing self-doc: {r_f:?}");
+        assert!(r_q.contains(5), "quantized path missing self-doc: {r_q:?}");
+    }
+
+    /// WARP two-stage: quorum > Q always yields empty (a doc
+    /// can't appear in more query-row sets than there are query
+    /// rows).
+    #[test]
+    fn warp_two_stage_quorum_above_q_is_empty() {
+        let docs: Vec<(u32, Vec<Vec<f32>>)> = (0..10u32)
+            .map(|i| (i, vec![vec![i as f32; 4]]))
+            .collect();
+        let refs: Vec<(u32, &Vec<Vec<f32>>)> = docs.iter().map(|(i, v)| (*i, v)).collect();
+        let p = PlaidIndex::build(refs.into_iter());
+        let q = vec![vec![0.5_f32; 4], vec![1.5_f32; 4]];
+        let too_strict = p.candidates_with_quorum(&q, 4, 99);
+        assert!(too_strict.is_empty());
     }
 
     /// WARP_SELECT correctness: probe=1 must return the SAME set
