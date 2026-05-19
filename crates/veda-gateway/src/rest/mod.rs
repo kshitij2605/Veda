@@ -37,6 +37,15 @@ pub fn build_router(app_state: state::AppState) -> Router {
         // Admin
         .route("/v1/admin/nodes", get(admin::list_nodes))
         .route("/v1/admin/metrics", get(admin::metrics))
+        // Raft membership API (Phase 6).
+        .route(
+            "/v1/admin/cluster/join",
+            post(admin::cluster_join),
+        )
+        .route(
+            "/v1/admin/cluster/nodes/{id}",
+            delete(admin::cluster_remove),
+        )
         // Collections
         .route("/v1/collections", post(collections::create_collection))
         .route("/v1/collections", get(collections::list_collections))

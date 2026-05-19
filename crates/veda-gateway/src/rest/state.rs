@@ -209,6 +209,40 @@ impl AppState {
         tracing::info!(model = %model, endpoint = %endpoint, "registered SPLADE encoder from environment");
     }
 
+    /// Spawn a background task that subscribes to the Raft metrics
+    /// watch channel and publishes the interesting numbers to the
+    /// existing Prometheus recorder. Idempotent — only spawns when
+    /// a coordinator is configured. Metrics:
+    ///   - veda_raft_term: current Raft term
+    ///   - veda_raft_leader_id: id of the current leader (0 if none)
+    ///   - veda_raft_last_applied_index: last applied log index
+    ///   - veda_raft_last_log_index: last log index (lag = this - last_applied)
+    ///   - veda_raft_is_leader: 1 when self is leader, 0 otherwise
+    pub async fn spawn_raft_metrics_publisher(&self) {
+        let guard = self.inner.raft.read().await;
+        let Some(coord) = guard.as_ref() else { return };
+        let mut rx = coord.metrics();
+        tokio::spawn(async move {
+            loop {
+                let m = rx.borrow_and_update().clone();
+                metrics::gauge!("veda_raft_term").set(m.current_term as f64);
+                metrics::gauge!("veda_raft_leader_id").set(m.current_leader.unwrap_or(0) as f64);
+                metrics::gauge!("veda_raft_last_applied_index").set(
+                    m.last_applied.map(|l| l.index).unwrap_or(0) as f64
+                );
+                metrics::gauge!("veda_raft_last_log_index").set(
+                    m.last_log_index.unwrap_or(0) as f64
+                );
+                let is_leader = matches!(m.state, veda_coordinator::RaftServerState::Leader);
+                metrics::gauge!("veda_raft_is_leader").set(if is_leader { 1.0 } else { 0.0 });
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+            tracing::info!("raft metrics publisher exiting");
+        });
+    }
+
     /// Optionally bootstrap a single-node `RaftCoordinator` from the
     /// env. Activated when `VEDA_COORDINATOR=raft` is set. The node
     /// id is read from `VEDA_NODE_ID` (defaults to 1). No-op
@@ -228,12 +262,53 @@ impl AppState {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
-        // Durable storage path under {data_dir}/raft. When this dir
-        // already contains a log/state, the coordinator recovers
-        // instead of re-initialising.
         let raft_dir = self.inner.data_dir.join("raft");
-        let res = RaftCoordinator::start_single_node_with_dir(node_id, &raft_dir).await;
-        match res {
+
+        // Multi-node path: VEDA_RAFT_PEERS=1@host1:6341,2@host2:6341,...
+        // VEDA_RAFT_LISTEN sets the gRPC bind address (default 0.0.0.0:6341).
+        let peers_env = std::env::var("VEDA_RAFT_PEERS").unwrap_or_default();
+        let peers = veda_coordinator::raft_tonic::parse_peers_env(&peers_env);
+        if !peers.is_empty() {
+            let listen = std::env::var("VEDA_RAFT_LISTEN")
+                .unwrap_or_else(|_| "0.0.0.0:6341".to_owned());
+            let listen_addr = match listen.parse::<std::net::SocketAddr>() {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::error!(error = %e, listen = %listen, "VEDA_RAFT_LISTEN invalid");
+                    return;
+                }
+            };
+            // Bootstrap when explicitly requested via VEDA_RAFT_BOOTSTRAP=1.
+            // Otherwise the node will recover from disk (if state exists)
+            // or wait for a join RPC.
+            let bootstrap = std::env::var("VEDA_RAFT_BOOTSTRAP")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            match RaftCoordinator::start_multi_node(node_id, &raft_dir, listen_addr, peers.clone(), bootstrap).await {
+                Ok(coord) => {
+                    let mut guard = self.inner.raft.write().await;
+                    *guard = Some(coord);
+                    tracing::info!(
+                        node_id,
+                        listen = %listen_addr,
+                        peers = peers.len(),
+                        bootstrap,
+                        raft_dir = %raft_dir.display(),
+                        "raft coordinator started (multi-node, Tonic)",
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to start multi-node raft");
+                    return;
+                }
+            }
+        }
+
+        // Single-node path (no peers): durable storage, no Tonic
+        // server. Useful for development and the simplest production
+        // deployment.
+        match RaftCoordinator::start_single_node_with_dir(node_id, &raft_dir).await {
             Ok(coord) => {
                 let mut guard = self.inner.raft.write().await;
                 *guard = Some(coord);

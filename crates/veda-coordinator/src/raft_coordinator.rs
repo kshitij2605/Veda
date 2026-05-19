@@ -26,6 +26,7 @@
 //! caller using the `CoordinatorHandle` API.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use openraft::storage::Adaptor;
@@ -35,6 +36,7 @@ use crate::network::CoordinatorError;
 use crate::raft::{NodeId, VedaTypeConfig};
 use crate::raft_network::InProcessNetwork;
 use crate::raft_storage::MemRaftStorage;
+use crate::raft_tonic::{PeerAddressBook, RaftService, TonicRaftNetwork};
 use crate::raft_types::{ClusterCommand, ClusterResponse, ClusterState};
 
 /// The `RaftCoordinator` itself. Cheap to clone (the `Raft` handle from
@@ -49,6 +51,10 @@ pub struct RaftCoordinator {
     /// through Raft. (Reads are local; this matches how the
     /// channel-based coordinator answers queries.)
     storage: MemRaftStorage,
+    /// Address book for cross-process peers. Always present, even
+    /// in in-process mode (empty book then). Membership-change RPCs
+    /// register peers here.
+    peers: PeerAddressBook,
 }
 
 impl RaftCoordinator {
@@ -108,7 +114,161 @@ impl RaftCoordinator {
         Ok(Self {
             raft: Arc::new(raft),
             storage,
+            peers: PeerAddressBook::new(),
         })
+    }
+
+    /// Multi-node bootstrap path — the production deployment shape.
+    ///
+    /// Builds the Raft instance with the Tonic cross-process
+    /// transport, spawns a gRPC server on `listen_addr`, populates
+    /// the peer address book from `peers`, and (when `bootstrap` is
+    /// true) calls `raft.initialize(...)` with the full peer set.
+    /// `bootstrap` should be true on first boot of the cluster; on
+    /// subsequent boots openraft picks up state from disk and the
+    /// caller should pass `false`.
+    pub async fn start_multi_node(
+        node_id: NodeId,
+        data_dir: &std::path::Path,
+        listen_addr: SocketAddr,
+        peers: Vec<(NodeId, String)>,
+        bootstrap: bool,
+    ) -> Result<Self, BootstrapError> {
+        let storage = MemRaftStorage::with_dir(data_dir)
+            .await
+            .map_err(|e| BootstrapError::RaftConstruct(format!("storage init: {e}")))?;
+        // If on-disk state already shows initialised cluster, skip
+        // the bootstrap regardless of the caller's intent.
+        let needs_init = bootstrap && storage.log.last_log_id().await.is_none();
+
+        let config = Config {
+            heartbeat_interval: 250,
+            election_timeout_min: 1500,
+            election_timeout_max: 3000,
+            ..Default::default()
+        };
+        let config = Arc::new(config.validate().map_err(BootstrapError::Config)?);
+
+        // Build address book + Tonic network factory.
+        let address_book = PeerAddressBook::new();
+        for (id, addr) in &peers {
+            address_book.register(*id, addr.clone()).await;
+        }
+        let network = TonicRaftNetwork::new(address_book.clone());
+
+        let (log_store, state_machine) =
+            Adaptor::<VedaTypeConfig, MemRaftStorage>::new(storage.clone());
+
+        let raft = Raft::new(node_id, config, network, log_store, state_machine)
+            .await
+            .map_err(|e| BootstrapError::RaftConstruct(e.to_string()))?;
+        let raft = Arc::new(raft);
+
+        // Spawn the Tonic gRPC server. Dropping the JoinHandle is
+        // intentional — the server runs for the lifetime of the
+        // process, and Tonic handles its own graceful shutdown via
+        // the underlying tokio runtime.
+        let service = RaftService::new(raft.clone()).into_grpc_service();
+        let server_addr = listen_addr;
+        tokio::spawn(async move {
+            if let Err(e) = tonic::transport::Server::builder()
+                .add_service(service)
+                .serve(server_addr)
+                .await
+            {
+                tracing::error!(error = %e, addr = %server_addr, "raft gRPC server exited");
+            }
+        });
+
+        // Bootstrap the cluster once all peers are in the book.
+        if needs_init {
+            let mut members = BTreeMap::new();
+            members.insert(node_id, BasicNode::default());
+            for (id, _addr) in &peers {
+                if *id != node_id {
+                    members.insert(*id, BasicNode::default());
+                }
+            }
+            // First boot: try to initialize. If another peer
+            // beat us to it, openraft returns AlreadyInitialized
+            // — that's fine, we just join the existing cluster.
+            match raft.initialize(members).await {
+                Ok(()) => tracing::info!(node_id, "raft cluster initialised"),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "raft.initialize() failed (already initialised on another node?)",
+                    );
+                }
+            }
+        }
+
+        Ok(Self {
+            raft,
+            storage,
+            peers: address_book,
+        })
+    }
+
+    /// Access the peer address book — used by the membership API
+    /// to register new peers after an add_voter RPC.
+    pub fn peers(&self) -> &PeerAddressBook {
+        &self.peers
+    }
+
+    /// Add a voter to the cluster. Membership change goes through
+    /// the Raft log; once committed the new node is a full voter.
+    /// Also registers the address in the local peer book so the
+    /// Tonic transport can dial it.
+    pub async fn add_voter(
+        &self,
+        node_id: NodeId,
+        address: String,
+    ) -> Result<(), String> {
+        self.peers.register(node_id, address).await;
+        self.raft
+            .add_learner(node_id, BasicNode::default(), true)
+            .await
+            .map_err(|e| format!("add_learner: {e}"))?;
+        // Compute the full membership set including the new voter.
+        let metrics = self.raft.metrics().borrow().clone();
+        let mut members: std::collections::BTreeSet<NodeId> = metrics
+            .membership_config
+            .membership()
+            .voter_ids()
+            .collect();
+        members.insert(node_id);
+        self.raft
+            .change_membership(members, false)
+            .await
+            .map_err(|e| format!("change_membership add: {e}"))?;
+        Ok(())
+    }
+
+    /// Remove a voter. Replicates the membership-change log entry,
+    /// then deregisters from the local peer book.
+    pub async fn remove_voter(&self, node_id: NodeId) -> Result<(), String> {
+        let metrics = self.raft.metrics().borrow().clone();
+        let mut members: std::collections::BTreeSet<NodeId> = metrics
+            .membership_config
+            .membership()
+            .voter_ids()
+            .collect();
+        members.remove(&node_id);
+        self.raft
+            .change_membership(members, false)
+            .await
+            .map_err(|e| format!("change_membership remove: {e}"))?;
+        self.peers.deregister(node_id).await;
+        Ok(())
+    }
+
+    /// Subscribe to the Raft metrics stream. Used by the gateway's
+    /// Prometheus task to publish term/leader/last_applied gauges.
+    pub fn metrics(
+        &self,
+    ) -> tokio::sync::watch::Receiver<openraft::RaftMetrics<NodeId, BasicNode>> {
+        self.raft.metrics()
     }
 
     /// Submit a `ClusterCommand` to the Raft leader and wait for it to

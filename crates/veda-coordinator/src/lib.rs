@@ -23,6 +23,11 @@ pub mod raft;
 pub mod raft_coordinator;
 pub mod raft_network;
 pub mod raft_storage;
+pub mod raft_tonic;
 pub mod raft_types;
 pub mod shard_router;
 pub mod store;
+
+// Re-exports so downstream crates (the gateway) don't have to declare
+// their own openraft dep just to mention a couple of types.
+pub use openraft::ServerState as RaftServerState;
