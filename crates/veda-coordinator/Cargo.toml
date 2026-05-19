@@ -19,6 +19,9 @@ async-trait = "0.1"
 # happens in build.rs.
 tonic = "0.12"
 prost = "0.13"
+# Cross-node health probes (peer_health.rs) — HTTP GET on each
+# peer's /admin/health. rustls-tls so we don't drag in OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [build-dependencies]
 tonic-build = "0.12"

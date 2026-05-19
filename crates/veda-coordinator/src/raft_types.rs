@@ -40,6 +40,14 @@ pub enum ClusterCommand {
         node_id: u64,
     },
 
+    /// No-op log entry. Used as a linearisable-read barrier:
+    /// a caller that needs a read reflecting every committed entry
+    /// up to "now" issues `Noop` first; the state machine apply
+    /// pathway treats it as a no-op (just advances last_applied),
+    /// and once it commits the read happens against state that's
+    /// guaranteed to include every prior write.
+    Noop,
+
     // -- Shard assignment --
     /// Assign a shard of a collection to a node.
     AssignShard {
@@ -62,6 +70,7 @@ impl fmt::Display for ClusterCommand {
             Self::DropCollection { name } => write!(f, "DropCollection({name})"),
             Self::RegisterNode { node_id, .. } => write!(f, "RegisterNode({node_id})"),
             Self::DeregisterNode { node_id } => write!(f, "DeregisterNode({node_id})"),
+            Self::Noop => write!(f, "Noop"),
             Self::AssignShard {
                 collection,
                 shard_id,
