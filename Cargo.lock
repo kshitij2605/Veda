@@ -4534,6 +4534,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bincode",
+ "crc32fast",
  "openraft",
  "prost",
  "reqwest",

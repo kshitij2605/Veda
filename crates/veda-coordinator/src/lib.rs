@@ -26,6 +26,7 @@ pub mod raft_network;
 pub mod raft_storage;
 pub mod raft_tonic;
 pub mod raft_types;
+pub mod raft_wal;
 pub mod shard_router;
 pub mod store;
 
