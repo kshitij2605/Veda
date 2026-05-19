@@ -72,7 +72,7 @@ pub struct ListRecordsResponse {
 pub async fn insert(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(req): Json<InsertRequest>,
+    Json(mut req): Json<InsertRequest>,
 ) -> Result<(StatusCode, Json<InsertResponse>), (StatusCode, Json<ErrorResponse>)> {
     let start = Instant::now();
     let schema = {
@@ -86,6 +86,61 @@ pub async fn insert(
             )
         })?
     };
+
+    // Raft mode: submit each record as a ClusterCommand::InsertRecord
+    // and return. All materialisation (local segment manager
+    // inserts) happens uniformly through the reconcile task on
+    // every node, including the receiver — that keeps the
+    // segment-manager view identical across the cluster instead
+    // of having the receiver run a slightly different code path.
+    {
+        let raft_guard = state.inner.raft.read().await;
+        if let Some(coord) = raft_guard.as_ref() {
+            let mut applied = 0usize;
+            for raw in req.records.iter() {
+                let record = parse_record_public(raw, &schema).map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse { error: e }),
+                    )
+                })?;
+                let rid = record.id().to_string();
+                let rjson = serde_json::to_string(&record).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("serialize record: {e}"),
+                        }),
+                    )
+                })?;
+                let cmd = veda_coordinator::raft_types::ClusterCommand::InsertRecord {
+                    collection: name.clone(),
+                    record_id: rid,
+                    record_json: rjson,
+                };
+                if let Err(e) = coord.execute(cmd).await {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("raft submit: {e}"),
+                        }),
+                    ));
+                }
+                applied += 1;
+            }
+            // Trigger an immediate reconcile so the receiver's
+            // segment manager sees the new records before this
+            // response returns. Without this, the caller would
+            // have to wait up to VEDA_RAFT_RECONCILE_INTERVAL_SECS
+            // before a follow-up GET /records returns the data.
+            let _ = crate::rest::collections::reconcile_collections_from_raft(&state).await;
+            let _ = start;
+            return Ok((
+                StatusCode::CREATED,
+                Json(InsertResponse { inserted: applied }),
+            ));
+        }
+    }
 
     let mut inserted = 0usize;
     let mut managers = state.inner.segment_managers.write().await;

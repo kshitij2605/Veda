@@ -110,6 +110,20 @@ pub struct ClusterStateMachine {
     nodes: HashMap<u64, NodeInfo>,
     /// collection -> (shard_id -> [node_ids])
     shard_assignments: HashMap<String, HashMap<u32, Vec<u64>>>,
+    /// Replicated record store: (collection, record_id) -> record_json.
+    /// Populated by `ClusterCommand::InsertRecord` applies. Each
+    /// node maintains its own copy; the gateway-side reconcile
+    /// path picks up new entries and pushes them into the local
+    /// SegmentManager.
+    ///
+    /// **Memory**: this map holds every inserted record in
+    /// process memory on every node. For small-to-medium states
+    /// this is fine (the same state machine is bincode-serialised
+    /// for snapshot install anyway). For very large datasets,
+    /// per-shard Raft groups are the right architectural answer —
+    /// see documentation/raft-migration.md.
+    #[serde(default)]
+    records: HashMap<String, HashMap<String, String>>,
 }
 
 impl ClusterStateMachine {
@@ -160,8 +174,8 @@ impl ClusterStateMachine {
                 if self.collections.remove(name).is_none() {
                     return ClusterResponse::Error(format!("collection '{name}' not found"));
                 }
-                // Also remove shard assignments for the dropped collection.
                 self.shard_assignments.remove(name);
+                self.records.remove(name);
                 ClusterResponse::Ok
             }
 
@@ -195,6 +209,24 @@ impl ClusterStateMachine {
             // forces the apply log to advance, which guarantees a
             // subsequent state read includes every prior commit.
             ClusterCommand::Noop => ClusterResponse::Ok,
+
+            ClusterCommand::InsertRecord {
+                collection,
+                record_id,
+                record_json,
+            } => {
+                if !self.collections.contains_key(collection) {
+                    return ClusterResponse::Error(format!(
+                        "collection '{collection}' does not exist"
+                    ));
+                }
+                let entry = self
+                    .records
+                    .entry(collection.clone())
+                    .or_default();
+                entry.insert(record_id.clone(), record_json.clone());
+                ClusterResponse::Ok
+            }
 
             ClusterCommand::AssignShard {
                 collection,
@@ -254,6 +286,7 @@ impl ClusterStateMachine {
             collections: self.collections.clone(),
             nodes: self.nodes.clone(),
             shard_assignments: self.shard_assignments.clone(),
+            records: self.records.clone(),
             last_applied_index: self.last_applied,
         }
     }

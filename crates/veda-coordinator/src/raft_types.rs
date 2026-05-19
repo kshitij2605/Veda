@@ -48,6 +48,27 @@ pub enum ClusterCommand {
     /// guaranteed to include every prior write.
     Noop,
 
+    /// Insert one record into a collection. The cluster state
+    /// machine doesn't materialise the data itself (record blobs
+    /// can be large); on apply, each node uses the
+    /// `(collection, record_id, record_json)` tuple to drive its
+    /// local SegmentManager. The leader assigns `record_id` before
+    /// proposing so all nodes agree on identity.
+    ///
+    /// **Performance trade-off**: routing every insert through
+    /// one cluster-wide Raft caps write throughput at the leader's
+    /// single-node speed. Real horizontal scaling needs per-shard
+    /// Raft groups (CockroachDB / TiDB pattern) — a fundamental
+    /// architectural refactor of veda-coordinator that's out of
+    /// scope here. The current implementation is correct (every
+    /// node converges to the same data) but not yet fast under
+    /// high write loads. See documentation/raft-migration.md.
+    InsertRecord {
+        collection: String,
+        record_id: String,
+        record_json: String,
+    },
+
     // -- Shard assignment --
     /// Assign a shard of a collection to a node.
     AssignShard {
@@ -71,6 +92,9 @@ impl fmt::Display for ClusterCommand {
             Self::RegisterNode { node_id, .. } => write!(f, "RegisterNode({node_id})"),
             Self::DeregisterNode { node_id } => write!(f, "DeregisterNode({node_id})"),
             Self::Noop => write!(f, "Noop"),
+            Self::InsertRecord { collection, record_id, .. } => {
+                write!(f, "InsertRecord({collection}/{record_id})")
+            }
             Self::AssignShard {
                 collection,
                 shard_id,
@@ -143,6 +167,9 @@ pub struct ClusterState {
     pub nodes: HashMap<u64, NodeInfo>,
     /// collection -> shard_id -> [node_ids]
     pub shard_assignments: HashMap<String, HashMap<u32, Vec<u64>>>,
+    /// collection -> record_id -> record_json (replicated record data)
+    #[serde(default)]
+    pub records: HashMap<String, HashMap<String, String>>,
     /// Index of the last applied log entry (0 = none applied).
     pub last_applied_index: u64,
 }
