@@ -191,6 +191,11 @@ impl ClusterStateMachine {
                 ClusterResponse::Ok
             }
 
+            // Linearisable-read barrier — applies as a no-op but
+            // forces the apply log to advance, which guarantees a
+            // subsequent state read includes every prior commit.
+            ClusterCommand::Noop => ClusterResponse::Ok,
+
             ClusterCommand::AssignShard {
                 collection,
                 shard_id,

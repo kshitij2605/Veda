@@ -128,12 +128,16 @@ pub async fn list_nodes(
         match guard.as_ref() {
             Some(c) => {
                 let peers_book = c.peers().snapshot().await;
-                Some((c.membership_snapshot(), peers_book))
+                let health = match c.peer_health() {
+                    Some(cache) => cache.snapshot().await,
+                    None => std::collections::HashMap::new(),
+                };
+                Some((c.membership_snapshot(), peers_book, health))
             }
             None => None,
         }
     };
-    if let Some((mem, peers_book)) = raft_view {
+    if let Some((mem, peers_book, peer_health)) = raft_view {
         let self_nid: u64 = std::env::var("VEDA_NODE_ID")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -151,11 +155,15 @@ pub async fn list_nodes(
                 };
                 let is_leader = mem.current_leader == Some(nid);
                 let role = if is_leader { "leader" } else { "follower" };
+                let peer_status = peer_health
+                    .get(&nid)
+                    .map(|h| h.label().to_owned())
+                    .unwrap_or_else(|| "unknown".to_owned());
                 NodeInfo {
                     id: format!("node-{nid}"),
                     address,
                     role: role.into(),
-                    status: if is_self { self_status.clone() } else { "unknown".into() },
+                    status: if is_self { self_status.clone() } else { peer_status },
                     version: "0.1.0".into(),
                     uptime_secs: if is_self { uptime_secs } else { 0 },
                     shard_count: if is_self { shard_count } else { 0 },
