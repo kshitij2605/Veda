@@ -78,7 +78,25 @@ pub struct ListRecordsResponse {
 pub async fn insert(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(mut req): Json<InsertRequest>,
+    Json(req): Json<InsertRequest>,
+) -> axum::response::Response {
+    if let Some(leader_url) = state.leader_rest_address().await {
+        return crate::rest::collections::raft_redirect(
+            &leader_url,
+            &format!("/v1/collections/{name}/insert"),
+        );
+    }
+    use axum::response::IntoResponse;
+    match insert_impl(state, name, req).await {
+        Ok((status, body)) => (status, body).into_response(),
+        Err((status, body)) => (status, body).into_response(),
+    }
+}
+
+async fn insert_impl(
+    state: AppState,
+    name: String,
+    mut req: InsertRequest,
 ) -> Result<(StatusCode, Json<InsertResponse>), (StatusCode, Json<ErrorResponse>)> {
     let start = Instant::now();
     let schema = {
@@ -102,6 +120,21 @@ pub async fn insert(
     {
         let raft_guard = state.inner.raft.read().await;
         if let Some(coord) = raft_guard.as_ref() {
+            // Per-shard group routing. When the
+            // MultiGroupCoordinator has a group for
+            // (collection, shard_id), submit there; otherwise
+            // fall back to the cluster-wide _meta group.
+            //
+            // Today the per-shard groups are in-process single-
+            // node Raft instances spawned by reconcile; they
+            // don't yet replicate across nodes (that needs the
+            // multiplexing Tonic transport). The _meta group
+            // remains the source of truth for cross-node
+            // replication. This wires the dispatching code path
+            // so the future multi-node multi-group transport
+            // drops in without changing this handler.
+            let mg = state.inner.multi_group.read().await.clone();
+            let shard_count = schema.shard_count();
             let mut applied = 0usize;
             let mut applied_ids: Vec<String> = Vec::with_capacity(req.records.len());
             for raw in req.records.iter() {
@@ -125,13 +158,49 @@ pub async fn insert(
                     record_id: rid.clone(),
                     record_json: rjson,
                 };
-                if let Err(e) = coord.execute(cmd).await {
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("raft submit: {e}"),
-                        }),
-                    ));
+
+                // Compute the shard id for this record. Falls
+                // through to the cluster-wide group below if
+                // multi_group isn't configured or the group
+                // hasn't been spawned yet.
+                let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
+                    &record.id(),
+                    shard_count,
+                );
+                let group_id = format!("{}:{}", name, shard_id);
+                let mut routed_to_shard = false;
+                if let Some(ref mg) = mg
+                    && mg.get(&group_id).await.is_some()
+                {
+                    if let Err(e) = mg.execute(&group_id, cmd.clone()).await {
+                        tracing::warn!(
+                            group_id = %group_id,
+                            error = %e,
+                            "per-shard submit failed; falling back to _meta",
+                        );
+                    } else {
+                        routed_to_shard = true;
+                    }
+                }
+
+                // Always also submit to the cluster-wide group —
+                // that's where cross-node replication lives until
+                // the multi-group transport ships. Skip when the
+                // per-shard submit was sufficient and the
+                // cluster-wide group is the same logical
+                // destination (single-node), to avoid double-
+                // counting. We detect single-node via "no peers"
+                // — coord.peers().snapshot() empty.
+                let peers_empty = coord.peers().snapshot().await.is_empty();
+                if !routed_to_shard || !peers_empty {
+                    if let Err(e) = coord.execute(cmd).await {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: format!("raft submit: {e}"),
+                            }),
+                        ));
+                    }
                 }
                 applied_ids.push(rid);
                 applied += 1;

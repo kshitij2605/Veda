@@ -37,3 +37,8 @@ tokio = { workspace = true }
 [[bin]]
 name = "veda-linearisability-harness"
 path = "src/bin/linearisability_harness.rs"
+
+[[bench]]
+name = "raft_throughput"
+path = "benches/raft_throughput.rs"
+harness = false

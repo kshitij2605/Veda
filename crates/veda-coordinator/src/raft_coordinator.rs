@@ -86,12 +86,79 @@ impl RaftCoordinator {
         Self::start_with_storage(node_id, storage, needs_init).await
     }
 
-    /// Spawn a periodic WAL-compaction task. Runs every
-    /// `VEDA_RAFT_WAL_COMPACT_INTERVAL_SECS` (default 60s) and
-    /// compacts when the WAL file size exceeds
+    /// Spawn a WAL compaction task that watches both the
+    /// periodic timer AND the Raft snapshot lifecycle. The
+    /// timer fires every `VEDA_RAFT_WAL_COMPACT_INTERVAL_SECS`
+    /// (default 60s) and compacts when WAL size exceeds
     /// `VEDA_RAFT_WAL_COMPACT_THRESHOLD_BYTES` (default 16 MB).
-    /// Idempotent — multiple spawns would compete; we spawn once
-    /// per RaftCoordinator construction.
+    /// Independently, whenever the metrics stream reports a new
+    /// `snapshot.last_log_id`, every log entry up to that
+    /// position can be safely dropped — we trigger an immediate
+    /// compaction without waiting for the timer.
+    fn spawn_compaction_with_metrics(
+        storage: MemRaftStorage,
+        raft: Arc<openraft::Raft<VedaTypeConfig>>,
+    ) {
+        let interval_secs = std::env::var("VEDA_RAFT_WAL_COMPACT_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60)
+            .max(5);
+        let threshold = std::env::var("VEDA_RAFT_WAL_COMPACT_THRESHOLD_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(16 * 1024 * 1024);
+        let storage_a = storage.clone();
+        let storage_b = storage;
+        // Timer-driven compaction (size threshold).
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let size = storage_a.log.wal_bytes().await;
+                if size < threshold {
+                    continue;
+                }
+                tracing::info!(wal_bytes = size, threshold, "WAL exceeded threshold; compacting");
+                if let Err(e) = storage_a.log.compact().await {
+                    tracing::error!(error = %e, "WAL compaction failed");
+                }
+            }
+        });
+        // Snapshot-driven compaction. Watch the metrics stream
+        // for advances in snapshot.last_log_id — every time
+        // openraft builds a new snapshot, entries up to that
+        // log index are durable in the state machine and can
+        // be purged from the WAL.
+        let mut rx = raft.metrics();
+        tokio::spawn(async move {
+            let mut last_snap_index: u64 = 0;
+            loop {
+                let m = rx.borrow_and_update().clone();
+                let snap_idx = m.snapshot.map(|l| l.index).unwrap_or(0);
+                if snap_idx > last_snap_index {
+                    tracing::info!(
+                        snapshot_log_index = snap_idx,
+                        previous = last_snap_index,
+                        "raft snapshot advanced; triggering WAL compaction",
+                    );
+                    if let Err(e) = storage_b.log.compact().await {
+                        tracing::error!(error = %e, "snapshot-triggered WAL compaction failed");
+                    }
+                    last_snap_index = snap_idx;
+                }
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+            tracing::info!("snapshot-driven WAL compaction watcher exiting");
+        });
+    }
+
+    /// Legacy entry point — keep around so single-node bootstrap
+    /// doesn't need the raft handle just for compaction. Delegates
+    /// to the timer-only variant.
     fn spawn_compaction(storage: MemRaftStorage) {
         let interval_secs = std::env::var("VEDA_RAFT_WAL_COMPACT_INTERVAL_SECS")
             .ok()
@@ -249,7 +316,10 @@ impl RaftCoordinator {
         // Spawn the peer health probe loop. Background task lives
         // for the runtime; reads back through `peer_health` accessor.
         let peer_health = spawn_probe(node_id, address_book.clone());
-        Self::spawn_compaction(storage.clone());
+        // Use the metrics-aware compaction so a snapshot install
+        // triggers compaction immediately rather than waiting
+        // for the 60s timer.
+        Self::spawn_compaction_with_metrics(storage.clone(), raft.clone());
 
         Ok(Self {
             raft,
