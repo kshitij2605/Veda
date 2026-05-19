@@ -20,6 +20,7 @@ use veda_query::search::VectorSearchRequest;
 
 use super::collections::ErrorResponse;
 use super::state::AppState;
+use crate::tenant::{self, Tenant};
 
 #[derive(Debug, Deserialize)]
 pub struct EvaluateQuery {
@@ -68,9 +69,11 @@ pub struct FieldQuality {
 
 pub async fn evaluate(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
     axum::extract::Query(q): axum::extract::Query<EvaluateQuery>,
 ) -> Result<Json<EvaluateResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let name = tenant::scope(&tenant, &name);
     let schema = {
         let schemas = state.inner.schemas.read().await;
         schemas.get(&name).cloned().ok_or_else(|| {

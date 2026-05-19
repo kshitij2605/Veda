@@ -13,6 +13,7 @@ use veda_query::search::{SearchTimings, VectorSearchRequest};
 
 use super::collections::ErrorResponse;
 use super::state::AppState;
+use crate::tenant::{self, Tenant};
 
 // ── Request types ────────────────────────────────────────────────────────
 
@@ -177,9 +178,11 @@ pub struct SearchHit {
 #[instrument(name = "search", skip(state, req), fields(collection = %name, top_k = req.limit, has_filter = req.filter.is_some()))]
 pub async fn search(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
     Json(mut req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let name = tenant::scope(&tenant, &name);
     // Cross-encoder rerank oversampling: if rerank is configured, fetch
     // `limit * 4` initial candidates so the reranker has enough to choose from.
     let final_limit = req.limit;

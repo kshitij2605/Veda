@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use super::state::AppState;
 use crate::rest::collections::ErrorResponse;
+use crate::tenant::{self, Tenant};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct QueryLogEntry {
@@ -162,9 +163,11 @@ fn read_window_entries(
 
 pub async fn coverage(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
     Query(q): Query<CoverageQuery>,
 ) -> Result<Json<CoverageResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let name = tenant::scope(&tenant, &name);
     {
         let schemas = state.inner.schemas.read().await;
         if !schemas.contains_key(&name) {

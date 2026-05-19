@@ -4,3 +4,4 @@ pub mod rbac;
 pub mod rest;
 pub mod server;
 pub mod streaming;
+pub mod tenant;

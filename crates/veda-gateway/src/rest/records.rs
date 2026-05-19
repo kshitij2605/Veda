@@ -19,6 +19,7 @@ use veda_storage::blob_store::ArcBlobStore;
 
 use super::collections::ErrorResponse;
 use super::state::AppState;
+use crate::tenant::{self, Tenant};
 
 // ── Request / Response types ─────────────────────────────────────────────
 
@@ -77,6 +78,7 @@ pub struct ListRecordsResponse {
 #[instrument(name = "insert", skip(state, req), fields(collection = %name, record_count = req.records.len()))]
 pub async fn insert(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
     Json(req): Json<InsertRequest>,
 ) -> axum::response::Response {
@@ -87,7 +89,8 @@ pub async fn insert(
         );
     }
     use axum::response::IntoResponse;
-    match insert_impl(state, name, req).await {
+    let scoped = tenant::scope(&tenant, &name);
+    match insert_impl(state, scoped, req).await {
         Ok((status, body)) => (status, body).into_response(),
         Err((status, body)) => (status, body).into_response(),
     }
@@ -362,9 +365,11 @@ async fn insert_impl(
 #[instrument(name = "list_records", skip(state), fields(collection = %name, limit = q.limit, offset = q.offset))]
 pub async fn list_records(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
     Query(q): Query<ListRecordsQuery>,
 ) -> Result<Json<ListRecordsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let name = tenant::scope(&tenant, &name);
     {
         let schemas = state.inner.schemas.read().await;
         if !schemas.contains_key(&name) {
@@ -442,9 +447,11 @@ pub struct GetRecordQuery {
 
 pub async fn get_record(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path((name, id_str)): Path<(String, String)>,
     Query(q): Query<GetRecordQuery>,
 ) -> Result<Json<GetRecordResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let name = tenant::scope(&tenant, &name);
     let record_id: Uuid = id_str.parse().map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -568,10 +575,11 @@ pub async fn get_record(
 
 pub async fn delete_records(
     State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path(name): Path<String>,
     Json(req): Json<DeleteRecordsRequest>,
 ) -> Result<Json<DeleteRecordsResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // Check collection exists
+    let name = tenant::scope(&tenant, &name);
     {
         let schemas = state.inner.schemas.read().await;
         if !schemas.contains_key(&name) {

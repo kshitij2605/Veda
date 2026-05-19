@@ -5,6 +5,7 @@ use axum::Router;
 use tower_http::trace::TraceLayer;
 
 use crate::auth;
+use crate::tenant;
 
 pub mod admin;
 pub mod chunk_preview;
@@ -125,6 +126,10 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             auth::auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            tenant::tenant_middleware,
         ));
 
     public
