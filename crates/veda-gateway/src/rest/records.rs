@@ -75,11 +75,12 @@ pub struct ListRecordsResponse {
 
 // ── Handlers ─────────────────────────────────────────────────────────────
 
-#[instrument(name = "insert", skip(state, req), fields(collection = %name, record_count = req.records.len()))]
+#[instrument(name = "insert", skip(state, req, headers), fields(collection = %name, record_count = req.records.len()))]
 pub async fn insert(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(name): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<InsertRequest>,
 ) -> axum::response::Response {
     if let Some(leader_url) = state.leader_rest_address().await {
@@ -90,7 +91,15 @@ pub async fn insert(
     }
     use axum::response::IntoResponse;
     let scoped = tenant::scope(&tenant, &name);
-    match insert_impl(state, scoped, req).await {
+    // Optional transactional enrollment — when X-Veda-Txn-Id is
+    // present, every record in this request is staged under that
+    // txn instead of going straight into the records map. See
+    // crates/veda-gateway/src/rest/txn.rs for the lifecycle.
+    let txn_id = headers
+        .get(crate::rest::txn::TXN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    match insert_impl(state, scoped, txn_id, req).await {
         Ok((status, body)) => (status, body).into_response(),
         Err((status, body)) => (status, body).into_response(),
     }
@@ -99,6 +108,7 @@ pub async fn insert(
 async fn insert_impl(
     state: AppState,
     name: String,
+    txn_id: Option<String>,
     mut req: InsertRequest,
 ) -> Result<(StatusCode, Json<InsertResponse>), (StatusCode, Json<ErrorResponse>)> {
     let start = Instant::now();
@@ -156,10 +166,18 @@ async fn insert_impl(
                         }),
                     )
                 })?;
-                let cmd = veda_coordinator::raft_types::ClusterCommand::InsertRecord {
-                    collection: name.clone(),
-                    record_id: rid.clone(),
-                    record_json: rjson,
+                let cmd = match &txn_id {
+                    Some(tid) => veda_coordinator::raft_types::ClusterCommand::TxnWrite {
+                        txn_id: tid.clone(),
+                        collection: name.clone(),
+                        record_id: rid.clone(),
+                        record_json: rjson,
+                    },
+                    None => veda_coordinator::raft_types::ClusterCommand::InsertRecord {
+                        collection: name.clone(),
+                        record_id: rid.clone(),
+                        record_json: rjson,
+                    },
                 };
 
                 // Compute the shard id for this record. Falls

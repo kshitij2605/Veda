@@ -124,6 +124,21 @@ pub struct ClusterStateMachine {
     /// see documentation/raft-migration.md.
     #[serde(default)]
     records: HashMap<String, HashMap<String, String>>,
+    /// Open transactions, keyed by txn_id. Each holds the staged
+    /// writes — moved into `records` on `CommitTxn`, discarded on
+    /// `AbortTxn`. v0 scaffolding (see ClusterCommand::BeginTxn
+    /// doc). Last-writer-wins on commit collisions.
+    #[serde(default)]
+    open_txns: HashMap<String, PendingTxn>,
+}
+
+/// Staged writes for an open transaction. v0 holds them in memory
+/// on every node — production Percolator would persist lock rows
+/// per key in a dedicated CF instead.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PendingTxn {
+    /// (collection, record_id) -> record_json
+    pub writes: Vec<(String, String, String)>,
 }
 
 impl ClusterStateMachine {
@@ -275,6 +290,58 @@ impl ClusterStateMachine {
                 }
                 ClusterResponse::Ok
             }
+
+            ClusterCommand::BeginTxn { txn_id } => {
+                // Idempotent — re-issuing the same txn_id is a no-op
+                // so a retried client (after a network blip) doesn't
+                // get a spurious error.
+                self.open_txns.entry(txn_id.clone()).or_default();
+                ClusterResponse::Ok
+            }
+
+            ClusterCommand::TxnWrite {
+                txn_id,
+                collection,
+                record_id,
+                record_json,
+            } => {
+                if !self.collections.contains_key(collection) {
+                    return ClusterResponse::Error(format!(
+                        "collection '{collection}' does not exist"
+                    ));
+                }
+                let Some(txn) = self.open_txns.get_mut(txn_id) else {
+                    return ClusterResponse::Error(format!(
+                        "transaction '{txn_id}' is not open"
+                    ));
+                };
+                txn.writes.push((
+                    collection.clone(),
+                    record_id.clone(),
+                    record_json.clone(),
+                ));
+                ClusterResponse::Ok
+            }
+
+            ClusterCommand::CommitTxn { txn_id } => {
+                let Some(txn) = self.open_txns.remove(txn_id) else {
+                    // Idempotent on re-commit (already moved).
+                    return ClusterResponse::Ok;
+                };
+                for (collection, record_id, record_json) in txn.writes {
+                    self.records
+                        .entry(collection)
+                        .or_default()
+                        .insert(record_id, record_json);
+                }
+                ClusterResponse::Ok
+            }
+
+            ClusterCommand::AbortTxn { txn_id } => {
+                // Idempotent — no error if the txn isn't open.
+                self.open_txns.remove(txn_id);
+                ClusterResponse::Ok
+            }
         }
     }
 
@@ -287,6 +354,7 @@ impl ClusterStateMachine {
             nodes: self.nodes.clone(),
             shard_assignments: self.shard_assignments.clone(),
             records: self.records.clone(),
+            open_txns: self.open_txns.keys().cloned().collect(),
             last_applied_index: self.last_applied,
         }
     }
@@ -466,5 +534,155 @@ mod tests {
         };
         let resp = sm.apply(&entry);
         assert!(matches!(resp, ClusterResponse::Error(_)));
+    }
+
+    /// Apply a sequence of commands directly to the SM, building
+    /// entries with the next expected index each time. Avoids
+    /// fresh-LogStore index reuse across helper calls.
+    fn drive(sm: &mut ClusterStateMachine, cmds: impl IntoIterator<Item = ClusterCommand>) {
+        for cmd in cmds {
+            let entry = LogEntry {
+                index: sm.last_applied + 1,
+                command: cmd,
+            };
+            let resp = sm.apply(&entry);
+            assert_eq!(resp, ClusterResponse::Ok, "expected Ok, got {resp:?}");
+        }
+    }
+
+    #[test]
+    fn txn_commit_flips_staged_writes_into_records() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [
+                ClusterCommand::CreateCollection {
+                    name: "docs".into(),
+                    schema_json: "{}".into(),
+                },
+                ClusterCommand::BeginTxn { txn_id: "T1".into() },
+                ClusterCommand::TxnWrite {
+                    txn_id: "T1".into(),
+                    collection: "docs".into(),
+                    record_id: "a".into(),
+                    record_json: "{\"v\":1}".into(),
+                },
+                ClusterCommand::TxnWrite {
+                    txn_id: "T1".into(),
+                    collection: "docs".into(),
+                    record_id: "b".into(),
+                    record_json: "{\"v\":2}".into(),
+                },
+            ],
+        );
+
+        // Pre-commit: records map is empty, txn is in open set.
+        assert!(sm.snapshot().records.get("docs").is_none());
+        assert_eq!(sm.snapshot().open_txns, vec!["T1".to_owned()]);
+
+        drive(&mut sm, [ClusterCommand::CommitTxn { txn_id: "T1".into() }]);
+
+        let snap = sm.snapshot();
+        let docs = snap.records.get("docs").expect("records[\"docs\"]");
+        assert_eq!(docs.get("a"), Some(&"{\"v\":1}".to_owned()));
+        assert_eq!(docs.get("b"), Some(&"{\"v\":2}".to_owned()));
+        assert!(snap.open_txns.is_empty(), "txn cleared on commit");
+    }
+
+    #[test]
+    fn txn_abort_drops_staged_writes() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [
+                ClusterCommand::CreateCollection {
+                    name: "docs".into(),
+                    schema_json: "{}".into(),
+                },
+                ClusterCommand::BeginTxn { txn_id: "T1".into() },
+                ClusterCommand::TxnWrite {
+                    txn_id: "T1".into(),
+                    collection: "docs".into(),
+                    record_id: "a".into(),
+                    record_json: "{\"v\":1}".into(),
+                },
+                ClusterCommand::AbortTxn { txn_id: "T1".into() },
+            ],
+        );
+
+        let snap = sm.snapshot();
+        assert!(snap.records.get("docs").is_none());
+        assert!(snap.open_txns.is_empty(), "txn cleared on abort");
+    }
+
+    #[test]
+    fn txn_write_against_unknown_txn_is_error() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [ClusterCommand::CreateCollection {
+                name: "docs".into(),
+                schema_json: "{}".into(),
+            }],
+        );
+        let mut log = LogStore::new();
+        let idx = log.append(ClusterCommand::TxnWrite {
+            txn_id: "NEVER_OPENED".into(),
+            collection: "docs".into(),
+            record_id: "a".into(),
+            record_json: "{}".into(),
+        });
+        let entry = &log.get_range(idx, idx + 1)[0];
+        let resp = sm.apply(entry);
+        assert!(matches!(resp, ClusterResponse::Error(_)));
+    }
+
+    #[test]
+    fn txn_begin_is_idempotent() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [
+                ClusterCommand::BeginTxn { txn_id: "T1".into() },
+                ClusterCommand::BeginTxn { txn_id: "T1".into() },
+            ],
+        );
+        assert_eq!(sm.snapshot().open_txns, vec!["T1".to_owned()]);
+    }
+
+    #[test]
+    fn last_writer_wins_on_concurrent_commit_to_same_key() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [
+                ClusterCommand::CreateCollection {
+                    name: "docs".into(),
+                    schema_json: "{}".into(),
+                },
+                ClusterCommand::BeginTxn { txn_id: "T1".into() },
+                ClusterCommand::TxnWrite {
+                    txn_id: "T1".into(),
+                    collection: "docs".into(),
+                    record_id: "a".into(),
+                    record_json: "{\"by\":\"T1\"}".into(),
+                },
+                ClusterCommand::BeginTxn { txn_id: "T2".into() },
+                ClusterCommand::TxnWrite {
+                    txn_id: "T2".into(),
+                    collection: "docs".into(),
+                    record_id: "a".into(),
+                    record_json: "{\"by\":\"T2\"}".into(),
+                },
+                ClusterCommand::CommitTxn { txn_id: "T1".into() },
+                ClusterCommand::CommitTxn { txn_id: "T2".into() },
+            ],
+        );
+
+        let snap = sm.snapshot();
+        let docs = snap.records.get("docs").unwrap();
+        // T2 commits second — its write wins. v0 has no conflict
+        // detection; this is the documented behaviour.
+        assert_eq!(docs.get("a"), Some(&"{\"by\":\"T2\"}".to_owned()));
     }
 }

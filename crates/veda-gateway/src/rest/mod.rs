@@ -24,6 +24,7 @@ pub mod route;
 pub mod saved_objects;
 pub mod search;
 pub mod state;
+pub mod txn;
 
 /// Build the complete REST API router.
 pub fn build_router(app_state: state::AppState) -> Router {
@@ -77,6 +78,11 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route("/v1/llm/complete", post(llm::complete))
         // Chunker A/B preview (no storage / no embedding)
         .route("/v1/chunk/preview", post(chunk_preview::preview))
+        // Transactions v0 (Raft-only; non-production, see
+        // crates/veda-gateway/src/rest/txn.rs).
+        .route("/v1/txn", post(txn::begin))
+        .route("/v1/txn/{txn_id}/commit", post(txn::commit))
+        .route("/v1/txn/{txn_id}/abort", post(txn::abort))
         // SavedObjects — Phase 6.5 follow-up: server-side persistence
         // for searches / atlas views / dashboards / etc. so they
         // survive a browser/localStorage wipe.

@@ -82,6 +82,56 @@ pub enum ClusterCommand {
         shard_id: u32,
         node_id: u64,
     },
+
+    // -- Transactions (v0 scaffolding — NOT production Percolator) --
+    //
+    // The v0 transaction model is a strict 2PC-style stage-and-flip:
+    // BeginTxn opens a holder, TxnWrite stages each record write
+    // under it, CommitTxn moves every staged write into the main
+    // record map atomically, AbortTxn drops the holder + its writes.
+    // Replicated through Raft, so every node sees the same outcome.
+    //
+    // What this v0 deliberately does NOT do:
+    //   * Optimistic / pessimistic concurrency control. Two
+    //     concurrent txns writing the same key both succeed; the
+    //     last commit wins.
+    //   * MVCC / snapshot isolation. Reads bypass the transaction
+    //     overlay completely — read-your-writes within a txn is
+    //     NOT supported.
+    //   * Distributed coordination across shards. The implementation
+    //     funnels every staged write through the cluster-wide group,
+    //     same as InsertRecord.
+    //   * Deadlock detection, retry on conflict, lock timeouts.
+    //   * Large transactions — every staged write sits in memory on
+    //     every node until commit / abort.
+    //
+    // Roadmap to production: vendor TiKV's `components/concurrency_manager`
+    // (Apache-2.0, ~4k LoC) + `txn_types` (~3k LoC) for real Percolator
+    // semantics. See research/2026-05-19-multi-week-survey/01-cross-shard-transactions.md
+    /// Open a new transaction holder. Idempotent: re-issuing the
+    /// same txn_id returns Ok without mutating state.
+    BeginTxn {
+        txn_id: String,
+    },
+    /// Stage a record write under an open transaction. Same shape
+    /// as InsertRecord, plus a `txn_id`. Apply must check that the
+    /// transaction is open and the collection exists.
+    TxnWrite {
+        txn_id: String,
+        collection: String,
+        record_id: String,
+        record_json: String,
+    },
+    /// Commit a transaction: move every staged write into the main
+    /// record map and drop the holder. No-op if the txn isn't open.
+    CommitTxn {
+        txn_id: String,
+    },
+    /// Abort a transaction: drop the holder and every staged write.
+    /// No-op if the txn isn't open.
+    AbortTxn {
+        txn_id: String,
+    },
 }
 
 impl fmt::Display for ClusterCommand {
@@ -105,6 +155,12 @@ impl fmt::Display for ClusterCommand {
                 shard_id,
                 node_id,
             } => write!(f, "UnassignShard({collection}/{shard_id}->{node_id})"),
+            Self::BeginTxn { txn_id } => write!(f, "BeginTxn({txn_id})"),
+            Self::TxnWrite { txn_id, collection, record_id, .. } => {
+                write!(f, "TxnWrite({txn_id}: {collection}/{record_id})")
+            }
+            Self::CommitTxn { txn_id } => write!(f, "CommitTxn({txn_id})"),
+            Self::AbortTxn { txn_id } => write!(f, "AbortTxn({txn_id})"),
         }
     }
 }
@@ -170,6 +226,11 @@ pub struct ClusterState {
     /// collection -> record_id -> record_json (replicated record data)
     #[serde(default)]
     pub records: HashMap<String, HashMap<String, String>>,
+    /// Open transaction ids — surfaces to the gateway so the REST
+    /// layer can reject writes against unknown txns without a
+    /// round-trip.
+    #[serde(default)]
+    pub open_txns: Vec<String>,
     /// Index of the last applied log entry (0 = none applied).
     pub last_applied_index: u64,
 }
