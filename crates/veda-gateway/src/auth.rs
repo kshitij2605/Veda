@@ -55,30 +55,46 @@ pub fn verify_token(token: &str, secret: &str) -> Result<Claims, StatusCode> {
     Ok(data.claims)
 }
 
-/// Axum middleware that extracts and validates JWT from the Authorization header.
+/// Axum middleware that extracts and validates a bearer JWT.
 ///
-/// When `auth_enabled` is false in AppState, the middleware is a no-op.
+/// Dispatches on `AppStateInner::auth_mode` (set from
+/// `VEDA_AUTH_MODE` env):
+///   - `Disabled` — no-op
+///   - `Static`   — HS256 verify against `jwt_secret` (backwards-
+///                  compatible with the original path)
+///   - `Oidc(..)` — verify against IdP-issued public key from JWKS
 pub async fn auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if !state.inner.auth_enabled {
-        return Ok(next.run(req).await);
-    }
+    let mode = state.inner.auth_mode.read().await.clone();
+    let claims = match mode {
+        crate::auth_oidc::AuthMode::Disabled => return Ok(next.run(req).await),
+        crate::auth_oidc::AuthMode::Static => {
+            // Legacy bool stays the source of truth here so tests
+            // that pre-date AuthMode and set `auth_enabled=false`
+            // directly still pass through.
+            if !state.inner.auth_enabled {
+                return Ok(next.run(req).await);
+            }
+            let token = extract_bearer(&req)?;
+            verify_token(token, &state.inner.jwt_secret)?
+        }
+        crate::auth_oidc::AuthMode::Oidc(ctx) => {
+            let token = extract_bearer(&req)?;
+            crate::auth_oidc::verify_oidc(token, &ctx).await?
+        }
+    };
+    req.extensions_mut().insert(claims);
+    Ok(next.run(req).await)
+}
 
-    let auth_header = req
+fn extract_bearer(req: &Request) -> Result<&str, StatusCode> {
+    let h = req
         .headers()
         .get("authorization")
-        .and_then(|v| v.to_str().ok());
-
-    let token = match auth_header {
-        Some(h) if h.starts_with("Bearer ") => &h[7..],
-        _ => return Err(StatusCode::UNAUTHORIZED),
-    };
-
-    let claims = verify_token(token, &state.inner.jwt_secret)?;
-    req.extensions_mut().insert(claims);
-
-    Ok(next.run(req).await)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    h.strip_prefix("Bearer ").ok_or(StatusCode::UNAUTHORIZED)
 }
