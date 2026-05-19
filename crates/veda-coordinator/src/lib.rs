@@ -19,6 +19,7 @@
 //! take over without changing the command/response interface.
 
 pub mod linearisability_checker;
+pub mod multi_group;
 pub mod network;
 pub mod peer_health;
 pub mod raft;
