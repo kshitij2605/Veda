@@ -8,6 +8,8 @@ members = [
     "crates/veda-coordinator",
     "crates/veda-gateway",
     "crates/veda-server",
+    "crates/veda-time",
+    "crates/veda-log",
 ]
 # `crates/veda-coordinator-raftrs` exists as a *decision artifact*
 # (see documentation/consensus-swap-decision.md). It's deliberately
@@ -45,3 +47,5 @@ veda-index = { path = "crates/veda-index" }
 veda-query = { path = "crates/veda-query" }
 veda-coordinator = { path = "crates/veda-coordinator" }
 veda-gateway = { path = "crates/veda-gateway" }
+veda-time = { path = "crates/veda-time" }
+veda-log = { path = "crates/veda-log" }

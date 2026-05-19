@@ -13,6 +13,9 @@ veda-query = { workspace = true }
 veda-storage = { workspace = true }
 veda-index = { workspace = true }
 veda-coordinator = { workspace = true }
+veda-time = { workspace = true }
+veda-log = { workspace = true }
+bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

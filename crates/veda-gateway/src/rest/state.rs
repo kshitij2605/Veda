@@ -18,6 +18,8 @@ use crate::auth_oidc::AuthMode;
 use crate::rest::saved_objects::SavedObjectStore;
 use veda_coordinator::multi_group::MultiGroupCoordinator;
 use veda_coordinator::raft_coordinator::RaftCoordinator;
+use veda_log::ShardLog;
+use veda_time::{LocalTso, Tso};
 
 /// Represents a user in the in-memory user store.
 #[derive(Clone)]
@@ -104,6 +106,18 @@ pub struct AppStateInner {
     /// session. Today this exists to exercise the routing code
     /// path and to surface where horizontal scaling will plug in.
     pub multi_group: RwLock<Option<MultiGroupCoordinator>>,
+    /// Timestamp oracle. Default is `LocalTso` — Phase A
+    /// (`.claude/plans/structured-mixing-turing.md`). The
+    /// `MetaLeasedTso` impl that consults `_meta`'s lease ships
+    /// in a Phase A follow-up.
+    pub tso: Arc<dyn Tso>,
+    /// Per-(collection, shard_id) append-only logs. Phase B
+    /// scaffolding for the FoundationDB-shape data plane. Today
+    /// these are dark-write targets: `records::insert` appends
+    /// here too when `VEDA_LOG_DARK_WRITE=1`, but the existing
+    /// Raft path remains the source of truth. Phase C will cut
+    /// the Raft path and make these primary.
+    pub shard_logs: RwLock<HashMap<String, Arc<ShardLog>>>,
 }
 
 impl AppState {
@@ -133,6 +147,8 @@ impl AppState {
                 raft_materialized_records: RwLock::new(HashMap::new()),
                 raft_rest_peers: RwLock::new(HashMap::new()),
                 multi_group: RwLock::new(None),
+                tso: Arc::new(LocalTso::new()),
+                shard_logs: RwLock::new(HashMap::new()),
             }),
         }
     }
@@ -171,6 +187,8 @@ impl AppState {
                 raft_materialized_records: RwLock::new(HashMap::new()),
                 raft_rest_peers: RwLock::new(HashMap::new()),
                 multi_group: RwLock::new(None),
+                tso: Arc::new(LocalTso::new()),
+                shard_logs: RwLock::new(HashMap::new()),
             }),
         }
     }
@@ -205,6 +223,8 @@ impl AppState {
                 raft_materialized_records: RwLock::new(HashMap::new()),
                 raft_rest_peers: RwLock::new(HashMap::new()),
                 multi_group: RwLock::new(None),
+                tso: Arc::new(LocalTso::new()),
+                shard_logs: RwLock::new(HashMap::new()),
             }),
         }
     }

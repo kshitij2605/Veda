@@ -223,6 +223,32 @@ async fn insert_impl(
                         ));
                     }
                 }
+                // Dark-write to per-shard ShardLog (Phase B).
+                // Errors logged but not surfaced — the Raft path
+                // above is still the source of truth in Phase A/B.
+                if dark_write_enabled() {
+                    let log_arc = ensure_shard_log(&state, &name, shard_id).await;
+                    if let Some(log) = log_arc {
+                        let hlc = state.inner.tso.now().await.unwrap_or_default();
+                        let payload = bytes::Bytes::from(serde_json::to_vec(raw).unwrap_or_default());
+                        let key = bytes::Bytes::from(record.id().as_bytes().to_vec());
+                        match log.append_one(hlc, 0, key, veda_log::LogOp::Put, payload) {
+                            Ok(seq) => tracing::debug!(
+                                collection = %name,
+                                shard = shard_id,
+                                seq_id = seq,
+                                hlc_phys = hlc.physical_ns,
+                                "dark-write to ShardLog ok"
+                            ),
+                            Err(e) => tracing::warn!(
+                                collection = %name,
+                                shard = shard_id,
+                                error = %e,
+                                "dark-write to ShardLog failed (ignored)"
+                            ),
+                        }
+                    }
+                }
                 applied_ids.push(rid);
                 applied += 1;
             }
@@ -291,6 +317,7 @@ async fn insert_impl(
             )
         })?;
 
+        let record_id_for_log = record.id();
         sm.insert(record).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -299,6 +326,32 @@ async fn insert_impl(
                 }),
             )
         })?;
+
+        // Dark-write to per-shard ShardLog (Phase B). Same
+        // behaviour + error handling as the Raft branch above.
+        if dark_write_enabled() {
+            let log_arc = ensure_shard_log(&state, &name, shard_id).await;
+            if let Some(log) = log_arc {
+                let hlc = state.inner.tso.now().await.unwrap_or_default();
+                let payload = bytes::Bytes::from(serde_json::to_vec(raw).unwrap_or_default());
+                let key = bytes::Bytes::from(record_id_for_log.as_bytes().to_vec());
+                match log.append_one(hlc, 0, key, veda_log::LogOp::Put, payload) {
+                    Ok(seq) => tracing::debug!(
+                        collection = %name,
+                        shard = shard_id,
+                        seq_id = seq,
+                        hlc_phys = hlc.physical_ns,
+                        "dark-write to ShardLog ok (non-raft branch)"
+                    ),
+                    Err(e) => tracing::warn!(
+                        collection = %name,
+                        shard = shard_id,
+                        error = %e,
+                        "dark-write to ShardLog failed (ignored)"
+                    ),
+                }
+            }
+        }
 
         inserted += 1;
     }
@@ -643,6 +696,53 @@ pub async fn delete_records(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+/// True when `VEDA_LOG_DARK_WRITE=1` (or any truthy value). The
+/// dark-write path is OFF by default so existing deployments don't
+/// pay the extra fsync — flip on in test / soak to exercise the
+/// future Phase C primary write path.
+fn dark_write_enabled() -> bool {
+    matches!(
+        std::env::var("VEDA_LOG_DARK_WRITE").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
+/// Look up or create a ShardLog for `(collection_scoped, shard_id)`.
+/// Logs live under `{data_dir}/_logs/{scoped}/{shard_id}/`.
+async fn ensure_shard_log(
+    state: &AppState,
+    scoped_collection: &str,
+    shard_id: u32,
+) -> Option<std::sync::Arc<veda_log::ShardLog>> {
+    let key = format!("{scoped_collection}:{shard_id}");
+    {
+        let guard = state.inner.shard_logs.read().await;
+        if let Some(log) = guard.get(&key) {
+            return Some(log.clone());
+        }
+    }
+    // Slow path — construct the log on disk.
+    let dir = state
+        .inner
+        .data_dir
+        .join("_logs")
+        .join(scoped_collection)
+        .join(format!("{shard_id:04}"));
+    let log = match veda_log::ShardLog::open(&dir) {
+        Ok(l) => std::sync::Arc::new(l),
+        Err(e) => {
+            tracing::warn!(
+                dir = ?dir,
+                error = %e,
+                "ShardLog::open failed; dark-write skipped for this shard"
+            );
+            return None;
+        }
+    };
+    let mut guard = state.inner.shard_logs.write().await;
+    Some(guard.entry(key).or_insert(log).clone())
+}
 
 /// Public wrapper exposing the record-parsing logic to other gateway modules
 /// (notably `streaming`). Internal callers should keep using `parse_record`.

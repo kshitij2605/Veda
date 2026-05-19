@@ -1,0 +1,19 @@
+[package]
+name = "veda-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+veda-time = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+bytes = { version = "1", features = ["serde"] }
+crc32fast = "1"
+bincode = "1.3"
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
