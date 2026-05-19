@@ -19,7 +19,14 @@ RUN cd niriksha && npm run build
 
 # Stage 3: Final minimal image
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+# ca-certificates for outbound HTTPS;
+# iproute2 ships `tc`, used by scripts/raft-fault-inject.sh to
+# introduce packet loss / latency / asymmetric partitions on the
+# eth0 interface during Raft hardening tests. Adds ~5 MB to the
+# image but is otherwise inert.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates iproute2 \
+ && rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust-builder /build/target/release/veda-server /usr/local/bin/veda-server
 COPY --from=node-builder /build/niriksha/dist /usr/share/veda/niriksha

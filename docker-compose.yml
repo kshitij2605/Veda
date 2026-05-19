@@ -121,6 +121,10 @@ services:
       <<: *raft-env
       VEDA_NODE_ID: "1"
       VEDA_NODE_ADDRESS: "veda-1:6340"
+    # NET_ADMIN lets `tc qdisc` inside the container introduce
+    # packet loss / latency on the eth0 interface — needed by the
+    # fault-injection harness in scripts/raft-fault-inject.sh.
+    cap_add: ["NET_ADMIN"]
     depends_on:
       minio: { condition: service_healthy }
       nats:  { condition: service_started }
@@ -136,6 +140,7 @@ services:
       <<: *raft-env
       VEDA_NODE_ID: "2"
       VEDA_NODE_ADDRESS: "veda-2:6340"
+    cap_add: ["NET_ADMIN"]
     depends_on:
       veda-1: { condition: service_started }
 
@@ -150,6 +155,7 @@ services:
       <<: *raft-env
       VEDA_NODE_ID: "3"
       VEDA_NODE_ADDRESS: "veda-3:6340"
+    cap_add: ["NET_ADMIN"]
     depends_on:
       veda-1: { condition: service_started }
 
