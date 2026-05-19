@@ -182,46 +182,69 @@ Remaining:
 **Original estimate: ~3-4 weeks of focused engineering**, dominated
 by phases 2-3 and production hardening in phase 7.
 
-**Status today** (after commit `ab2c5de`): a 3-node Raft cluster
-runs end-to-end on docker-compose. Killed the leader, watched
-node-2 win a new election within 5 seconds, restarted the
-killed node, it rejoined and replicated logs from disk. Phases
-1-6 are complete. The remaining work is the production
-hardening pass:
+**Status today** (after commit `a7ca788`): the migration is
+substantially complete. A 3-node Raft cluster boots,
+elects leaders, fails over on node loss, recovers from a
+wiped-clean follower (via WAL replay + Tonic
+AppendEntries), and serves linearisable reads through a
+no-op barrier. Each of the six hardening items the previous
+revision of this doc called out has shipped except pre-vote
+(genuinely unavailable in openraft 0.9):
 
-- **Cross-node health probes** (~0.5 day). Each node currently
-  reports its own status via `/admin/health` checks; peer status
-  on /admin/nodes is `"unknown"`. A periodic
-  poll of each peer's /admin/health would give the dashboard
-  live "node X is responsive" data.
-- **Per-entry WAL with crash-during-fsync recovery** (~3-5 days).
-  The current durable layer rewrites the whole log+state file on
-  every mutation with atomic .tmp+rename. Correct but O(log_size)
-  write amplification — fine up to ~10k entries, slow beyond.
-  A real WAL appends a single record per entry with its own
-  fsync, plus crash recovery for torn writes.
-- **Snapshot streaming over Tonic** (~1 day). openraft's default
-  chunked snapshot path works through our InstallSnapshot RPC,
-  but has not been soak-tested on large states. A real test
-  installs a >100 MB snapshot across a partition.
-- **Network-partition fault injection** (~3-5 days). `tc qdisc`
-  / `iptables -j DROP` scenarios against the 3-node cluster:
-  asymmetric partitions, packet loss, jitter. Catches the bugs
-  that don't show up in happy-path testing.
-- **Pre-vote** (~0.5 day). openraft 0.9 doesn't expose a config
-  knob for this; requires upgrading to a version that does. Pays
-  off when a partition-isolated follower rejoins — without
-  pre-vote, the rejoin triggers a disruptive election.
-- **Linearisable reads** (~0.5 day). Current reads go straight to
-  the local state machine (follower-safe but not linearisable).
-  A no-op `client_write` probe gives true linearisability when a
-  caller asks for it.
+- ✅ **Cross-node health probes** (`peer_health.rs`,
+  commit `9095454`). Each node GETs every peer's
+  `/admin/health` every 5s; the dashboard's Cluster Nodes
+  table reports `healthy / degraded / unreachable` instead
+  of `unknown`.
+- ✅ **Per-entry WAL** (`raft_wal.rs`, commit `0641a1f`).
+  Append-only `raft_log.wal` with crc32-framed records,
+  torn-write recovery, and a one-shot migration from the
+  legacy `raft_log.bin` snapshot file.
+- ✅ **Snapshot soak smoke** (`scripts/raft-snapshot-soak.sh`,
+  commit `a7ca788`). Drives 200 Noop entries through the
+  log, wipes a follower's data dir, restarts it, asserts
+  catch-up to the leader's high-water mark within 60s.
+- ✅ **Partition smoke** (`scripts/raft-partition-smoke.sh`,
+  commit `79c1e95`). Kills the leader, asserts a new one is
+  elected from the surviving pair, restarts the killed
+  node, asserts convergence. Also caught + fixed a Tonic
+  cached-channel-reuse bug in the same commit.
+- ✅ **Linearisable reads** (commit `9095454`).
+  `RaftCoordinator::linearisable_query_state()` issues a
+  `Noop` barrier write before reading; the test asserts
+  `last_applied_index` advances through the barrier.
+- ❌ **Pre-vote** — genuinely not available in openraft
+  0.9.24 (`grep -irn pre.vote` finds zero hits in the
+  crate source + changelog). Requires upgrading to an
+  openraft version that ships it, or swapping the
+  consensus crate. Either is a separate engagement.
 
-A team can run multi-node Veda today for any deployment where
-"a 3-node cluster boots, elects a leader, replicates writes, and
-survives a single-node failure" is sufficient. They should NOT
-deploy under hostile network conditions until the partition
-fault injection pass lands.
+What still needs production-scale work, in honest terms:
+
+- **Hours-long soak** under continuous concurrent load with
+  random kill timings. The harnesses here run a single pass
+  each — they're correctness checks, not endurance tests.
+- **Asymmetric partition + packet-loss fault injection**.
+  `tc qdisc` and `iptables -j DROP` require `NET_ADMIN`
+  inside containers, which the existing compose stack
+  doesn't grant. A separate test rig with privileged
+  containers is the right vehicle.
+- **WAL compaction**. The append-only WAL grows even when
+  entries get truncated/purged because the markers stay on
+  disk. A periodic rewrite-from-live-state pass is the
+  next follow-up.
+- **Large-state snapshot streaming**. NOOP_COUNT=200 keeps
+  the state machine tiny; chunked-snapshot stress wants
+  entries that materially grow the state, which means
+  routing real `CreateCollection`s through Raft (a separate
+  wiring engagement).
+- **Pre-vote** when openraft adds it.
+
+A team can deploy multi-node Veda today and expect a 3-node
+cluster to survive single-node failures, restarts, and clean
+network partitions. They should not yet run it in environments
+with sustained packet-loss / asymmetric-partition conditions
+until the fault-injection rig lands.
 
 ## Why not openraft today
 
