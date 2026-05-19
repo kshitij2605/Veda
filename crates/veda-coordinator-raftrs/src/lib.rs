@@ -10,13 +10,17 @@
 //!
 //! ## Why the stub exists
 //!
-//! Research at `research/2026-05-19-multi-week-survey/03-consensus-crates.md`
-//! concluded the right call is to wait for openraft 0.10 (which is in
-//! alpha and explicitly addresses our pre-vote concerns) rather than
-//! swap to raft-rs. To make that decision auditable in the future,
-//! this crate captures the surface area a swap would touch — so if
-//! the calculus changes (openraft 0.10 lands and is still wrong, or
-//! raft-rs picks up new releases) the cost is clearly visible.
+//! openraft has publicly declined to add Raft pre-vote (see
+//! Discussion #15 upstream; verified against `raft_core.rs` in
+//! openraft 0.10.0-alpha.20 — no `pre_vote` references). That means
+//! the disruptive-election-on-partition-heal failure mode is
+//! narrowed by openraft's `Vote` design but never fully eliminated.
+//! Today the decision is to live with that and mitigate at the
+//! application layer (CheckQuorum, jitter, single-term-leader).
+//! This crate captures the surface area of the *only* alternative
+//! that delivers true pre-vote — a swap to tikv/raft-rs 0.7 — so
+//! the 3-5 engineer-week cost stays visible if the operational
+//! calculus ever changes.
 //!
 //! ## Surface area
 //!
