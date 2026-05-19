@@ -172,43 +172,56 @@ Remaining:
 | Phase | Estimate | Status |
 |---|---|---|
 | 1 (scaffolding) | 1 hour | ✅ done |
-| 2 (storage, in-memory) | 1-2 days | ✅ done |
-| 3 (network, in-process) | 2-3 days | ✅ in-process done; Tonic deferred |
+| 2 (storage) | 1-2 days | ✅ in-memory + durable file-backed (commit `6ef5d46`) |
+| 3 (network) | 2-3 days | ✅ Tonic gRPC transport (commit `7374a3e`) |
 | 4 (coordinator) | 1 day | ✅ done |
-| 5 (single-node bootstrap) | 0.5 day | ✅ done |
-| 6 (membership + observability) | 1 day | ⚠ UI fan-out done; join/leave + Prom metrics deferred |
-| 7 (production hardening) | 1-2 weeks | ❌ deferred (Tonic, durable log, snapshot streaming, pre-vote, partition tests) |
+| 5 (bootstrap) | 0.5 day | ✅ single-node + multi-node (`VEDA_RAFT_PEERS`) |
+| 6 (membership + observability) | 1 day | ✅ POST/DELETE /v1/admin/cluster/* + Raft Prom gauges + UI fan-out |
+| 7 (production hardening) | 1-2 weeks | ⚠ partial — see "remaining" below |
 
 **Original estimate: ~3-4 weeks of focused engineering**, dominated
 by phases 2-3 and production hardening in phase 7.
 
-**Status today** (after commit `d4aebff`): single-node openraft is
-running end-to-end. Phases 1, 2, 4, 5 (single-node) are complete;
-Phase 3 (in-process portion) and Phase 6 (UI fan-out) are
-complete. The remaining work is the multi-node hardening pass:
+**Status today** (after commit `ab2c5de`): a 3-node Raft cluster
+runs end-to-end on docker-compose. Killed the leader, watched
+node-2 win a new election within 5 seconds, restarted the
+killed node, it rejoined and replicated logs from disk. Phases
+1-6 are complete. The remaining work is the production
+hardening pass:
 
-- **Tonic gRPC transport** (~2-3 days). Replace the in-process
-  `RaftNetwork` impl with a real cross-process one. Service the
-  three openraft RPCs (`AppendEntries`, `InstallSnapshot`, `Vote`)
-  + the chunked-snapshot path.
-- **Durable storage** (~3-5 days). The current `MemRaftStorage`
-  loses cluster state on restart. A file-backed log + fsync'd vote
-  is the minimum honest durability story. Snapshot streaming on
-  top of that.
-- **Multi-node bootstrap** (~0.5 day after transport lands).
-  `VEDA_RAFT_PEERS=1@host1,2@host2,3@host3` + a `--bootstrap` flag
-  that calls `raft.initialize(...)` on first boot.
-- **Membership API** (~0.5 day). `POST /v1/admin/cluster/join` +
-  `DELETE /v1/admin/cluster/nodes/{id}`.
-- **Observability** (~0.5 day). Raft Prometheus metrics scraping
-  `Raft::metrics()` stream.
-- **Production hardening** (1-2 weeks, mostly testing). Pre-vote,
-  partition tests, snapshot soak, leader transfer.
+- **Cross-node health probes** (~0.5 day). Each node currently
+  reports its own status via `/admin/health` checks; peer status
+  on /admin/nodes is `"unknown"`. A periodic
+  poll of each peer's /admin/health would give the dashboard
+  live "node X is responsive" data.
+- **Per-entry WAL with crash-during-fsync recovery** (~3-5 days).
+  The current durable layer rewrites the whole log+state file on
+  every mutation with atomic .tmp+rename. Correct but O(log_size)
+  write amplification — fine up to ~10k entries, slow beyond.
+  A real WAL appends a single record per entry with its own
+  fsync, plus crash recovery for torn writes.
+- **Snapshot streaming over Tonic** (~1 day). openraft's default
+  chunked snapshot path works through our InstallSnapshot RPC,
+  but has not been soak-tested on large states. A real test
+  installs a >100 MB snapshot across a partition.
+- **Network-partition fault injection** (~3-5 days). `tc qdisc`
+  / `iptables -j DROP` scenarios against the 3-node cluster:
+  asymmetric partitions, packet loss, jitter. Catches the bugs
+  that don't show up in happy-path testing.
+- **Pre-vote** (~0.5 day). openraft 0.9 doesn't expose a config
+  knob for this; requires upgrading to a version that does. Pays
+  off when a partition-isolated follower rejoins — without
+  pre-vote, the rejoin triggers a disruptive election.
+- **Linearisable reads** (~0.5 day). Current reads go straight to
+  the local state machine (follower-safe but not linearisable).
+  A no-op `client_write` probe gives true linearisability when a
+  caller asks for it.
 
-A team can use the current single-node path in production
-deployments where consensus matters less than "does it boot
-cleanly under VEDA_COORDINATOR=raft" — but should not deploy
-multi-node until the durable-storage + Tonic items land.
+A team can run multi-node Veda today for any deployment where
+"a 3-node cluster boots, elects a leader, replicates writes, and
+survives a single-node failure" is sufficient. They should NOT
+deploy under hostile network conditions until the partition
+fault injection pass lands.
 
 ## Why not openraft today
 
