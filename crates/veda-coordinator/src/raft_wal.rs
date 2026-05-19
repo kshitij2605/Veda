@@ -160,6 +160,66 @@ impl WalLog {
     pub async fn bytes_written(&self) -> u64 {
         self.inner.lock().await.bytes_written
     }
+
+    /// Compact the WAL by atomically rewriting it with only the
+    /// records implied by the given **live state**. The caller
+    /// passes the records that should survive (in order); this
+    /// method writes them to a fresh `raft_log.wal.compacting`,
+    /// fsyncs it, renames over the existing file, then swaps the
+    /// append handle.
+    ///
+    /// Compaction is correct when the in-memory state and
+    /// `surviving` agree. The caller (MemLogState::compact) holds
+    /// the write lock on the in-memory log for the duration so no
+    /// other appends slip in mid-rewrite.
+    pub async fn rewrite(&self, surviving: &[WalRecord]) -> std::io::Result<()> {
+        let mut guard = self.inner.lock().await;
+        let dir = guard
+            .path
+            .parent()
+            .map(|p| p.to_owned())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let temp = dir.join("raft_log.wal.compacting");
+        // Write all surviving records into a new file.
+        {
+            let mut tmp_file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&temp)?;
+            let mut total = 0u64;
+            for record in surviving {
+                let payload = bincode::serialize(record).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+                })?;
+                let len: u32 = payload.len().try_into().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "payload >4GB",
+                    )
+                })?;
+                let crc = crc32fast::hash(&payload);
+                tmp_file.write_all(&crc.to_le_bytes())?;
+                tmp_file.write_all(&len.to_le_bytes())?;
+                tmp_file.write_all(&payload)?;
+                total += 8 + payload.len() as u64;
+            }
+            tmp_file.sync_all()?;
+        }
+        // Atomic rename — readers see either the old file or the
+        // new file, never both.
+        std::fs::rename(&temp, &guard.path)?;
+        // Reopen our append handle so subsequent writes go to the
+        // new file. The old handle still references the deleted
+        // inode on POSIX, which would silently leak writes.
+        guard.file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&guard.path)?;
+        guard.bytes_written = guard.file.metadata()?.len();
+        Ok(())
+    }
 }
 
 /// Parse as many valid records as possible from `bytes`. Returns
@@ -266,6 +326,57 @@ mod tests {
             len_final > len_after,
             "appending after recovery should grow the file",
         );
+    }
+
+    #[tokio::test]
+    async fn rewrite_compacts_to_live_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = WalLog::open(tmp.path()).unwrap();
+        for i in 1..=20 {
+            wal.append(&WalRecord::Entry(make_entry(i))).await.unwrap();
+        }
+        // Purge everything up to and including index 10 — the
+        // surviving state is entries 11-20 plus the Purge marker.
+        wal.append(&WalRecord::Purge(LogId::new(
+            CommittedLeaderId::new(1, 1),
+            10,
+        )))
+        .await
+        .unwrap();
+        let pre_compact_size = std::fs::metadata(tmp.path().join("raft_log.wal"))
+            .unwrap()
+            .len();
+
+        let surviving: Vec<WalRecord> = (11..=20).map(|i| WalRecord::Entry(make_entry(i))).collect();
+        wal.rewrite(&surviving).await.unwrap();
+
+        let post_compact_size = std::fs::metadata(tmp.path().join("raft_log.wal"))
+            .unwrap()
+            .len();
+        assert!(
+            post_compact_size < pre_compact_size,
+            "compaction should shrink the WAL: {pre_compact_size} -> {post_compact_size}",
+        );
+
+        // A fresh handle replays the compacted file — only the
+        // surviving entries come back.
+        let wal2 = WalLog::open(tmp.path()).unwrap();
+        let records = wal2.replay().await.unwrap();
+        assert_eq!(records.len(), 10);
+        // Confirm the first entry after compaction is index 11.
+        match &records[0] {
+            WalRecord::Entry(e) => assert_eq!(e.log_id.index, 11),
+            _ => panic!("expected Entry"),
+        }
+        // Subsequent appends land in the compacted file cleanly.
+        wal.append(&WalRecord::Entry(make_entry(21))).await.unwrap();
+        let wal3 = WalLog::open(tmp.path()).unwrap();
+        let records = wal3.replay().await.unwrap();
+        assert_eq!(records.len(), 11);
+        match records.last().unwrap() {
+            WalRecord::Entry(e) => assert_eq!(e.log_id.index, 21),
+            _ => panic!("expected Entry"),
+        }
     }
 
     #[tokio::test]
