@@ -203,6 +203,14 @@ impl ClusterStateMachine {
     }
 
     /// Apply a command (without index bookkeeping) — pure business logic.
+    ///
+    /// `#[allow(deprecated)]`: the v0 data-plane variants
+    /// (`InsertRecord` / `TxnWrite` / `BeginTxn` / `CommitTxn` /
+    /// `AbortTxn`) are still applied here to keep mixed-version
+    /// clusters working through the one-release deprecation
+    /// window; the next major release removes both the variants
+    /// and these match arms together.
+    #[allow(deprecated)]
     fn apply_command(&mut self, cmd: &ClusterCommand) -> ClusterResponse {
         match cmd {
             ClusterCommand::CreateCollection { name, schema_json } => {
@@ -551,6 +559,7 @@ impl ClusterStateMachine {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // tests exercise the deprecated v0 data-plane variants
 mod tests {
     use super::*;
 
