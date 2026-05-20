@@ -14,6 +14,13 @@ use crate::raft_types::{
     ClusterCommand, ClusterResponse, ClusterState, LogEntry, NodeInfo, NodeStatus,
 };
 
+/// Phase H sentinel key for the cross-region `RegionTopology`
+/// JSON blob, stored inside `shard_ensembles`. Chosen to be
+/// distinct from any valid `{collection}:{shard_id}` form (no
+/// real collection name contains a leading underscore in the
+/// schema validator).
+pub const REGION_TOPOLOGY_KEY: &str = "_region_topology";
+
 // ---------------------------------------------------------------------------
 // LogStore
 // ---------------------------------------------------------------------------
@@ -200,6 +207,16 @@ impl ClusterStateMachine {
         self.records.clear();
         self.open_txns.clear();
         (recs, txns)
+    }
+
+    /// Phase H: read the persisted `RegionTopology` JSON, if
+    /// any. Stored as a sentinel-keyed row in `shard_ensembles`
+    /// so we don't need a new top-level field on the state
+    /// machine (matches the wan.rs RegionTopology doc note).
+    pub fn region_topology_json(&self) -> Option<&str> {
+        self.shard_ensembles
+            .get(REGION_TOPOLOGY_KEY)
+            .map(|s| s.as_str())
     }
 
     /// Apply a command (without index bookkeeping) — pure business logic.
@@ -919,6 +936,40 @@ mod tests {
         };
         assert!(matches!(sm.apply(&entry), ClusterResponse::Error(_)));
         assert_eq!(sm.ts_lease().unwrap().ceiling_ns, 1_000);
+    }
+
+    #[test]
+    fn region_topology_round_trips_through_register_shard_ensemble() {
+        let mut sm = ClusterStateMachine::new();
+        // Before set: not present.
+        assert!(sm.region_topology_json().is_none());
+        // The operator writes the topology via the same
+        // RegisterShardEnsemble path, with the sentinel key.
+        let topology = r#"{"primary_region":"us-east-1","replica_regions":["eu-west-1"],"staleness_target_ms":5000,"epoch":1}"#;
+        drive(
+            &mut sm,
+            [ClusterCommand::RegisterShardEnsemble {
+                shard_id: REGION_TOPOLOGY_KEY.into(),
+                ensemble_json: topology.to_owned(),
+            }],
+        );
+        assert_eq!(sm.region_topology_json(), Some(topology));
+        // Operator advances the topology epoch on a cutover.
+        let topology_v2 = r#"{"primary_region":"eu-west-1","replica_regions":["us-east-1"],"staleness_target_ms":5000,"epoch":2}"#;
+        drive(
+            &mut sm,
+            [ClusterCommand::RegisterShardEnsemble {
+                shard_id: REGION_TOPOLOGY_KEY.into(),
+                ensemble_json: topology_v2.to_owned(),
+            }],
+        );
+        assert_eq!(sm.region_topology_json(), Some(topology_v2));
+        // Round-trips through the snapshot.
+        let snap = sm.snapshot();
+        assert_eq!(
+            snap.shard_ensembles.get(REGION_TOPOLOGY_KEY).map(|s| s.as_str()),
+            Some(topology_v2)
+        );
     }
 
     #[test]
