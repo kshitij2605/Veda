@@ -27,6 +27,13 @@ pub struct VectorSearchRequest {
     /// pre-built ANN indexes (those were built on full-dim vectors) and falls
     /// back to brute-force scan — opt-in, slower, correct.
     pub truncate_to: Option<u32>,
+    /// Phase F MVCC snapshot timestamp. When set AND the
+    /// growing segment has commit_ts stamps, the search
+    /// executor filters candidates against
+    /// `growing_segment::visible_doc_ids_at` so future /
+    /// superseded versions never surface as hits. `None` =
+    /// no version filtering (legacy / non-MVCC).
+    pub read_ts: Option<u128>,
 }
 
 /// A search request for a single sparse vector field.
@@ -37,6 +44,8 @@ pub struct SparseSearchRequest {
     pub k: usize,
     pub metric: DistanceMetric,
     pub filter: Option<String>,
+    /// Phase F MVCC snapshot timestamp. See [`VectorSearchRequest::read_ts`].
+    pub read_ts: Option<u128>,
 }
 
 /// A search request for a single multi-vector (ColPali) field.
@@ -47,6 +56,8 @@ pub struct MultiVectorSearchRequest {
     pub k: usize,
     pub metric: DistanceMetric,
     pub filter: Option<String>,
+    /// Phase F MVCC snapshot timestamp. See [`VectorSearchRequest::read_ts`].
+    pub read_ts: Option<u128>,
 }
 
 /// A search response containing scored records.

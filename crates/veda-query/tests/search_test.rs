@@ -81,6 +81,7 @@ fn test_unfiltered_search() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) =
@@ -120,6 +121,7 @@ fn test_filtered_search_category() {
         metric: DistanceMetric::Euclidean,
         filter: Some("category = 'electronics'".into()),
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) =
@@ -163,6 +165,7 @@ fn test_filtered_search_range() {
         metric: DistanceMetric::Euclidean,
         filter: Some("price BETWEEN 100 AND 200".into()),
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) =
@@ -202,6 +205,7 @@ fn test_combined_filter() {
         metric: DistanceMetric::Euclidean,
         filter: Some("category = 'electronics' AND price < 200".into()),
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) =
@@ -266,6 +270,7 @@ fn test_sealed_segment_search() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
@@ -318,6 +323,7 @@ fn test_sealed_segment_filtered_search() {
         metric: DistanceMetric::Euclidean,
         filter: Some("category = 'books'".into()),
     truncate_to: None,
+        read_ts: None,
     };
 
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
@@ -387,6 +393,7 @@ fn test_multi_segment_merge() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) =
@@ -439,6 +446,7 @@ fn test_k_zero_returns_empty() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) =
@@ -464,6 +472,7 @@ fn test_k_larger_than_matching() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) =
@@ -491,6 +500,7 @@ fn test_no_segments_empty_result() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings): (veda_query::search::SearchResponse, _) =
@@ -531,6 +541,7 @@ fn test_sealed_segment_range_filter() {
         metric: DistanceMetric::Euclidean,
         filter: Some("price BETWEEN 100 AND 200".into()),
     truncate_to: None,
+        read_ts: None,
     };
 
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
@@ -571,6 +582,7 @@ fn test_filter_matches_nothing() {
         metric: DistanceMetric::Euclidean,
         filter: Some("category = 'nonexistent'".into()),
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) =
@@ -596,6 +608,7 @@ fn test_record_eval_ne_filter() {
         metric: DistanceMetric::Euclidean,
         filter: Some("category != 'electronics'".into()),
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) =

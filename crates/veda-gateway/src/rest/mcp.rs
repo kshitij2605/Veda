@@ -367,6 +367,7 @@ async fn tool_search(
         metric,
         filter,
         truncate_to: None,
+        read_ts: None,
     };
     let (response, _) = executor
         .search(&request)
