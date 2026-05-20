@@ -110,15 +110,23 @@ Matches FoundationDB / Aurora / TiDB v8+ / YugabyteDB.
 | Operator `promote_replica` cutover primitive | `crates/veda-log/src/wan.rs` | H | done |
 | `RegionTopology` persisted under sentinel key in `_meta::shard_ensembles` | `crates/veda-coordinator/src/store.rs::REGION_TOPOLOGY_KEY` | H | done |
 | `veda-admin migrate-metadata` CLI | `crates/veda-admin/` | E | stub (no v0 to migrate post hard-remove) |
+| BookKeeper open-and-recover truncate + ensemble change + snapshot install | `crates/veda-log/src/{shard_log,replication}.rs` | D | done (v0.2.1) |
+| `FollowerHealthMonitor` edge-triggered auto-orchestrator | `crates/veda-log/src/replication.rs` | D | done (v0.2.1) |
+| `quorum_partition.rs` split-brain integration test | `crates/veda-log/tests/quorum_partition.rs` | D | done (v0.2.1) |
+| MVCC WAL checkpoint (atomic snapshot + WAL truncate) | `crates/veda-storage/src/{mvcc_wal,segment_manager}.rs` | F | done (v0.2.1) |
+| Native `search_filtered` for Flat / IVF-PQ / DiskANN | `crates/veda-index/src/{flat,ivfpq,diskann}` | F | done (v0.2.1) |
+| `mvcc_isolation` + `gc_safety` linearisability tests | `crates/veda-storage/tests/mvcc_isolation_gc_safety.rs` | F | done (v0.2.1) |
+| Real re-chunk pipeline (chunker + embedder transforms) | `crates/veda-gateway/src/rest/collections.rs::rechunk_source_into_sibling` | G | done (v0.2.1) |
+| `snapshot_isolation` Adya anomaly suite + `atomic_reindex` test | `crates/veda-coordinator/tests/{snapshot_isolation,atomic_reindex}.rs` | G | done (v0.2.1) |
+| Admin REST: `GET/PUT /v1/admin/region-topology`, `POST /v1/admin/promote-region`, `GET/PUT /v1/admin/replica-safe-ts` | `crates/veda-gateway/src/rest/admin.rs` | H | done (v0.2.1) |
+| Cross-region reader gating in live `/records` + `/search` (sentinel `0` = no gating; 503 when `read_ts > replica_safe_ts`) | `crates/veda-gateway/src/rest/{records,search,state}.rs` | H | done (v0.2.1) |
+| `planned_failover` zero-acked-write-loss + `old_primary_fences_after_planned_failover` | `crates/veda-log/src/wan.rs` | H | done (v0.2.1) |
 
-What's deliberately NOT here yet (tracked follow-ups, not in v0.2.0):
+What's deliberately NOT here yet (tracked follow-ups, not in v0.2.1):
 
-- Phase D production-grade recovery: BookKeeper "open-and-recover ledger" at writer handover; ensemble-change orchestration on follower failure; partition / multi-node linearisability harness.
-- Phase G production re-chunk pipeline: `/reindex` ships the atomic alias-swap primitive but does NOT yet run OCR/chunker/embed against the source. Operator-driven for now.
-- Phase G test harness: `snapshot_isolation.rs` (Adya anomaly suite) and `atomic_reindex.rs` (kill-mid-reindex recovery).
-- Phase H operator surface: `lag_recovery.rs` and `planned_failover.rs` integration tests; live admin REST endpoints to read/set `RegionTopology` and drive `promote_replica`.
-- Phase F nice-to-haves: `IVF-PQ` / DiskANN native `search_filtered` overrides (today inherit the 10×-oversample default); MVCC WAL periodic checkpoint loop (unbounded WAL is fine for v1 but scales poorly under heavy churn).
 - Niriksha frontend redesign — separate 7-phase plan (~14 engineer-weeks). Not started.
+- Persistent `last_applied` cursor for `LogApplier` (today idempotent on the storage layer but wasteful on cold start; cf. ADR-019).
+- `MultiGroupCoordinator` rewrite into a `ShardLogRegistry` (today the registry lives alongside the original group state for incremental migration).
 
 ## Reading order for new contributors
 

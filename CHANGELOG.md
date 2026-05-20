@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-20
+
+Production-grade follow-ups to the Phase A-H rearchitecture: BookKeeper open-and-recover, auto-orchestrated ensemble changes, MVCC WAL checkpoint, native filtered search on every index, cross-region reader gating in the live request path, admin REST endpoints for region operations, and a real chunker/embedder reindex pipeline.
+
+### Added — Phase D production-grade replication
+- **BookKeeper open-and-recover** — `ShardLog::truncate_above(target)` walks the active segment via `LogEntryV2::decode` to find the first frame past `target` and truncates the file there. `LogFollower::truncate_above` mirrors the cut on followers. `LogWriter::open_and_recover` now runs Phase 3 truncate so a minority-acked entry cannot resurrect after a writer handover.
+- **Ensemble change** — `rebuild_ensemble(current, failed, replacement)` produces a new `LogEnsemble` with the failed node swapped out and the epoch bumped; ready to feed into `RegisterShardEnsemble` on `_meta`.
+- **Snapshot install for joining followers** — `ShardLog::copy_to(dest_dir)` fsyncs and copies rolled-over + active segment files so a new follower can catch up mid-stream cleanly.
+- **`FollowerHealthMonitor` auto-orchestrator** — probes followers on an interval, edge-triggered (fires exactly once per consecutive-failure threshold crossing, not on every probe). `spawn(on_failure)` runs the probe loop and feeds the orchestrator hook without operator action.
+- **`quorum_partition.rs`** — split-brain integration test with a `PartitionableFollower` wrapper; verifies the writer stalls on `Qa`-side, minority fences on heal, and no acked write is lost.
+
+### Added — Phase F MVCC durability + native index visibility
+- **`MvccWal::checkpoint(store, snap_path)`** — atomic snapshot file (`.tmp` + `fsync` + `rename`) followed by WAL truncate. `MvccStore::snapshot_entries()` / `install_snapshot_entries()` are the in-memory primitives. `SegmentManager::mvcc_checkpoint()` is the operator hook; `enable_mvcc_durable(path)` loads the snapshot first and then replays the trailing WAL so checkpoint + WAL together form the durable record without unbounded WAL growth.
+- **Native `search_filtered`** for `Flat`, `IVF-PQ`, and `DiskANN` — the bitmap is consulted INSIDE the candidate walk, so invisible docs never occupy top-k slots and the 10× post-filter oversample disappears. DiskANN uses `l = self.l_search.max(k * 4)` to keep recall at high read-ts ratios.
+- **`mvcc_isolation_gc_safety.rs`** — 8 linearisability tests covering SI invariants (reader at T never sees write at T+1; cross-key interleavings; tombstone handling) and GC safety (floor version always preserved; tombstone floor not dropped; above-safe-ts always kept; snapshot at safe_ts after GC returns the floor).
+
+### Added — Phase G real reindex pipeline + SI verification
+- **`POST /v1/collections/{name}/reindex`** now accepts a JSON body `{chunker?, re_embed?, text_field?, parent_id_field?, chunk_index_field?, embedding_field?}`. With `chunker` set, the handler groups source records by `parent_doc_id` (configurable), sorts by `chunk_index` (configurable), reconstructs the parent document text, re-chunks via `veda_core::chunking::chunk_markdown`, and inserts the new chunks into the sibling. With `re_embed: true`, embeds each new chunk via the registry's text-modality model. No body / empty body remains the straight-copy behaviour.
+- **424 `FAILED_DEPENDENCY`** when `re_embed: true` is requested but no embedding endpoint is configured — explicit failure instead of zero-vector placeholders.
+- **`snapshot_isolation.rs`** — Adya anomaly suite: write-skew allowed (SI is not serialisable), lost-update prevented, read-only consistent, abort releases locks.
+- **`atomic_reindex.rs`** — kill-mid-reindex recovery: alias unchanged on partial failure; sibling either fully populated or absent.
+
+### Added — Phase H operator surface + live gating
+- **Admin REST endpoints**:
+  - `GET /v1/admin/region-topology` / `PUT /v1/admin/region-topology` — read or replace the `RegionTopology` stored under the sentinel key in `_meta::shard_ensembles`.
+  - `POST /v1/admin/promote-region` — operator-driven region cutover; returns 409 when `new_epoch ≤ current_epoch`.
+  - `GET /v1/admin/replica-safe-ts` / `PUT /v1/admin/replica-safe-ts` — read or advance the local replica `safe_ts` (monotonic-forward; sentinel `0` = no gating). Body uses JSON-string encoding for u128.
+- **Cross-region reader gating in the live path** — `GET /records/:id` and `POST /search` consult `replica_safe_ts` before serving. When `safe > 0 && read_ts > safe`, they return `503` with `replica behind: read_ts=X exceeds replica_safe_ts=Y by Z` so callers can choose to retry, fall back, or wait.
+- **`planned_failover_with_zero_acked_write_loss`** + **`old_primary_fences_after_planned_failover`** — controlled-cutover test confirming the drain + epoch-bump + fence semantics; the stale-primary ship returns `EpochMismatch` after the receiver advances to the new epoch.
+
+### Changed
+- `ReadVisibility` enum now derives `Debug + Clone` so test diagnostics print the discriminant.
+
 ## [0.2.0] - 2026-05-20
 
 FoundationDB-shape data plane: record writes leave the cluster-wide Raft, the metadata Raft becomes a small "_meta" group, and Phases A through H of `.claude/plans/structured-mixing-turing.md` land in production-integrated form.
