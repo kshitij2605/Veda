@@ -1,12 +1,26 @@
 # System Architecture
 
+> **PARTIALLY OUT OF DATE for v0.2.0.** This document predates the
+> FoundationDB-shape data-plane rearchitecture that landed in v0.2.0
+> (Phases A–H). The high-level descriptions of indexes, storage,
+> queries, OCR, embedding, and observability remain accurate. The
+> sections on coordination, consensus, transactions, and the data
+> plane have been superseded — record writes no longer flow through
+> a single Raft group; transactions are Percolator-style; MVCC is
+> live end-to-end.
+>
+> Read this doc for the index / storage / query / pipeline /
+> observability layers, then read
+> [`rearchitecture-overview.md`](rearchitecture-overview.md) for the
+> current data-plane shape and the Phase A–H status table.
+
 ## 1. Overview
 
 Veda is a multimodal vector database designed for the RAG (Retrieval-Augmented Generation) era. It stores, indexes, and searches embeddings across any modality -- text, images, audio, video, and documents -- through a unified REST API.
 
 The system comprises three major components:
 
-- **Core Engine** -- 7 Rust crates organized in a layered dependency graph, compiled into a single `veda-server` binary
+- **Core Engine** -- 10 Rust crates organized in a layered dependency graph, compiled into a single `veda-server` binary (`veda-core`, `veda-storage`, `veda-index`, `veda-query`, `veda-coordinator`, `veda-gateway`, `veda-server`, plus the rearchitecture crates `veda-time`, `veda-log`, `veda-admin`)
 - **Niriksha Dashboard** -- A React/TypeScript visualization and exploration frontend
 - **Python SDK** -- A pure-Python client wrapping the REST API
 

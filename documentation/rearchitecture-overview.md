@@ -5,17 +5,18 @@ This is the engineer-onboarding companion to
 the full multi-phase schedule and decision points; this doc
 summarises what's true *today* and where each new piece slots in.
 
-## Why we're rearchitecting
+## Why we rearchitected
 
-Today every record write funnels through one cluster-wide openraft
-group. `ClusterStateMachine.records` at
-`crates/veda-coordinator/src/store.rs` IS the data store. Every
-replica holds every record in memory, the reconcile loop at
-`crates/veda-gateway/src/rest/collections.rs` pulls them out, and
-the local `SegmentManager` mirrors what cluster-wide Raft already
-replicated. Correct, but caps write throughput at one Raft
-leader's speed and makes the metadata snapshot grow linearly with
-data.
+Until Phase E hard-remove (commit `c8baf29`), every record write
+funnelled through one cluster-wide openraft group.
+`ClusterStateMachine.records` was literally the data store: every
+replica held every record in memory, the reconcile loop pulled
+them out, and the local `SegmentManager` mirrored what
+cluster-wide Raft already replicated. Correct, but capped write
+throughput at one Raft leader's speed and made the metadata
+snapshot grow linearly with data. The Phase E hard-remove
+deleted that path entirely; the doc below describes the
+target state we're now in.
 
 The state of the art for a database in this shape is **not** a
 different Raft library — it is a layered split:
@@ -72,36 +73,52 @@ Matches FoundationDB / Aurora / TiDB v8+ / YugabyteDB.
              └──────────────────────────────────────┘
 ```
 
-## Where we are today (Phase A foundations + start of Phase B)
+## Where we are today (Phases A-H landed in v0.2.0)
 
-Shipped in this rearchitecture commit:
+| Piece | Location | Phase | Status |
+|---|---|---|---|
+| Hybrid Logical Clock | `crates/veda-time/src/hlc.rs` | A | done |
+| `Tso` trait + `LocalTso` + `SwappableTso` | `crates/veda-time/src/{tso,swappable}.rs` | A | done |
+| `MetaLeasedTso` (talks to `_meta` lease) | `crates/veda-coordinator/src/meta_leased_tso.rs` | A | done |
+| `GrantTsLease` / `RenewTsLease` with strict epoch monotonicity | `crates/veda-coordinator/src/raft_types.rs` + `store.rs` | A | done |
+| `AppState.tso` + `load_meta_leased_tso()` auto-swap when Raft up | `crates/veda-gateway/src/rest/state.rs` + `server.rs` | A | done |
+| `ShardLog` append-only log, 256 MB segments + 4 KB sidecar index | `crates/veda-log/src/{shard_log,segment_file}.rs` | B | done |
+| `LogTailer` (gapless replay + `lag_seq` watermark) | `crates/veda-log/src/reader.rs` | B | done |
+| Group commit (1 ms / 64 KB) | `crates/veda-log/src/shard_log.rs` | B | done |
+| Per-collection `use_log_primary` schema flag + env fallback | `crates/veda-core/src/schema.rs` | C | done |
+| `insert_via_log` is the only data-plane write path | `crates/veda-gateway/src/rest/records.rs` | C | done |
+| `LogApplier` per-shard tail-and-apply task | `crates/veda-storage/src/log_applier.rs` | C | done |
+| Gateway bootstrap auto-spawn (`VEDA_LOG_APPLIER=1`) | `crates/veda-gateway/src/log_appliers.rs` | C | done |
+| BookKeeper-style replication (`LogEnsemble`, writer-leadership in `_meta`) | `crates/veda-log/src/replication/` | D | scaffolding done |
+| Tonic gRPC transport for follower (`RawRpc` + bincode) | `crates/veda-log/src/tonic_log.rs` + `proto/log_service.proto` | D | done |
+| `ChangeShardWriter` / `RegisterShardEnsemble` cluster commands | `crates/veda-coordinator/src/{raft_types,store}.rs` | D | done |
+| `_meta` slimmed: `records` + `open_txns` + variants removed | `crates/veda-coordinator/src/{raft_types,store}.rs` | E | hard-removed |
+| `RecordTxnCommit` for one-row-per-txn registry | `crates/veda-coordinator/src/raft_types.rs` | E | done |
+| `MvccStore` with descending-commit_ts encoding | `crates/veda-storage/src/mvcc.rs` | F | done |
+| `MvccWal` per-shard durability | `crates/veda-storage/src/mvcc_wal.rs` | F | done |
+| `commit_ts` per doc in growing + sealed segments | `crates/veda-storage/src/{growing_segment,segment}.rs` | F | done |
+| Per-doc visibility via `is_visible_at` / `visible_doc_ids_at` | both | F | done |
+| `read_ts` plumbed through `SearchRequest` types | `crates/veda-query/src/search.rs` | F | done |
+| Executor pre-filters candidates by visibility bitmap | `crates/veda-query/src/local_shard.rs` | F | done |
+| `GET /records/:id?at=<ts>` + `POST /search { at: ts }` | `crates/veda-gateway/src/rest/{records,search}.rs` | F | done |
+| Percolator `TxnCoordinator` (begin/commit/abort) | `crates/veda-coordinator/src/percolator.rs` | G | done |
+| Background orphan-lock resolver | `crates/veda-coordinator/src/percolator.rs` + `state.rs` | G | done |
+| `seed_records` for atomic create-and-load (with rollback) | `crates/veda-gateway/src/rest/collections.rs` | G | done |
+| `SetCollectionAlias` + `_meta::aliases` + `POST /reindex` | `crates/veda-coordinator/src/{raft_types,store}.rs` + `gateway` | G | done |
+| WAN log shipping (`LogShipper`, `LocalReceiver`) | `crates/veda-log/src/wan.rs` | H | done |
+| Tonic WAN transport + `safe_ts` gating | `crates/veda-log/src/tonic_wan.rs` + `proto/wan_service.proto` | H | done |
+| Operator `promote_replica` cutover primitive | `crates/veda-log/src/wan.rs` | H | done |
+| `RegionTopology` persisted under sentinel key in `_meta::shard_ensembles` | `crates/veda-coordinator/src/store.rs::REGION_TOPOLOGY_KEY` | H | done |
+| `veda-admin migrate-metadata` CLI | `crates/veda-admin/` | E | stub (no v0 to migrate post hard-remove) |
 
-| Piece | Location | Phase |
-|---|---|---|
-| Hybrid Logical Clock | `crates/veda-time/src/hlc.rs` | A |
-| Tso trait + `LocalTso` | `crates/veda-time/src/tso.rs` | A |
-| `TsLease` record | `crates/veda-time/src/lease.rs` | A |
-| `GrantTsLease` / `RenewTsLease` cluster commands | `crates/veda-coordinator/src/raft_types.rs` | A |
-| Lease apply path + epoch fencing | `crates/veda-coordinator/src/store.rs::apply_command` | A |
-| `AppStateInner.tso: Arc<dyn Tso>` | `crates/veda-gateway/src/rest/state.rs` | A |
-| `Invocation.commit_ts: Option<u128>` (harness scaffolding) | `crates/veda-coordinator/src/linearisability_checker.rs` | A |
-| `ShardLog` single-node append-only log | `crates/veda-log/src/shard_log.rs` | B (start) |
-| CRC32+len framing identical to `raft_wal.rs` | `crates/veda-log/src/format.rs` | B (start) |
-| Segment file rollover (256MB) + 4KB sidecar index | `crates/veda-log/src/segment_file.rs` | B (start) |
-| Polling `LogTailer` | `crates/veda-log/src/reader.rs` | B (start) |
-| Gateway dark-write (`VEDA_LOG_DARK_WRITE=1`) | `crates/veda-gateway/src/rest/records.rs::insert` | B (start) |
+What's deliberately NOT here yet (tracked follow-ups, not in v0.2.0):
 
-What's deliberately NOT here yet (all later phases):
-
-- `MetaLeasedTso` — the production TSO impl that talks to `_meta`
-  via the lease grant. The data type ships now; the impl lands as
-  a Phase A follow-up.
-- Multi-node `ShardLog` replication (Phase D).
-- Migration of the live data plane off `ClusterStateMachine.records`
-  (Phase C).
-- MVCC versioning of records (Phase F).
-- Real Percolator-style snapshot isolation transactions (Phase G).
-- WAN log shipping (Phase H).
+- Phase D production-grade recovery: BookKeeper "open-and-recover ledger" at writer handover; ensemble-change orchestration on follower failure; partition / multi-node linearisability harness.
+- Phase G production re-chunk pipeline: `/reindex` ships the atomic alias-swap primitive but does NOT yet run OCR/chunker/embed against the source. Operator-driven for now.
+- Phase G test harness: `snapshot_isolation.rs` (Adya anomaly suite) and `atomic_reindex.rs` (kill-mid-reindex recovery).
+- Phase H operator surface: `lag_recovery.rs` and `planned_failover.rs` integration tests; live admin REST endpoints to read/set `RegionTopology` and drive `promote_replica`.
+- Phase F nice-to-haves: `IVF-PQ` / DiskANN native `search_filtered` overrides (today inherit the 10×-oversample default); MVCC WAL periodic checkpoint loop (unbounded WAL is fine for v1 but scales poorly under heavy churn).
+- Niriksha frontend redesign — separate 7-phase plan (~14 engineer-weeks). Not started.
 
 ## Reading order for new contributors
 

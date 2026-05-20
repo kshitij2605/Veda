@@ -1,5 +1,35 @@
 # Transactions v0 — design + roadmap
 
+> **HISTORICAL — superseded in v0.2.0 (Phases E hard-remove + G).**
+>
+> The v0 single-Raft txn stub described below was removed entirely in
+> commit `c8baf29` (Phase E hard-remove). All five `ClusterCommand`
+> variants (`BeginTxn`, `TxnWrite`, `CommitTxn`, `AbortTxn`,
+> `InsertRecord`) and the `open_txns: HashMap<String, PendingTxn>`
+> field on `ClusterStateMachine` are gone.
+>
+> The production txn substrate is now Percolator-style snapshot
+> isolation, delivered by `crates/veda-coordinator/src/percolator.rs::
+> TxnCoordinator`. Two-phase commit: prewrite places primary +
+> secondary locks on per-shard logs at `start_ts`, commit writes a
+> single `RecordTxnCommit` row to `_meta::txn_commits` at `commit_ts`,
+> async cleanup of secondary lock markers. Orphan locks resolved by a
+> background task (`spawn_orphan_resolver`) that checks the primary
+> in `_meta`.
+>
+> The REST surface (`/v1/txn` begin / commit / abort, `X-Veda-Txn-Id`
+> header on inserts) is unchanged in shape; only the implementation
+> moved from "stage on every node via Raft" to "Percolator locks on
+> the per-shard log + one commit row in `_meta`".
+>
+> See [ADR-016](ADR.md#adr-016-percolator-style-snapshot-isolation-transactions)
+> and [rearchitecture-overview.md](rearchitecture-overview.md) (Phase G).
+>
+> Kept for historical reference and to document the "what v0 deliberately
+> did NOT do" list that drove the Phase G design.
+>
+> ---
+
 This document captures what shipped in the v0 transaction
 scaffolding and — much more importantly — what's deliberately
 missing relative to a production system. Anyone reading this

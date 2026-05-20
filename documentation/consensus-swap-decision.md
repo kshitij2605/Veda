@@ -6,6 +6,15 @@ mode, and mitigate it at the application layer. Capture the swap
 surface in `crates/veda-coordinator-raftrs/` as a design artifact so
 the cost stays visible if the calculus ever changes.
 
+> **Scope note (v0.2.0):** This decision applies to the `_meta` Raft
+> group only, which is now small (schema, shard plan, nodes, TSO
+> lease, txn commit records, aliases, region topology). The much
+> larger record-write traffic that used to share this group moved
+> to per-shard `veda-log` in Phase C, so the disruptive-election
+> blast radius on Raft is now narrow. See
+> [ADR-013](ADR.md#adr-013-foundationdb-shape-data-plane-_meta-raft--per-shard-log)
+> and [rearchitecture-overview.md](rearchitecture-overview.md).
+
 ## The actual choice
 
 After Phase 2 (Raft migration) shipped, the visible failure mode that
