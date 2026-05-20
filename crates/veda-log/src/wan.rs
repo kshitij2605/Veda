@@ -628,4 +628,102 @@ mod tests {
             assert_eq!(e.seq_id, (i as u64) + 1, "gap at index {i}");
         }
     }
+
+    /// Phase H planned_failover invariant: a controlled
+    /// cutover via `promote_replica` must surface every
+    /// acked-on-old-primary write on the new primary's local
+    /// log. Zero acked-write loss — the strict cross-region
+    /// durability guarantee operators rely on.
+    #[tokio::test]
+    async fn planned_failover_with_zero_acked_write_loss() {
+        // Old primary log + a replica receiver. We'll ship
+        // continuously, then run promote_replica, then verify
+        // every acked write is present on the replica.
+        let (_t_src, src) = fresh_log();
+        let (_t_dst, dst) = fresh_log();
+        let receiver = Arc::new(LocalReceiver::new("replica-eu", 2, dst.clone()))
+            as Arc<dyn LogReceiver>;
+        let shipper = LogShipper::new(src.clone(), receiver.clone()).with_batch_size(16);
+
+        // Append in batches with interleaved ship_once calls —
+        // simulates steady-state log shipping.
+        for batch_start in 0..5 {
+            let lo = batch_start * 20 + 1;
+            let hi = lo + 19;
+            for i in lo..=hi {
+                src.append_one(
+                    Hlc::new(i, 0),
+                    1,
+                    Bytes::copy_from_slice(&i.to_le_bytes()),
+                    LogOp::Put,
+                    Bytes::from(format!("acked-{i}").into_bytes()),
+                )
+                .unwrap();
+            }
+            // Ship after each batch — these are the "acked" writes.
+            shipper.ship_once().await.unwrap();
+        }
+        let acked_on_old_primary = src.durable_seq();
+        assert_eq!(acked_on_old_primary, 100);
+
+        // Run promote_replica — drains + bumps epoch.
+        let report = promote_replica(&shipper, 2, 50).await.unwrap();
+        assert_eq!(report.drained_seq, 100);
+        assert_eq!(report.new_epoch, 2);
+
+        // Zero-loss invariant: the new primary's local log has
+        // EVERY entry the old primary acked.
+        assert_eq!(
+            dst.durable_seq(),
+            acked_on_old_primary,
+            "new primary durable_seq must match old primary's acked count"
+        );
+        let entries = dst.read_from(1).unwrap();
+        assert_eq!(entries.len(), 100);
+        for (i, e) in entries.iter().enumerate() {
+            let expected_seq = (i as u64) + 1;
+            assert_eq!(e.seq_id, expected_seq);
+            assert_eq!(
+                e.payload.as_ref(),
+                format!("acked-{expected_seq}").as_bytes(),
+                "payload mismatch at seq {expected_seq}"
+            );
+        }
+    }
+
+    /// Phase H planned_failover anti-test: an old-epoch
+    /// shipper trying to push more data AFTER the cutover
+    /// fences via EpochMismatch on the receiver. Without this,
+    /// a stale primary could write past the cutover point and
+    /// silently corrupt the new primary's log.
+    #[tokio::test]
+    async fn old_primary_fences_after_planned_failover() {
+        let (_t_src, src) = fresh_log();
+        append_to(&src, 30);
+        let (_t_dst, dst) = fresh_log();
+        let receiver = Arc::new(LocalReceiver::new("replica", 2, dst.clone()))
+            as Arc<dyn LogReceiver>;
+        let shipper = LogShipper::new(src.clone(), receiver.clone());
+        shipper.catch_up(10).await.unwrap();
+        // Promote bumps the shipper's epoch; an additional
+        // ship at the new epoch is what advances the
+        // receiver's `current_epoch` to 2 (the LocalReceiver
+        // only updates on receipt of a batch with a higher
+        // epoch). Operators trigger this in the post-cutover
+        // boot of the new primary.
+        promote_replica(&shipper, 2, 10).await.unwrap();
+        append_to(&src, 1);
+        let _ = shipper.ship_once().await.unwrap();
+        // The receiver is now at epoch=2.
+
+        // A separate OLD-epoch shipper (still at epoch 1) tries
+        // to ship to the same receiver — must be fenced.
+        let stale_shipper = LogShipper::new(src.clone(), receiver.clone());
+        append_to(&src, 5);
+        let stale_result = stale_shipper.ship_once().await;
+        match stale_result {
+            Err(WanError::EpochMismatch { .. }) => {}
+            other => panic!("expected EpochMismatch from stale primary, got {other:?}"),
+        }
+    }
 }
