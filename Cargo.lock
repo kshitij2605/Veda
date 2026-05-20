@@ -4718,6 +4718,8 @@ dependencies = [
  "tracing",
  "uuid",
  "veda-core",
+ "veda-log",
+ "veda-time",
 ]
 
 [[package]]

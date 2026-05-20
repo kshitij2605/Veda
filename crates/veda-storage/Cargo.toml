@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 metrics = { workspace = true }
 veda-core = { workspace = true }
+veda-log = { workspace = true }
+veda-time = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
