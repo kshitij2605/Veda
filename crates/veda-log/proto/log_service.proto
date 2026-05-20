@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package veda.log;
+
+// Tonic transport for the Phase D BookKeeper-style replication.
+// Same bincode-in-bytes pattern as veda-coordinator's
+// `veda.raft.VedaRaft`: each RPC's request/response is the
+// bincode encoding of the matching Rust type (`AppendRpc`,
+// `AppendAck`, etc. — all with serde derives). Saves redefining
+// every type in protobuf at the cost of opacity to non-Veda
+// peers (acceptable: this is an internal data-plane RPC).
+
+service VedaLog {
+  rpc Append(RawRpc) returns (RawRpc);
+  rpc LastDurableSeq(RawRpc) returns (RawRpc);
+  rpc FenceTo(RawRpc) returns (RawRpc);
+}
+
+message RawRpc {
+  bytes payload = 1;
+}

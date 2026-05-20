@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package veda.wan;
+
+// Tonic transport for Phase H WAN log shipping. Same
+// bincode-in-bytes pattern as `veda.log.VedaLog`: each RPC's
+// request/response is the bincode encoding of the matching Rust
+// type (`ShipBatchRpc`, `ShipBatchAck`, etc. — all with serde
+// derives).
+//
+// Endpoints map to the `LogReceiver` trait in `wan.rs`:
+//   ShipBatch        → LogReceiver::ship_batch
+//   ReplicaDurableSeq → LogReceiver::replica_durable_seq
+//   ReplicaSafeTs    → LogReceiver::replica_safe_ts
+//   CheckReadTs      → LogReceiver::check_read_ts  (safe_ts gate)
+
+service VedaWan {
+  rpc ShipBatch(RawRpc) returns (RawRpc);
+  rpc ReplicaDurableSeq(RawRpc) returns (RawRpc);
+  rpc ReplicaSafeTs(RawRpc) returns (RawRpc);
+  rpc CheckReadTs(RawRpc) returns (RawRpc);
+}
+
+message RawRpc {
+  bytes payload = 1;
+}
