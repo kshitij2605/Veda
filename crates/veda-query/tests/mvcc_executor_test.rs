@@ -138,3 +138,67 @@ fn search_without_read_ts_returns_every_doc() {
     let (hits, _t) = searcher.search_shard(0, &query).unwrap();
     assert_eq!(hits.len(), 2);
 }
+
+#[test]
+fn sealed_segment_carries_commit_ts_through_seal_reopen() {
+    // Insert with MVCC, seal, then search via the LocalShardSearcher
+    // against the sealed segment. The visibility filter must work
+    // identically to the growing-segment case.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut sm = SegmentManager::new(schema(), 0, tmp.path(), 512 * 1024).unwrap();
+    sm.enable_mvcc();
+    sm.insert_mvcc(100, record([1.0, 0.0])).unwrap();
+    sm.insert_mvcc(200, record([0.9, 0.1])).unwrap();
+    sm.insert_mvcc(300, record([0.8, 0.2])).unwrap();
+    // Force a seal: drains the growing segment to disk and starts
+    // a fresh empty growing.
+    sm.seal_growing().expect("seal").expect("non-empty");
+    // The growing segment is now empty; all 3 docs live in a
+    // sealed segment that should carry commit_ts through.
+    assert_eq!(sm.growing_segment().count(), 0);
+    assert_eq!(sm.sealed_segments().len(), 1);
+
+    let searcher = LocalShardSearcher::new(sm);
+    let query = VectorSearchRequest {
+        field: "v".into(),
+        query_vector: vec![1.0, 0.0],
+        k: 10,
+        metric: DistanceMetric::Cosine,
+        filter: None,
+        truncate_to: None,
+        read_ts: Some(150),
+    };
+    let (hits, _t) = searcher.search_shard(0, &query).unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "sealed-segment visibility at read_ts=150 should keep only the doc committed at ts=100; got {:?}",
+        hits
+    );
+}
+
+#[test]
+fn sealed_segment_without_commit_ts_treats_every_doc_visible() {
+    // Legacy (non-MVCC) inserts → seal → search with read_ts set.
+    // The sealed segment has no commit_ts sidecar; every doc must
+    // surface regardless of read_ts (always-visible semantics).
+    let tmp = tempfile::tempdir().unwrap();
+    let mut sm = SegmentManager::new(schema(), 0, tmp.path(), 512 * 1024).unwrap();
+    sm.insert(record([1.0, 0.0])).unwrap();
+    sm.insert(record([0.9, 0.1])).unwrap();
+    sm.seal_growing().expect("seal").expect("non-empty");
+    assert_eq!(sm.sealed_segments().len(), 1);
+
+    let searcher = LocalShardSearcher::new(sm);
+    let query = VectorSearchRequest {
+        field: "v".into(),
+        query_vector: vec![1.0, 0.0],
+        k: 10,
+        metric: DistanceMetric::Cosine,
+        filter: None,
+        truncate_to: None,
+        read_ts: Some(0), // would drop every MVCC doc; legacy stays
+    };
+    let (hits, _t) = searcher.search_shard(0, &query).unwrap();
+    assert_eq!(hits.len(), 2, "legacy sealed segment should pass through");
+}

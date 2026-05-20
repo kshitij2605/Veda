@@ -30,6 +30,10 @@ const DELETE_BITMAP_FILE: &str = "delete_bitmap.bin";
 const METADATA_FILE: &str = "metadata.json";
 const BLOB_REFS_FILE: &str = "blob_refs.json";
 const RECORDS_FILE: &str = "records.jsonl";
+/// Phase F: per-doc commit_ts sidecar. Bincode-serialised
+/// `Vec<Option<u128>>` of length `row_count`. Absent file =
+/// pre-MVCC segment (all docs always visible).
+const COMMIT_TS_FILE: &str = "commit_ts.bin";
 
 fn vector_file(name: &str) -> String {
     format!("{name}.vec")
@@ -207,6 +211,13 @@ pub struct SegmentWriter {
 
     // Blob refs: doc_id -> { field_name -> blob_ref_uri }
     blob_refs: Vec<HashMap<String, String>>,
+
+    /// Phase F: per-doc commit_ts. Same length as row_count;
+    /// `None` for inserts via the legacy `insert` path, `Some`
+    /// for inserts via `insert_with_commit_ts`. At seal time
+    /// the sidecar `commit_ts.bin` is written only when at
+    /// least one stamp is present.
+    commit_ts: Vec<Option<u128>>,
 }
 
 impl SegmentWriter {
@@ -301,6 +312,7 @@ impl SegmentWriter {
             columnar_writer: None,
             stored_format: StoredFormat::Jsonl,
             blob_refs: Vec::new(),
+            commit_ts: Vec::new(),
         })
     }
 
@@ -317,6 +329,20 @@ impl SegmentWriter {
         w.stored_format = StoredFormat::Columnar;
         w.columnar_writer = Some(crate::columnar_stored_fields::ColumnarWriter::new(dir));
         Ok(w)
+    }
+
+    /// Phase F: insert a record stamped with `commit_ts`. The
+    /// sealed-segment sidecar `commit_ts.bin` will then carry
+    /// the value so reads at a snapshot `read_ts` can filter
+    /// superseded / future versions inside the search walk.
+    pub fn insert_with_commit_ts(&mut self, record: &Record, commit_ts: u128) -> Result<u32> {
+        let doc_id = self.insert(record)?;
+        // The insert above pushed `None`; overwrite with the
+        // real stamp.
+        if let Some(slot) = self.commit_ts.last_mut() {
+            *slot = Some(commit_ts);
+        }
+        Ok(doc_id)
     }
 
     /// Insert a record into the segment. Returns the internal 0-indexed doc_id.
@@ -479,6 +505,9 @@ impl SegmentWriter {
         }
 
         self.row_count += 1;
+        // Phase F: legacy insert pushes None; the
+        // insert_with_commit_ts wrapper overwrites the slot.
+        self.commit_ts.push(None);
         Ok(doc_id)
     }
 
@@ -554,6 +583,16 @@ impl SegmentWriter {
         let blob_json = serde_json::to_vec(&self.blob_refs)?;
         fs::write(self.dir.join(BLOB_REFS_FILE), blob_json)?;
 
+        // 7b. Phase F: save commit_ts sidecar — but only when
+        //     at least one doc was inserted with a stamp.
+        //     Non-MVCC segments stay byte-identical on disk.
+        if self.commit_ts.iter().any(|t| t.is_some()) {
+            let ts_bytes = bincode::serialize(&self.commit_ts).map_err(|e| {
+                VedaError::Storage(format!("encode commit_ts sidecar: {e}"))
+            })?;
+            fs::write(self.dir.join(COMMIT_TS_FILE), ts_bytes)?;
+        }
+
         // 8. Write metadata.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -611,6 +650,11 @@ pub struct SegmentReader {
 
     // Delete bitmap.
     delete_bitmap: DeleteBitmap,
+
+    /// Phase F: per-doc commit_ts, loaded from
+    /// `commit_ts.bin` if present. Empty Vec when the segment
+    /// was sealed pre-MVCC (no stamps were issued).
+    commit_ts: Vec<Option<u128>>,
 
     // Per-row scalar/blob data. Dispatches on segment metadata's
     // `stored_format`: legacy segments are Jsonl (mmap'd JSONL +
@@ -762,6 +806,18 @@ impl SegmentReader {
             ),
         };
 
+        // Phase F: load commit_ts sidecar if present. Absent =
+        // pre-MVCC segment, treat all docs as always-visible.
+        let commit_ts_path = dir.join(COMMIT_TS_FILE);
+        let commit_ts: Vec<Option<u128>> = if commit_ts_path.exists() {
+            let bytes = fs::read(&commit_ts_path)?;
+            bincode::deserialize(&bytes).map_err(|e| {
+                VedaError::Storage(format!("decode commit_ts sidecar: {e}"))
+            })?
+        } else {
+            Vec::new()
+        };
+
         Ok(Self {
             dir: dir.to_owned(),
             metadata,
@@ -774,8 +830,73 @@ impl SegmentReader {
             bitmap_indexes,
             bm25_indexes,
             delete_bitmap,
+            commit_ts,
             stored_fields,
         })
+    }
+
+    /// Phase F: per-doc commit_ts. `None` for docs from
+    /// pre-MVCC segments (sidecar missing) or for docs the
+    /// writer inserted via the legacy `insert` path.
+    pub fn commit_ts_of(&self, doc_id: u32) -> Option<u128> {
+        self.commit_ts.get(doc_id as usize).and_then(|v| *v)
+    }
+
+    /// Phase F: precise visibility check at the doc-id level.
+    /// Mirrors `GrowingSegment::is_visible_at`. A doc is
+    /// visible at `read_ts` when:
+    /// - it is not tombstoned;
+    /// - and either no commit_ts is recorded (legacy /
+    ///   non-MVCC segment), OR `commit_ts <= read_ts` AND no
+    ///   later commit_ts for the same record.id() is visible.
+    pub fn is_visible_at(&self, doc_id: u32, read_ts: u128) -> bool {
+        if self.delete_bitmap.is_deleted(doc_id) {
+            return false;
+        }
+        let Some(commit_ts) = self.commit_ts.get(doc_id as usize).and_then(|v| *v) else {
+            // No MVCC stamp → always visible.
+            return true;
+        };
+        if commit_ts > read_ts {
+            return false;
+        }
+        // Look up this doc's record.id() to detect supersession.
+        let rid = match self.get_record(doc_id) {
+            Ok(r) => r.id(),
+            Err(_) => return true, // can't introspect; pass through
+        };
+        for (other_id, slot) in self.commit_ts.iter().enumerate() {
+            if other_id as u32 == doc_id {
+                continue;
+            }
+            let Some(other_ts) = *slot else { continue };
+            if other_ts <= read_ts
+                && other_ts > commit_ts
+                && !self.delete_bitmap.is_deleted(other_id as u32)
+                && let Ok(other_rec) = self.get_record(other_id as u32)
+                && other_rec.id() == rid
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Phase F: return every doc_id in this sealed segment
+    /// visible at `read_ts`. `None` means there are no MVCC
+    /// stamps in this segment — caller should treat every
+    /// non-tombstoned doc as visible.
+    pub fn visible_doc_ids_at(&self, read_ts: u128) -> Option<roaring::RoaringBitmap> {
+        if self.commit_ts.is_empty() {
+            return None;
+        }
+        let mut bitmap = roaring::RoaringBitmap::new();
+        for doc_id in 0..self.metadata.row_count as u32 {
+            if self.is_visible_at(doc_id, read_ts) {
+                bitmap.insert(doc_id);
+            }
+        }
+        Some(bitmap)
     }
 
     /// Access the BM25 index for a given field name, if one was built.

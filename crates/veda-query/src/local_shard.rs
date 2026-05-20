@@ -454,6 +454,34 @@ impl ShardSearcher for LocalShardSearcher {
         }
         agg_timings.ann_search_ms += sealed_start.elapsed().as_secs_f64() * 1000.0;
 
+        // Phase F: sealed-segment visibility filter. For each
+        // sealed segment with a commit_ts sidecar, retain only
+        // hits whose doc_id is visible at read_ts. Segments
+        // without the sidecar pass through (no MVCC stamps =
+        // always visible). The growing-segment filter above
+        // already handled growing hits.
+        if let Some(read_ts) = request.read_ts {
+            use std::collections::HashMap;
+            let mut sealed_visible: HashMap<veda_core::types::SegmentId, roaring::RoaringBitmap> =
+                HashMap::new();
+            for handle in self.segment_manager.sealed_segments() {
+                if let Some(vis) = handle.reader.visible_doc_ids_at(read_ts) {
+                    sealed_visible.insert(handle.metadata.id, vis);
+                }
+            }
+            if !sealed_visible.is_empty() {
+                all_results.retain(|hit| {
+                    if hit.segment_id == growing_segment_id {
+                        return true; // growing filtered already
+                    }
+                    match sealed_visible.get(&hit.segment_id) {
+                        Some(vis) => vis.contains(hit.doc_id),
+                        None => true, // sealed segment with no MVCC stamps
+                    }
+                });
+            }
+        }
+
         // Sort by distance ascending, take top-k.
         let scoring_start = std::time::Instant::now();
         all_results.sort_by(|a, b| {
@@ -485,22 +513,36 @@ impl ShardSearcher for LocalShardSearcher {
         let (response, timings) =
             SearchExecutor::search_sparse(request, growing_opt, &sealed_refs)?;
 
-        // Phase F: filter growing-segment hits against the
-        // MVCC visibility bitmap at request.read_ts. Sealed
-        // segments don't yet carry commit_ts, so they pass
-        // through (the segment_id branch in the predicate).
+        // Phase F: filter hits against the MVCC visibility
+        // bitmap at request.read_ts. Both growing and sealed
+        // segments now carry commit_ts; segments with no
+        // stamps pass through.
         let results = match request.read_ts {
-            Some(ts) => match growing.visible_doc_ids_at(ts) {
-                Some(vis) => {
-                    let growing_id = growing.id();
+            Some(ts) => {
+                use std::collections::HashMap;
+                let mut visible_per_seg: HashMap<veda_core::types::SegmentId, roaring::RoaringBitmap> =
+                    HashMap::new();
+                if let Some(vis) = growing.visible_doc_ids_at(ts) {
+                    visible_per_seg.insert(growing.id(), vis);
+                }
+                for handle in self.segment_manager.sealed_segments() {
+                    if let Some(vis) = handle.reader.visible_doc_ids_at(ts) {
+                        visible_per_seg.insert(handle.metadata.id, vis);
+                    }
+                }
+                if visible_per_seg.is_empty() {
+                    response.results
+                } else {
                     response
                         .results
                         .into_iter()
-                        .filter(|r| r.segment_id != growing_id || vis.contains(r.doc_id))
+                        .filter(|r| match visible_per_seg.get(&r.segment_id) {
+                            Some(vis) => vis.contains(r.doc_id),
+                            None => true,
+                        })
                         .collect()
                 }
-                None => response.results,
-            },
+            }
             None => response.results,
         };
         Ok((results, timings))
@@ -623,6 +665,18 @@ impl ShardSearcher for LocalShardSearcher {
                         bm.remove(doc_id);
                     }
                 }
+            }
+
+            // Phase F: intersect with MVCC visibility bitmap
+            // when read_ts is set AND this sealed segment carries
+            // commit_ts stamps. Pre-MVCC segments pass through.
+            if let Some(ts) = request.read_ts
+                && let Some(vis) = reader.visible_doc_ids_at(ts)
+            {
+                allowed = Some(match allowed {
+                    Some(existing) => existing & vis,
+                    None => vis,
+                });
             }
 
             // PLAID candidate pruning if available.
