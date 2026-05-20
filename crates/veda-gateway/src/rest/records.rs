@@ -105,6 +105,12 @@ pub async fn insert(
     }
 }
 
+// Phase E deprecation window: the Raft-fallback block below still
+// constructs `ClusterCommand::InsertRecord` / `TxnWrite`, both
+// `#[deprecated]`. Allowed for one release while collections
+// flip `use_log_primary`; removed at the next major along with
+// the apply arms in `store::apply_command`.
+#[allow(deprecated)]
 async fn insert_impl(
     state: AppState,
     name: String,
@@ -139,6 +145,9 @@ async fn insert_impl(
     // every node, including the receiver — that keeps the
     // segment-manager view identical across the cluster instead
     // of having the receiver run a slightly different code path.
+    //
+    // (Phase E: this block is inside an `#[allow(deprecated)]`
+    // function; see the attribute on `insert_impl` above.)
     {
         let raft_guard = state.inner.raft.read().await;
         if let Some(coord) = raft_guard.as_ref() {

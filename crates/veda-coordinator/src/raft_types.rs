@@ -64,6 +64,14 @@ pub enum ClusterCommand {
     /// scope here. The current implementation is correct (every
     /// node converges to the same data) but not yet fast under
     /// high write loads. See documentation/raft-migration.md.
+    ///
+    /// **Deprecated (Phase E)**: writes go to per-shard `veda-log`
+    /// when `effective_use_log_primary()` is true. This variant
+    /// remains for mixed-version clusters during one-release
+    /// transition; the next major release removes it.
+    #[deprecated(
+        note = "Phase E: writes move to per-shard veda-log; flip the collection's use_log_primary flag (or VEDA_LOG_PRIMARY=1) and stop issuing this variant"
+    )]
     InsertRecord {
         collection: String,
         record_id: String,
@@ -111,12 +119,22 @@ pub enum ClusterCommand {
     // semantics. See research/2026-05-19-multi-week-survey/01-cross-shard-transactions.md
     /// Open a new transaction holder. Idempotent: re-issuing the
     /// same txn_id returns Ok without mutating state.
+    ///
+    /// **Deprecated (Phase E)**: txns moved to the Percolator
+    /// `TxnCoordinator` (locks on shard logs, commit record in
+    /// `_meta::txn_commits`). Remains for one-release transition.
+    #[deprecated(
+        note = "Phase E: txns use TxnCoordinator (Percolator SI); stop issuing BeginTxn through Raft"
+    )]
     BeginTxn {
         txn_id: String,
     },
     /// Stage a record write under an open transaction. Same shape
     /// as InsertRecord, plus a `txn_id`. Apply must check that the
     /// transaction is open and the collection exists.
+    #[deprecated(
+        note = "Phase E: txn writes stage as Percolator locks on the per-shard log; stop issuing TxnWrite through Raft"
+    )]
     TxnWrite {
         txn_id: String,
         collection: String,
@@ -125,11 +143,17 @@ pub enum ClusterCommand {
     },
     /// Commit a transaction: move every staged write into the main
     /// record map and drop the holder. No-op if the txn isn't open.
+    #[deprecated(
+        note = "Phase E: txn commit goes through TxnCoordinator (writes Commit record to _meta); stop issuing CommitTxn through Raft"
+    )]
     CommitTxn {
         txn_id: String,
     },
     /// Abort a transaction: drop the holder and every staged write.
     /// No-op if the txn isn't open.
+    #[deprecated(
+        note = "Phase E: txn abort goes through TxnCoordinator; stop issuing AbortTxn through Raft"
+    )]
     AbortTxn {
         txn_id: String,
     },
@@ -193,6 +217,11 @@ pub enum ClusterCommand {
 }
 
 impl fmt::Display for ClusterCommand {
+    // Display destructures every variant, including the
+    // `#[deprecated]` v0 data-plane ones. The match arms here
+    // are compatibility-only (logs / traces) and disappear with
+    // the variants at the next major.
+    #[allow(deprecated)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CreateCollection { name, .. } => write!(f, "CreateCollection({name})"),
