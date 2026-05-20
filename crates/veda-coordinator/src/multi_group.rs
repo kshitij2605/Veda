@@ -42,10 +42,9 @@
 //!   follow-up. Today an operator pre-declares groups via env
 //!   var `VEDA_RAFT_DATA_GROUPS=col1:0,col1:1,col2:0`.
 //! - **Inserts routed by ShardRouter at the REST handler.**
-//!   The existing insert path still goes through the
-//!   `_meta` group's ClusterCommand::InsertRecord. A future
-//!   commit teaches `records::insert` to compute
-//!   `(collection, shard_id)` and submit to the right group.
+//!   Phase C / Phase E hard-remove: record writes go through
+//!   per-shard `veda-log` (Phase C). The legacy `InsertRecord`
+//!   variant was removed entirely in Phase E hard-remove.
 //! - **Cross-group transactions.** Each group is independent;
 //!   there is no two-phase commit yet. CockroachDB's parallel
 //!   commits / atomic multi-range writes are a separate

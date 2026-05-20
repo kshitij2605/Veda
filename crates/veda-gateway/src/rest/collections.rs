@@ -583,75 +583,11 @@ pub async fn reconcile_collections_from_raft(
         let _ = state.inner.raft_materialized_records.write().await.remove(name);
     }
 
-    // Records: materialise any (collection, record_id) in Raft
-    // state that isn't yet in our local SegmentManager.
-    for (collection, records) in &raft_state.records {
-        let schemas = state.inner.schemas.read().await;
-        let Some(schema) = schemas.get(collection).cloned() else { continue };
-        drop(schemas);
-        let already_materialised: std::collections::HashSet<String> = state
-            .inner
-            .raft_materialized_records
-            .read()
-            .await
-            .get(collection)
-            .cloned()
-            .unwrap_or_default();
-        let mut newly = Vec::new();
-        for (rid, _rjson) in records {
-            if !already_materialised.contains(rid) {
-                newly.push(rid.clone());
-            }
-        }
-        if newly.is_empty() {
-            continue;
-        }
-        // Apply each new record into the local segment manager.
-        let mut managers = state.inner.segment_managers.write().await;
-        let Some(shard_map) = managers.get_mut(collection) else { continue };
-        let shard_count = schema.shard_count();
-        let mut applied = 0usize;
-        for rid in &newly {
-            let Some(rjson) = records.get(rid) else { continue };
-            // Records were serde-serialised at insert time on the
-            // leader, so deserialising round-trips the exact same
-            // Record (UUID + fields) across every node. parse_record
-            // would re-assign the UUID, which we don't want here.
-            let record: veda_core::record::Record =
-                match serde_json::from_str(rjson) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!(record_id = %rid, error = %e, "reconcile: record deserialise failed");
-                        continue;
-                    }
-                };
-            let shard_id =
-                veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
-            let Some(sm) = shard_map.get_mut(&shard_id) else { continue };
-            // Insert may fail if the record is already present
-            // (the responding node inserted it directly in
-            // records::insert). Treat duplicate-id as success.
-            match sm.insert(record) {
-                Ok(_) => applied += 1,
-                Err(e) => {
-                    tracing::debug!(record_id = %rid, error = %e, "reconcile: sm.insert error (likely duplicate)");
-                }
-            }
-        }
-        drop(managers);
-        if applied > 0 {
-            tracing::info!(collection = %collection, applied, "reconcile: materialised raft records");
-        }
-        // Update the materialised set for everything we walked,
-        // even rows we didn't actually insert (we tried; on the
-        // next tick we skip them).
-        let mut set = state.inner.raft_materialized_records.write().await;
-        let entry = set.entry(collection.clone()).or_default();
-        for rid in newly {
-            entry.insert(rid);
-        }
-    }
-
+    // Phase E hard-remove: record materialisation from
+    // `raft_state.records` is gone. Records live in per-shard
+    // `veda-log` now; follower nodes pick them up via the Phase
+    // C `LogApplier`, not the metadata-Raft reconcile loop.
+    let _ = &raft_state;
     Ok(())
 }
 
