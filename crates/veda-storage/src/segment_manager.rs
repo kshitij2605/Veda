@@ -107,6 +107,18 @@ impl SegmentManager {
         self.mvcc.is_some()
     }
 
+    /// MVCC visibility check. Returns true if the record is
+    /// visible at `read_ts` (i.e. some non-tombstone version
+    /// exists with `commit_ts <= read_ts`). Collections without
+    /// MVCC always return true — readers can't filter on a
+    /// dimension that isn't tracked.
+    pub fn is_visible_at(&self, record_id: &uuid::Uuid, read_ts: u128) -> bool {
+        match self.mvcc.as_ref() {
+            None => true,
+            Some(m) => m.get_at(record_id.as_bytes(), read_ts).is_some(),
+        }
+    }
+
     /// MVCC-aware insert. Mirrors the record into the MVCC
     /// overlay at `commit_ts` AND into the existing growing
     /// segment so that legacy reads continue to work. Returns
