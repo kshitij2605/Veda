@@ -141,6 +141,60 @@ impl VectorIndex for FlatIndex {
         Ok(results)
     }
 
+    /// Phase F: native filtered search. Flat is already brute-
+    /// force, so the only optimization is skipping non-bitmap
+    /// doc_ids INSIDE the scan instead of scoring everything
+    /// then post-filtering. Eliminates the 10x oversample the
+    /// default would impose.
+    fn search_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &roaring::RoaringBitmap,
+    ) -> Result<Vec<SearchResult>> {
+        if query.len() as u32 != self.dimension {
+            return Err(VedaError::DimensionMismatch {
+                expected: self.dimension,
+                actual: query.len() as u32,
+            });
+        }
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let mut heap: BinaryHeap<HeapCandidate> = BinaryHeap::with_capacity(k + 1);
+        for (id, vector) in self.vectors.iter().enumerate() {
+            let id = id as u32;
+            if self.deleted.contains(&id) {
+                continue;
+            }
+            if !filter.contains(id) {
+                continue;
+            }
+            let distance = compute_distance(query, vector, self.metric);
+            if heap.len() < k {
+                heap.push(HeapCandidate { id, distance });
+            } else if let Some(worst) = heap.peek()
+                && distance < worst.distance
+            {
+                heap.pop();
+                heap.push(HeapCandidate { id, distance });
+            }
+        }
+        let mut results: Vec<SearchResult> = heap
+            .into_iter()
+            .map(|c| SearchResult {
+                id: c.id,
+                distance: c.distance,
+            })
+            .collect();
+        results.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+        });
+        Ok(results)
+    }
+
     fn insert(&mut self, id: u32, vector: &[f32]) -> Result<()> {
         if vector.len() as u32 != self.dimension {
             return Err(VedaError::DimensionMismatch {
@@ -259,5 +313,50 @@ mod tests {
         let results = idx.search(&[0.5, 0.0], 3).unwrap();
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|r| r.id != 1));
+    }
+
+    #[test]
+    fn search_filtered_returns_only_bitmap_members() {
+        use roaring::RoaringBitmap;
+        let mut idx = FlatIndex::new(DistanceMetric::Euclidean, 2);
+        idx.insert(0, &[0.0, 0.0]).unwrap();
+        idx.insert(1, &[1.0, 0.0]).unwrap();
+        idx.insert(2, &[2.0, 0.0]).unwrap();
+        idx.insert(3, &[3.0, 0.0]).unwrap();
+        idx.insert(4, &[4.0, 0.0]).unwrap();
+
+        let mut filter = RoaringBitmap::new();
+        filter.insert(1);
+        filter.insert(3);
+        // Query at 0.5: closest visible is 1 (dist 0.5), then 3 (dist 2.5).
+        let results = idx.search_filtered(&[0.5, 0.0], 5, &filter).unwrap();
+        let ids: Vec<u32> = results.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![1, 3]);
+    }
+
+    #[test]
+    fn search_filtered_excludes_deleted_even_if_in_filter() {
+        use roaring::RoaringBitmap;
+        let mut idx = FlatIndex::new(DistanceMetric::Euclidean, 2);
+        idx.insert(0, &[0.0, 0.0]).unwrap();
+        idx.insert(1, &[1.0, 0.0]).unwrap();
+        idx.delete(1).unwrap();
+        let mut filter = RoaringBitmap::new();
+        filter.insert(0);
+        filter.insert(1); // tombstoned — must be excluded
+        let results = idx.search_filtered(&[0.5, 0.0], 5, &filter).unwrap();
+        let ids: Vec<u32> = results.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![0]);
+    }
+
+    #[test]
+    fn search_filtered_with_empty_filter_returns_empty() {
+        use roaring::RoaringBitmap;
+        let mut idx = FlatIndex::new(DistanceMetric::Euclidean, 2);
+        idx.insert(0, &[0.0, 0.0]).unwrap();
+        idx.insert(1, &[1.0, 0.0]).unwrap();
+        let filter = RoaringBitmap::new();
+        let results = idx.search_filtered(&[0.5, 0.0], 5, &filter).unwrap();
+        assert!(results.is_empty());
     }
 }

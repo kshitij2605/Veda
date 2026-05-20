@@ -163,6 +163,56 @@ impl VectorIndex for DiskAnnIndex {
         Ok(results)
     }
 
+    /// Phase F: native filtered search. DiskANN's greedy graph
+    /// search needs to traverse non-filtered nodes to navigate
+    /// the graph, so we can't skip them in the walk itself — but
+    /// we CAN oversample the L search list aggressively, then
+    /// filter the candidates BEFORE truncating to k. This avoids
+    /// the default's blind 10x oversample of the final result
+    /// set in favour of growing the search frontier inside the
+    /// graph walk where DiskANN's recall is best.
+    fn search_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &roaring::RoaringBitmap,
+    ) -> Result<Vec<SearchResult>> {
+        if query.len() as u32 != self.dimension {
+            return Err(VedaError::DimensionMismatch {
+                expected: self.dimension,
+                actual: query.len() as u32,
+            });
+        }
+        if k == 0 || self.vectors.is_empty() {
+            return Ok(Vec::new());
+        }
+        let medoid = match self.graph.medoid() {
+            Some(m) => m,
+            None => return Ok(Vec::new()),
+        };
+        // Oversample inside the graph walk. 4× the default L
+        // is a reasonable starting point; for very sparse filters
+        // the caller can rerun if recall is too low (this is the
+        // same tradeoff that ACORN-style filtered ANN papers
+        // discuss).
+        let l = self.l_search.max(k * 4);
+        let candidates = searcher::greedy_search(
+            query,
+            medoid,
+            l,
+            &self.graph,
+            &self.vectors,
+            self.metric,
+        );
+        let results: Vec<SearchResult> = candidates
+            .into_iter()
+            .filter(|&(id, _)| !self.deleted.contains(&id) && filter.contains(id))
+            .take(k)
+            .map(|(id, distance)| SearchResult { id, distance })
+            .collect();
+        Ok(results)
+    }
+
     fn insert(&mut self, _id: u32, _vector: &[f32]) -> Result<()> {
         Err(VedaError::Index(
             "DiskANN does not support incremental inserts; use build() instead".to_string(),
