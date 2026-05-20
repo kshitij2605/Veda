@@ -372,6 +372,64 @@ impl LogShipper {
             *g = new_epoch;
         }
     }
+
+    /// Inspect the shipper's current topology epoch (read-only).
+    pub async fn epoch(&self) -> u64 {
+        *self.epoch.lock().await
+    }
+}
+
+/// Outcome of a [`promote_replica`] call.
+#[derive(Debug, Clone)]
+pub struct CutoverReport {
+    /// `durable_seq` at the replica after the final drain. All
+    /// log entries with `seq_id <= drained_seq` are now durable
+    /// on the new primary side.
+    pub drained_seq: u64,
+    /// Replica's `safe_ts` watermark at the end of drain. Used
+    /// by cross-region readers to verify snapshot-read freshness.
+    pub safe_ts: u128,
+    /// The new topology epoch the shipper now stamps on every
+    /// outgoing `ship_batch`.
+    pub new_epoch: u64,
+}
+
+/// Operator-driven planned cutover. Drains all pending batches
+/// from `shipper` to its target (the receiver about to become
+/// the new primary), then bumps the shipper's epoch so any
+/// subsequent appends from the old primary fence.
+///
+/// Strict ordering of side effects:
+///   1. Drain pending — `shipper.catch_up(max_drain_rounds)`.
+///   2. Bump epoch — `shipper.set_epoch(new_epoch)`. After this
+///      point, the old primary's subsequent ships carry the new
+///      epoch (or — if the operator removed the old shipper
+///      first — get fenced by the receiver via
+///      `EpochMismatch`).
+///
+/// The operator is responsible for: bumping `RegionTopology.epoch`
+/// in `_meta` (so other regions learn the new primary), updating
+/// the gateway to route writes to the new primary, and tearing
+/// down the old primary's shipper if there is one.
+pub async fn promote_replica(
+    shipper: &LogShipper,
+    new_epoch: u64,
+    max_drain_rounds: usize,
+) -> Result<CutoverReport, WanError> {
+    let drained_seq = shipper.catch_up(max_drain_rounds).await?;
+    if shipper.lag().await > 0 {
+        return Err(WanError::Io(format!(
+            "drain incomplete after {max_drain_rounds} rounds; lag={}",
+            shipper.lag().await
+        )));
+    }
+    shipper.set_epoch(new_epoch).await;
+    let safe_ts = shipper.target.replica_safe_ts().await;
+    Ok(CutoverReport {
+        drained_seq,
+        safe_ts,
+        new_epoch,
+    })
 }
 
 #[cfg(test)]
@@ -488,5 +546,86 @@ mod tests {
         let s = serde_json::to_string(&t).unwrap();
         let back: RegionTopology = serde_json::from_str(&s).unwrap();
         assert_eq!(t, back);
+    }
+
+    /// Planned promote_replica: every entry that was acked at
+    /// the old primary lands on the new primary before the
+    /// epoch bump. Zero acked-write loss.
+    #[tokio::test]
+    async fn promote_replica_drains_then_bumps_epoch() {
+        let (_t_src, src) = fresh_log();
+        append_to(&src, 100);
+        let (_t_dst, dst) = fresh_log();
+        let receiver = Arc::new(LocalReceiver::new("replica-eu", 2, dst.clone()))
+            as Arc<dyn LogReceiver>;
+        let shipper = LogShipper::new(src.clone(), receiver.clone()).with_batch_size(16);
+        shipper.set_safe_ts(42_000).await;
+
+        // Before cutover the replica trails.
+        assert!(shipper.lag().await > 0);
+
+        let report = promote_replica(&shipper, 7, 50).await.unwrap();
+        assert!(report.drained_seq >= 100);
+        assert_eq!(report.new_epoch, 7);
+        assert_eq!(report.safe_ts, 42_000);
+        assert_eq!(shipper.lag().await, 0);
+        assert_eq!(shipper.epoch().await, 7);
+
+        // Every appended entry made it to the replica side.
+        let replica_entries = dst.read_from(1).unwrap();
+        assert_eq!(replica_entries.len(), 100);
+    }
+
+    /// promote_replica refuses to bump the epoch if the drain
+    /// didn't actually finish (lag > 0). Without this check the
+    /// caller could promote a stale replica.
+    #[tokio::test]
+    async fn promote_replica_refuses_when_drain_incomplete() {
+        let (_t_src, src) = fresh_log();
+        append_to(&src, 500);
+        let (_t_dst, dst) = fresh_log();
+        let receiver = Arc::new(LocalReceiver::new("replica", 2, dst.clone()))
+            as Arc<dyn LogReceiver>;
+        // Tiny batch_size + tiny max_rounds: 1 round * 1 entry
+        // = 1 entry shipped, leaving 499 behind.
+        let shipper = LogShipper::new(src.clone(), receiver.clone()).with_batch_size(1);
+        let err = promote_replica(&shipper, 9, 1).await.unwrap_err();
+        match err {
+            WanError::Io(msg) => assert!(msg.contains("drain incomplete"), "got: {msg}"),
+            other => panic!("expected Io(drain incomplete), got {other:?}"),
+        }
+        // Epoch must NOT have advanced.
+        assert_eq!(shipper.epoch().await, 1);
+    }
+
+    /// Long-disconnect lag recovery: ship some, "disconnect"
+    /// (just don't ship for a while), append many more, then
+    /// reconnect — catch_up drains everything with no gaps.
+    #[tokio::test]
+    async fn lag_recovery_after_long_disconnect_has_no_gaps() {
+        let (_t_src, src) = fresh_log();
+        append_to(&src, 30);
+        let (_t_dst, dst) = fresh_log();
+        let receiver = Arc::new(LocalReceiver::new("replica", 2, dst.clone()))
+            as Arc<dyn LogReceiver>;
+        let shipper = LogShipper::new(src.clone(), receiver.clone()).with_batch_size(8);
+        shipper.catch_up(10).await.unwrap();
+        assert_eq!(shipper.lag().await, 0);
+
+        // "Disconnect": don't ship. Append a lot more to src.
+        append_to(&src, 200);
+        assert!(shipper.lag().await >= 200);
+
+        // Reconnect — catch_up brings everything across.
+        let final_seq = shipper.catch_up(100).await.unwrap();
+        assert!(final_seq >= 230);
+        assert_eq!(shipper.lag().await, 0);
+
+        // Replica's log is gap-free seq 1..230.
+        let entries = dst.read_from(1).unwrap();
+        assert_eq!(entries.len(), 230);
+        for (i, e) in entries.iter().enumerate() {
+            assert_eq!(e.seq_id, (i as u64) + 1, "gap at index {i}");
+        }
     }
 }
