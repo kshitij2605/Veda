@@ -332,3 +332,83 @@ Pre-filter. `LocalShardSearcher::search_shard` (and its sparse / multi-vector si
 ### Consequences
 - **Positive:** HNSW / quantized-HNSW (which override `search_filtered` with native-walk implementations) never traverse invisible neighbours. Top-k slots aren't wasted. Correctness invariant preserved (the supersession test proves a better-matching superseded version is correctly dropped). The default `search_filtered` (10× oversample + post-filter) still works for IVF-PQ / DiskANN at v1 — they inherit correctness at the cost of some wasted retrieval.
 - **Negative:** Building the visibility bitmap costs O(N) per search for segments with MVCC stamps. Cheap relative to the search itself, but worth bench-checking on very large segments.
+
+---
+
+## ADR-021: Edge-triggered follower-health monitor drives ensemble change
+
+**Status:** Accepted
+
+### Context
+With BookKeeper-style replication, a single follower failure stalls the ack quorum until either the writer retries indefinitely (unbounded latency) or the ensemble is changed to swap out the failing node. Two failure-detector designs were considered: (a) level-triggered — fire on every probe while the follower is below the threshold; (b) edge-triggered — fire exactly once per crossing of the threshold, and not again until the follower recovers and fails again.
+
+### Decision
+Edge-triggered. `FollowerHealthMonitor::probe_once` tracks consecutive-failure counts per `NodeId` and only emits the `NodeId` when the count crosses `failure_threshold` from below. `spawn(on_failure)` runs the probe loop on a `tokio::interval` and invokes the user-supplied closure for each newly-failed node. The closure is responsible for driving `rebuild_ensemble(current, failed, replacement)` and persisting the new ensemble via `RegisterShardEnsemble` on `_meta`.
+
+### Consequences
+- **Positive:** A persistently-down follower yields exactly one orchestration call per outage, not one per probe interval. The orchestrator stays at human-driven escalation rates even when network partitions last hours. The monitor itself is dependency-light: a list of `Arc<dyn LogFollower>`, a threshold, a probe interval — embeddable in any operator process.
+- **Negative:** A flapping follower (fail → recover → fail → recover) triggers one ensemble change per cycle, which is the intended behaviour but can amplify churn; the operator should set `failure_threshold` high enough (default 3 consecutive failures) to absorb single-probe blips. `_meta` rate-limiting on `ChangeShardWriter` / `RegisterShardEnsemble` is the second line of defence (cf. risk register in `.claude/plans/structured-mixing-turing.md`).
+
+---
+
+## ADR-022: MVCC WAL checkpoint = atomic snapshot file + WAL truncate
+
+**Status:** Accepted
+
+### Context
+The MVCC WAL (`MvccWal` per shard) appends every `(key, ts, payload)` write so the in-memory `MvccStore` can be reconstructed on open. Without a checkpoint mechanism the WAL grows without bound, replay cost scales linearly with the number of writes ever made, and disk fills up under any sustained workload.
+
+### Decision
+Periodic checkpoint that writes a complete snapshot of the in-memory state to a separate `mvcc_snap` file using the same atomic-write idiom as the metadata snapshot: write `<path>.tmp`, `fsync`, then `rename`. After the snapshot is durable, the WAL is truncated to zero length. On open, `enable_mvcc_durable(path)` first calls `load_snapshot_into(snap, store)` and then replays the (now-short) trailing WAL. `SegmentManager::mvcc_checkpoint() -> Result<Option<usize>>` is the operator-facing trigger; returning `None` indicates MVCC durability is not enabled for that shard.
+
+### Consequences
+- **Positive:** Replay cost is bounded by `time-since-last-checkpoint`, not total history. Snapshot installation is atomic: a crash mid-write leaves the previous snapshot intact (the `.tmp` is orphaned and ignored). The same primitive supports future point-in-time recovery and follower snapshot install over WAN.
+- **Negative:** Checkpoint cost is proportional to the live keyspace (every key-version pair is serialised). For workloads with very large keyspaces the operator should checkpoint less frequently, accepting longer replay in exchange for lower amortised cost.
+
+---
+
+## ADR-023: Native `search_filtered` overrides on every index
+
+**Status:** Accepted
+
+### Context
+The default `VectorIndex::search_filtered` implementation runs the unfiltered top-k search at 10× oversample and then drops post-walk hits whose `doc_id` is not in the allowed bitmap. For sparse bitmaps (e.g. an `read_ts` snapshot that excludes 90% of docs), 10× oversample is insufficient — the recall collapses. For dense bitmaps it wastes work. ADR-020 introduces the bitmap-pre-filter strategy at the executor level; this ADR pushes the same logic into the index implementations themselves.
+
+### Decision
+Each index ships a native `search_filtered` that consults the bitmap INSIDE the candidate walk. `Flat` and `IVF-PQ` skip non-bitmap docs as the metric-comparison loop runs. `DiskANN` reuses the graph walk with `l = self.l_search.max(k * 4)` to keep recall stable when the bitmap is sparse, and tests every visited node against the bitmap. HNSW already had a native filtered walk; this ADR generalises the pattern.
+
+### Consequences
+- **Positive:** Recall stays at the unfiltered level regardless of bitmap density. Top-k slots are never spent on invisible docs. The 10× oversample fallback is no longer load-bearing.
+- **Negative:** Each index now carries its own bitmap-aware walk; the abstraction "filtered search" leaks into the index implementations. Acceptable because the API surface is identical (one trait method) — only the body differs.
+
+---
+
+## ADR-024: Cross-region reader gating uses sentinel `0` for "no gating"
+
+**Status:** Accepted
+
+### Context
+The replica `safe_ts` watermark gates cross-region snapshot reads: a read at `read_ts > replica_safe_ts` must be rejected, because the replica's `MvccStore` has not yet seen all writes ≤ `read_ts`. The default value (before any WAN batch lands) needs to encode "no gating in effect" cleanly. Two designs: (a) default to `u128::MAX`, gate is "`read_ts > safe_ts`" — semantically clean but the monotonic-forward setter cannot move `safe_ts` from `u128::MAX` to any lower value, so the first WAN batch can't set it; (b) default to `0`, gate is "`safe_ts > 0 && read_ts > safe_ts`" — one extra branch in the hot path but the monotonic setter works from defaults.
+
+### Decision
+Sentinel `0` = no gating. `replica_safe_ts: RwLock<u128>` initialised to `0`. The check on `/records/:id` and `/search` is `if safe > 0 && read_ts > safe { return 503 }`. The setter on `PUT /v1/admin/replica-safe-ts` and on the `LogReceiver` path is monotonic-forward (refuses to lower the watermark). Body uses JSON-string encoding for u128 since JavaScript can't safely round-trip values past 2^53.
+
+### Consequences
+- **Positive:** Operators can stand up a primary-only deployment and never touch `safe_ts`; cross-region gating activates the moment the first WAN batch lands. Test setup is trivial — fresh state means no gating, identical to single-region behaviour. The monotonic-forward invariant matches every other watermark in the system.
+- **Negative:** One extra branch on every read. Negligible relative to the index walk. The `0` sentinel does mean "snapshot at `read_ts = 0`" is no longer a meaningful API call (which it never was — `0` is below every commit_ts).
+
+---
+
+## ADR-025: Reindex pipeline groups by `parent_doc_id`, reconstructs text, then re-chunks
+
+**Status:** Accepted
+
+### Context
+The atomic-alias-swap reindex primitive (ADR-017) creates a sibling collection and points the alias at it once populated. The straight-copy version (v0.2.0) copies source records verbatim. The production version (v0.2.1) needs to re-chunk under a new strategy and optionally re-embed. The chunker takes parent-document text, not individual chunks, so we have three choices: (a) re-OCR the source PDFs from blob storage and re-chunk that; (b) store the unchunked parent text alongside every chunk and re-chunk that; (c) reconstruct the parent text by sorting the chunks by `chunk_index` and concatenating, then re-chunk that.
+
+### Decision
+(c). The reindex handler reads source records, groups them by the `parent_id_field` (default `parent_doc_id`), sorts each group by the `chunk_index_field` (default `chunk_index`), concatenates the `text_field` (default `content`) values, and runs `veda_core::chunking::chunk_markdown(reconstructed, &strategy)` on each. The new chunks land in the sibling with `parent_doc_id` preserved and `chunk_index` re-numbered. When `re_embed: true`, each new chunk's embedding comes from the registry's text-modality model; when no text-modality model is configured, the handler returns `424 FAILED_DEPENDENCY` instead of producing zero-vector placeholders.
+
+### Consequences
+- **Positive:** No dependency on the OCR pipeline staying healthy during reindex. No on-disk schema change (no separate parent-text storage). Lossless for any chunker that operates on flat text. Works the same for both text-only and multimodal collections (image chunks pass through untouched since they have no `chunk_index`).
+- **Negative:** Original document structure (headings, page breaks) is lost — the concatenation produces a flat blob. Markdown-aware chunkers degrade to text-recursive behaviour. For collections where the source PDFs are still in blob storage, re-OCR (option (a)) would be lossless; that path is a future enhancement, not a v0.2.1 regression.
