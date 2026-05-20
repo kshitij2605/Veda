@@ -4704,6 +4704,7 @@ dependencies = [
  "base64",
  "bincode",
  "bytes",
+ "crc32fast",
  "futures",
  "lindera",
  "memmap2",
