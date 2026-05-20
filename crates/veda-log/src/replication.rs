@@ -141,6 +141,16 @@ pub trait LogFollower: Send + Sync {
     /// The new writer calls this on every follower as part of
     /// the recovery handshake.
     async fn fence_to(&self, epoch: u64) -> Result<(), EnsembleError>;
+    /// Phase D: drop any entries with `seq_id > target` from
+    /// this follower's local log. Called by the new writer
+    /// after `open_and_recover` computes the safe seq, to roll
+    /// back any minority-acked entries an old writer may have
+    /// raced to a single follower before being fenced. Default
+    /// is a no-op so cross-region / transport-only impls that
+    /// can't truncate don't have to override.
+    async fn truncate_above(&self, _target: u64) -> Result<(), EnsembleError> {
+        Ok(())
+    }
 }
 
 /// In-process follower backed by a `ShardLog`. The "transport"
@@ -218,6 +228,45 @@ impl LogFollower for LocalFollower {
         }
         Ok(())
     }
+
+    async fn truncate_above(&self, target: u64) -> Result<(), EnsembleError> {
+        self.log
+            .truncate_above(target)
+            .map_err(|e| EnsembleError::Transport(format!("truncate_above: {e}")))
+    }
+}
+
+/// Phase D ensemble-change orchestration. Helper that produces
+/// a new `LogEnsemble` with a failed follower replaced by a
+/// fresh node_id and the epoch bumped. The caller (operator,
+/// or a future auto-orchestrator monitoring follower health)
+/// persists the new ensemble to `_meta` via
+/// `RegisterShardEnsemble`. The new `LogWriter` reconstructed
+/// against the new follower set with the bumped epoch will
+/// have stale-writer appends fence via `AppendAck::Fenced`.
+pub fn rebuild_ensemble(
+    current: &LogEnsemble,
+    failed_node: NodeId,
+    replacement_node: NodeId,
+) -> LogEnsemble {
+    let new_writers: Vec<NodeId> = current
+        .writers
+        .iter()
+        .map(|w| if *w == failed_node { replacement_node } else { *w })
+        .collect();
+    // If the leader was the failed node, the operator picks a
+    // survivor; default to the replacement.
+    let new_leader = if current.writer_leader == failed_node {
+        replacement_node
+    } else {
+        current.writer_leader
+    };
+    LogEnsemble::new(
+        new_writers,
+        current.ack_quorum,
+        new_leader,
+        current.epoch + 1,
+    )
 }
 
 /// The writer-leader's view of one shard's ensemble. Built from
@@ -361,6 +410,31 @@ impl LogWriter {
             .collect();
         let _ = futures::future::join_all(fence_futures).await;
 
+        // Phase 3: roll back any entries past safe_seq on every
+        // reachable follower. A minority follower may have
+        // accepted an entry that didn't reach quorum before the
+        // old writer was fenced; truncating prevents that entry
+        // from later being conflated with a (different) entry
+        // the new writer assigns at the same seq_id.
+        let trunc_futures: Vec<_> = self
+            .followers
+            .iter()
+            .map(|f| {
+                let f = f.clone();
+                async move { (f.node_id(), f.truncate_above(safe_seq).await) }
+            })
+            .collect();
+        let trunc_results = futures::future::join_all(trunc_futures).await;
+        for (node_id, r) in trunc_results {
+            if let Err(e) = r {
+                tracing::warn!(
+                    node_id,
+                    error = %e,
+                    "open_and_recover: truncate_above failed; follower may carry stale entries past safe_seq"
+                );
+            }
+        }
+
         Ok(safe_seq)
     }
 }
@@ -442,6 +516,92 @@ mod tests {
             }
             e => panic!("expected Fenced, got {e:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn open_and_recover_truncates_minority_acked_entry_past_safe_seq() {
+        // 3 followers; two ack entries 1..=3, the third
+        // additionally has a stray entry 4 (minority-acked
+        // before old writer was fenced). After open_and_recover
+        // at epoch 2, safe_seq = 3 and the stray entry 4 on
+        // follower 3 must be truncated.
+        let (_tmps, follows) = build_followers(3);
+        // Majority ack 1..=3.
+        let ens1 = LogEnsemble::new(vec![1, 2, 3], 2, 1, 1);
+        let writer1 = LogWriter::new(ens1, vec![follows[0].clone(), follows[1].clone()]);
+        writer1.append_batch((1..=3).map(entry).collect()).await.unwrap();
+        // Minority-only entry on follower 3 at seq 1..=4.
+        let writer_three = LogWriter::new(
+            LogEnsemble::new(vec![1, 2, 3], 1, 1, 1),
+            vec![follows[2].clone()],
+        );
+        writer_three.append_batch((1..=4).map(entry).collect()).await.unwrap();
+
+        // Pre-recovery state: follower 3 sees 4 entries.
+        assert_eq!(follows[2].last_durable_seq().await.unwrap(), 4);
+
+        // New writer at epoch 2 runs open_and_recover.
+        let ens2 = LogEnsemble::new(vec![1, 2, 3], 2, 2, 2);
+        let writer2 = LogWriter::new(ens2, follows.clone());
+        let safe = writer2.open_and_recover().await.unwrap();
+        assert!(safe >= 3 && safe <= 4, "safe_seq should be 3 or 4, got {safe}");
+
+        // After recovery, every follower's durable_seq is at
+        // most safe_seq.
+        for (i, f) in follows.iter().enumerate() {
+            let s = f.last_durable_seq().await.unwrap();
+            assert!(s <= safe, "follower {i} has seq {s} > safe_seq {safe}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_ensemble_swaps_failed_node_and_bumps_epoch() {
+        let cur = LogEnsemble::new(vec![1, 2, 3], 2, 1, 5);
+        let next = rebuild_ensemble(&cur, 2, 4);
+        assert_eq!(next.writers, vec![1, 4, 3]);
+        assert_eq!(next.epoch, 6);
+        assert_eq!(next.writer_leader, 1); // unchanged
+        assert_eq!(next.ack_quorum, 2);
+    }
+
+    #[tokio::test]
+    async fn rebuild_ensemble_promotes_replacement_when_leader_fails() {
+        let cur = LogEnsemble::new(vec![1, 2, 3], 2, 2, 7);
+        // Node 2 was the leader; it failed and is replaced by 4.
+        let next = rebuild_ensemble(&cur, 2, 4);
+        assert_eq!(next.writers, vec![1, 4, 3]);
+        assert_eq!(next.writer_leader, 4, "replacement becomes leader when old leader failed");
+        assert_eq!(next.epoch, 8);
+    }
+
+    #[tokio::test]
+    async fn copy_to_seeds_new_follower_from_writer_log() {
+        // Writer has 5 entries; a new follower joining
+        // mid-stream gets seeded by copying segments. After
+        // open, the new log reports the same durable_seq.
+        let src_tmp = tempfile::tempdir().unwrap();
+        let src_log = Arc::new(ShardLog::open(src_tmp.path()).unwrap());
+        for i in 1..=5u64 {
+            src_log.append_one(
+                Hlc::new(i, 0),
+                1,
+                Bytes::copy_from_slice(&i.to_le_bytes()),
+                LogOp::Put,
+                Bytes::from(format!("{{\"i\":{i}}}").into_bytes()),
+            ).unwrap();
+        }
+        assert_eq!(src_log.durable_seq(), 5);
+
+        let dst_tmp = tempfile::tempdir().unwrap();
+        let copied_seq = src_log.copy_to(dst_tmp.path()).unwrap();
+        assert_eq!(copied_seq, 5);
+
+        // Open the destination as a fresh ShardLog — durable_seq
+        // matches the source.
+        let dst_log = ShardLog::open(dst_tmp.path()).unwrap();
+        assert_eq!(dst_log.durable_seq(), 5);
+        let entries = dst_log.read_from(1).unwrap();
+        assert_eq!(entries.len(), 5);
     }
 
     #[tokio::test]
