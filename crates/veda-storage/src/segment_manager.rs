@@ -12,6 +12,23 @@ use crate::compaction::{CompactionConfig, compact_segments, select_segments_for_
 use crate::growing_segment::GrowingSegment;
 use crate::segment::{SegmentMetadata, SegmentReader};
 
+/// Phase F: companion-snapshot path for an MVCC WAL. Given a
+/// `path/to/mvcc.wal`, the snapshot lives next to it at
+/// `path/to/mvcc.wal.snap`. Keeping them sibling-named makes
+/// the recovery story trivial — one ls of the shard dir tells
+/// the operator everything.
+fn mvcc_snap_path(wal_path: &Path) -> PathBuf {
+    let mut p = wal_path.to_path_buf();
+    if let Some(name) = p.file_name().map(|n| n.to_os_string()) {
+        let mut new_name = name;
+        new_name.push(".snap");
+        p.set_file_name(new_name);
+    } else {
+        p.set_extension("snap");
+    }
+    p
+}
+
 /// Handle to a sealed segment with its associated reader.
 pub struct SealedSegmentHandle {
     pub metadata: SegmentMetadata,
@@ -83,13 +100,24 @@ impl SegmentManager {
 
     /// Turn on the MVCC overlay with WAL-backed durability. The
     /// WAL lives at `path` (typically
-    /// `{base_dir}/mvcc.wal`); existing entries are replayed
-    /// into a fresh `MvccStore` before the manager accepts new
-    /// writes. Subsequent `insert_mvcc` / `delete_mvcc` /
-    /// `set_mvcc_safe_ts` calls append + fsync to the WAL.
+    /// `{base_dir}/mvcc.wal`); a sibling snapshot at
+    /// `{path}.snap` (if present) is loaded first, then the
+    /// WAL is replayed on top. Subsequent `insert_mvcc` /
+    /// `delete_mvcc` / `set_mvcc_safe_ts` calls append + fsync
+    /// to the WAL. Call `mvcc_checkpoint()` to rewrite the
+    /// snapshot and truncate the WAL.
     pub fn enable_mvcc_durable(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
         let path = path.as_ref().to_path_buf();
+        let snap_path = mvcc_snap_path(&path);
         let mut store = crate::mvcc::MvccStore::new();
+        // 1. Load snapshot (if any) — gets us to the last
+        //    checkpoint point.
+        let _snap_n = crate::mvcc_wal::MvccWal::load_snapshot_into(&snap_path, &mut store)
+            .map_err(|e| {
+                veda_core::error::VedaError::Index(format!("mvcc snap load: {e}"))
+            })?;
+        // 2. Replay WAL on top — picks up everything after the
+        //    last checkpoint.
         let (_applied, _dropped) =
             crate::mvcc_wal::MvccWal::replay_into(&path, &mut store).map_err(|e| {
                 veda_core::error::VedaError::Index(format!("mvcc replay: {e}"))
@@ -100,6 +128,22 @@ impl SegmentManager {
         self.mvcc = Some(store);
         self.mvcc_wal = Some(wal);
         Ok(())
+    }
+
+    /// Phase F: write a full MVCC snapshot to disk and truncate
+    /// the WAL. Returns the count of versions snapshotted, or
+    /// `None` if MVCC durability isn't enabled. Idempotent on a
+    /// quiescent store — repeated checkpoints just overwrite the
+    /// snapshot file.
+    pub fn mvcc_checkpoint(&mut self) -> Result<Option<usize>> {
+        let (Some(store), Some(wal)) = (self.mvcc.as_ref(), self.mvcc_wal.as_mut()) else {
+            return Ok(None);
+        };
+        let snap_path = mvcc_snap_path(wal.path());
+        let n = wal.checkpoint(store, &snap_path).map_err(|e| {
+            veda_core::error::VedaError::Index(format!("mvcc checkpoint: {e}"))
+        })?;
+        Ok(Some(n))
     }
 
     /// Whether the MVCC overlay is active on this shard.
