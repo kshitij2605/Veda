@@ -345,6 +345,20 @@ async fn create_collection_impl(
         return Err((status, e));
     }
 
+    // Phase C: when the per-shard log applier is on, spawn one
+    // task per shard of the newly-created collection so writes
+    // submitted later through `insert_via_log` get applied.
+    if crate::log_appliers::applier_enabled() {
+        for shard_id in 0..schema.shard_count() {
+            crate::log_appliers::spawn_one(
+                state.clone(),
+                scoped_name.clone(),
+                shard_id,
+                std::time::Duration::from_millis(20),
+            );
+        }
+    }
+
     // Phase G: atomic create-and-load. The bulk insert runs
     // immediately after materialise; any failure rolls back the
     // collection via the regular drop path so the client never
