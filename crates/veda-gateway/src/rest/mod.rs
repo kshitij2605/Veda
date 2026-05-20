@@ -65,6 +65,17 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/collections/{name}",
             delete(collections::drop_collection),
         )
+        // Phase G: atomic re-chunk swap. Creates name@vN and
+        // points the alias at it.
+        .route(
+            "/v1/collections/{name}/reindex",
+            post(collections::reindex_collection),
+        )
+        // Phase G: read / set the alias for a collection.
+        .route(
+            "/v1/admin/collections/{name}/alias",
+            get(collections::get_alias).put(collections::set_alias),
+        )
         // Search
         .route("/v1/collections/{name}/search", post(search::search))
         // Coverage rollup over the per-collection query log

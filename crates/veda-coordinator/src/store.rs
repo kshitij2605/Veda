@@ -153,6 +153,12 @@ pub struct ClusterStateMachine {
     /// per txn; the per-write log entries live in per-shard logs.
     #[serde(default)]
     txn_commits: HashMap<String, crate::raft_types::CommitRecord>,
+    /// Phase G alias table. `alias_name -> target_collection`.
+    /// Populated by `SetCollectionAlias`. Used by the atomic
+    /// re-chunk swap so `docs` resolves to `docs@v2` after a
+    /// successful reindex without invalidating any URLs.
+    #[serde(default)]
+    aliases: HashMap<String, String>,
 }
 
 /// Staged writes for an open transaction. v0 holds them in memory
@@ -217,6 +223,22 @@ impl ClusterStateMachine {
         self.shard_ensembles
             .get(REGION_TOPOLOGY_KEY)
             .map(|s| s.as_str())
+    }
+
+    /// Phase G alias resolver. Returns the target collection
+    /// name for `name`, following at most one alias hop. If
+    /// `name` is not aliased, returns `name` unchanged.
+    pub fn resolve_collection<'a>(&'a self, name: &'a str) -> &'a str {
+        self.aliases
+            .get(name)
+            .map(|s| s.as_str())
+            .unwrap_or(name)
+    }
+
+    /// Phase G: read access to the alias map. Used by the
+    /// gateway to surface alias state in admin endpoints.
+    pub fn aliases(&self) -> &HashMap<String, String> {
+        &self.aliases
     }
 
     /// Apply a command (without index bookkeeping) — pure business logic.
@@ -520,6 +542,26 @@ impl ClusterStateMachine {
                 );
                 ClusterResponse::Ok
             }
+
+            ClusterCommand::SetCollectionAlias { alias, target } => {
+                // The alias may point at the same name as itself
+                // (rollback). The target must be a real
+                // collection — otherwise reads via the alias
+                // would surface a phantom NotFound, which is
+                // worse than rejecting the swap at apply time.
+                if !self.collections.contains_key(target) {
+                    return ClusterResponse::Error(format!(
+                        "SetCollectionAlias: target '{target}' does not exist"
+                    ));
+                }
+                if alias == target {
+                    // Pointing an alias at itself = clear it.
+                    self.aliases.remove(alias);
+                } else {
+                    self.aliases.insert(alias.clone(), target.clone());
+                }
+                ClusterResponse::Ok
+            }
         }
     }
 
@@ -536,6 +578,7 @@ impl ClusterStateMachine {
             ts_lease: self.ts_lease.clone(),
             shard_ensembles: self.shard_ensembles.clone(),
             txn_commits: self.txn_commits.clone(),
+            aliases: self.aliases.clone(),
             last_applied_index: self.last_applied,
         }
     }
@@ -936,6 +979,99 @@ mod tests {
         };
         assert!(matches!(sm.apply(&entry), ClusterResponse::Error(_)));
         assert_eq!(sm.ts_lease().unwrap().ceiling_ns, 1_000);
+    }
+
+    #[test]
+    fn set_collection_alias_swap_and_rollback() {
+        let mut sm = ClusterStateMachine::new();
+        // Create both source + sibling.
+        drive(
+            &mut sm,
+            [
+                ClusterCommand::CreateCollection {
+                    name: "docs".into(),
+                    schema_json: "{}".into(),
+                },
+                ClusterCommand::CreateCollection {
+                    name: "docs@v2".into(),
+                    schema_json: "{}".into(),
+                },
+            ],
+        );
+        assert_eq!(sm.resolve_collection("docs"), "docs");
+
+        // Swap alias docs -> docs@v2.
+        drive(
+            &mut sm,
+            [ClusterCommand::SetCollectionAlias {
+                alias: "docs".into(),
+                target: "docs@v2".into(),
+            }],
+        );
+        assert_eq!(sm.resolve_collection("docs"), "docs@v2");
+        assert_eq!(sm.aliases().get("docs"), Some(&"docs@v2".to_owned()));
+
+        // Rollback: SetCollectionAlias { alias: docs, target: docs }
+        // clears the alias.
+        drive(
+            &mut sm,
+            [ClusterCommand::SetCollectionAlias {
+                alias: "docs".into(),
+                target: "docs".into(),
+            }],
+        );
+        assert_eq!(sm.resolve_collection("docs"), "docs");
+        assert!(sm.aliases().is_empty());
+    }
+
+    #[test]
+    fn set_collection_alias_rejects_unknown_target() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [ClusterCommand::CreateCollection {
+                name: "docs".into(),
+                schema_json: "{}".into(),
+            }],
+        );
+        // Try to alias to a target that doesn't exist.
+        let entry = LogEntry {
+            index: sm.last_applied + 1,
+            command: ClusterCommand::SetCollectionAlias {
+                alias: "docs".into(),
+                target: "ghost".into(),
+            },
+        };
+        match sm.apply(&entry) {
+            ClusterResponse::Error(msg) => assert!(msg.contains("does not exist"), "got {msg}"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        // Alias map is unchanged.
+        assert!(sm.aliases().is_empty());
+    }
+
+    #[test]
+    fn aliases_round_trip_through_snapshot() {
+        let mut sm = ClusterStateMachine::new();
+        drive(
+            &mut sm,
+            [
+                ClusterCommand::CreateCollection {
+                    name: "a".into(),
+                    schema_json: "{}".into(),
+                },
+                ClusterCommand::CreateCollection {
+                    name: "b".into(),
+                    schema_json: "{}".into(),
+                },
+                ClusterCommand::SetCollectionAlias {
+                    alias: "a".into(),
+                    target: "b".into(),
+                },
+            ],
+        );
+        let snap = sm.snapshot();
+        assert_eq!(snap.aliases.get("a"), Some(&"b".to_owned()));
     }
 
     #[test]
