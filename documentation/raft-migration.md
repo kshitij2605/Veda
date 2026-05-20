@@ -1,5 +1,47 @@
 # Raft Consensus Migration Plan
 
+> **PARTIALLY HISTORICAL — superseded in v0.2.0 (Phase C + Phase E hard-remove).**
+>
+> The original migration goal of "route every record write through a
+> single cluster-wide openraft group" is intentionally NOT where Veda
+> landed. In v0.2.0 the data plane split:
+>
+> - `_meta` openraft group — schema, shard plan, nodes, TSO lease,
+>   txn commit records, aliases, region topology. Slim by design.
+> - Per-shard `veda-log` — record writes. NOT Raft. BookKeeper-
+>   style `(E, Qw, Qa)` quorum replication with epoch fencing.
+>   Writer-leadership per shard named in `_meta`.
+>
+> The "current state" table below described the early scaffolding for
+> the all-records-through-Raft target. That target was abandoned in
+> favour of the FoundationDB-shape layered split when it became clear
+> that funnelling every record through one Raft leader caps write
+> throughput at single-leader speed and makes the metadata snapshot
+> grow linearly with the dataset. See ADR-013 and
+> [rearchitecture-overview.md](rearchitecture-overview.md).
+>
+> What this doc IS still useful for:
+>
+> - Historical record of the openraft 0.9 integration steps (state
+>   machine, log store, snapshot, in-process transport, gateway env
+>   switch). All of that scaffolding survived and powers `_meta`
+>   today.
+> - The "current state" table accurately describes the `_meta` Raft
+>   group as it stands now.
+>
+> What this doc IS NOT useful for:
+>
+> - The "Phase 4" / "Phase 5" / "Phase 6" sections that talk about
+>   routing record writes through Raft. That path was deprecated in
+>   `70b4aa0` (Phase E deprecation) and hard-removed in `c8baf29`
+>   (Phase E hard-remove). Record writes flow through `veda-log`,
+>   not the Raft state machine.
+> - `ClusterCommand::InsertRecord` / `TxnWrite` / `BeginTxn` /
+>   `CommitTxn` / `AbortTxn` — all five variants are gone.
+> - `ClusterStateMachine.records` / `open_txns` — both gone.
+>
+> ---
+
 This document describes the staged migration from Veda's current single-leader
 channel-based coordinator (`veda-coordinator/src/network.rs`) to a fully
 distributed Raft consensus layer backed by [openraft](https://github.com/datafuselabs/openraft).

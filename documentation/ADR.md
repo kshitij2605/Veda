@@ -118,7 +118,7 @@ Use MinIO as the default blob storage backend, accessed via the S3-compatible AP
 
 ## ADR-008: Channel-Based Coordination (Raft-Ready)
 
-**Status:** Accepted
+**Status:** Superseded by ADR-013 — see below
 
 ### Context
 Cluster coordination requires consensus on shard assignments, leader election, and configuration changes. Full Raft consensus is complex to implement correctly but necessary for production-grade multi-node deployments.
@@ -198,3 +198,137 @@ Use MarkdownRecursive as the default chunking strategy with 512 tokens (~2000 ch
 ### Consequences
 - **Positive:** Simple, fast, and deterministic. No model dependency during chunking. Respects document structure (headings, paragraphs) for natural break points. Works well with markdown output from FlashParse OCR.
 - **Negative:** May miss some topic boundaries that semantic chunking catches, particularly in unstructured text without clear markdown formatting. Users can switch to semantic chunking via the `chunking_strategy` parameter when needed.
+
+---
+
+## ADR-013: FoundationDB-shape data plane (`_meta` Raft + per-shard log)
+
+**Status:** Accepted (supersedes ADR-008's "Raft-ready" stance for record writes)
+
+### Context
+The original design funnelled every record write through a single cluster-wide openraft group. `ClusterStateMachine.records` was literally the data store: every replica held every record in memory, the reconcile loop pulled them out, and the local `SegmentManager` mirrored what Raft already replicated. Correct but caps write throughput at one leader's single-node speed, and makes the metadata snapshot grow linearly with the dataset.
+
+The state of the art for this shape is not "swap openraft for raft-rs" but a layered split (FoundationDB / Aurora / TiDB v8+ / YugabyteDB shape): a small consensus group carrying only metadata, plus a per-shard distributed log carrying record writes.
+
+### Decision
+Split the data plane:
+
+1. `_meta` openraft group — schema, shard plan, node membership, TSO leases, transaction commit records, collection aliases, region topology. Low write rate, small snapshot.
+2. Per-shard `veda-log` — record writes. BookKeeper-style `(E, Qw, Qa)` quorum replication with epoch fencing. Writer-leadership per shard named in `_meta` (`ChangeShardWriter`). Data-plane RPCs do not touch openraft.
+3. Tonic gRPC for cross-process replication, both intra-region (follower) and cross-region (WAN).
+
+### Consequences
+- **Positive:** Metadata snapshot bounded by schema count, not record count. Record write throughput scales with shard count, not leader speed. Cross-region replication via async log shipping with bounded staleness. Standard FoundationDB-shape architecture; references easily map to known systems.
+- **Negative:** Two replication systems to operate (openraft + BookKeeper-style). Migration off the single-Raft data plane required a deprecation window (we ultimately hard-removed in the same release since no live deployments existed).
+
+---
+
+## ADR-014: Hybrid Logical Clock + leased Timestamp Oracle
+
+**Status:** Accepted
+
+### Context
+The new data plane needs monotonic commit timestamps that order writes across shards and survive leader changes. Options: (a) Spanner-style TrueTime (requires GPS hardware), (b) per-shard HLC ordering (no cross-shard SI), (c) leased centralised TSO with HLC physical-time backbone.
+
+### Decision
+Adopt CockroachDB-style Hybrid Logical Clocks (`(physical_ns, logical)`) as the underlying time format. Issue them from a single leased Timestamp Oracle whose lease is granted via `GrantTsLease` in `_meta`. Default lease horizon 10 s; leader-change-driven rewinds prevented by the lease ceiling.
+
+### Consequences
+- **Positive:** Monotonic commit_ts across shards enables cross-shard snapshot isolation. Lease handoff sub-50 ms. Batched allocation (10k ts per RPC) keeps the TSO from becoming a hot path. `SwappableTso` wrapper enables non-disruptive swap from `LocalTso` (single-node) to `MetaLeasedTso` (multi-node) once Raft is up.
+- **Negative:** Single allocator is a logical bottleneck; the batching mitigates throughput but operators must monitor lease handoff latency. Not as crisp as TrueTime for sub-millisecond external consistency — we explicitly do not target Spanner-class semantics.
+
+---
+
+## ADR-015: MVCC versioning with descending-commit_ts key encoding
+
+**Status:** Accepted
+
+### Context
+Phase G snapshot-isolation transactions need MVCC: records keyed by `(user_key, commit_ts)` so reads at `read_ts = T` see the latest write whose `commit_ts ≤ T`. Two key-encoding directions are possible: ascending commit_ts (reverse-seek to find latest) or descending commit_ts (forward-seek finds latest directly).
+
+### Decision
+Encode commit_ts as `MAX_TS - real_ts` (descending) so that a forward iterator from `(user_key, read_ts)` finds the newest visible version as its first hit. Carry per-doc `commit_ts: Option<u128>` in both `GrowingSegment` and `SegmentReader` (sealed-segment `commit_ts.bin` sidecar). MVCC durability via a per-shard WAL (`MvccWal`) with the same torn-tail-safe framing the data log uses.
+
+### Consequences
+- **Positive:** RocksDB / TiKV convention; saves one reverse-seek per read. Bounded per-key version count (default 100) prevents pathological hot-key growth. Sealed-segment sidecar is omitted entirely when no doc was stamped, so pre-MVCC segments stay byte-identical on disk (backwards-compatible).
+- **Negative:** GC must coordinate across `safe_ts` advancement to avoid dropping a version a live snapshot could observe. Read amplification under heavy churn (multiple versions per key) — bounded by `max_versions_per_key`.
+
+---
+
+## ADR-016: Percolator-style snapshot-isolation transactions
+
+**Status:** Accepted (replaces the v0 single-Raft txn stub)
+
+### Context
+The v0 `BeginTxn` / `TxnWrite` / `CommitTxn` / `AbortTxn` `ClusterCommand`s funnelled every staged write through the cluster-wide Raft and held them as `PendingTxn` blobs on every node. No isolation, no conflict detection — last-writer-wins. Phase G requires a real transactional substrate.
+
+### Decision
+Vendor Percolator's two-phase commit protocol: optimistic concurrency control, primary-and-secondary lock rows on the per-shard log at prewrite (`start_ts`), single `RecordTxnCommit` entry in `_meta` at commit (`commit_ts`), async cleanup of secondary lock markers. Orphan locks resolved by checking the primary in `_meta`. Background orphan-lock resolver runs every 5 s.
+
+### Consequences
+- **Positive:** Snapshot-isolation reads (no anomalies except write-skew, which SI explicitly allows). Cross-shard atomicity via locks on each shard's log. `_meta` chatter is one commit record per txn, not one per write. TiKV's `concurrency_manager` + `txn_types` modules serve as the reference algorithm.
+- **Negative:** Locks are real state that survives node restarts; the orphan-lock resolver must run or stuck locks accumulate. SI is not serialisable — applications that need it must use external coordination.
+
+---
+
+## ADR-017: Atomic re-chunk via collection aliases
+
+**Status:** Accepted
+
+### Context
+Re-chunking / re-embedding a collection (different chunker config, different embedding model) must be atomic from the client's perspective — a partially-rebuilt index should never serve reads. Three options: in-place rebuild (locks the collection), copy-on-write into the same name (requires per-record versioning), or sibling-build + atomic swap.
+
+### Decision
+Use a sibling-build pattern. `POST /v1/collections/{name}/reindex` creates `name@vN` with the same schema, then `SetCollectionAlias { alias: "docs", target: "docs@v2" }` atomically points the alias at the rebuilt sibling. Rollback is `SetCollectionAlias { alias: "docs", target: "docs" }` (alias-to-self clears the entry). The alias map persists in `_meta::aliases` and round-trips through snapshots.
+
+### Consequences
+- **Positive:** Atomic from any reader's perspective — one `_meta` commit flips the alias. Rollback is the same primitive in reverse. Old data stays on disk (auditable / restorable) until an explicit drop.
+- **Negative:** Disk footprint roughly doubles during the rebuild window. Read-side alias resolution adds one hop (single-hop chain by design — no chasing through multi-level aliases).
+
+---
+
+## ADR-018: WAN log shipping with operator-driven failover
+
+**Status:** Accepted
+
+### Context
+Cross-region replication tradeoffs: synchronous commits across regions cost ~30 ms RTT per write (Spanner-class durability, prohibitive throughput); async log shipping with bounded staleness (FoundationDB / Aurora style) preserves throughput at the cost of a configurable RPO window.
+
+### Decision
+Async log shipping. `LogShipper` drains a source `ShardLog` to a replica `LocalReceiver` (or `TonicReceiver` cross-process) in batches. Each `ShipBatchRpc` carries the primary's `safe_ts`; replicas advance their local `safe_ts` once the batch is durable. Cross-region readers call `check_read_ts(read_ts)` which rejects reads ahead of the replica's `safe_ts`. Operator-driven `promote_replica` (no auto-failover): drains pending → refuses if drain incomplete → bumps the topology epoch → old primary's subsequent ships fence via `EpochMismatch`.
+
+### Consequences
+- **Positive:** Throughput stays at primary-region quorum speed. Bounded-staleness reads are explicit, not silent. Operator failover prevents split-brain — the same conservative stance FoundationDB and Spanner take.
+- **Negative:** RPO > 0 in steady state (typically seconds). No auto-failover means longer RTO when the primary region is hard-down; operators must drive the cutover.
+
+---
+
+## ADR-019: Per-shard `LogApplier` for follower nodes
+
+**Status:** Accepted
+
+### Context
+On the writer node, `insert_via_log` appends to the log AND applies inline to the local `SegmentManager` in the same call (fast feedback). On follower nodes the log entry arrives via Tonic-replicated `AppendRpc`; something must drive those entries into the follower's local `SegmentManager`.
+
+### Decision
+Per-shard `LogApplier` task (`crates/veda-storage/src/log_applier.rs`) that holds a `LogTailer` and a handle to the shard's `SegmentManager`, applying `LogOp::Put` / `LogOp::Delete` entries on each tick. Gated by `VEDA_LOG_APPLIER=1` env. When the env is on, the writer's inline-apply path is skipped to prevent double-apply; visibility comes via the applier tick (~20-50 ms).
+
+### Consequences
+- **Positive:** Clean separation — same log entries are the source of truth for every node's SegmentManager. Errors are logged but never propagate (an applier crash must not take the gateway down). The standalone module is fully unit-testable.
+- **Negative:** Visibility latency on followers is bounded by the applier tick. The writer's last_applied cursor isn't yet persisted across restart (idempotent on the storage layer, but wasteful on a cold start that re-applies everything).
+
+---
+
+## ADR-020: Pre-filter MVCC visibility inside the index walk
+
+**Status:** Accepted
+
+### Context
+With MVCC live, a search at `read_ts` should not surface candidates whose `commit_ts > read_ts` or whose version has been superseded. Two implementations: (a) post-filter — execute the index walk normally, drop invisible hits afterwards; (b) pre-filter — intersect the visibility bitmap with the `allowed` set BEFORE calling `index.search_filtered`, so the index never spends candidate budget on invisible docs.
+
+### Decision
+Pre-filter. `LocalShardSearcher::search_shard` (and its sparse / multi-vector siblings) computes the visibility bitmap from `GrowingSegment::visible_doc_ids_at` and `SegmentReader::visible_doc_ids_at` and intersects it into the `allowed` set fed to `VectorIndex::search_filtered`. Brute-force scans check `mvcc_visible.contains(doc_id)` inside the loop. The gateway's old per-record post-filter is removed — redundant.
+
+### Consequences
+- **Positive:** HNSW / quantized-HNSW (which override `search_filtered` with native-walk implementations) never traverse invisible neighbours. Top-k slots aren't wasted. Correctness invariant preserved (the supersession test proves a better-matching superseded version is correctly dropped). The default `search_filtered` (10× oversample + post-filter) still works for IVF-PQ / DiskANN at v1 — they inherit correctness at the cost of some wasted retrieval.
+- **Negative:** Building the visibility bitmap costs O(N) per search for segments with MVCC stamps. Cheap relative to the search itself, but worth bench-checking on very large segments.

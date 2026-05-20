@@ -19,6 +19,7 @@
 
 ## Features
 
+### Storage + retrieval
 - **Multimodal native** -- first-class support for text, image, audio, video, and PDF embeddings
 - **4 ANN index types** -- HNSW, DiskANN (Vamana graph), IVF-PQ, and Flat (brute-force)
 - **RaBitQ + SQ8 quantization** -- memory-efficient vector compression with minimal recall loss
@@ -27,6 +28,17 @@
 - **Multi-vector fusion** -- RRF, WeightedSum, and Intersection strategies for cross-modal retrieval
 - **Pattern search** -- suffix array-backed substring and fuzzy matching on text fields
 - **Built-in blob storage** -- store raw files alongside embeddings via MinIO/S3-compatible backends
+
+### Distributed data plane (FoundationDB-shape)
+- **Per-shard append-only log** (`veda-log`) -- record writes go through `veda-log`, not the metadata Raft. BookKeeper-style quorum replication (E, Qw, Qa) with epoch fencing; Tonic gRPC transport for cross-process followers.
+- **Hybrid Logical Clock + leased TSO** (`veda-time`) -- monotonic commit timestamps issued by a lease holder named in `_meta`. `MetaLeasedTso` swaps in automatically when Raft is configured.
+- **MVCC versioning** -- every shard tracks per-doc `commit_ts` from growing through sealed segments. Reads at `?at=<ts>` return the snapshot view; the executor filters superseded / future versions inside the search walk (HNSW / IVF-PQ / Flat / brute-force). Disk-durable via per-shard MVCC WAL.
+- **Percolator snapshot-isolation transactions** -- begin/commit/abort on `/v1/txn`, primary-and-secondary locks on the per-shard log, commit record in `_meta`. Replaces the v0 single-Raft txn stub. Background orphan-lock resolver included.
+- **Atomic create-and-load** -- `POST /v1/collections` accepts `seed_records`; insert failure rolls back the collection via a compensating drop.
+- **Collection aliases** -- `SetCollectionAlias` swaps a name onto a sibling (e.g. `docs` → `docs@v2`) at commit_ts. The atomic-cutover primitive for re-chunk / re-embed workflows.
+- **Cross-region WAN log shipping** -- async replication of per-shard logs to replica regions with bounded staleness, `safe_ts` gating on cross-region reads, and an operator-driven `promote_replica` cutover that drains pending then bumps the topology epoch (fences old primaries).
+
+### Pipelines + tooling
 - **7 chunking strategies** -- MarkdownRecursive, MarkdownHeading (3 levels), Semantic, Sentence, FixedSize, Page, None
 - **FlashParse OCR integration** -- end-to-end document processing with configurable chunking
 - **Auto-embedding pipeline** -- automatic embedding generation with modality validation
@@ -34,6 +46,7 @@
 - **JWT authentication + RBAC** -- Admin, Editor, and Viewer roles with token-based auth
 - **Full observability stack** -- Prometheus metrics, OpenTelemetry tracing, query explain, health checks, and a pre-built Grafana dashboard
 - **Python SDK** -- `veda-client` package for idiomatic Python access
+- **`veda-admin` CLI** -- offline maintenance tool (currently scaffold)
 
 ## Quick Start
 
@@ -87,43 +100,57 @@ cd niriksha && npm install && npm run build
 ## Architecture
 
 ```
-                    +-----------+
-                    |  Niriksha |   (React dashboard)
-                    +-----+-----+
-                          |
-                    +-----v-----+
-   Clients ------> |  Gateway   |   (REST API, auth, routing)
-                    +-----+-----+
-                          |
-                    +-----v-----+
-                    |   Query    |   (planning, fusion, fan-out)
-                    +-----+-----+
-                          |
-              +-----------+-----------+
-              |                       |
-        +-----v-----+          +-----v-----+
-        |   Index    |          |  Storage   |
-        | HNSW/Disk  |          | vectors,   |
-        | ANN/IVF-PQ |          | blobs, WAL |
-        +-----+-----+          +-----+-----+
-              |                       |
-        +-----v-----------------------v-----+
-        |          Coordinator               |
-        |   (shards, cluster, compaction)    |
-        +------------------------------------+
+                  +-----------+
+                  |  Niriksha |   (React dashboard)
+                  +-----+-----+
+                        |
+                  +-----v-----+
+ Clients -------> |  Gateway   |   REST, auth, MVCC reads at ?at=<ts>
+                  +--+--+--+---+
+                     |  |  |
+       +-------------+  |  +-------------+
+       |                |                |
+       v                v                v
+  +---------+    +--------------+   +------------------+
+  | TSO/HLC |    |  _meta RAFT  |   |  PER-SHARD LOGS  |
+  | veda-   |    |  schema /    |   |  veda-log        |
+  | time    |    |  shard plan /|   |  - quorum write  |
+  | leased  |    |  TSO lease / |   |    (E, Qw, Qa)   |
+  | alloc.  |    |  txn commits |   |  - tonic gRPC    |
+  +---------+    |  / aliases / |   |  - epoch-fenced  |
+                 |  RegionTopo  |   |  - WAN ship      |
+                 +------+-------+   +---------+--------+
+                        |                     |
+                        +----------+----------+
+                                   v
+                  +----------------------------------+
+                  |  STORAGE / APPLIER (veda-storage)|
+                  |  - LogApplier tails shard logs   |
+                  |  - growing segment (commit_ts)   |
+                  |  - sealed segment (commit_ts     |
+                  |    sidecar) + MVCC WAL durable   |
+                  |  - executor filters by read_ts   |
+                  +----------------------------------+
 ```
+
+The metadata Raft (`_meta`) carries only schemas, the shard plan, nodes, the TSO lease, txn commit records, collection aliases, and the region topology — NOT record bodies. Record writes go to per-shard `veda-log`; reads go to local `SegmentManager`s with per-doc `commit_ts` filtering.
 
 **Crates:**
 
 | Crate | Role |
 |---|---|
-| `veda-gateway` | REST API (axum), authentication, request routing |
-| `veda-query` | Query planning, multi-vector fusion, distributed fan-out |
-| `veda-index` | ANN indexes (HNSW, DiskANN, IVF-PQ, Flat), scalar indexes |
-| `veda-storage` | Vector storage, blob storage, WAL, mmap I/O |
-| `veda-core` | Shared types, distance functions, filter expressions |
-| `veda-coordinator` | Shard management, cluster coordination, compaction |
+| `veda-gateway` | REST API (axum), authentication, MVCC snapshot reads, txn endpoints, LogApplier bootstrap |
+| `veda-query` | Query planning, multi-vector fusion, distributed fan-out, executor-side visibility filter |
+| `veda-index` | ANN indexes (HNSW, DiskANN, IVF-PQ, Flat), scalar indexes — visibility-aware `search_filtered` |
+| `veda-storage` | Vector storage, blob storage, growing + sealed segments with `commit_ts`, MVCC store + WAL, `LogApplier` |
+| `veda-core` | Shared types, distance functions, filter expressions, schema (incl. `use_log_primary` / `use_mvcc`) |
+| `veda-coordinator` | `_meta` state machine + apply path, Percolator `TxnCoordinator`, shard router, Raft transport |
+| `veda-time` | Hybrid Logical Clock, `Tso` trait, `LocalTso`, `MetaLeasedTso`, `SwappableTso` |
+| `veda-log` | Per-shard `ShardLog`, BookKeeper-style replication, Tonic transport for follower + WAN, cutover primitive |
 | `veda-server` | Binary entry point, configuration, startup |
+| `veda-admin` | Offline maintenance CLI (scaffold) |
+
+See [documentation/rearchitecture-overview.md](documentation/rearchitecture-overview.md) for the layered design and current phase status.
 
 ## API Examples
 
