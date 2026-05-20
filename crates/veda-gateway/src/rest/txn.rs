@@ -1,36 +1,40 @@
-//! Transaction lifecycle REST endpoints (v0 — NOT production
-//! Percolator).
+//! Transaction lifecycle REST endpoints — production Phase G
+//! integration. Routes through `TxnCoordinator` (Percolator SI)
+//! instead of the v0 ClusterCommand-based stub.
 //!
-//! Surface:
+//! Surface (unchanged from v0, the wire shape is stable):
 //!   POST /v1/txn                  open a new transaction
 //!     → 201 { "txn_id": "<uuid>" }
-//!   POST /v1/txn/{txn_id}/commit  commit, flipping staged writes
-//!     → 200 { "txn_id": "...", "status": "committed" }
+//!   POST /v1/txn/{txn_id}/commit  commit (prewrite + commit)
+//!     → 200 { "txn_id": "...", "status": "committed", "commit_ts": "..." }
 //!   POST /v1/txn/{txn_id}/abort   abort, dropping staged writes
 //!     → 200 { "txn_id": "...", "status": "aborted" }
 //!
-//! Writes participate in a transaction when the caller sends
-//! `X-Veda-Txn-Id: <txn_id>` on POST /v1/collections/{name}/insert.
-//! The insert handler will then submit `TxnWrite` instead of
-//! `InsertRecord` and the row stays invisible until commit.
-//!
-//! Limits in v0 — see [`veda_coordinator::raft_types::ClusterCommand::BeginTxn`]
-//! doc for the full list. Headline: no concurrency control, no
-//! read-your-writes inside a txn, no cross-shard coordination.
+//! Writes participate via `X-Veda-Txn-Id: <txn_id>` on
+//! `POST /v1/collections/{name}/insert`. The insert handler
+//! buffers the mutation into the matching TxnHandle (in
+//! `AppState::open_txn_handles`); commit triggers prewrite +
+//! commit on the coordinator.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
-use uuid::Uuid;
-use veda_coordinator::raft_types::ClusterCommand;
+use veda_coordinator::percolator::TxnError;
 
-use super::collections::{raft_redirect, ErrorResponse};
+use super::collections::ErrorResponse;
 use super::state::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct BeginTxnResponse {
     pub txn_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommitTxnResponse {
+    pub txn_id: String,
+    pub status: &'static str,
+    pub commit_ts_ns: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,88 +48,95 @@ pub const TXN_HEADER: &str = "x-veda-txn-id";
 
 pub async fn begin(
     State(state): State<AppState>,
-) -> axum::response::Response {
-    if let Some(leader_url) = state.leader_rest_address().await {
-        return raft_redirect(&leader_url, "/v1/txn");
-    }
-    use axum::response::IntoResponse;
-    let txn_id = Uuid::new_v4().to_string();
-    if let Err((status, body)) = submit(&state, ClusterCommand::BeginTxn {
-        txn_id: txn_id.clone(),
-    })
-    .await
-    {
-        return (status, body).into_response();
-    }
-    (StatusCode::CREATED, Json(BeginTxnResponse { txn_id })).into_response()
+) -> Result<(StatusCode, Json<BeginTxnResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let handle = state
+        .inner
+        .txn_coordinator
+        .begin()
+        .await
+        .map_err(map_txn_err)?;
+    let txn_id = handle.txn_id.clone();
+    state
+        .inner
+        .open_txn_handles
+        .write()
+        .await
+        .insert(txn_id.clone(), handle);
+    Ok((StatusCode::CREATED, Json(BeginTxnResponse { txn_id })))
 }
 
 pub async fn commit(
     State(state): State<AppState>,
     Path(txn_id): Path<String>,
-) -> axum::response::Response {
-    if let Some(leader_url) = state.leader_rest_address().await {
-        return raft_redirect(&leader_url, &format!("/v1/txn/{txn_id}/commit"));
-    }
-    use axum::response::IntoResponse;
-    if let Err((status, body)) = submit(&state, ClusterCommand::CommitTxn {
-        txn_id: txn_id.clone(),
-    })
-    .await
-    {
-        return (status, body).into_response();
-    }
-    Json(TxnStatusResponse {
+) -> Result<Json<CommitTxnResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let handle = state
+        .inner
+        .open_txn_handles
+        .write()
+        .await
+        .remove(&txn_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("txn '{txn_id}' not open"),
+                }),
+            )
+        })?;
+    state
+        .inner
+        .txn_coordinator
+        .prewrite(&handle)
+        .await
+        .map_err(map_txn_err)?;
+    let commit_ts_ns = state
+        .inner
+        .txn_coordinator
+        .commit(&handle)
+        .await
+        .map_err(map_txn_err)?;
+    Ok(Json(CommitTxnResponse {
         txn_id,
         status: "committed",
-    })
-    .into_response()
+        commit_ts_ns,
+    }))
 }
 
 pub async fn abort(
     State(state): State<AppState>,
     Path(txn_id): Path<String>,
-) -> axum::response::Response {
-    if let Some(leader_url) = state.leader_rest_address().await {
-        return raft_redirect(&leader_url, &format!("/v1/txn/{txn_id}/abort"));
+) -> Result<Json<TxnStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let handle = state
+        .inner
+        .open_txn_handles
+        .write()
+        .await
+        .remove(&txn_id);
+    if let Some(h) = handle {
+        state.inner.txn_coordinator.abort(&h).await;
     }
-    use axum::response::IntoResponse;
-    if let Err((status, body)) = submit(&state, ClusterCommand::AbortTxn {
-        txn_id: txn_id.clone(),
-    })
-    .await
-    {
-        return (status, body).into_response();
-    }
-    Json(TxnStatusResponse {
+    // Idempotent: aborting an unknown / already-aborted txn
+    // returns OK rather than 404 (caller may retry on a flaky
+    // network).
+    Ok(Json(TxnStatusResponse {
         txn_id,
         status: "aborted",
-    })
-    .into_response()
+    }))
 }
 
-/// Push the txn command through Raft. v0 requires Raft mode —
-/// without consensus, transactional staging has nowhere to live.
-async fn submit(
-    state: &AppState,
-    cmd: ClusterCommand,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let raft_guard = state.inner.raft.read().await;
-    let coord = raft_guard.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "transactions require VEDA_COORDINATOR=raft".to_owned(),
-            }),
-        )
-    })?;
-    coord.execute(cmd).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("raft submit: {e}"),
-            }),
-        )
-    })?;
-    Ok(())
+fn map_txn_err(e: TxnError) -> (StatusCode, Json<ErrorResponse>) {
+    let status = match &e {
+        TxnError::NotOpen { .. } => StatusCode::NOT_FOUND,
+        TxnError::AlreadyCommitted { .. } => StatusCode::CONFLICT,
+        TxnError::LockConflict { .. } | TxnError::WriteWriteConflict { .. } => {
+            StatusCode::CONFLICT
+        }
+        TxnError::Tso(_) => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    (
+        status,
+        Json(ErrorResponse {
+            error: format!("{e}"),
+        }),
+    )
 }

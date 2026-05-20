@@ -19,7 +19,7 @@ use crate::rest::saved_objects::SavedObjectStore;
 use veda_coordinator::multi_group::MultiGroupCoordinator;
 use veda_coordinator::raft_coordinator::RaftCoordinator;
 use veda_log::ShardLog;
-use veda_time::{LocalTso, Tso};
+use veda_time::{LocalTso, SwappableTso, Tso};
 
 /// Represents a user in the in-memory user store.
 #[derive(Clone)]
@@ -110,7 +110,25 @@ pub struct AppStateInner {
     /// (`.claude/plans/structured-mixing-turing.md`). The
     /// `MetaLeasedTso` impl that consults `_meta`'s lease ships
     /// in a Phase A follow-up.
+    /// Timestamp oracle. Starts as `LocalTso` wrapped in
+    /// [`SwappableTso`]; the gateway startup swaps the inner
+    /// impl to `MetaLeasedTso` once Raft is up via
+    /// [`AppState::load_meta_leased_tso`]. Callers see the
+    /// `dyn Tso` surface unchanged.
     pub tso: Arc<dyn Tso>,
+    /// Typed handle to the same swapper as `tso` — kept here
+    /// solely so `load_meta_leased_tso` can call
+    /// [`SwappableTso::swap`] without re-discovering it. Shares
+    /// the refcount with `tso`.
+    pub tso_swapper: Arc<SwappableTso>,
+    /// Phase G Percolator transaction coordinator. All
+    /// `BEGIN / COMMIT / ABORT` requests go through this; the
+    /// `X-Veda-Txn-Id` insert header buffers mutations into the
+    /// matching `TxnHandle`.
+    pub txn_coordinator: Arc<veda_coordinator::percolator::TxnCoordinator>,
+    /// Open transaction handles keyed by `txn_id`. Cleared on
+    /// commit / abort / orphan-resolver eviction.
+    pub open_txn_handles: RwLock<HashMap<String, veda_coordinator::percolator::TxnHandle>>,
     /// Per-(collection, shard_id) append-only logs. Phase B
     /// scaffolding for the FoundationDB-shape data plane. Today
     /// these are dark-write targets: `records::insert` appends
@@ -120,9 +138,18 @@ pub struct AppStateInner {
     pub shard_logs: RwLock<HashMap<String, Arc<ShardLog>>>,
 }
 
+/// Build a swappable TSO + the matching `dyn Tso` handle that
+/// shares its refcount. Used by every `AppState` constructor.
+fn make_tso_pair() -> (Arc<dyn Tso>, Arc<SwappableTso>) {
+    let swapper = Arc::new(SwappableTso::new(Arc::new(LocalTso::new())));
+    let dyn_handle: Arc<dyn Tso> = swapper.clone();
+    (dyn_handle, swapper)
+}
+
 impl AppState {
     /// Create a new AppState with auth **disabled** (default for tests).
     pub fn new(data_dir: &Path) -> Self {
+        let tso_pair = make_tso_pair();
         Self {
             inner: Arc::new(AppStateInner {
                 schemas: RwLock::new(HashMap::new()),
@@ -147,7 +174,12 @@ impl AppState {
                 raft_materialized_records: RwLock::new(HashMap::new()),
                 raft_rest_peers: RwLock::new(HashMap::new()),
                 multi_group: RwLock::new(None),
-                tso: Arc::new(LocalTso::new()),
+                tso: tso_pair.0.clone(),
+                tso_swapper: tso_pair.1.clone(),
+                txn_coordinator: Arc::new(
+                    veda_coordinator::percolator::TxnCoordinator::new(tso_pair.0.clone()),
+                ),
+                open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: RwLock::new(HashMap::new()),
             }),
         }
@@ -163,6 +195,7 @@ impl AppState {
                 role: Role::Admin,
             },
         );
+        let tso_pair = make_tso_pair();
         Self {
             inner: Arc::new(AppStateInner {
                 schemas: RwLock::new(HashMap::new()),
@@ -187,7 +220,12 @@ impl AppState {
                 raft_materialized_records: RwLock::new(HashMap::new()),
                 raft_rest_peers: RwLock::new(HashMap::new()),
                 multi_group: RwLock::new(None),
-                tso: Arc::new(LocalTso::new()),
+                tso: tso_pair.0.clone(),
+                tso_swapper: tso_pair.1.clone(),
+                txn_coordinator: Arc::new(
+                    veda_coordinator::percolator::TxnCoordinator::new(tso_pair.0.clone()),
+                ),
+                open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: RwLock::new(HashMap::new()),
             }),
         }
@@ -199,6 +237,7 @@ impl AppState {
         jwt_secret: &str,
         users: HashMap<String, UserRecord>,
     ) -> Self {
+        let tso_pair = make_tso_pair();
         Self {
             inner: Arc::new(AppStateInner {
                 schemas: RwLock::new(HashMap::new()),
@@ -223,7 +262,12 @@ impl AppState {
                 raft_materialized_records: RwLock::new(HashMap::new()),
                 raft_rest_peers: RwLock::new(HashMap::new()),
                 multi_group: RwLock::new(None),
-                tso: Arc::new(LocalTso::new()),
+                tso: tso_pair.0.clone(),
+                tso_swapper: tso_pair.1.clone(),
+                txn_coordinator: Arc::new(
+                    veda_coordinator::percolator::TxnCoordinator::new(tso_pair.0.clone()),
+                ),
+                open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: RwLock::new(HashMap::new()),
             }),
         }
@@ -480,6 +524,33 @@ impl AppState {
             .await
             .get(&leader_id)
             .cloned()
+    }
+
+    /// Phase G: spawn the orphan-lock resolver background task.
+    /// Runs every 5 seconds, sweeps the TxnCoordinator's
+    /// LockTable for leases past their ceiling.
+    pub fn spawn_orphan_resolver(&self) -> tokio::task::JoinHandle<()> {
+        self.inner
+            .txn_coordinator
+            .clone()
+            .spawn_orphan_resolver(std::time::Duration::from_secs(5))
+    }
+
+    /// After `load_raft_from_env` has installed a coordinator,
+    /// swap the gateway's TSO from `LocalTso` to `MetaLeasedTso`
+    /// bound to that coordinator + start the renewer so the
+    /// leader claims the lease. No-op when Raft isn't running.
+    pub async fn load_meta_leased_tso(&self) {
+        let coord = match self.inner.raft.read().await.clone() {
+            Some(c) => c,
+            None => return,
+        };
+        let leased = std::sync::Arc::new(
+            veda_coordinator::meta_leased_tso::MetaLeasedTso::new(coord),
+        );
+        leased.start_renewer().await;
+        self.inner.tso_swapper.swap(leased).await;
+        tracing::info!("TSO swapped to MetaLeasedTso bound to raft coordinator");
     }
 
     pub async fn load_raft_from_env(&self) {

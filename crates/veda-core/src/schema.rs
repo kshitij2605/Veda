@@ -233,6 +233,13 @@ pub struct CollectionSchema {
     /// changed after some had already sealed.
     #[serde(default)]
     stored_format: Option<String>,
+    /// Per-collection opt-in to the Phase C primary-write path.
+    /// When `Some(true)`, writes for this collection go through
+    /// `veda-log` regardless of the `VEDA_LOG_PRIMARY` env flag.
+    /// When `None`, the env flag decides. Lets operators roll out
+    /// the new path collection-by-collection.
+    #[serde(default)]
+    use_log_primary: Option<bool>,
 }
 
 impl CollectionSchema {
@@ -244,7 +251,21 @@ impl CollectionSchema {
             shard_count: 1,
             replication_factor: 1,
             stored_format: None,
+            use_log_primary: None,
         }
+    }
+
+    /// Per-collection log-primary override. Returns the
+    /// effective decision, falling back to the env flag when
+    /// the schema didn't specify.
+    pub fn effective_use_log_primary(&self) -> bool {
+        if let Some(v) = self.use_log_primary {
+            return v;
+        }
+        matches!(
+            std::env::var("VEDA_LOG_PRIMARY").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE")
+        )
     }
 
     pub fn id(&self) -> CollectionId {
@@ -335,6 +356,7 @@ pub struct CollectionSchemaBuilder {
     shard_count: u32,
     replication_factor: u32,
     stored_format: Option<String>,
+    use_log_primary: Option<bool>,
 }
 
 impl CollectionSchemaBuilder {
@@ -361,6 +383,15 @@ impl CollectionSchemaBuilder {
     /// values fall back to JSONL at segment-write time.
     pub fn stored_format(mut self, fmt: impl Into<String>) -> Self {
         self.stored_format = Some(fmt.into());
+        self
+    }
+
+    /// Opt this collection into the Phase C primary-write path.
+    /// `None` (the default) means "use the env flag";
+    /// `Some(true)` / `Some(false)` is an explicit per-collection
+    /// override.
+    pub fn use_log_primary(mut self, v: Option<bool>) -> Self {
+        self.use_log_primary = v;
         self
     }
 
@@ -415,6 +446,7 @@ impl CollectionSchemaBuilder {
             shard_count: self.shard_count,
             replication_factor: self.replication_factor,
             stored_format: self.stored_format,
+            use_log_primary: self.use_log_primary,
         })
     }
 }

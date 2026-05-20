@@ -344,6 +344,29 @@ impl TxnCoordinator {
         }
     }
 
+    /// Spawn a background task that resolves orphan locks on a
+    /// timer. Returns a `JoinHandle` so callers (the gateway)
+    /// can cancel on shutdown. Sleeps `interval` between
+    /// iterations; default is 5 seconds for production.
+    pub fn spawn_orphan_resolver(
+        self: std::sync::Arc<Self>,
+        interval: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let me = self;
+            loop {
+                tokio::time::sleep(interval).await;
+                let rolled = me.resolve_orphan_locks().await;
+                if rolled > 0 {
+                    tracing::warn!(
+                        rolled,
+                        "orphan-lock resolver rolled back {rolled} expired transactions"
+                    );
+                }
+            }
+        })
+    }
+
     /// Look at every active lock and roll back any whose lease
     /// has expired (wall clock > lease_ns). Production runs this
     /// on a periodic task. Returns the count of rolled-back
@@ -519,6 +542,27 @@ mod tests {
                 }
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_orphan_resolver_runs_periodically() {
+        let tso = Arc::new(LocalTso::new());
+        let mut cc = TxnCoordinator::new(tso);
+        cc.lease_ns = 0; // immediate orphan
+        let cc_arc = Arc::new(cc);
+        let mut h = cc_arc.begin().await.unwrap();
+        h.buffer(mut_put(b"k", b"v"));
+        cc_arc.prewrite(&h).await.unwrap();
+        // Spawn the resolver with a 10ms tick.
+        let handle = cc_arc
+            .clone()
+            .spawn_orphan_resolver(std::time::Duration::from_millis(10));
+        // Wait long enough for at least 2 ticks.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // The lock for k must have been released by the
+        // resolver.
+        assert!(cc_arc.locks.get(b"k").await.is_none());
+        handle.abort();
     }
 
     #[tokio::test]

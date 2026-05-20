@@ -23,6 +23,8 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     app_state.load_llm_from_env().await;
     app_state.load_auth_from_env().await;
     app_state.load_raft_from_env().await;
+    app_state.load_meta_leased_tso().await;
+    let _orphan_handle = app_state.spawn_orphan_resolver();
     app_state.load_raft_rest_peers_from_env().await;
     app_state.spawn_raft_metrics_publisher().await;
     app_state.spawn_raft_reconcile().await;

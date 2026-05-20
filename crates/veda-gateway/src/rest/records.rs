@@ -124,11 +124,11 @@ async fn insert_impl(
         })?
     };
 
-    // Phase C: when `VEDA_LOG_PRIMARY=1` is set, the per-shard
-    // veda-log is the source of truth and the cluster-wide Raft
-    // is bypassed for record writes. Schemas + transactions still
-    // go through `_meta`; only the data plane moves.
-    if log_primary_enabled() {
+    // Phase C: route this collection's writes through
+    // `veda-log` when EITHER the schema explicitly opted in
+    // (`use_log_primary: Some(true)`) OR `VEDA_LOG_PRIMARY=1`
+    // is set as a global rollout flag.
+    if schema.effective_use_log_primary() {
         let _ = start;
         return insert_via_log(state, name, txn_id, req, schema).await;
     }
@@ -717,16 +717,12 @@ fn dark_write_enabled() -> bool {
     )
 }
 
-/// True when `VEDA_LOG_PRIMARY=1` (Phase C cutover) is set. When
-/// on, record writes bypass the cluster-wide Raft and go through
-/// the per-shard `veda-log` instead; the SegmentManager is fed by
-/// the direct apply path in [`insert_via_log`].
-fn log_primary_enabled() -> bool {
-    matches!(
-        std::env::var("VEDA_LOG_PRIMARY").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE")
-    )
-}
+// Note: per-collection log-primary decision is made via
+// `CollectionSchema::effective_use_log_primary()` — see
+// `crates/veda-core/src/schema.rs`. This file used to have a
+// helper that consulted the env flag directly; it's been
+// rolled into the schema accessor so per-collection overrides
+// land cleanly.
 
 /// Phase C primary write path. Each record:
 ///   1. Parses + serialises (same shape the Raft path used).
@@ -746,14 +742,52 @@ async fn insert_via_log(
     req: InsertRequest,
     schema: veda_core::schema::CollectionSchema,
 ) -> Result<(StatusCode, Json<InsertResponse>), (StatusCode, Json<ErrorResponse>)> {
-    if txn_id.is_some() {
-        // Txn writes still go through the cluster-wide path until
-        // Phase G. Surface a clear error instead of silently
-        // applying without commit barriers.
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "X-Veda-Txn-Id writes not yet supported in VEDA_LOG_PRIMARY mode (Phase G)".into(),
+    if let Some(tid) = txn_id.as_deref() {
+        // Phase G integration: buffer mutations into the open
+        // TxnHandle. Caller drives prewrite + commit via
+        // `POST /v1/txn/{id}/commit`.
+        let mut handles = state.inner.open_txn_handles.write().await;
+        let handle = handles.get_mut(tid).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("txn '{tid}' not open"),
+                }),
+            )
+        })?;
+        let mut applied_ids = Vec::with_capacity(req.records.len());
+        for raw in req.records.iter() {
+            let record = parse_record_public(raw, &schema).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse { error: e }),
+                )
+            })?;
+            let rid = record.id().to_string();
+            let payload = bytes::Bytes::from(serde_json::to_vec(&record).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("serialize record: {e}"),
+                    }),
+                )
+            })?);
+            // Key as `{scoped_collection}/{record_id}` — the
+            // MVCC key shape that pairs with how Phase F's
+            // SegmentManager integration looks up versioned rows.
+            let key = format!("{name}/{rid}").into_bytes();
+            handle.buffer(veda_coordinator::percolator::Mutation {
+                key,
+                value: Some(payload),
+            });
+            applied_ids.push(rid);
+        }
+        let inserted = applied_ids.len();
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(InsertResponse {
+                inserted,
+                ids: applied_ids,
             }),
         ));
     }

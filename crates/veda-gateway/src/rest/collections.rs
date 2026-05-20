@@ -58,6 +58,13 @@ pub struct CreateCollectionRequest {
     /// segments without rewriting existing ones.
     #[serde(default)]
     pub stored_format: Option<String>,
+    /// Per-collection opt-in for the Phase C primary-write path.
+    /// When `Some(true)`, writes go through the per-shard
+    /// `veda-log` for THIS collection regardless of the
+    /// `VEDA_LOG_PRIMARY` global env flag. When `None` (the
+    /// default), the env flag decides.
+    #[serde(default)]
+    pub use_log_primary: Option<bool>,
 }
 
 fn default_shard_count() -> u32 {
@@ -227,7 +234,8 @@ async fn create_collection_impl(
     // the scoped name; responses strip it back to user_name.
     let mut builder = CollectionSchema::builder(&scoped_name)
         .shard_count(req.shard_count)
-        .replication_factor(req.replication_factor);
+        .replication_factor(req.replication_factor)
+        .use_log_primary(req.use_log_primary);
     if let Some(fmt) = req.stored_format.as_deref() {
         match fmt.to_lowercase().as_str() {
             "jsonl" | "columnar" => builder = builder.stored_format(fmt.to_lowercase()),
