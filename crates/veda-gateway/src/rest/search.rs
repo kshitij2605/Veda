@@ -241,6 +241,23 @@ pub async fn search(
     } else {
         None
     };
+    // Phase H: cross-region reader gating. Sentinel 0 means
+    // gating is off; once the operator advances safe_ts above 0,
+    // reads ahead of it are rejected.
+    if let Some(ts) = effective_read_ts {
+        let safe = *state.inner.replica_safe_ts.read().await;
+        if safe > 0 && ts > safe {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: format!(
+                        "replica behind: read_ts={ts} exceeds replica_safe_ts={safe} by {}",
+                        ts - safe
+                    ),
+                }),
+            ));
+        }
+    }
 
     let executors = state.inner.query_executors.read().await;
     let executor = executors.get(&name).ok_or_else(|| {

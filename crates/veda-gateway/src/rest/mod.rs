@@ -48,6 +48,11 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/admin/region_topology/promote",
             post(admin::promote_region),
         )
+        // Phase H: cross-region reader-gating watermark.
+        .route(
+            "/v1/admin/replica/safe_ts",
+            get(admin::get_replica_safe_ts).post(admin::set_replica_safe_ts),
+        )
         // Raft membership API (Phase 6).
         .route(
             "/v1/admin/cluster/join",
