@@ -190,6 +190,18 @@ impl ClusterStateMachine {
         }
     }
 
+    /// Phase E migration: strip v0-only fields (`records` and
+    /// `open_txns`) that used to live on the metadata Raft and
+    /// have moved to per-shard logs + the Percolator coordinator.
+    /// Counts how many entries were dropped, for the admin tool.
+    pub fn drop_v0_data_plane(&mut self) -> (usize, usize) {
+        let recs: usize = self.records.values().map(|m| m.len()).sum();
+        let txns = self.open_txns.len();
+        self.records.clear();
+        self.open_txns.clear();
+        (recs, txns)
+    }
+
     /// Apply a command (without index bookkeeping) — pure business logic.
     fn apply_command(&mut self, cmd: &ClusterCommand) -> ClusterResponse {
         match cmd {

@@ -10,6 +10,7 @@ members = [
     "crates/veda-server",
     "crates/veda-time",
     "crates/veda-log",
+    "crates/veda-admin",
 ]
 # `crates/veda-coordinator-raftrs` exists as a *decision artifact*
 # (see documentation/consensus-swap-decision.md). It's deliberately
