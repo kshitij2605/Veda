@@ -34,6 +34,13 @@ pub struct SearchRequest {
     /// `limit * 4` candidates (oversampling), reranks them via the
     /// configured `RERANK_ENDPOINT`, and returns the top `limit`.
     pub rerank: Option<super::rerank::RerankConfig>,
+    /// Phase F MVCC snapshot timestamp (u128 decimal). When the
+    /// collection has MVCC on, hits whose record isn't visible
+    /// at this `read_ts` are filtered out before the response.
+    /// Default = TSO.now() at the start of the search.
+    /// Collections without MVCC ignore the value.
+    #[serde(default)]
+    pub at: Option<String>,
 }
 
 fn default_limit() -> usize {
@@ -396,6 +403,45 @@ pub async fn search(
     } else {
         results
     };
+
+    // Phase F MVCC visibility post-filter. For collections with
+    // MVCC enabled, drop hits whose record is invisible at
+    // `read_ts` (no version with commit_ts <= read_ts, or the
+    // visible version is a tombstone). Non-MVCC collections
+    // skip — `is_visible_at` returns true uniformly.
+    let mvcc_active = {
+        let managers = state.inner.segment_managers.read().await;
+        managers
+            .get(&name)
+            .map(|m| m.values().any(|sm| sm.has_mvcc()))
+            .unwrap_or(false)
+    };
+    if mvcc_active {
+        let read_ts: u128 = match req.at.as_deref() {
+            Some(s) => s.parse::<u128>().map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("invalid at='{s}': expected decimal u128"),
+                    }),
+                )
+            })?,
+            None => {
+                let hlc = state.inner.tso.now().await.unwrap_or_default();
+                ((hlc.physical_ns as u128) << 32) | (hlc.logical as u128)
+            }
+        };
+        let managers = state.inner.segment_managers.read().await;
+        if let Some(shard_map) = managers.get(&name) {
+            results.retain(|hit| {
+                let rid = match uuid::Uuid::parse_str(&hit.id) {
+                    Ok(u) => u,
+                    Err(_) => return true, // can't filter what we can't parse
+                };
+                shard_map.values().any(|sm| sm.is_visible_at(&rid, read_ts))
+            });
+        }
+    }
 
     // Populate fields on each hit by looking up the stored record. Without
     // this every SearchHit.fields is an empty Map, which is unusable for
