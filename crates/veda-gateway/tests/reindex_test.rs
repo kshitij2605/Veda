@@ -53,7 +53,9 @@ async fn reindex_in_non_raft_mode_returns_target_status_no_raft() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["target"], json!("docs@v2"));
     // Non-Raft mode: status reflects the no-SM path.
-    assert_eq!(body["status"], json!("no_raft"));
+    // Status string now reports copy count too: "no_raft (copied N records)".
+    let status = body["status"].as_str().unwrap();
+    assert!(status.starts_with("no_raft"), "status must start with 'no_raft', got {status}");
 }
 
 #[tokio::test]
@@ -126,4 +128,58 @@ async fn reindex_unknown_collection_returns_404() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn reindex_copies_source_records_to_sibling() {
+    // Phase G real pipeline: /reindex must end with the sibling
+    // holding every (non-tombstoned) record from the source.
+    // Today the copy is straight; chunker / embedder transforms
+    // slot in later. The visible-from-tests invariant is record
+    // count + payload identity.
+    let (base, _tmp) = start_server().await;
+    let c = Client::new();
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "reindex_copy",
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" },
+                { "name": "label", "type": "string", "filterable": true }
+            ],
+            "seed_records": [
+                { "v": [1.0, 0.0], "label": "alpha" },
+                { "v": [0.0, 1.0], "label": "beta" },
+                { "v": [1.0, 1.0], "label": "gamma" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let resp = c
+        .post(format!("{base}/v1/collections/reindex_copy/reindex"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["target"], json!("reindex_copy@v2"));
+    // Status reports the copy count.
+    assert!(
+        body["status"].as_str().unwrap().contains("copied 3 records"),
+        "status should report copy count; got {body}"
+    );
+
+    // List the sibling — must hold all 3 records.
+    let resp = c
+        .get(format!("{base}/v1/collections/reindex_copy@v2/records?limit=10"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["total"], json!(3), "sibling should hold all 3 source records; got {body}");
 }
