@@ -719,6 +719,214 @@ pub async fn drop_collection(
     }
 }
 
+// ---------------------------------------------------------------
+// Phase G — alias administration + reindex stub.
+// ---------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SetAliasRequest {
+    pub target: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AliasResponse {
+    pub alias: String,
+    pub target: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReindexResponse {
+    /// New collection that was created with the same schema.
+    pub target: String,
+    /// Status — "alias_swapped" or "no_raft" depending on mode.
+    pub status: String,
+}
+
+pub async fn get_alias(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(name): Path<String>,
+) -> Result<Json<AliasResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let scoped = tenant::scope(&tenant, &name);
+    // No Raft → just resolve against the in-memory schemas
+    // (the alias map round-trips through state-machine snapshot,
+    // but in non-Raft mode there's no SM to consult). Surface
+    // alias = target when no alias is set.
+    let raft_guard = state.inner.raft.read().await;
+    let target = if let Some(coord) = raft_guard.as_ref() {
+        let snap = coord.linearisable_query_state().await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("query state: {e}"),
+                }),
+            )
+        })?;
+        snap.aliases.get(&scoped).cloned().unwrap_or(scoped.clone())
+    } else {
+        scoped.clone()
+    };
+    let target_user = tenant::strip_prefix(&tenant, &target).unwrap_or(&target).to_owned();
+    Ok(Json(AliasResponse {
+        alias: name,
+        target: target_user,
+    }))
+}
+
+pub async fn set_alias(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(name): Path<String>,
+    Json(req): Json<SetAliasRequest>,
+) -> Result<Json<AliasResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let scoped_alias = tenant::scope(&tenant, &name);
+    let scoped_target = tenant::scope(&tenant, &req.target);
+    {
+        let raft_guard = state.inner.raft.read().await;
+        if let Some(coord) = raft_guard.as_ref() {
+            let cmd = veda_coordinator::raft_types::ClusterCommand::SetCollectionAlias {
+                alias: scoped_alias.clone(),
+                target: scoped_target.clone(),
+            };
+            if let Err(e) = coord.execute(cmd).await {
+                let lower = format!("{e}").to_lowercase();
+                let status = if lower.contains("does not exist") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                return Err((
+                    status,
+                    Json(ErrorResponse {
+                        error: format!("set_alias: {e}"),
+                    }),
+                ));
+            }
+        }
+        // Non-Raft mode: there's no SM to write to. The handler
+        // is a no-op that surfaces the requested target as if
+        // the swap happened — alias resolution in non-Raft mode
+        // is a follow-up.
+    }
+    Ok(Json(AliasResponse {
+        alias: name,
+        target: req.target,
+    }))
+}
+
+/// Phase G stub: creates `name@v2` (next version if it exists)
+/// with the SAME schema as `name`, then submits the alias swap.
+/// Does NOT copy records or re-chunk — that's the full
+/// reindex pipeline (separate follow-up). Today this proves the
+/// atomic-swap primitive end-to-end via REST.
+pub async fn reindex_collection(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(name): Path<String>,
+) -> Result<Json<ReindexResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let scoped = tenant::scope(&tenant, &name);
+
+    // 1. Look up the current schema.
+    let schema_json = {
+        let schemas = state.inner.schemas.read().await;
+        match schemas.get(&scoped) {
+            Some(s) => serde_json::to_string(s).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("serialize schema: {e}"),
+                    }),
+                )
+            })?,
+            None => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: format!("collection '{name}' not found"),
+                    }),
+                ));
+            }
+        }
+    };
+
+    // 2. Pick the next sibling version. Today we just append
+    //    `@v2`; a v2 of v2 would be `@v3`. Keep it simple.
+    let new_user_name = if let Some(prefix) = name.strip_suffix("@v2") {
+        format!("{prefix}@v3")
+    } else if name.contains("@v") {
+        // generic vN bump
+        let bumped = bump_version_suffix(&name).unwrap_or_else(|| format!("{name}@v2"));
+        bumped
+    } else {
+        format!("{name}@v2")
+    };
+    let scoped_new = tenant::scope(&tenant, &new_user_name);
+
+    // 3. Submit CreateCollection for the sibling, reusing the
+    //    same scoped schema_json (Raft mode only — non-Raft
+    //    mode falls through and the sibling creation is best-
+    //    effort via the local create path).
+    {
+        let raft_guard = state.inner.raft.read().await;
+        if let Some(coord) = raft_guard.as_ref() {
+            // Rewrite the schema's "name" field to match the
+            // new scoped name (the SM keys collections by their
+            // schema name).
+            let mut rewritten: serde_json::Value = serde_json::from_str(&schema_json)
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("rewrite schema: {e}"),
+                        }),
+                    )
+                })?;
+            rewritten["name"] = serde_json::Value::String(scoped_new.clone());
+            let new_schema_json = serde_json::to_string(&rewritten).unwrap_or(schema_json);
+            let create = veda_coordinator::raft_types::ClusterCommand::CreateCollection {
+                name: scoped_new.clone(),
+                schema_json: new_schema_json,
+            };
+            if let Err(e) = coord.execute(create).await {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("create sibling: {e}"),
+                    }),
+                ));
+            }
+            // 4. Swap the alias.
+            let swap = veda_coordinator::raft_types::ClusterCommand::SetCollectionAlias {
+                alias: scoped.clone(),
+                target: scoped_new.clone(),
+            };
+            if let Err(e) = coord.execute(swap).await {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("swap alias: {e}"),
+                    }),
+                ));
+            }
+            return Ok(Json(ReindexResponse {
+                target: new_user_name,
+                status: "alias_swapped".into(),
+            }));
+        }
+    }
+    Ok(Json(ReindexResponse {
+        target: new_user_name,
+        status: "no_raft".into(),
+    }))
+}
+
+fn bump_version_suffix(name: &str) -> Option<String> {
+    let at = name.rfind("@v")?;
+    let suffix = &name[at + 2..];
+    let n: u32 = suffix.parse().ok()?;
+    Some(format!("{}@v{}", &name[..at], n + 1))
+}
+
 async fn drop_collection_impl(
     state: AppState,
     tenant: tenant::TenantId,

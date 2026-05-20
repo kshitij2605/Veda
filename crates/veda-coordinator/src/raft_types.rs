@@ -214,6 +214,19 @@ pub enum ClusterCommand {
         primary_shard: String,
         shards_touched: Vec<String>,
     },
+
+    /// Phase G atomic re-chunk: swap an alias so subsequent
+    /// reads of `alias` resolve to `target`. `target` must
+    /// already exist in `collections` at apply time (the
+    /// command rejects otherwise). Setting an alias to a
+    /// non-existent target is the rollback handle —
+    /// `SetCollectionAlias { alias: "docs", target: "docs" }`
+    /// makes `docs` resolve to itself again, undoing a prior
+    /// reindex.
+    SetCollectionAlias {
+        alias: String,
+        target: String,
+    },
 }
 
 impl fmt::Display for ClusterCommand {
@@ -262,6 +275,9 @@ impl fmt::Display for ClusterCommand {
                     f,
                     "ChangeShardWriter({shard_id} -> {new_writer} @ epoch {new_epoch})"
                 )
+            }
+            Self::SetCollectionAlias { alias, target } => {
+                write!(f, "SetCollectionAlias({alias} -> {target})")
             }
             Self::RecordTxnCommit { txn_id, commit_ts_ns, .. } => {
                 write!(f, "RecordTxnCommit({txn_id} @ {commit_ts_ns})")
@@ -355,6 +371,13 @@ pub struct ClusterState {
     /// during snapshot reads.
     #[serde(default)]
     pub txn_commits: HashMap<String, CommitRecord>,
+    /// Phase G alias map: `alias_name -> target_collection`.
+    /// Reads via `alias_name` resolve to `target_collection`.
+    /// Populated by `SetCollectionAlias`. Used by the atomic
+    /// re-chunk swap: original `docs` becomes an alias pointing
+    /// at the newly-built `docs@v2`.
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
     /// Index of the last applied log entry (0 = none applied).
     pub last_applied_index: u64,
 }
