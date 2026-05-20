@@ -443,6 +443,73 @@ impl VectorIndex for IvfPqIndex {
         Ok(reranked)
     }
 
+    /// Phase F: native filtered search. Skips non-bitmap doc_ids
+    /// INSIDE the inverted-list walk, then reranks only filtered
+    /// candidates. Avoids the default's 10x oversample on the
+    /// full result set, which is wasteful when the filter is
+    /// small relative to the index size (e.g. MVCC visibility
+    /// dropping superseded versions).
+    fn search_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: &roaring::RoaringBitmap,
+    ) -> Result<Vec<SearchResult>> {
+        if query.len() as u32 != self.dimension {
+            return Err(VedaError::DimensionMismatch {
+                expected: self.dimension,
+                actual: query.len() as u32,
+            });
+        }
+        if k == 0 || self.vectors.is_empty() || self.centroids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 1. Find nprobe nearest IVF centroids (same as search).
+        let nprobe = self.nprobe.min(self.nlist);
+        let mut centroid_dists: Vec<(usize, f32)> = self
+            .centroids
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, compute_distance(query, c, self.metric)))
+            .collect();
+        centroid_dists
+            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 2. ADC distances, filtering by bitmap inside the walk.
+        let mut candidates: Vec<SearchResult> = Vec::new();
+        for &(centroid_id, _) in centroid_dists.iter().take(nprobe) {
+            let query_residual = Self::compute_residual(query, &self.centroids[centroid_id]);
+            let table = self.precompute_distance_table(&query_residual);
+            for &vec_id in &self.inverted_lists[centroid_id] {
+                if self.deleted.contains(&vec_id) || !filter.contains(vec_id) {
+                    continue;
+                }
+                let dist = Self::adc_distance(&table, &self.pq_codes[vec_id as usize]);
+                candidates.push(SearchResult { id: vec_id, distance: dist });
+            }
+        }
+
+        // 3. Sort + rerank top candidates with exact distances.
+        candidates.sort_by(|a, b| {
+            a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let rerank_count = (k * 4).min(candidates.len()).max(k);
+        let rerank_count = rerank_count.min(candidates.len());
+        let mut reranked: Vec<SearchResult> = candidates[..rerank_count]
+            .iter()
+            .map(|c| SearchResult {
+                id: c.id,
+                distance: compute_distance(query, &self.vectors[c.id as usize], self.metric),
+            })
+            .collect();
+        reranked.sort_by(|a, b| {
+            a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        reranked.truncate(k);
+        Ok(reranked)
+    }
+
     fn insert(&mut self, id: u32, vector: &[f32]) -> Result<()> {
         if vector.len() as u32 != self.dimension {
             return Err(VedaError::DimensionMismatch {
