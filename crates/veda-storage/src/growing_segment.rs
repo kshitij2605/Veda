@@ -609,7 +609,19 @@ impl GrowingSegment {
             if self.delete_bitmap.is_deleted(doc_id as u32) {
                 continue;
             }
-            writer.insert(record)?;
+            // Phase F: carry commit_ts through to the sealed
+            // segment when present. Mixing stamped + unstamped
+            // docs in one segment works — unstamped docs end
+            // up with `commit_ts: None` (always-visible) on
+            // the sealed side.
+            match self.commit_ts.get(doc_id).and_then(|v| *v) {
+                Some(ts) => {
+                    writer.insert_with_commit_ts(record, ts)?;
+                }
+                None => {
+                    writer.insert(record)?;
+                }
+            }
         }
 
         writer.seal()

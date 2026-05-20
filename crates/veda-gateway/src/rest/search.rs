@@ -436,26 +436,12 @@ pub async fn search(
         results
     };
 
-    // Phase F MVCC visibility safety net for sealed-segment
-    // hits. The growing-segment hits were already filtered
-    // precisely by the executor (per-doc-id), but sealed-
-    // segment readers don't yet carry commit_ts stamps. The
-    // per-record `is_visible_at` check here catches the case
-    // where a sealed segment surfaces a record whose newest
-    // version is invisible at read_ts. Once sealed-segment
-    // MVCC tracking lands the post-filter becomes redundant.
-    if let Some(read_ts) = effective_read_ts {
-        let managers = state.inner.segment_managers.read().await;
-        if let Some(shard_map) = managers.get(&name) {
-            results.retain(|hit| {
-                let rid = match uuid::Uuid::parse_str(&hit.id) {
-                    Ok(u) => u,
-                    Err(_) => return true, // can't filter what we can't parse
-                };
-                shard_map.values().any(|sm| sm.is_visible_at(&rid, read_ts))
-            });
-        }
-    }
+    // Phase F: MVCC visibility filtering now lives inside the
+    // LocalShardSearcher (both growing-segment and sealed-
+    // segment paths intersect candidates with
+    // `visible_doc_ids_at` when request.read_ts is set). The
+    // previous belt-and-suspenders post-filter here is gone.
+    let _ = effective_read_ts; // already plumbed through the request
 
     // Populate fields on each hit by looking up the stored record. Without
     // this every SearchHit.fields is an empty Map, which is unusable for
