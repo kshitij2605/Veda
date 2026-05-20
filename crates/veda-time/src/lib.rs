@@ -33,10 +33,12 @@
 
 pub mod hlc;
 pub mod lease;
+pub mod swappable;
 pub mod tso;
 
 pub use hlc::{Hlc, HlcClock};
 pub use lease::TsLease;
+pub use swappable::SwappableTso;
 pub use tso::{LocalTso, TsRange, Tso, TsoError};
 
 /// A timestamp = an `Hlc`. Re-exported as `Ts` because that's

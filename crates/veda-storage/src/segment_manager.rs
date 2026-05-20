@@ -30,6 +30,13 @@ pub struct SegmentManager {
     growing: GrowingSegment,
     sealed_segments: Vec<SealedSegmentHandle>,
     seal_threshold_bytes: usize,
+    /// Optional MVCC overlay. When `enable_mvcc` is called, the
+    /// segment manager mirrors every `insert_mvcc(...)` write
+    /// into this in-memory versioned store. Snapshot reads via
+    /// `read_at_ts` then return the version visible at the
+    /// requested timestamp. The existing single-version paths
+    /// (`insert`, `growing_segment` reads) are unaffected.
+    mvcc: Option<crate::mvcc::MvccStore>,
 }
 
 impl SegmentManager {
@@ -54,7 +61,83 @@ impl SegmentManager {
             growing,
             sealed_segments: Vec::new(),
             seal_threshold_bytes,
+            mvcc: None,
         })
+    }
+
+    /// Turn on the MVCC overlay. Idempotent — calling twice is
+    /// a no-op (preserves existing versions).
+    pub fn enable_mvcc(&mut self) {
+        if self.mvcc.is_none() {
+            self.mvcc = Some(crate::mvcc::MvccStore::new());
+        }
+    }
+
+    /// MVCC-aware insert. Mirrors the record into the MVCC
+    /// overlay at `commit_ts` AND into the existing growing
+    /// segment so that legacy reads continue to work. Returns
+    /// `Err` if `enable_mvcc()` hasn't been called.
+    pub fn insert_mvcc(&mut self, commit_ts: u128, record: Record) -> Result<()> {
+        let mvcc = self.mvcc.as_mut().ok_or_else(|| {
+            veda_core::error::VedaError::Index(
+                "insert_mvcc requires enable_mvcc()".into(),
+            )
+        })?;
+        let key = record.id().as_bytes().to_vec();
+        let payload = bytes::Bytes::from(
+            serde_json::to_vec(&record)
+                .map_err(|e| veda_core::error::VedaError::Index(format!("serde: {e}")))?,
+        );
+        mvcc.put_payload(&key, commit_ts, payload).map_err(|e| {
+            veda_core::error::VedaError::Index(format!("mvcc.put: {e}"))
+        })?;
+        // Still write into the growing segment so existing
+        // search/list paths work. v1 will read those paths via
+        // the MVCC overlay too.
+        self.insert(record)?;
+        Ok(())
+    }
+
+    /// MVCC-aware tombstone. Same shape as `insert_mvcc`.
+    pub fn delete_mvcc(&mut self, commit_ts: u128, record_id: &uuid::Uuid) -> Result<()> {
+        let mvcc = self.mvcc.as_mut().ok_or_else(|| {
+            veda_core::error::VedaError::Index(
+                "delete_mvcc requires enable_mvcc()".into(),
+            )
+        })?;
+        let key = record_id.as_bytes().to_vec();
+        mvcc.delete(&key, commit_ts).map_err(|e| {
+            veda_core::error::VedaError::Index(format!("mvcc.delete: {e}"))
+        })?;
+        // Tombstone the growing segment too.
+        let _ = self.delete_record(*record_id)?;
+        Ok(())
+    }
+
+    /// MVCC snapshot read. Returns the record JSON visible at
+    /// `read_ts`. `None` means no version exists at that ts OR
+    /// the visible version is a tombstone.
+    pub fn read_at_ts(&self, record_id: &uuid::Uuid, read_ts: u128) -> Option<bytes::Bytes> {
+        let mvcc = self.mvcc.as_ref()?;
+        mvcc.get_at(record_id.as_bytes(), read_ts)
+    }
+
+    /// Advance the MVCC safe-ts watermark. Callers (typically
+    /// the gateway's GC scheduler) wire this from the TSO's
+    /// `safe_ts` watermark.
+    pub fn set_mvcc_safe_ts(&mut self, ts: u128) -> bool {
+        if let Some(mvcc) = self.mvcc.as_mut() {
+            mvcc.set_safe_ts(ts);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Run MVCC GC on this shard. Returns the count of versions
+    /// dropped, or `None` if MVCC isn't enabled.
+    pub fn mvcc_gc(&mut self) -> Option<usize> {
+        self.mvcc.as_mut().map(|m| m.gc())
     }
 
     /// Insert a record into the growing segment.

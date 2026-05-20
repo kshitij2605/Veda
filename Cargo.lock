@@ -4529,6 +4529,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
+name = "veda-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "veda-coordinator",
+]
+
+[[package]]
 name = "veda-coordinator"
 version = "0.1.0"
 dependencies = [
@@ -4630,11 +4642,15 @@ dependencies = [
  "bytes",
  "crc32fast",
  "futures",
+ "prost",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
  "tracing",
  "veda-time",
 ]
