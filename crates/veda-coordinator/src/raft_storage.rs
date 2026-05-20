@@ -350,6 +350,36 @@ struct StatePersistedData {
     current_snapshot: Option<StoredSnapshot>,
 }
 
+/// Phase E migration: take a `raft_state.bin` blob, drop the
+/// data-plane fields (records + open_txns) from the embedded
+/// state machine, and return the re-serialised blob plus a
+/// `(records_dropped, open_txns_dropped)` count. Caller writes
+/// the bytes back with `atomic_write` (or its own equivalent).
+pub fn migrate_persisted_blob(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
+    let mut d: StatePersistedData = bincode::deserialize(bytes)
+        .map_err(|e| format!("decode raft_state.bin: {e}"))?;
+    let (recs, txns) = d.state.drop_v0_data_plane();
+    let out = bincode::serialize(&d).map_err(|e| format!("encode raft_state.bin: {e}"))?;
+    Ok((out, recs, txns))
+}
+
+/// Test/admin helper: serialise a bare `ClusterStateMachine`
+/// into the same bincode layout `raft_state.bin` uses on disk.
+/// `applied_log`, `membership`, and `current_snapshot` are left
+/// at their defaults — sufficient for migration round-trips and
+/// fixture generation.
+pub fn build_persisted_blob_for_state(
+    state: crate::store::ClusterStateMachine,
+) -> Result<Vec<u8>, String> {
+    let d = StatePersistedData {
+        applied_log: None,
+        membership: StoredMembership::default(),
+        state,
+        current_snapshot: None,
+    };
+    bincode::serialize(&d).map_err(|e| format!("encode: {e}"))
+}
+
 #[derive(Debug, Default)]
 struct StateInner {
     applied_log: Option<LogId<NodeId>>,
