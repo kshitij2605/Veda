@@ -410,6 +410,14 @@ impl ShardSearcher for LocalShardSearcher {
                 let segment_id = reader.metadata().id;
                 let mut local: Vec<(u32, f32)> = Vec::with_capacity(request.k * 2);
                 let delete_bm = reader.delete_bitmap();
+                // Phase F: precompute the MVCC visibility
+                // bitmap for this sealed segment if read_ts is
+                // requested. `None` means either no read_ts OR
+                // a pre-MVCC segment (treat every doc visible).
+                let mvcc_visible = match request.read_ts {
+                    Some(ts) => reader.visible_doc_ids_at(ts),
+                    None => None,
+                };
                 let metric_fn: fn(&[f32], &[f32]) -> f32 = match request.metric {
                     DistanceMetric::Cosine => veda_core::simd::cosine_distance,
                     DistanceMetric::Euclidean => veda_core::simd::euclidean_distance,
@@ -419,6 +427,11 @@ impl ShardSearcher for LocalShardSearcher {
                 };
                 for doc_id in 0..row_count {
                     if delete_bm.is_deleted(doc_id) {
+                        continue;
+                    }
+                    if let Some(vis) = mvcc_visible.as_ref()
+                        && !vis.contains(doc_id)
+                    {
                         continue;
                     }
                     let Ok(stored) = reader.get_vector(&request.field, doc_id) else {
@@ -454,33 +467,15 @@ impl ShardSearcher for LocalShardSearcher {
         }
         agg_timings.ann_search_ms += sealed_start.elapsed().as_secs_f64() * 1000.0;
 
-        // Phase F: sealed-segment visibility filter. For each
-        // sealed segment with a commit_ts sidecar, retain only
-        // hits whose doc_id is visible at read_ts. Segments
-        // without the sidecar pass through (no MVCC stamps =
-        // always visible). The growing-segment filter above
-        // already handled growing hits.
-        if let Some(read_ts) = request.read_ts {
-            use std::collections::HashMap;
-            let mut sealed_visible: HashMap<veda_core::types::SegmentId, roaring::RoaringBitmap> =
-                HashMap::new();
-            for handle in self.segment_manager.sealed_segments() {
-                if let Some(vis) = handle.reader.visible_doc_ids_at(read_ts) {
-                    sealed_visible.insert(handle.metadata.id, vis);
-                }
-            }
-            if !sealed_visible.is_empty() {
-                all_results.retain(|hit| {
-                    if hit.segment_id == growing_segment_id {
-                        return true; // growing filtered already
-                    }
-                    match sealed_visible.get(&hit.segment_id) {
-                        Some(vis) => vis.contains(hit.doc_id),
-                        None => true, // sealed segment with no MVCC stamps
-                    }
-                });
-            }
-        }
+        // Phase F sealed-segment visibility used to be a
+        // post-filter pass here. It's gone now: the ANN path
+        // intersects the bitmap into `allowed` BEFORE
+        // index.search_filtered runs (see
+        // `search_sealed_segment_ref`), and the brute-force
+        // fallback checks `mvcc_visible.contains(doc_id)`
+        // inside its scan loop. Both pay zero candidate budget
+        // for invisible docs.
+        let _ = growing_segment_id; // referenced only by the (now-removed) post-filter
 
         // Sort by distance ascending, take top-k.
         let scoring_start = std::time::Instant::now();
@@ -821,12 +816,12 @@ fn search_sealed_segment_ref(
         );
     }
 
-    let raw_results = match &filter_expr {
+    // Build the base "allowed" bitmap from the filter
+    // expression + tombstones. None = no constraint.
+    let base_allowed: Option<RoaringBitmap> = match &filter_expr {
         Some(expr) => {
             use crate::filter::evaluator::FilterContext;
-
             let mut ctx = FilterContext::new(row_count);
-
             let mut fields = Vec::new();
             collect_filter_fields(expr, &mut fields);
             for field_name in &fields {
@@ -840,7 +835,6 @@ fn search_sealed_segment_ref(
                     ctx.add_bitmap(field_name, idx);
                 }
             }
-
             let mut allowed = ctx.evaluate(expr)?;
             let delete_bm = reader.delete_bitmap();
             for doc_id in 0..row_count {
@@ -848,8 +842,7 @@ fn search_sealed_segment_ref(
                     allowed.remove(doc_id);
                 }
             }
-
-            index.search_filtered(&request.query_vector, request.k, &allowed)?
+            Some(allowed)
         }
         None => {
             let delete_bm = reader.delete_bitmap();
@@ -860,11 +853,35 @@ fn search_sealed_segment_ref(
                         allowed.remove(doc_id);
                     }
                 }
-                index.search_filtered(&request.query_vector, request.k, &allowed)?
+                Some(allowed)
             } else {
-                index.search(&request.query_vector, request.k)?
+                None
             }
         }
+    };
+
+    // Phase F: AND in MVCC visibility when read_ts is set AND
+    // this sealed segment carries commit_ts stamps. Pre-MVCC
+    // segments have no sidecar so `visible_doc_ids_at` returns
+    // None and we leave the base bitmap unchanged. Doing the
+    // intersection HERE (before the index walk) means HNSW /
+    // IVF-PQ / Flat never spends candidate budget on invisible
+    // docs — the visibility filter is now native to the search,
+    // not a post-step.
+    let allowed: Option<RoaringBitmap> = match (request.read_ts, base_allowed) {
+        (Some(ts), base) => match reader.visible_doc_ids_at(ts) {
+            Some(vis) => Some(match base {
+                Some(b) => b & vis,
+                None => vis,
+            }),
+            None => base,
+        },
+        (None, base) => base,
+    };
+
+    let raw_results = match allowed {
+        Some(bm) => index.search_filtered(&request.query_vector, request.k, &bm)?,
+        None => index.search(&request.query_vector, request.k)?,
     };
 
     let results: Vec<ScoredRecord> = raw_results
