@@ -48,6 +48,13 @@ pub struct GrowingSegment {
     /// freshly-ingested batches were invisible to text search until they
     /// hit the seal threshold.
     bm25_indexes: HashMap<String, crate::bm25_index::Bm25Index>,
+    /// Phase F: commit timestamps per doc_id. `None` means the
+    /// record was inserted via the non-MVCC path (legacy
+    /// `insert(record)`). `Some(ts)` is set by
+    /// `insert_with_commit_ts(record, ts)`. Used by
+    /// `is_visible_at(doc_id, read_ts)` for precise per-version
+    /// visibility filtering (not just per-record).
+    commit_ts: Vec<Option<u128>>,
 }
 
 impl GrowingSegment {
@@ -96,6 +103,7 @@ impl GrowingSegment {
             delete_bitmap: DeleteBitmap::new(),
             uuid_to_doc_id: HashMap::new(),
             bm25_indexes,
+            commit_ts: Vec::new(),
         }
     }
 
@@ -238,9 +246,92 @@ impl GrowingSegment {
 
         self.uuid_to_doc_id.insert(record.id(), doc_id);
         self.records.push(record);
+        // No commit_ts supplied — legacy single-version insert.
+        self.commit_ts.push(None);
         self.size_bytes += added_bytes;
 
         Ok(doc_id)
+    }
+
+    /// Phase F: insert tagged with `commit_ts`. Same shape as
+    /// `insert` but stamps the doc with a timestamp for
+    /// per-version visibility filtering. Multiple versions of
+    /// the same `record.id()` end up as separate doc_ids with
+    /// different commit_ts values; readers use
+    /// [`Self::is_visible_at`] to pick the right one.
+    pub fn insert_with_commit_ts(&mut self, record: Record, commit_ts: u128) -> Result<u32> {
+        let doc_id = self.insert(record)?;
+        // Overwrite the None we just pushed with the real ts.
+        if let Some(slot) = self.commit_ts.last_mut() {
+            *slot = Some(commit_ts);
+        }
+        Ok(doc_id)
+    }
+
+    /// Phase F: returns the commit_ts of a doc, if it was
+    /// inserted via the MVCC path. `None` for legacy inserts.
+    pub fn commit_ts_of(&self, doc_id: u32) -> Option<u128> {
+        self.commit_ts.get(doc_id as usize).and_then(|v| *v)
+    }
+
+    /// Phase F: return every doc_id in this growing segment
+    /// that is visible at `read_ts`. Useful for precomputing a
+    /// visibility mask once per search and intersecting it with
+    /// candidate sets from per-field indexes. `None` means the
+    /// caller should treat all doc_ids as visible (no MVCC
+    /// stamps present in this segment).
+    pub fn visible_doc_ids_at(&self, read_ts: u128) -> Option<RoaringBitmap> {
+        let any_mvcc = self.commit_ts.iter().any(|t| t.is_some());
+        if !any_mvcc {
+            return None;
+        }
+        let mut bitmap = RoaringBitmap::new();
+        for doc_id in 0..self.records.len() as u32 {
+            if self.is_visible_at(doc_id, read_ts) {
+                bitmap.insert(doc_id);
+            }
+        }
+        Some(bitmap)
+    }
+
+    /// Phase F: precise visibility check at the doc-id level.
+    /// A doc is visible at `read_ts` when:
+    /// - It has no commit_ts (legacy/non-MVCC, always visible), OR
+    /// - Its commit_ts <= read_ts AND no later commit_ts for the
+    ///   same record.id() exists (later versions supersede).
+    /// Tombstones (delete_bitmap) supersede too.
+    pub fn is_visible_at(&self, doc_id: u32, read_ts: u128) -> bool {
+        if self.delete_bitmap.is_deleted(doc_id) {
+            return false;
+        }
+        let Some(record) = self.records.get(doc_id as usize) else {
+            return false;
+        };
+        let Some(commit_ts) = self.commit_ts.get(doc_id as usize).and_then(|v| *v) else {
+            // Non-MVCC insert; always visible.
+            return true;
+        };
+        if commit_ts > read_ts {
+            return false;
+        }
+        // Visible iff no later version of the same record.id()
+        // also has commit_ts <= read_ts.
+        let rid = record.id();
+        for (other_id, slot) in self.commit_ts.iter().enumerate() {
+            if other_id as u32 == doc_id {
+                continue;
+            }
+            let Some(other_ts) = *slot else { continue };
+            if other_ts <= read_ts && other_ts > commit_ts {
+                if let Some(other_rec) = self.records.get(other_id)
+                    && other_rec.id() == rid
+                    && !self.delete_bitmap.is_deleted(other_id as u32)
+                {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Check if the segment should be sealed (exceeds `max_size_bytes`).
@@ -589,5 +680,130 @@ impl Ord for OrdF32Entry {
             .partial_cmp(&other.dist)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| self.doc_id.cmp(&other.doc_id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use veda_core::schema::FieldDefinition;
+    use veda_core::types::{DistanceMetric, FieldType};
+    use veda_core::vector::DenseVector;
+
+    fn schema() -> CollectionSchema {
+        CollectionSchema::builder("gs_mvcc_test")
+            .add_field(FieldDefinition::vector("v", 2, DistanceMetric::Cosine))
+            .add_field(FieldDefinition::new("label", FieldType::String))
+            .shard_count(1)
+            .build()
+            .unwrap()
+    }
+
+    fn record(label: &str) -> Record {
+        let mut r = Record::new();
+        r.set("v", FieldValue::Vector(DenseVector::new(vec![1.0, 0.0])));
+        r.set("label", FieldValue::String(label.to_owned()));
+        r
+    }
+
+    #[test]
+    fn legacy_insert_is_visible_at_any_read_ts() {
+        let mut g = GrowingSegment::new(schema());
+        let r = record("a");
+        let doc_id = g.insert(r).unwrap();
+        assert!(g.is_visible_at(doc_id, 0));
+        assert!(g.is_visible_at(doc_id, u128::MAX));
+        assert!(g.commit_ts_of(doc_id).is_none());
+    }
+
+    #[test]
+    fn mvcc_insert_in_future_is_invisible_at_lower_read_ts() {
+        let mut g = GrowingSegment::new(schema());
+        let doc_id = g.insert_with_commit_ts(record("v1"), 100).unwrap();
+        assert!(!g.is_visible_at(doc_id, 50));
+        assert!(g.is_visible_at(doc_id, 100));
+        assert!(g.is_visible_at(doc_id, 150));
+    }
+
+    #[test]
+    fn newer_version_supersedes_older_at_higher_read_ts() {
+        let mut g = GrowingSegment::new(schema());
+        let r1 = record("v1");
+        let rid = r1.id();
+        let d1 = g.insert_with_commit_ts(r1, 100).unwrap();
+        // Same record.id() at a newer commit_ts.
+        let mut r2 = Record::with_id(rid);
+        r2.set("v", FieldValue::Vector(DenseVector::new(vec![1.0, 0.0])));
+        r2.set("label", FieldValue::String("v2".into()));
+        let d2 = g.insert_with_commit_ts(r2, 200).unwrap();
+
+        // At read_ts=150: only v1 visible.
+        assert!(g.is_visible_at(d1, 150));
+        assert!(!g.is_visible_at(d2, 150));
+
+        // At read_ts=250: only v2 visible (v1 superseded).
+        assert!(!g.is_visible_at(d1, 250));
+        assert!(g.is_visible_at(d2, 250));
+    }
+
+    #[test]
+    fn tombstoned_doc_is_invisible_regardless_of_commit_ts() {
+        let mut g = GrowingSegment::new(schema());
+        let doc_id = g.insert_with_commit_ts(record("doomed"), 100).unwrap();
+        g.delete_bitmap.mark_deleted(doc_id);
+        assert!(!g.is_visible_at(doc_id, 100));
+        assert!(!g.is_visible_at(doc_id, 200));
+    }
+
+    #[test]
+    fn visible_doc_ids_returns_none_when_no_mvcc_stamps() {
+        let mut g = GrowingSegment::new(schema());
+        g.insert(record("a")).unwrap();
+        g.insert(record("b")).unwrap();
+        assert!(g.visible_doc_ids_at(0).is_none());
+        assert!(g.visible_doc_ids_at(u128::MAX).is_none());
+    }
+
+    #[test]
+    fn visible_doc_ids_at_filters_supersession_and_future() {
+        let mut g = GrowingSegment::new(schema());
+        let r1 = record("v1");
+        let rid = r1.id();
+        let d1 = g.insert_with_commit_ts(r1, 100).unwrap();
+        let mut r2 = Record::with_id(rid);
+        r2.set("v", FieldValue::Vector(DenseVector::new(vec![1.0, 0.0])));
+        r2.set("label", FieldValue::String("v2".into()));
+        let d2 = g.insert_with_commit_ts(r2, 200).unwrap();
+        // Third record (different id) at 300, also MVCC.
+        let d3 = g.insert_with_commit_ts(record("rec_c"), 300).unwrap();
+
+        // At read_ts=150: only d1 (v1) visible — d2/d3 are future.
+        let v = g.visible_doc_ids_at(150).expect("MVCC stamps present");
+        assert!(v.contains(d1));
+        assert!(!v.contains(d2));
+        assert!(!v.contains(d3));
+
+        // At read_ts=250: d2 (v2 supersedes v1), d3 still future.
+        let v = g.visible_doc_ids_at(250).unwrap();
+        assert!(!v.contains(d1));
+        assert!(v.contains(d2));
+        assert!(!v.contains(d3));
+
+        // At read_ts=350: d2 + d3.
+        let v = g.visible_doc_ids_at(350).unwrap();
+        assert!(!v.contains(d1));
+        assert!(v.contains(d2));
+        assert!(v.contains(d3));
+    }
+
+    #[test]
+    fn different_record_ids_dont_supersede_each_other() {
+        let mut g = GrowingSegment::new(schema());
+        let d1 = g.insert_with_commit_ts(record("rec_a"), 100).unwrap();
+        let d2 = g.insert_with_commit_ts(record("rec_b"), 200).unwrap();
+        // Both visible at read_ts=300 — they have distinct
+        // record IDs so neither supersedes the other.
+        assert!(g.is_visible_at(d1, 300));
+        assert!(g.is_visible_at(d2, 300));
     }
 }

@@ -107,11 +107,9 @@ impl SegmentManager {
         self.mvcc.is_some()
     }
 
-    /// MVCC visibility check. Returns true if the record is
-    /// visible at `read_ts` (i.e. some non-tombstone version
-    /// exists with `commit_ts <= read_ts`). Collections without
-    /// MVCC always return true — readers can't filter on a
-    /// dimension that isn't tracked.
+    /// Per-record MVCC visibility check. Returns true if some
+    /// non-tombstone version with `commit_ts <= read_ts` exists.
+    /// Collections without MVCC always return true.
     pub fn is_visible_at(&self, record_id: &uuid::Uuid, read_ts: u128) -> bool {
         match self.mvcc.as_ref() {
             None => true,
@@ -119,9 +117,19 @@ impl SegmentManager {
         }
     }
 
+    /// Phase F: per-doc-id visibility check. The growing segment
+    /// may have multiple doc_ids for the same record (each
+    /// version is a separate doc_id, stamped with commit_ts).
+    /// This routes the visibility decision to the right doc.
+    /// Returns true on legacy / non-MVCC docs.
+    pub fn doc_visible_at(&self, doc_id: u32, read_ts: u128) -> bool {
+        self.growing.is_visible_at(doc_id, read_ts)
+    }
+
     /// MVCC-aware insert. Mirrors the record into the MVCC
     /// overlay at `commit_ts` AND into the existing growing
-    /// segment so that legacy reads continue to work. Returns
+    /// segment (stamped with the same commit_ts so per-version
+    /// visibility filtering can pick the right doc_id). Returns
     /// `Err` if `enable_mvcc()` hasn't been called.
     pub fn insert_mvcc(&mut self, commit_ts: u128, record: Record) -> Result<()> {
         let mvcc = self.mvcc.as_mut().ok_or_else(|| {
@@ -147,10 +155,13 @@ impl SegmentManager {
                 veda_core::error::VedaError::Index(format!("mvcc wal append: {e}"))
             })?;
         }
-        // Still write into the growing segment so existing
-        // search/list paths work. v1 will read those paths via
-        // the MVCC overlay too.
-        self.insert(record)?;
+        // Phase F: write into the growing segment with the
+        // commit_ts so per-version visibility filtering works
+        // for search hits and growing-segment reads.
+        if self.growing.should_seal() {
+            self.seal_growing()?;
+        }
+        self.growing.insert_with_commit_ts(record, commit_ts)?;
         Ok(())
     }
 
