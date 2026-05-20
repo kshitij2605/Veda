@@ -220,6 +220,95 @@ impl ShardLog {
             .expect("ShardLog mutex poisoned")
             .next_seq
     }
+
+    /// Phase D: copy every segment file from `self` into
+    /// `dest_dir`, producing a byte-identical replica log.
+    /// Used to seed a new follower joining the ensemble
+    /// mid-stream: the operator (or auto-orchestrator) ships
+    /// the writer's current log to the new follower's data
+    /// dir, opens that dir as a `ShardLog`, and registers the
+    /// follower in the ensemble. The new follower's
+    /// `durable_seq` then matches the writer's at the moment
+    /// of the copy; subsequent `AppendRpc`s replicate forward.
+    ///
+    /// `dest_dir` must not already contain `.log` files (we
+    /// don't merge / dedupe). The simplest correct usage is to
+    /// hand a fresh empty dir.
+    pub fn copy_to(&self, dest_dir: impl AsRef<Path>) -> Result<u64, ShardLogError> {
+        let dest = dest_dir.as_ref();
+        std::fs::create_dir_all(dest)?;
+        let mut state = self.state.lock().expect("ShardLog mutex poisoned");
+        // Flush + fsync the active segment so the bytes we
+        // about to copy are durable.
+        state.active.sync_all()?;
+        // Copy rolled-over segments + the active segment. For a
+        // freshly-opened log `state.segments` is empty (it's
+        // populated by directory enumeration at open time, not
+        // by per-append bookkeeping), so we always also copy
+        // the active segment's file. Dedupe by file name in
+        // case `state.segments` already contains it.
+        let mut copied_names: std::collections::HashSet<std::ffi::OsString> =
+            std::collections::HashSet::new();
+        for seg_path in &state.segments {
+            let file_name = seg_path
+                .file_name()
+                .ok_or_else(|| ShardLogError::Io(std::io::Error::other("segment has no file name")))?;
+            std::fs::copy(seg_path, dest.join(file_name))?;
+            copied_names.insert(file_name.to_os_string());
+        }
+        let active_path = &state.active.log_path;
+        if let Some(file_name) = active_path.file_name()
+            && !copied_names.contains(file_name)
+        {
+            std::fs::copy(active_path, dest.join(file_name))?;
+        }
+        Ok(state.durable_seq)
+    }
+
+    /// Phase D: drop every entry with `seq_id > target` from the
+    /// active segment. Used by the BookKeeper-style open-and-
+    /// recover handshake to roll back any entries a now-fenced
+    /// old writer may have acked to a minority of followers but
+    /// NOT to the safe quorum. After this returns,
+    /// `durable_seq() <= target` and subsequent appends pick up
+    /// at `target + 1`.
+    ///
+    /// Best-effort against the active segment only — older
+    /// segments are assumed intact because they were fsynced
+    /// closed before the active segment was created. In
+    /// practice the post-handover safe_seq is always inside the
+    /// active segment for any realistic ensemble lifetime.
+    pub fn truncate_above(&self, target: u64) -> Result<(), ShardLogError> {
+        let mut state = self.state.lock().expect("ShardLog mutex poisoned");
+        if state.durable_seq <= target {
+            return Ok(()); // nothing to truncate
+        }
+        // Walk the active segment, find the byte offset of the
+        // first frame whose seq_id > target.
+        let bytes = state.active.read_all()?;
+        let mut cursor: usize = 0;
+        let mut last_kept_seq: Option<u64> = None;
+        let mut truncate_at: usize = bytes.len();
+        while cursor < bytes.len() {
+            match crate::format::LogEntryV2::decode(&bytes[cursor..]) {
+                Ok((entry, consumed)) => {
+                    if entry.seq_id > target {
+                        truncate_at = cursor;
+                        break;
+                    }
+                    last_kept_seq = Some(entry.seq_id);
+                    cursor += consumed;
+                }
+                Err(_) => break, // torn / CRC — leave the tail
+            }
+        }
+        if truncate_at < bytes.len() {
+            state.active.truncate_log(truncate_at as u64)?;
+        }
+        state.durable_seq = last_kept_seq.unwrap_or(0);
+        state.next_seq = state.durable_seq + 1;
+        Ok(())
+    }
 }
 
 /// Replay one segment file: scan every frame, return the highest
