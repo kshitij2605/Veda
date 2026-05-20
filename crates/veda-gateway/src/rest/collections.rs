@@ -65,6 +65,11 @@ pub struct CreateCollectionRequest {
     /// default), the env flag decides.
     #[serde(default)]
     pub use_log_primary: Option<bool>,
+    /// Per-collection opt-in for the Phase F MVCC overlay.
+    /// `Some(true)` enables it for this collection regardless
+    /// of the `VEDA_MVCC` env flag. `None` falls back to env.
+    #[serde(default)]
+    pub use_mvcc: Option<bool>,
 }
 
 fn default_shard_count() -> u32 {
@@ -235,7 +240,8 @@ async fn create_collection_impl(
     let mut builder = CollectionSchema::builder(&scoped_name)
         .shard_count(req.shard_count)
         .replication_factor(req.replication_factor)
-        .use_log_primary(req.use_log_primary);
+        .use_log_primary(req.use_log_primary)
+        .use_mvcc(req.use_mvcc);
     if let Some(fmt) = req.stored_format.as_deref() {
         match fmt.to_lowercase().as_str() {
             "jsonl" | "columnar" => builder = builder.stored_format(fmt.to_lowercase()),
@@ -358,8 +364,9 @@ pub(crate) async fn materialize_collection_locally(
     }
     let mut shard_managers: HashMap<u32, SegmentManager> = HashMap::new();
     let mut executor = DistributedQueryExecutor::new();
+    let mvcc_on = schema.effective_use_mvcc();
     for shard_id in 0..schema.shard_count() {
-        let sm =
+        let mut sm =
             SegmentManager::new(schema.clone(), shard_id, collection_dir, 512 * 1024 * 1024)
                 .map_err(|e| {
                     (
@@ -369,6 +376,9 @@ pub(crate) async fn materialize_collection_locally(
                         }),
                     )
                 })?;
+        if mvcc_on {
+            sm.enable_mvcc();
+        }
         let searcher = LocalShardSearcher::new(
             SegmentManager::new(schema.clone(), shard_id, collection_dir, 512 * 1024 * 1024)
                 .unwrap(),

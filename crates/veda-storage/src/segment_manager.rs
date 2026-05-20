@@ -73,6 +73,11 @@ impl SegmentManager {
         }
     }
 
+    /// Whether the MVCC overlay is active on this shard.
+    pub fn has_mvcc(&self) -> bool {
+        self.mvcc.is_some()
+    }
+
     /// MVCC-aware insert. Mirrors the record into the MVCC
     /// overlay at `commit_ts` AND into the existing growing
     /// segment so that legacy reads continue to work. Returns

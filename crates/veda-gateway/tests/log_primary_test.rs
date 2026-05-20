@@ -105,7 +105,10 @@ async fn log_primary_insert_then_read_finds_record() {
 }
 
 #[tokio::test]
-async fn log_primary_txn_writes_return_503() {
+async fn log_primary_txn_write_for_unknown_txn_is_404() {
+    // Prod-5 / Phase G: writes carrying `X-Veda-Txn-Id` route
+    // through the TxnCoordinator instead of the v0 503 stub.
+    // An unknown txn-id surfaces as 404 (TxnError::NotFound).
     let (base, _tmp) = start_log_primary_server().await;
     let c = Client::new();
 
@@ -117,9 +120,6 @@ async fn log_primary_txn_writes_return_503() {
         .unwrap();
     assert_eq!(resp.status(), 201);
 
-    // Even though no txn was opened, supplying the header in
-    // PRIMARY mode must surface the "Phase G not ready" error
-    // rather than silently bypassing the txn coordinator.
     let resp = c
         .post(format!("{base}/v1/collections/primary_docs/insert"))
         .header("x-veda-txn-id", "made-up-txn")
@@ -129,5 +129,5 @@ async fn log_primary_txn_writes_return_503() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 503);
+    assert_eq!(resp.status(), 404);
 }

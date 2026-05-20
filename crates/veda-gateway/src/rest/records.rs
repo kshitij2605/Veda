@@ -532,6 +532,14 @@ pub struct GetRecordQuery {
     /// followers.
     #[serde(default)]
     pub linearisable: bool,
+    /// Phase F: MVCC snapshot timestamp (HLC u128, decimal). When
+    /// the collection has `use_mvcc` on, the read returns the
+    /// latest version with `commit_ts <= at`. Omitted = TSO.now()
+    /// at read time. Ignored when MVCC is off for this collection.
+    /// Wire type is String because Axum's `serde_urlencoded` does
+    /// not support `u128`.
+    #[serde(default)]
+    pub at: Option<String>,
 }
 
 pub async fn get_record(
@@ -626,7 +634,53 @@ pub async fn get_record(
         )
     })?;
 
-    // Search all shards for the record
+    // Phase F: when any shard has MVCC enabled, route the read
+    // through `read_at_ts`. The `?at=<ts>` query param selects the
+    // snapshot; omitted defaults to TSO.now() (so the default is
+    // "latest visible version", matching non-MVCC behaviour
+    // semantics).
+    let mvcc_active = shard_map.values().any(|sm| sm.has_mvcc());
+    if mvcc_active {
+        let read_ts: u128 = match q.at.as_deref() {
+            Some(s) => s.parse::<u128>().map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("invalid ?at= value '{s}': expected decimal u128"),
+                    }),
+                )
+            })?,
+            None => {
+                let hlc = state.inner.tso.now().await.unwrap_or_default();
+                ((hlc.physical_ns as u128) << 32) | (hlc.logical as u128)
+            }
+        };
+        for sm in shard_map.values() {
+            if !sm.has_mvcc() {
+                continue;
+            }
+            if let Some(bytes) = sm.read_at_ts(&record_id, read_ts) {
+                let rec: veda_core::record::Record = serde_json::from_slice(&bytes)
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: format!("mvcc record deserialise: {e}"),
+                            }),
+                        )
+                    })?;
+                return Ok(Json(record_to_response(&rec)));
+            }
+        }
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("record '{record_id}' not visible at read_ts={read_ts}"),
+            }),
+        ));
+    }
+
+    // Non-MVCC (legacy) path: scan segments for the record.
     for sm in shard_map.values() {
         // Check growing segment
         let gs = sm.growing_segment();
@@ -867,14 +921,30 @@ async fn insert_via_log(
                 }),
             )
         })?;
-        sm.insert(record).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("VEDA_LOG_PRIMARY: segment insert failed: {e}"),
-                }),
-            )
-        })?;
+        // Phase F: when MVCC is enabled for this shard, insert
+        // through the MVCC overlay (which also mirrors into the
+        // growing segment for legacy reads). Otherwise take the
+        // single-version path.
+        let commit_ts = ((hlc.physical_ns as u128) << 32) | (hlc.logical as u128);
+        if sm.has_mvcc() {
+            sm.insert_mvcc(commit_ts, record).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("VEDA_LOG_PRIMARY: mvcc insert failed: {e}"),
+                    }),
+                )
+            })?;
+        } else {
+            sm.insert(record).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("VEDA_LOG_PRIMARY: segment insert failed: {e}"),
+                    }),
+                )
+            })?;
+        }
 
         applied_ids.push(rid);
     }
