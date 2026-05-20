@@ -136,6 +136,18 @@ pub struct AppStateInner {
     /// Raft path remains the source of truth. Phase C will cut
     /// the Raft path and make these primary.
     pub shard_logs: RwLock<HashMap<String, Arc<ShardLog>>>,
+    /// Phase H cross-region reader gating. When this gateway is
+    /// running on a replica region, snapshot reads at
+    /// `?at=<read_ts>` are checked against this watermark — if
+    /// `read_ts > replica_safe_ts` the read is rejected with 503
+    /// rather than returning a partial snapshot. **Sentinel `0`**
+    /// (the default) means "no gating active" — the primary
+    /// region and single-region deployments leave it at 0. The
+    /// operator advances it forward via `POST
+    /// /v1/admin/replica/safe_ts` or via the WAN receiver's
+    /// auto-advance hook once a `ShipBatchRpc` lands. Monotonic
+    /// forward: backwards-moves are no-ops.
+    pub replica_safe_ts: RwLock<u128>,
 }
 
 /// Build a swappable TSO + the matching `dyn Tso` handle that
@@ -181,6 +193,7 @@ impl AppState {
                 ),
                 open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: RwLock::new(HashMap::new()),
+                replica_safe_ts: RwLock::new(0),
             }),
         }
     }
@@ -227,6 +240,7 @@ impl AppState {
                 ),
                 open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: RwLock::new(HashMap::new()),
+                replica_safe_ts: RwLock::new(0),
             }),
         }
     }
@@ -269,6 +283,7 @@ impl AppState {
                 ),
                 open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: RwLock::new(HashMap::new()),
+                replica_safe_ts: RwLock::new(0),
             }),
         }
     }

@@ -461,6 +461,23 @@ pub async fn get_record(
                 ((hlc.physical_ns as u128) << 32) | (hlc.logical as u128)
             }
         };
+        // Phase H: cross-region reader gating. Sentinel 0 means
+        // gating is off (default; primary regions / single-region
+        // deployments). Once an operator advances safe_ts above 0,
+        // reads ahead of it are rejected so we never surface a
+        // partial snapshot.
+        let safe = *state.inner.replica_safe_ts.read().await;
+        if safe > 0 && read_ts > safe {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: format!(
+                        "replica behind: read_ts={read_ts} exceeds replica_safe_ts={safe} by {}",
+                        read_ts - safe
+                    ),
+                }),
+            ));
+        }
         for sm in shard_map.values() {
             if !sm.has_mvcc() {
                 continue;

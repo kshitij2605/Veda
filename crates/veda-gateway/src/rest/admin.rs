@@ -612,3 +612,50 @@ pub async fn promote_region(
         new_epoch: req.new_topology.epoch,
     }))
 }
+
+#[derive(Debug, Deserialize)]
+pub struct ReplicaSafeTsBody {
+    pub ts: String, // u128 decimal — JSON numbers can't hold u128
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReplicaSafeTsResponse {
+    pub replica_safe_ts: String,
+}
+
+/// `GET /v1/admin/replica/safe_ts` — current cross-region
+/// reader-gating watermark on this gateway. `u128::MAX` means
+/// no gating (default).
+pub async fn get_replica_safe_ts(
+    State(state): State<AppState>,
+) -> Json<ReplicaSafeTsResponse> {
+    let ts = *state.inner.replica_safe_ts.read().await;
+    Json(ReplicaSafeTsResponse {
+        replica_safe_ts: ts.to_string(),
+    })
+}
+
+/// `POST /v1/admin/replica/safe_ts` — advance the replica
+/// reader-gating watermark. Snapshot reads at `?at=<ts>` are
+/// rejected with 503 when `ts > replica_safe_ts`. Monotonic:
+/// requests to move the watermark backwards are no-ops.
+pub async fn set_replica_safe_ts(
+    State(state): State<AppState>,
+    Json(body): Json<ReplicaSafeTsBody>,
+) -> Result<Json<ReplicaSafeTsResponse>, (StatusCode, Json<ClusterMembershipError>)> {
+    let new_ts: u128 = body.ts.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ClusterMembershipError {
+                error: format!("invalid ts '{}': expected decimal u128", body.ts),
+            }),
+        )
+    })?;
+    let mut guard = state.inner.replica_safe_ts.write().await;
+    if new_ts > *guard {
+        *guard = new_ts;
+    }
+    Ok(Json(ReplicaSafeTsResponse {
+        replica_safe_ts: guard.to_string(),
+    }))
+}
