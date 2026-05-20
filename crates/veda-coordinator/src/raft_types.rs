@@ -49,35 +49,6 @@ pub enum ClusterCommand {
     /// guaranteed to include every prior write.
     Noop,
 
-    /// Insert one record into a collection. The cluster state
-    /// machine doesn't materialise the data itself (record blobs
-    /// can be large); on apply, each node uses the
-    /// `(collection, record_id, record_json)` tuple to drive its
-    /// local SegmentManager. The leader assigns `record_id` before
-    /// proposing so all nodes agree on identity.
-    ///
-    /// **Performance trade-off**: routing every insert through
-    /// one cluster-wide Raft caps write throughput at the leader's
-    /// single-node speed. Real horizontal scaling needs per-shard
-    /// Raft groups (CockroachDB / TiDB pattern) — a fundamental
-    /// architectural refactor of veda-coordinator that's out of
-    /// scope here. The current implementation is correct (every
-    /// node converges to the same data) but not yet fast under
-    /// high write loads. See documentation/raft-migration.md.
-    ///
-    /// **Deprecated (Phase E)**: writes go to per-shard `veda-log`
-    /// when `effective_use_log_primary()` is true. This variant
-    /// remains for mixed-version clusters during one-release
-    /// transition; the next major release removes it.
-    #[deprecated(
-        note = "Phase E: writes move to per-shard veda-log; flip the collection's use_log_primary flag (or VEDA_LOG_PRIMARY=1) and stop issuing this variant"
-    )]
-    InsertRecord {
-        collection: String,
-        record_id: String,
-        record_json: String,
-    },
-
     // -- Shard assignment --
     /// Assign a shard of a collection to a node.
     AssignShard {
@@ -91,72 +62,13 @@ pub enum ClusterCommand {
         shard_id: u32,
         node_id: u64,
     },
-
-    // -- Transactions (v0 scaffolding — NOT production Percolator) --
-    //
-    // The v0 transaction model is a strict 2PC-style stage-and-flip:
-    // BeginTxn opens a holder, TxnWrite stages each record write
-    // under it, CommitTxn moves every staged write into the main
-    // record map atomically, AbortTxn drops the holder + its writes.
-    // Replicated through Raft, so every node sees the same outcome.
-    //
-    // What this v0 deliberately does NOT do:
-    //   * Optimistic / pessimistic concurrency control. Two
-    //     concurrent txns writing the same key both succeed; the
-    //     last commit wins.
-    //   * MVCC / snapshot isolation. Reads bypass the transaction
-    //     overlay completely — read-your-writes within a txn is
-    //     NOT supported.
-    //   * Distributed coordination across shards. The implementation
-    //     funnels every staged write through the cluster-wide group,
-    //     same as InsertRecord.
-    //   * Deadlock detection, retry on conflict, lock timeouts.
-    //   * Large transactions — every staged write sits in memory on
-    //     every node until commit / abort.
-    //
-    // Roadmap to production: vendor TiKV's `components/concurrency_manager`
-    // (Apache-2.0, ~4k LoC) + `txn_types` (~3k LoC) for real Percolator
-    // semantics. See research/2026-05-19-multi-week-survey/01-cross-shard-transactions.md
-    /// Open a new transaction holder. Idempotent: re-issuing the
-    /// same txn_id returns Ok without mutating state.
-    ///
-    /// **Deprecated (Phase E)**: txns moved to the Percolator
-    /// `TxnCoordinator` (locks on shard logs, commit record in
-    /// `_meta::txn_commits`). Remains for one-release transition.
-    #[deprecated(
-        note = "Phase E: txns use TxnCoordinator (Percolator SI); stop issuing BeginTxn through Raft"
-    )]
-    BeginTxn {
-        txn_id: String,
-    },
-    /// Stage a record write under an open transaction. Same shape
-    /// as InsertRecord, plus a `txn_id`. Apply must check that the
-    /// transaction is open and the collection exists.
-    #[deprecated(
-        note = "Phase E: txn writes stage as Percolator locks on the per-shard log; stop issuing TxnWrite through Raft"
-    )]
-    TxnWrite {
-        txn_id: String,
-        collection: String,
-        record_id: String,
-        record_json: String,
-    },
-    /// Commit a transaction: move every staged write into the main
-    /// record map and drop the holder. No-op if the txn isn't open.
-    #[deprecated(
-        note = "Phase E: txn commit goes through TxnCoordinator (writes Commit record to _meta); stop issuing CommitTxn through Raft"
-    )]
-    CommitTxn {
-        txn_id: String,
-    },
-    /// Abort a transaction: drop the holder and every staged write.
-    /// No-op if the txn isn't open.
-    #[deprecated(
-        note = "Phase E: txn abort goes through TxnCoordinator; stop issuing AbortTxn through Raft"
-    )]
-    AbortTxn {
-        txn_id: String,
-    },
+    // Phase E hard-remove: `InsertRecord`, `BeginTxn`,
+    // `TxnWrite`, `CommitTxn`, and `AbortTxn` have been deleted.
+    // Record writes go through per-shard `veda-log` (Phase C);
+    // transactions go through the Percolator `TxnCoordinator`
+    // (Phase G). Existing pre-v1 `raft_state.bin` snapshots
+    // migrate via the `veda-admin migrate-metadata` tool, which
+    // uses a `LegacyV0` shadow type to read the old layout.
 
     // -- TSO lease (Phase A scaffolding — see
     //    `.claude/plans/structured-mixing-turing.md`)
@@ -230,11 +142,6 @@ pub enum ClusterCommand {
 }
 
 impl fmt::Display for ClusterCommand {
-    // Display destructures every variant, including the
-    // `#[deprecated]` v0 data-plane ones. The match arms here
-    // are compatibility-only (logs / traces) and disappear with
-    // the variants at the next major.
-    #[allow(deprecated)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CreateCollection { name, .. } => write!(f, "CreateCollection({name})"),
@@ -242,9 +149,6 @@ impl fmt::Display for ClusterCommand {
             Self::RegisterNode { node_id, .. } => write!(f, "RegisterNode({node_id})"),
             Self::DeregisterNode { node_id } => write!(f, "DeregisterNode({node_id})"),
             Self::Noop => write!(f, "Noop"),
-            Self::InsertRecord { collection, record_id, .. } => {
-                write!(f, "InsertRecord({collection}/{record_id})")
-            }
             Self::AssignShard {
                 collection,
                 shard_id,
@@ -255,12 +159,6 @@ impl fmt::Display for ClusterCommand {
                 shard_id,
                 node_id,
             } => write!(f, "UnassignShard({collection}/{shard_id}->{node_id})"),
-            Self::BeginTxn { txn_id } => write!(f, "BeginTxn({txn_id})"),
-            Self::TxnWrite { txn_id, collection, record_id, .. } => {
-                write!(f, "TxnWrite({txn_id}: {collection}/{record_id})")
-            }
-            Self::CommitTxn { txn_id } => write!(f, "CommitTxn({txn_id})"),
-            Self::AbortTxn { txn_id } => write!(f, "AbortTxn({txn_id})"),
             Self::GrantTsLease { epoch, holder_node_id, .. } => {
                 write!(f, "GrantTsLease(epoch={epoch}, holder={holder_node_id})")
             }
@@ -344,14 +242,9 @@ pub struct ClusterState {
     pub nodes: HashMap<u64, NodeInfo>,
     /// collection -> shard_id -> [node_ids]
     pub shard_assignments: HashMap<String, HashMap<u32, Vec<u64>>>,
-    /// collection -> record_id -> record_json (replicated record data)
-    #[serde(default)]
-    pub records: HashMap<String, HashMap<String, String>>,
-    /// Open transaction ids — surfaces to the gateway so the REST
-    /// layer can reject writes against unknown txns without a
-    /// round-trip.
-    #[serde(default)]
-    pub open_txns: Vec<String>,
+    // Phase E hard-remove: `records` and `open_txns` are gone.
+    // Record state lives in per-shard `veda-log`; txn state
+    // lives in the Percolator `TxnCoordinator`.
     /// Current TSO lease, if granted. Phase A populates this via
     /// `GrantTsLease` / `RenewTsLease`; Phase C consumers read it
     /// to decide whether to honour requests from a given holder.

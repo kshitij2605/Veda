@@ -117,26 +117,12 @@ pub struct ClusterStateMachine {
     nodes: HashMap<u64, NodeInfo>,
     /// collection -> (shard_id -> [node_ids])
     shard_assignments: HashMap<String, HashMap<u32, Vec<u64>>>,
-    /// Replicated record store: (collection, record_id) -> record_json.
-    /// Populated by `ClusterCommand::InsertRecord` applies. Each
-    /// node maintains its own copy; the gateway-side reconcile
-    /// path picks up new entries and pushes them into the local
-    /// SegmentManager.
-    ///
-    /// **Memory**: this map holds every inserted record in
-    /// process memory on every node. For small-to-medium states
-    /// this is fine (the same state machine is bincode-serialised
-    /// for snapshot install anyway). For very large datasets,
-    /// per-shard Raft groups are the right architectural answer —
-    /// see documentation/raft-migration.md.
-    #[serde(default)]
-    records: HashMap<String, HashMap<String, String>>,
-    /// Open transactions, keyed by txn_id. Each holds the staged
-    /// writes — moved into `records` on `CommitTxn`, discarded on
-    /// `AbortTxn`. v0 scaffolding (see ClusterCommand::BeginTxn
-    /// doc). Last-writer-wins on commit collisions.
-    #[serde(default)]
-    open_txns: HashMap<String, PendingTxn>,
+    // Phase E hard-remove: `records` and `open_txns` are gone.
+    // Record state lives in per-shard `veda-log`; transaction
+    // state lives in the Percolator `TxnCoordinator`. Old
+    // snapshots round-trip through `veda-admin migrate-metadata`,
+    // which reads the v0 layout via a shadow `LegacyV0` struct
+    // and rewrites without these fields.
     /// Current TSO lease, if granted. Phase A scaffolding — populated
     /// by `GrantTsLease` / `RenewTsLease`. Phase C wires
     /// `MetaLeasedTso` to read this. See
@@ -161,14 +147,9 @@ pub struct ClusterStateMachine {
     aliases: HashMap<String, String>,
 }
 
-/// Staged writes for an open transaction. v0 holds them in memory
-/// on every node — production Percolator would persist lock rows
-/// per key in a dedicated CF instead.
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PendingTxn {
-    /// (collection, record_id) -> record_json
-    pub writes: Vec<(String, String, String)>,
-}
+// Phase E hard-remove: `PendingTxn` is gone. Transaction state
+// lives in the Percolator `TxnCoordinator` (per-shard log
+// locks + a `RecordTxnCommit` entry in `_meta::txn_commits`).
 
 impl ClusterStateMachine {
     pub fn new() -> Self {
@@ -203,18 +184,6 @@ impl ClusterStateMachine {
         }
     }
 
-    /// Phase E migration: strip v0-only fields (`records` and
-    /// `open_txns`) that used to live on the metadata Raft and
-    /// have moved to per-shard logs + the Percolator coordinator.
-    /// Counts how many entries were dropped, for the admin tool.
-    pub fn drop_v0_data_plane(&mut self) -> (usize, usize) {
-        let recs: usize = self.records.values().map(|m| m.len()).sum();
-        let txns = self.open_txns.len();
-        self.records.clear();
-        self.open_txns.clear();
-        (recs, txns)
-    }
-
     /// Phase H: read the persisted `RegionTopology` JSON, if
     /// any. Stored as a sentinel-keyed row in `shard_ensembles`
     /// so we don't need a new top-level field on the state
@@ -242,14 +211,6 @@ impl ClusterStateMachine {
     }
 
     /// Apply a command (without index bookkeeping) — pure business logic.
-    ///
-    /// `#[allow(deprecated)]`: the v0 data-plane variants
-    /// (`InsertRecord` / `TxnWrite` / `BeginTxn` / `CommitTxn` /
-    /// `AbortTxn`) are still applied here to keep mixed-version
-    /// clusters working through the one-release deprecation
-    /// window; the next major release removes both the variants
-    /// and these match arms together.
-    #[allow(deprecated)]
     fn apply_command(&mut self, cmd: &ClusterCommand) -> ClusterResponse {
         match cmd {
             ClusterCommand::CreateCollection { name, schema_json } => {
@@ -265,7 +226,6 @@ impl ClusterStateMachine {
                     return ClusterResponse::Error(format!("collection '{name}' not found"));
                 }
                 self.shard_assignments.remove(name);
-                self.records.remove(name);
                 ClusterResponse::Ok
             }
 
@@ -299,24 +259,6 @@ impl ClusterStateMachine {
             // forces the apply log to advance, which guarantees a
             // subsequent state read includes every prior commit.
             ClusterCommand::Noop => ClusterResponse::Ok,
-
-            ClusterCommand::InsertRecord {
-                collection,
-                record_id,
-                record_json,
-            } => {
-                if !self.collections.contains_key(collection) {
-                    return ClusterResponse::Error(format!(
-                        "collection '{collection}' does not exist"
-                    ));
-                }
-                let entry = self
-                    .records
-                    .entry(collection.clone())
-                    .or_default();
-                entry.insert(record_id.clone(), record_json.clone());
-                ClusterResponse::Ok
-            }
 
             ClusterCommand::AssignShard {
                 collection,
@@ -363,58 +305,6 @@ impl ClusterStateMachine {
                         "shard {shard_id} of '{collection}' is not assigned to node {node_id}"
                     ));
                 }
-                ClusterResponse::Ok
-            }
-
-            ClusterCommand::BeginTxn { txn_id } => {
-                // Idempotent — re-issuing the same txn_id is a no-op
-                // so a retried client (after a network blip) doesn't
-                // get a spurious error.
-                self.open_txns.entry(txn_id.clone()).or_default();
-                ClusterResponse::Ok
-            }
-
-            ClusterCommand::TxnWrite {
-                txn_id,
-                collection,
-                record_id,
-                record_json,
-            } => {
-                if !self.collections.contains_key(collection) {
-                    return ClusterResponse::Error(format!(
-                        "collection '{collection}' does not exist"
-                    ));
-                }
-                let Some(txn) = self.open_txns.get_mut(txn_id) else {
-                    return ClusterResponse::Error(format!(
-                        "transaction '{txn_id}' is not open"
-                    ));
-                };
-                txn.writes.push((
-                    collection.clone(),
-                    record_id.clone(),
-                    record_json.clone(),
-                ));
-                ClusterResponse::Ok
-            }
-
-            ClusterCommand::CommitTxn { txn_id } => {
-                let Some(txn) = self.open_txns.remove(txn_id) else {
-                    // Idempotent on re-commit (already moved).
-                    return ClusterResponse::Ok;
-                };
-                for (collection, record_id, record_json) in txn.writes {
-                    self.records
-                        .entry(collection)
-                        .or_default()
-                        .insert(record_id, record_json);
-                }
-                ClusterResponse::Ok
-            }
-
-            ClusterCommand::AbortTxn { txn_id } => {
-                // Idempotent — no error if the txn isn't open.
-                self.open_txns.remove(txn_id);
                 ClusterResponse::Ok
             }
 
@@ -573,8 +463,6 @@ impl ClusterStateMachine {
             collections: self.collections.clone(),
             nodes: self.nodes.clone(),
             shard_assignments: self.shard_assignments.clone(),
-            records: self.records.clone(),
-            open_txns: self.open_txns.keys().cloned().collect(),
             ts_lease: self.ts_lease.clone(),
             shard_ensembles: self.shard_ensembles.clone(),
             txn_commits: self.txn_commits.clone(),
@@ -619,7 +507,6 @@ impl ClusterStateMachine {
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // tests exercise the deprecated v0 data-plane variants
 mod tests {
     use super::*;
 
@@ -780,105 +667,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn txn_commit_flips_staged_writes_into_records() {
-        let mut sm = ClusterStateMachine::new();
-        drive(
-            &mut sm,
-            [
-                ClusterCommand::CreateCollection {
-                    name: "docs".into(),
-                    schema_json: "{}".into(),
-                },
-                ClusterCommand::BeginTxn { txn_id: "T1".into() },
-                ClusterCommand::TxnWrite {
-                    txn_id: "T1".into(),
-                    collection: "docs".into(),
-                    record_id: "a".into(),
-                    record_json: "{\"v\":1}".into(),
-                },
-                ClusterCommand::TxnWrite {
-                    txn_id: "T1".into(),
-                    collection: "docs".into(),
-                    record_id: "b".into(),
-                    record_json: "{\"v\":2}".into(),
-                },
-            ],
-        );
-
-        // Pre-commit: records map is empty, txn is in open set.
-        assert!(sm.snapshot().records.get("docs").is_none());
-        assert_eq!(sm.snapshot().open_txns, vec!["T1".to_owned()]);
-
-        drive(&mut sm, [ClusterCommand::CommitTxn { txn_id: "T1".into() }]);
-
-        let snap = sm.snapshot();
-        let docs = snap.records.get("docs").expect("records[\"docs\"]");
-        assert_eq!(docs.get("a"), Some(&"{\"v\":1}".to_owned()));
-        assert_eq!(docs.get("b"), Some(&"{\"v\":2}".to_owned()));
-        assert!(snap.open_txns.is_empty(), "txn cleared on commit");
-    }
-
-    #[test]
-    fn txn_abort_drops_staged_writes() {
-        let mut sm = ClusterStateMachine::new();
-        drive(
-            &mut sm,
-            [
-                ClusterCommand::CreateCollection {
-                    name: "docs".into(),
-                    schema_json: "{}".into(),
-                },
-                ClusterCommand::BeginTxn { txn_id: "T1".into() },
-                ClusterCommand::TxnWrite {
-                    txn_id: "T1".into(),
-                    collection: "docs".into(),
-                    record_id: "a".into(),
-                    record_json: "{\"v\":1}".into(),
-                },
-                ClusterCommand::AbortTxn { txn_id: "T1".into() },
-            ],
-        );
-
-        let snap = sm.snapshot();
-        assert!(snap.records.get("docs").is_none());
-        assert!(snap.open_txns.is_empty(), "txn cleared on abort");
-    }
-
-    #[test]
-    fn txn_write_against_unknown_txn_is_error() {
-        let mut sm = ClusterStateMachine::new();
-        drive(
-            &mut sm,
-            [ClusterCommand::CreateCollection {
-                name: "docs".into(),
-                schema_json: "{}".into(),
-            }],
-        );
-        let mut log = LogStore::new();
-        let idx = log.append(ClusterCommand::TxnWrite {
-            txn_id: "NEVER_OPENED".into(),
-            collection: "docs".into(),
-            record_id: "a".into(),
-            record_json: "{}".into(),
-        });
-        let entry = &log.get_range(idx, idx + 1)[0];
-        let resp = sm.apply(entry);
-        assert!(matches!(resp, ClusterResponse::Error(_)));
-    }
-
-    #[test]
-    fn txn_begin_is_idempotent() {
-        let mut sm = ClusterStateMachine::new();
-        drive(
-            &mut sm,
-            [
-                ClusterCommand::BeginTxn { txn_id: "T1".into() },
-                ClusterCommand::BeginTxn { txn_id: "T1".into() },
-            ],
-        );
-        assert_eq!(sm.snapshot().open_txns, vec!["T1".to_owned()]);
-    }
+    // Phase E hard-remove: the four txn tests
+    // (txn_commit_flips_staged_writes_into_records,
+    // txn_abort_drops_staged_writes,
+    // txn_write_against_unknown_txn_is_error,
+    // txn_begin_is_idempotent) covered the v0
+    // BeginTxn/TxnWrite/CommitTxn/AbortTxn variants. With those
+    // variants gone, the corresponding behaviour now lives in
+    // veda-coordinator::percolator::TxnCoordinator (Prod-5) and
+    // is exercised by veda-gateway/tests/txn_test.rs.
 
     #[test]
     fn grant_ts_lease_then_renew() {
@@ -1194,39 +991,9 @@ mod tests {
         assert_eq!(lease.ceiling_ns, 12_345);
     }
 
-    #[test]
-    fn last_writer_wins_on_concurrent_commit_to_same_key() {
-        let mut sm = ClusterStateMachine::new();
-        drive(
-            &mut sm,
-            [
-                ClusterCommand::CreateCollection {
-                    name: "docs".into(),
-                    schema_json: "{}".into(),
-                },
-                ClusterCommand::BeginTxn { txn_id: "T1".into() },
-                ClusterCommand::TxnWrite {
-                    txn_id: "T1".into(),
-                    collection: "docs".into(),
-                    record_id: "a".into(),
-                    record_json: "{\"by\":\"T1\"}".into(),
-                },
-                ClusterCommand::BeginTxn { txn_id: "T2".into() },
-                ClusterCommand::TxnWrite {
-                    txn_id: "T2".into(),
-                    collection: "docs".into(),
-                    record_id: "a".into(),
-                    record_json: "{\"by\":\"T2\"}".into(),
-                },
-                ClusterCommand::CommitTxn { txn_id: "T1".into() },
-                ClusterCommand::CommitTxn { txn_id: "T2".into() },
-            ],
-        );
-
-        let snap = sm.snapshot();
-        let docs = snap.records.get("docs").unwrap();
-        // T2 commits second — its write wins. v0 has no conflict
-        // detection; this is the documented behaviour.
-        assert_eq!(docs.get("a"), Some(&"{\"by\":\"T2\"}".to_owned()));
-    }
+    // Phase E hard-remove: the last-writer-wins-on-concurrent-
+    // commit test exercised the v0 TxnWrite/CommitTxn variants
+    // which are now gone. Equivalent semantics under the
+    // Percolator coordinator are exercised by
+    // veda-coordinator/src/percolator.rs unit tests.
 }

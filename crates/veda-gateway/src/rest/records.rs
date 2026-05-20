@@ -105,12 +105,6 @@ pub async fn insert(
     }
 }
 
-// Phase E deprecation window: the Raft-fallback block below still
-// constructs `ClusterCommand::InsertRecord` / `TxnWrite`, both
-// `#[deprecated]`. Allowed for one release while collections
-// flip `use_log_primary`; removed at the next major along with
-// the apply arms in `store::apply_command`.
-#[allow(deprecated)]
 pub(crate) async fn insert_impl(
     state: AppState,
     name: String,
@@ -130,163 +124,22 @@ pub(crate) async fn insert_impl(
         })?
     };
 
-    // Phase C: route this collection's writes through
-    // `veda-log` when EITHER the schema explicitly opted in
-    // (`use_log_primary: Some(true)`) OR `VEDA_LOG_PRIMARY=1`
-    // is set as a global rollout flag.
+    // Phase C: log-primary is now the only data-plane path.
+    // The legacy Raft-fallback that constructed
+    // `ClusterCommand::InsertRecord` / `TxnWrite` was deleted in
+    // Phase E hard-remove; collections without
+    // `use_log_primary` set still take this branch because
+    // `effective_use_log_primary` falls back to the env flag,
+    // and even when it returns false the only viable code path
+    // is the local segment-manager-direct fall-through below.
     if schema.effective_use_log_primary() {
         let _ = start;
         return insert_via_log(state, name, txn_id, req, schema).await;
     }
 
-    // Raft mode: submit each record as a ClusterCommand::InsertRecord
-    // and return. All materialisation (local segment manager
-    // inserts) happens uniformly through the reconcile task on
-    // every node, including the receiver — that keeps the
-    // segment-manager view identical across the cluster instead
-    // of having the receiver run a slightly different code path.
-    //
-    // (Phase E: this block is inside an `#[allow(deprecated)]`
-    // function; see the attribute on `insert_impl` above.)
-    {
-        let raft_guard = state.inner.raft.read().await;
-        if let Some(coord) = raft_guard.as_ref() {
-            // Per-shard group routing. When the
-            // MultiGroupCoordinator has a group for
-            // (collection, shard_id), submit there; otherwise
-            // fall back to the cluster-wide _meta group.
-            //
-            // Today the per-shard groups are in-process single-
-            // node Raft instances spawned by reconcile; they
-            // don't yet replicate across nodes (that needs the
-            // multiplexing Tonic transport). The _meta group
-            // remains the source of truth for cross-node
-            // replication. This wires the dispatching code path
-            // so the future multi-node multi-group transport
-            // drops in without changing this handler.
-            let mg = state.inner.multi_group.read().await.clone();
-            let shard_count = schema.shard_count();
-            let mut applied = 0usize;
-            let mut applied_ids: Vec<String> = Vec::with_capacity(req.records.len());
-            for raw in req.records.iter() {
-                let record = parse_record_public(raw, &schema).map_err(|e| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse { error: e }),
-                    )
-                })?;
-                let rid = record.id().to_string();
-                let rjson = serde_json::to_string(&record).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("serialize record: {e}"),
-                        }),
-                    )
-                })?;
-                let cmd = match &txn_id {
-                    Some(tid) => veda_coordinator::raft_types::ClusterCommand::TxnWrite {
-                        txn_id: tid.clone(),
-                        collection: name.clone(),
-                        record_id: rid.clone(),
-                        record_json: rjson,
-                    },
-                    None => veda_coordinator::raft_types::ClusterCommand::InsertRecord {
-                        collection: name.clone(),
-                        record_id: rid.clone(),
-                        record_json: rjson,
-                    },
-                };
-
-                // Compute the shard id for this record. Falls
-                // through to the cluster-wide group below if
-                // multi_group isn't configured or the group
-                // hasn't been spawned yet.
-                let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
-                    &record.id(),
-                    shard_count,
-                );
-                let group_id = format!("{}:{}", name, shard_id);
-                let mut routed_to_shard = false;
-                if let Some(ref mg) = mg
-                    && mg.get(&group_id).await.is_some()
-                {
-                    if let Err(e) = mg.execute(&group_id, cmd.clone()).await {
-                        tracing::warn!(
-                            group_id = %group_id,
-                            error = %e,
-                            "per-shard submit failed; falling back to _meta",
-                        );
-                    } else {
-                        routed_to_shard = true;
-                    }
-                }
-
-                // Always also submit to the cluster-wide group —
-                // that's where cross-node replication lives until
-                // the multi-group transport ships. Skip when the
-                // per-shard submit was sufficient and the
-                // cluster-wide group is the same logical
-                // destination (single-node), to avoid double-
-                // counting. We detect single-node via "no peers"
-                // — coord.peers().snapshot() empty.
-                let peers_empty = coord.peers().snapshot().await.is_empty();
-                if !routed_to_shard || !peers_empty {
-                    if let Err(e) = coord.execute(cmd).await {
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse {
-                                error: format!("raft submit: {e}"),
-                            }),
-                        ));
-                    }
-                }
-                // Dark-write to per-shard ShardLog (Phase B).
-                // Errors logged but not surfaced — the Raft path
-                // above is still the source of truth in Phase A/B.
-                if dark_write_enabled() {
-                    let log_arc = ensure_shard_log(&state, &name, shard_id).await;
-                    if let Some(log) = log_arc {
-                        let hlc = state.inner.tso.now().await.unwrap_or_default();
-                        let payload = bytes::Bytes::from(serde_json::to_vec(raw).unwrap_or_default());
-                        let key = bytes::Bytes::from(record.id().as_bytes().to_vec());
-                        match log.append_one(hlc, 0, key, veda_log::LogOp::Put, payload) {
-                            Ok(seq) => tracing::debug!(
-                                collection = %name,
-                                shard = shard_id,
-                                seq_id = seq,
-                                hlc_phys = hlc.physical_ns,
-                                "dark-write to ShardLog ok"
-                            ),
-                            Err(e) => tracing::warn!(
-                                collection = %name,
-                                shard = shard_id,
-                                error = %e,
-                                "dark-write to ShardLog failed (ignored)"
-                            ),
-                        }
-                    }
-                }
-                applied_ids.push(rid);
-                applied += 1;
-            }
-            // Trigger an immediate reconcile so the receiver's
-            // segment manager sees the new records before this
-            // response returns. Without this, the caller would
-            // have to wait up to VEDA_RAFT_RECONCILE_INTERVAL_SECS
-            // before a follow-up GET /records returns the data.
-            let _ = crate::rest::collections::reconcile_collections_from_raft(&state).await;
-            let _ = start;
-            return Ok((
-                StatusCode::CREATED,
-                Json(InsertResponse {
-                    inserted: applied,
-                    ids: applied_ids,
-                }),
-            ));
-        }
-    }
-
+    // Phase E hard-remove fall-through: no log-primary, no
+    // Raft replication. Local single-node insertion only —
+    // multi-node deployments must enable log-primary.
     let mut inserted = 0usize;
     let mut managers = state.inner.segment_managers.write().await;
     let shard_map = managers.get_mut(&name).ok_or_else(|| {
@@ -335,7 +188,6 @@ pub(crate) async fn insert_impl(
             )
         })?;
 
-        let record_id_for_log = record.id();
         sm.insert(record).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -344,32 +196,6 @@ pub(crate) async fn insert_impl(
                 }),
             )
         })?;
-
-        // Dark-write to per-shard ShardLog (Phase B). Same
-        // behaviour + error handling as the Raft branch above.
-        if dark_write_enabled() {
-            let log_arc = ensure_shard_log(&state, &name, shard_id).await;
-            if let Some(log) = log_arc {
-                let hlc = state.inner.tso.now().await.unwrap_or_default();
-                let payload = bytes::Bytes::from(serde_json::to_vec(raw).unwrap_or_default());
-                let key = bytes::Bytes::from(record_id_for_log.as_bytes().to_vec());
-                match log.append_one(hlc, 0, key, veda_log::LogOp::Put, payload) {
-                    Ok(seq) => tracing::debug!(
-                        collection = %name,
-                        shard = shard_id,
-                        seq_id = seq,
-                        hlc_phys = hlc.physical_ns,
-                        "dark-write to ShardLog ok (non-raft branch)"
-                    ),
-                    Err(e) => tracing::warn!(
-                        collection = %name,
-                        shard = shard_id,
-                        error = %e,
-                        "dark-write to ShardLog failed (ignored)"
-                    ),
-                }
-            }
-        }
 
         inserted += 1;
     }
@@ -583,32 +409,12 @@ pub async fn get_record(
                     }),
                 ));
             }
-            if let Some(records) = cs.records.get(&name) {
-                if let Some(rjson) = records.get(&record_id.to_string()) {
-                    let rec: veda_core::record::Record = serde_json::from_str(rjson)
-                        .map_err(|e| {
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(ErrorResponse {
-                                    error: format!(
-                                        "raft record deserialise: {e}"
-                                    ),
-                                }),
-                            )
-                        })?;
-                    return Ok(Json(record_to_response(&rec)));
-                }
-            }
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("record '{record_id}' not found"),
-                }),
-            ));
+            // Phase E hard-remove: `cs.records` is gone. After
+            // the Noop barrier commits, record state lives in
+            // per-shard `veda-log` and the local SegmentManager
+            // (driven by the log applier on followers). Fall
+            // through to the segment-manager read.
         }
-        // Raft not configured — fall through to the local path
-        // (linearisability flag is effectively a no-op when
-        // there's only one node).
     }
 
     // Check collection exists
@@ -769,16 +575,12 @@ pub async fn delete_records(
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/// True when `VEDA_LOG_DARK_WRITE=1` (or any truthy value). The
-/// dark-write path is OFF by default so existing deployments don't
-/// pay the extra fsync — flip on in test / soak to exercise the
-/// future Phase C primary write path.
-fn dark_write_enabled() -> bool {
-    matches!(
-        std::env::var("VEDA_LOG_DARK_WRITE").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE")
-    )
-}
+// Phase E hard-remove: `dark_write_enabled` is gone. Phase B's
+// VEDA_LOG_DARK_WRITE knob existed so writes could mirror to
+// the per-shard log alongside the Raft path during the
+// pre-Phase-C rollout. With the Raft data-plane path removed in
+// Phase E hard-remove, the only data-plane path IS the log
+// (Phase C), so there's nothing to "dark write" alongside.
 
 // Note: per-collection log-primary decision is made via
 // `CollectionSchema::effective_use_log_primary()` — see
