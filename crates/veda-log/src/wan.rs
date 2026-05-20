@@ -88,6 +88,15 @@ pub trait LogReceiver: Send + Sync {
     async fn ship_batch(&self, batch: ShipBatchRpc) -> Result<ShipBatchAck, WanError>;
     /// Highest seq the replica has confirmed locally.
     async fn replica_durable_seq(&self) -> u64;
+    /// Highest commit_ts below which all writes are durable at
+    /// this replica (HLC, ns units). Used by cross-region readers
+    /// to gate snapshot reads at a chosen `read_ts`.
+    async fn replica_safe_ts(&self) -> u128;
+    /// Returns `Ok(replica_safe_ts)` if `read_ts <= safe_ts`,
+    /// else `Err(WanError::ReadTsTooNew)` with the staleness in
+    /// HLC units. Cross-region readers call this before serving
+    /// a snapshot read.
+    async fn check_read_ts(&self, read_ts: u128) -> Result<u128, WanError>;
 }
 
 /// Wire payload for one shipping round.
@@ -98,6 +107,12 @@ pub struct ShipBatchRpc {
     /// The primary's seq_id of the first entry in `entries`.
     /// Used by the receiver for sanity-checking continuity.
     pub start_seq: u64,
+    /// The primary's `safe_ts` (MVCC GC water mark) at the time
+    /// the batch was produced. Receivers advance their local
+    /// safe_ts to at least this value once the batch is durable;
+    /// cross-region readers gate snapshot reads against it.
+    #[serde(default)]
+    pub primary_safe_ts: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +128,14 @@ pub enum WanError {
     SeqGap { expected: u64, got: u64 },
     #[error("io: {0}")]
     Io(String),
+    #[error("read_ts {read_ts} ahead of replica safe_ts {safe_ts} by {lag} units")]
+    ReadTsTooNew {
+        read_ts: u128,
+        safe_ts: u128,
+        lag: u128,
+    },
+    #[error("transport: {0}")]
+    Transport(String),
 }
 
 /// In-process receiver backed by a `ShardLog`. The trait surface
@@ -124,6 +147,10 @@ pub struct LocalReceiver {
     /// Tracks the highest epoch we've accepted. Refuses
     /// out-of-order epochs (planned cutover bumps the epoch).
     current_epoch: Mutex<u64>,
+    /// Replica-side MVCC watermark. Advances when the primary
+    /// ships a batch with a higher `primary_safe_ts`, or when
+    /// the operator pokes it explicitly (test affordance).
+    safe_ts: Mutex<u128>,
 }
 
 impl LocalReceiver {
@@ -133,6 +160,19 @@ impl LocalReceiver {
             node_id,
             log,
             current_epoch: Mutex::new(0),
+            safe_ts: Mutex::new(0),
+        }
+    }
+
+    /// Manually advance `safe_ts` — primarily for tests / admin.
+    /// Production callers set this via `ShipBatchRpc.primary_safe_ts`.
+    pub async fn set_safe_ts(&self, ts: u128) -> bool {
+        let mut g = self.safe_ts.lock().await;
+        if ts > *g {
+            *g = ts;
+            true
+        } else {
+            false
         }
     }
 }
@@ -186,11 +226,36 @@ impl LogReceiver for LocalReceiver {
                 .map_err(|e| WanError::Io(format!("replica append: {e}")))?;
             last = seq;
         }
+        // Advance the safe_ts watermark with the primary's value
+        // once entries are durable.
+        if batch.primary_safe_ts > 0 {
+            let mut g = self.safe_ts.lock().await;
+            if batch.primary_safe_ts > *g {
+                *g = batch.primary_safe_ts;
+            }
+        }
         Ok(ShipBatchAck { durable_seq: last })
     }
 
     async fn replica_durable_seq(&self) -> u64 {
         self.log.durable_seq()
+    }
+
+    async fn replica_safe_ts(&self) -> u128 {
+        *self.safe_ts.lock().await
+    }
+
+    async fn check_read_ts(&self, read_ts: u128) -> Result<u128, WanError> {
+        let safe = *self.safe_ts.lock().await;
+        if read_ts <= safe {
+            Ok(safe)
+        } else {
+            Err(WanError::ReadTsTooNew {
+                read_ts,
+                safe_ts: safe,
+                lag: read_ts - safe,
+            })
+        }
     }
 }
 
@@ -206,6 +271,10 @@ pub struct LogShipper {
     /// Topology epoch carried in every `ShipBatchRpc`. Updated
     /// when the operator promotes a replica.
     epoch: Mutex<u64>,
+    /// Primary-side `safe_ts` water mark stamped on every
+    /// `ShipBatchRpc`. Operator/MVCC GC advances this so the
+    /// replica's safe_ts trails the primary's.
+    safe_ts: Mutex<u128>,
     /// Max entries shipped per round. Caps memory + RPC size.
     batch_size: usize,
 }
@@ -217,6 +286,7 @@ impl LogShipper {
             target,
             next_seq: Mutex::new(1),
             epoch: Mutex::new(1),
+            safe_ts: Mutex::new(0),
             batch_size: 512,
         }
     }
@@ -224,6 +294,15 @@ impl LogShipper {
     pub fn with_batch_size(mut self, n: usize) -> Self {
         self.batch_size = n.max(1);
         self
+    }
+
+    /// Advance the primary's published safe_ts — subsequent
+    /// `ship_batch` RPCs carry this value.
+    pub async fn set_safe_ts(&self, ts: u128) {
+        let mut g = self.safe_ts.lock().await;
+        if ts > *g {
+            *g = ts;
+        }
     }
 
     /// Lag in seq_id units — `source.durable_seq - replica.durable_seq`.
@@ -252,12 +331,14 @@ impl LogShipper {
         let start_seq = batch[0].seq_id;
         let last_seq = batch.last().map(|e| e.seq_id).unwrap_or(0);
         let epoch = *self.epoch.lock().await;
+        let primary_safe_ts = *self.safe_ts.lock().await;
         let ack = self
             .target
             .ship_batch(ShipBatchRpc {
                 epoch,
                 entries: batch,
                 start_seq,
+                primary_safe_ts,
             })
             .await?;
         *cursor = last_seq + 1;
@@ -388,6 +469,7 @@ mod tests {
                 epoch: 5,
                 entries: vec![],
                 start_seq: 6,
+                primary_safe_ts: 0,
             })
             .await
             .unwrap();

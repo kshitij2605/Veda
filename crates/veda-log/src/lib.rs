@@ -35,6 +35,8 @@ pub mod reader;
 pub mod replication;
 pub mod segment_file;
 pub mod shard_log;
+pub mod tonic_log;
+pub mod tonic_wan;
 pub mod wan;
 
 pub use format::{LogEntryV2, LogOp};
