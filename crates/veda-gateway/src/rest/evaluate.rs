@@ -201,6 +201,7 @@ pub async fn evaluate(
                 metric,
                 filter: None,
                 truncate_to: None,
+                read_ts: None,
             };
             let Ok((resp, _)) = executor.search(&request) else {
                 continue;

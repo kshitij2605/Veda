@@ -212,6 +212,36 @@ pub async fn search(
         })?
     };
 
+    // Phase F: resolve the snapshot timestamp once up front so
+    // the executor request structs carry it and apply
+    // visibility-at-read_ts filtering inside the search walk.
+    // Non-MVCC collections leave this as None (no filtering).
+    let mvcc_active_for_collection = {
+        let managers = state.inner.segment_managers.read().await;
+        managers
+            .get(&name)
+            .map(|m| m.values().any(|sm| sm.has_mvcc()))
+            .unwrap_or(false)
+    };
+    let effective_read_ts: Option<u128> = if mvcc_active_for_collection {
+        Some(match req.at.as_deref() {
+            Some(s) => s.parse::<u128>().map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("invalid at='{s}': expected decimal u128"),
+                    }),
+                )
+            })?,
+            None => {
+                let hlc = state.inner.tso.now().await.unwrap_or_default();
+                ((hlc.physical_ns as u128) << 32) | (hlc.logical as u128)
+            }
+        })
+    } else {
+        None
+    };
+
     let executors = state.inner.query_executors.read().await;
     let executor = executors.get(&name).ok_or_else(|| {
         (
@@ -271,7 +301,7 @@ pub async fn search(
             }
         }
         let metric = resolve_metric(&schema, &vec_query.field);
-        let (hits, timings) = execute_single_vector(executor, vec_query, &req, metric)?;
+        let (hits, timings) = execute_single_vector(executor, vec_query, &req, metric, effective_read_ts)?;
         if req.explain {
             let total = timings.filter_ms + timings.ann_search_ms + timings.scoring_ms;
             explain_timing = Some(ExplainTiming {
@@ -292,6 +322,7 @@ pub async fn search(
             k: req.limit,
             metric,
             filter: req.filter.clone(),
+            read_ts: effective_read_ts,
         };
         let (response, timings) = executor
             .search_multi_vector_colpali(&request)
@@ -325,7 +356,7 @@ pub async fn search(
     } else if let Some(ref sparse_query) = req.query.sparse_vector {
         // Sparse-vector search.
         let metric = resolve_sparse_metric(&schema, &sparse_query.field);
-        let (hits, timings) = execute_sparse_vector(executor, sparse_query, &req, metric)?;
+        let (hits, timings) = execute_sparse_vector(executor, sparse_query, &req, metric, effective_read_ts)?;
         if req.explain {
             let total = timings.filter_ms + timings.ann_search_ms + timings.scoring_ms;
             explain_timing = Some(ExplainTiming {
@@ -374,6 +405,7 @@ pub async fn search(
             &req,
             metric,
             req.limit,
+            effective_read_ts,
         )
         .await?;
         if req.explain {
@@ -404,33 +436,15 @@ pub async fn search(
         results
     };
 
-    // Phase F MVCC visibility post-filter. For collections with
-    // MVCC enabled, drop hits whose record is invisible at
-    // `read_ts` (no version with commit_ts <= read_ts, or the
-    // visible version is a tombstone). Non-MVCC collections
-    // skip — `is_visible_at` returns true uniformly.
-    let mvcc_active = {
-        let managers = state.inner.segment_managers.read().await;
-        managers
-            .get(&name)
-            .map(|m| m.values().any(|sm| sm.has_mvcc()))
-            .unwrap_or(false)
-    };
-    if mvcc_active {
-        let read_ts: u128 = match req.at.as_deref() {
-            Some(s) => s.parse::<u128>().map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: format!("invalid at='{s}': expected decimal u128"),
-                    }),
-                )
-            })?,
-            None => {
-                let hlc = state.inner.tso.now().await.unwrap_or_default();
-                ((hlc.physical_ns as u128) << 32) | (hlc.logical as u128)
-            }
-        };
+    // Phase F MVCC visibility safety net for sealed-segment
+    // hits. The growing-segment hits were already filtered
+    // precisely by the executor (per-doc-id), but sealed-
+    // segment readers don't yet carry commit_ts stamps. The
+    // per-record `is_visible_at` check here catches the case
+    // where a sealed segment surfaces a record whose newest
+    // version is invisible at read_ts. Once sealed-segment
+    // MVCC tracking lands the post-filter becomes redundant.
+    if let Some(read_ts) = effective_read_ts {
         let managers = state.inner.segment_managers.read().await;
         if let Some(shard_map) = managers.get(&name) {
             results.retain(|hit| {
@@ -618,6 +632,7 @@ fn execute_single_vector(
     vec_query: &SingleVectorQuery,
     req: &SearchRequest,
     metric: DistanceMetric,
+    read_ts: Option<u128>,
 ) -> Result<(Vec<SearchHit>, SearchTimings), (StatusCode, Json<ErrorResponse>)> {
     let request = VectorSearchRequest {
         field: vec_query.field.clone(),
@@ -626,6 +641,7 @@ fn execute_single_vector(
         metric,
         filter: req.filter.clone(),
         truncate_to: req.truncate_to,
+        read_ts,
     };
 
     let (response, timings) = executor.search(&request).map_err(|e| {
@@ -746,11 +762,12 @@ async fn execute_hybrid_dense_bm25(
     req: &SearchRequest,
     metric: DistanceMetric,
     k: usize,
+    read_ts: Option<u128>,
 ) -> Result<(Vec<SearchHit>, HybridLegs), (StatusCode, Json<ErrorResponse>)> {
     let dense_w = hybrid.dense_weight.clamp(0.0, 1.0);
     let bm25_w = 1.0 - dense_w;
 
-    let (dense_hits, _t) = execute_single_vector(executor, &hybrid.dense, req, metric)?;
+    let (dense_hits, _t) = execute_single_vector(executor, &hybrid.dense, req, metric, read_ts)?;
     let bm25_hits = execute_bm25(state, collection, &hybrid.bm25, k.max(req.limit)).await?;
 
     let dense_top: Vec<String> = dense_hits.iter().map(|h| h.id.clone()).collect();
@@ -931,6 +948,7 @@ fn execute_sparse_vector(
     sparse_query: &SparseVectorQuery,
     req: &SearchRequest,
     metric: DistanceMetric,
+    read_ts: Option<u128>,
 ) -> Result<(Vec<SearchHit>, veda_query::search::SearchTimings), (StatusCode, Json<ErrorResponse>)>
 {
     let sv = veda_core::sparse::SparseVec::new(
@@ -952,6 +970,7 @@ fn execute_sparse_vector(
         k: req.limit,
         metric,
         filter: req.filter.clone(),
+        read_ts,
     };
 
     let (response, timings) = executor.search_sparse(&request).map_err(|e| {

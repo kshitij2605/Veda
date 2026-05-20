@@ -330,10 +330,29 @@ impl ShardSearcher for LocalShardSearcher {
         let mut all_results: Vec<ScoredRecord> = Vec::new();
         let mut agg_timings = SearchTimings::default();
 
+        // Phase F: precompute the visible-doc bitmap for the
+        // growing segment once. `None` means either no read_ts
+        // requested OR the growing segment has no MVCC stamps —
+        // in either case every doc is considered visible.
+        let growing_visible = match request.read_ts {
+            Some(ts) => growing.visible_doc_ids_at(ts),
+            None => None,
+        };
+        let growing_segment_id = growing.id();
+
         // Search growing segment.
         if has_growing {
             let (response, timings) = SearchExecutor::search(request, Some(growing), &[])?;
-            all_results.extend(response.results);
+            // Filter to visible-at-read_ts when applicable.
+            let filtered: Vec<ScoredRecord> = match &growing_visible {
+                Some(vis) => response
+                    .results
+                    .into_iter()
+                    .filter(|r| r.segment_id != growing_segment_id || vis.contains(r.doc_id))
+                    .collect(),
+                None => response.results,
+            };
+            all_results.extend(filtered);
             agg_timings.filter_ms += timings.filter_ms;
             agg_timings.ann_search_ms += timings.ann_search_ms;
             agg_timings.scoring_ms += timings.scoring_ms;
@@ -368,6 +387,7 @@ impl ShardSearcher for LocalShardSearcher {
                     metric: request.metric,
                     filter: request.filter.clone(),
                     truncate_to: None, // already truncated
+                    read_ts: request.read_ts,
                 };
                 let results =
                     search_sealed_segment_ref(reader, mrl_index.as_ref(), &trunc_req)?;
@@ -464,7 +484,26 @@ impl ShardSearcher for LocalShardSearcher {
 
         let (response, timings) =
             SearchExecutor::search_sparse(request, growing_opt, &sealed_refs)?;
-        Ok((response.results, timings))
+
+        // Phase F: filter growing-segment hits against the
+        // MVCC visibility bitmap at request.read_ts. Sealed
+        // segments don't yet carry commit_ts, so they pass
+        // through (the segment_id branch in the predicate).
+        let results = match request.read_ts {
+            Some(ts) => match growing.visible_doc_ids_at(ts) {
+                Some(vis) => {
+                    let growing_id = growing.id();
+                    response
+                        .results
+                        .into_iter()
+                        .filter(|r| r.segment_id != growing_id || vis.contains(r.doc_id))
+                        .collect()
+                }
+                None => response.results,
+            },
+            None => response.results,
+        };
+        Ok((results, timings))
     }
 
     fn search_shard_multi_vector(
@@ -499,7 +538,7 @@ impl ShardSearcher for LocalShardSearcher {
         // Growing segment — brute force (no PLAID there yet).
         let growing = self.segment_manager.growing_segment();
         if growing.count() > 0 {
-            let growing_filter: Option<RoaringBitmap> = match filter_expr.as_ref() {
+            let mut growing_filter: Option<RoaringBitmap> = match filter_expr.as_ref() {
                 Some(expr) => {
                     let mut bm = RoaringBitmap::new();
                     for doc_id in 0..growing.count() {
@@ -513,6 +552,18 @@ impl ShardSearcher for LocalShardSearcher {
                 }
                 None => None,
             };
+            // Phase F: intersect the candidate set with the
+            // MVCC visibility bitmap BEFORE the multi-vector
+            // search — cheaper than post-filter on the merged
+            // results list.
+            if let Some(ts) = request.read_ts
+                && let Some(visible) = growing.visible_doc_ids_at(ts)
+            {
+                growing_filter = Some(match growing_filter {
+                    Some(existing) => existing & visible,
+                    None => visible,
+                });
+            }
             let raw = growing.search_multi_vector(
                 &request.field,
                 &request.query_rows,

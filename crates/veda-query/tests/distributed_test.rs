@@ -169,6 +169,7 @@ fn test_single_shard_search() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -210,6 +211,7 @@ fn test_multi_shard_fanout() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -261,6 +263,7 @@ fn test_multi_shard_with_filter() {
         metric: DistanceMetric::Euclidean,
         filter: Some("category = 'electronics'".into()),
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -355,6 +358,7 @@ fn test_empty_shard() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -388,6 +392,7 @@ fn test_k_larger_than_total() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -455,6 +460,7 @@ fn test_local_shard_searcher_growing_segment() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (results, _timings) = searcher.search_shard(0, &request).unwrap();
@@ -506,6 +512,7 @@ fn test_local_shard_searcher_with_sealed_segments() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (results, _timings) = searcher.search_shard(0, &request).unwrap();
@@ -568,6 +575,7 @@ fn test_distributed_with_local_shards() {
         metric: DistanceMetric::Euclidean,
         filter: None,
     truncate_to: None,
+        read_ts: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
