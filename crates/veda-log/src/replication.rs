@@ -236,10 +236,98 @@ impl LogFollower for LocalFollower {
     }
 }
 
+/// Phase D follower-health auto-orchestrator. Polls every
+/// follower's `last_durable_seq` on a tokio interval and tracks
+/// consecutive failures per `NodeId`. When a follower exceeds
+/// `failure_threshold` consecutive errors, the supplied
+/// callback fires with the `NodeId` so the caller can drive
+/// `rebuild_ensemble` + `RegisterShardEnsemble` via the
+/// metadata Raft.
+///
+/// The monitor is deliberately decoupled from the actual
+/// ensemble-change submission — operators (or tests) plug in
+/// the callback that owns the Raft path. Keeps the monitor
+/// reusable across single-node tests and multi-node
+/// production gateways.
+pub struct FollowerHealthMonitor {
+    followers: Vec<Arc<dyn LogFollower>>,
+    failure_threshold: usize,
+    probe_interval: std::time::Duration,
+}
+
+impl FollowerHealthMonitor {
+    pub fn new(
+        followers: Vec<Arc<dyn LogFollower>>,
+        failure_threshold: usize,
+        probe_interval: std::time::Duration,
+    ) -> Self {
+        Self {
+            followers,
+            failure_threshold: failure_threshold.max(1),
+            probe_interval,
+        }
+    }
+
+    /// Run one probe pass against every follower. Returns the
+    /// `NodeId`s whose consecutive-failure count just crossed
+    /// `failure_threshold` AT this tick (edge-triggered, fires
+    /// exactly once per crossing). `state` is the running
+    /// per-follower failure counter the caller threads across
+    /// ticks.
+    pub async fn probe_once(
+        &self,
+        state: &mut std::collections::HashMap<NodeId, usize>,
+    ) -> Vec<NodeId> {
+        let mut newly_failed = Vec::new();
+        for f in &self.followers {
+            let id = f.node_id();
+            match f.last_durable_seq().await {
+                Ok(_) => {
+                    state.insert(id, 0); // reset on success
+                }
+                Err(_) => {
+                    let next = state.get(&id).copied().unwrap_or(0) + 1;
+                    state.insert(id, next);
+                    if next == self.failure_threshold {
+                        newly_failed.push(id);
+                    }
+                }
+            }
+        }
+        newly_failed
+    }
+
+    /// Spawn a background task that polls every
+    /// `probe_interval` and calls `on_failure(node_id)` when a
+    /// follower crosses the threshold. Abort the handle to
+    /// stop. The callback runs on the monitor's tokio task —
+    /// keep it cheap and non-blocking (the typical pattern is
+    /// to fire-and-forget a `RegisterShardEnsemble` Raft
+    /// submission).
+    pub fn spawn<F>(self, mut on_failure: F) -> tokio::task::JoinHandle<()>
+    where
+        F: FnMut(NodeId) + Send + 'static,
+    {
+        tokio::spawn(async move {
+            let mut state: std::collections::HashMap<NodeId, usize> =
+                std::collections::HashMap::new();
+            let mut interval = tokio::time::interval(self.probe_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let failed = self.probe_once(&mut state).await;
+                for id in failed {
+                    on_failure(id);
+                }
+            }
+        })
+    }
+}
+
 /// Phase D ensemble-change orchestration. Helper that produces
 /// a new `LogEnsemble` with a failed follower replaced by a
 /// fresh node_id and the epoch bumped. The caller (operator,
-/// or a future auto-orchestrator monitoring follower health)
+/// or the [`FollowerHealthMonitor`] auto-orchestrator above)
 /// persists the new ensemble to `_meta` via
 /// `RegisterShardEnsemble`. The new `LogWriter` reconstructed
 /// against the new follower set with the bumped epoch will
@@ -602,6 +690,140 @@ mod tests {
         assert_eq!(dst_log.durable_seq(), 5);
         let entries = dst_log.read_from(1).unwrap();
         assert_eq!(entries.len(), 5);
+    }
+
+    /// Phase D auto-orchestrator: a follower that fails for
+    /// N consecutive probes triggers the callback exactly once.
+    /// Subsequent failures past the threshold don't re-fire
+    /// (edge-triggered, not level-triggered).
+    #[tokio::test]
+    async fn follower_health_monitor_fires_after_threshold_failures() {
+        // Build a custom follower that always errors on
+        // last_durable_seq.
+        struct AlwaysFailing(NodeId);
+        #[async_trait::async_trait]
+        impl LogFollower for AlwaysFailing {
+            fn node_id(&self) -> NodeId {
+                self.0
+            }
+            async fn append(&self, _: AppendRpc) -> Result<AppendAck, EnsembleError> {
+                Err(EnsembleError::Transport("down".into()))
+            }
+            async fn last_durable_seq(&self) -> Result<u64, EnsembleError> {
+                Err(EnsembleError::Transport("down".into()))
+            }
+            async fn fence_to(&self, _: u64) -> Result<(), EnsembleError> {
+                Ok(())
+            }
+        }
+        let f1: Arc<dyn LogFollower> = Arc::new(AlwaysFailing(7));
+        let monitor = FollowerHealthMonitor::new(
+            vec![f1],
+            3, // threshold
+            std::time::Duration::from_millis(10),
+        );
+        // Probe 3 times — only the 3rd should report failure.
+        let mut state = std::collections::HashMap::new();
+        let r1 = monitor.probe_once(&mut state).await;
+        let r2 = monitor.probe_once(&mut state).await;
+        let r3 = monitor.probe_once(&mut state).await;
+        let r4 = monitor.probe_once(&mut state).await;
+        assert!(r1.is_empty(), "1st failure shouldn't trip threshold");
+        assert!(r2.is_empty(), "2nd failure shouldn't trip");
+        assert_eq!(r3, vec![7], "3rd consecutive failure should trip");
+        assert!(r4.is_empty(), "4th probe shouldn't re-fire (edge-triggered)");
+    }
+
+    #[tokio::test]
+    async fn follower_health_monitor_resets_counter_on_success() {
+        // A follower that fails twice, succeeds, fails twice
+        // again — should NOT trip the threshold of 3.
+        struct Toggling {
+            id: NodeId,
+            counter: std::sync::Mutex<usize>,
+            pattern: Vec<bool>, // true = success, false = fail
+        }
+        #[async_trait::async_trait]
+        impl LogFollower for Toggling {
+            fn node_id(&self) -> NodeId {
+                self.id
+            }
+            async fn append(&self, _: AppendRpc) -> Result<AppendAck, EnsembleError> {
+                Err(EnsembleError::Transport("n/a".into()))
+            }
+            async fn last_durable_seq(&self) -> Result<u64, EnsembleError> {
+                let mut c = self.counter.lock().unwrap();
+                let idx = *c;
+                *c += 1;
+                let ok = *self.pattern.get(idx).unwrap_or(&true);
+                if ok {
+                    Ok(0)
+                } else {
+                    Err(EnsembleError::Transport("down".into()))
+                }
+            }
+            async fn fence_to(&self, _: u64) -> Result<(), EnsembleError> {
+                Ok(())
+            }
+        }
+        let f1: Arc<dyn LogFollower> = Arc::new(Toggling {
+            id: 9,
+            counter: std::sync::Mutex::new(0),
+            pattern: vec![false, false, true, false, false],
+        });
+        let monitor = FollowerHealthMonitor::new(
+            vec![f1],
+            3,
+            std::time::Duration::from_millis(10),
+        );
+        let mut state = std::collections::HashMap::new();
+        for _ in 0..5 {
+            let trips = monitor.probe_once(&mut state).await;
+            assert!(
+                trips.is_empty(),
+                "success in the middle should reset counter; trips={trips:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn follower_health_monitor_callback_drives_ensemble_rebuild() {
+        // End-to-end: monitor detects failure, callback
+        // produces a new ensemble. Pins the integration shape
+        // the gateway will actually use.
+        struct AlwaysFailing(NodeId);
+        #[async_trait::async_trait]
+        impl LogFollower for AlwaysFailing {
+            fn node_id(&self) -> NodeId {
+                self.0
+            }
+            async fn append(&self, _: AppendRpc) -> Result<AppendAck, EnsembleError> {
+                Err(EnsembleError::Transport("down".into()))
+            }
+            async fn last_durable_seq(&self) -> Result<u64, EnsembleError> {
+                Err(EnsembleError::Transport("down".into()))
+            }
+            async fn fence_to(&self, _: u64) -> Result<(), EnsembleError> {
+                Ok(())
+            }
+        }
+        let original = LogEnsemble::new(vec![1, 2, 3], 2, 1, 1);
+        let mut state = std::collections::HashMap::new();
+        let bad: Arc<dyn LogFollower> = Arc::new(AlwaysFailing(2));
+        let monitor = FollowerHealthMonitor::new(
+            vec![bad],
+            2,
+            std::time::Duration::from_millis(10),
+        );
+        let _ = monitor.probe_once(&mut state).await;
+        let fired = monitor.probe_once(&mut state).await;
+        assert_eq!(fired, vec![2]);
+        // Operator callback: pick replacement, rebuild.
+        let replacement_node = 99;
+        let next = rebuild_ensemble(&original, fired[0], replacement_node);
+        assert_eq!(next.writers, vec![1, 99, 3]);
+        assert_eq!(next.epoch, 2);
+        assert_eq!(next.writer_leader, 1); // leader survived
     }
 
     #[tokio::test]
