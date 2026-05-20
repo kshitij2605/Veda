@@ -798,40 +798,102 @@ pub async fn reindex_collection(
     };
     let scoped_new = tenant::scope(&tenant, &new_user_name);
 
-    // 3. Submit CreateCollection for the sibling, reusing the
-    //    same scoped schema_json (Raft mode only — non-Raft
-    //    mode falls through and the sibling creation is best-
-    //    effort via the local create path).
+    // 3. Materialize the sibling locally with the rewritten
+    //    schema. In Raft mode we ALSO submit a CreateCollection
+    //    so peers learn about it; in non-Raft mode the local
+    //    materialise IS the create. We always materialise so
+    //    the record-copy step below has somewhere to put rows.
+    let mut rewritten: serde_json::Value = serde_json::from_str(&schema_json)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("rewrite schema: {e}"),
+                }),
+            )
+        })?;
+    rewritten["name"] = serde_json::Value::String(scoped_new.clone());
+    let new_schema_json = serde_json::to_string(&rewritten).unwrap_or(schema_json);
+    let new_schema: CollectionSchema = serde_json::from_str(&new_schema_json).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("parse rewritten schema: {e}"),
+            }),
+        )
+    })?;
+
+    // Write the schema marker for the sibling so
+    // recover_collections_from_disk picks it up across restart.
+    let sibling_dir = state.inner.data_dir.join(&scoped_new);
+    std::fs::create_dir_all(&sibling_dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("create sibling dir: {e}"),
+            }),
+        )
+    })?;
+    let schema_bytes = serde_json::to_vec_pretty(&new_schema).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("serialize sibling schema: {e}"),
+            }),
+        )
+    })?;
+    std::fs::write(sibling_dir.join("collection.json"), &schema_bytes).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("persist sibling schema: {e}"),
+            }),
+        )
+    })?;
+    if let Err((status, e)) = materialize_collection_locally(&state, &new_schema, &sibling_dir).await
+    {
+        return Err((status, e));
+    }
+
+    // 4. Raft-mode CreateCollection so the sibling exists on
+    //    every node, then continue with the copy locally.
     {
         let raft_guard = state.inner.raft.read().await;
         if let Some(coord) = raft_guard.as_ref() {
-            // Rewrite the schema's "name" field to match the
-            // new scoped name (the SM keys collections by their
-            // schema name).
-            let mut rewritten: serde_json::Value = serde_json::from_str(&schema_json)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("rewrite schema: {e}"),
-                        }),
-                    )
-                })?;
-            rewritten["name"] = serde_json::Value::String(scoped_new.clone());
-            let new_schema_json = serde_json::to_string(&rewritten).unwrap_or(schema_json);
             let create = veda_coordinator::raft_types::ClusterCommand::CreateCollection {
                 name: scoped_new.clone(),
                 schema_json: new_schema_json,
             };
             if let Err(e) = coord.execute(create).await {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("create sibling: {e}"),
-                    }),
-                ));
+                // The state machine returns "already exists" if
+                // a previous attempt got this far; treat that as
+                // continue rather than fatal.
+                let msg = format!("{e}");
+                if !msg.contains("already exists") {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("create sibling: {e}"),
+                        }),
+                    ));
+                }
             }
-            // 4. Swap the alias.
+        }
+    }
+
+    // 5. Copy records from source segment managers into sibling
+    //    segment managers. This is the "re-chunk pipeline"
+    //    skeleton — today it's a straight copy (no chunker
+    //    re-run); plug in chunker / embedder transforms here
+    //    when the actual pipeline integration lands.
+    let copied = copy_source_records_to_sibling(&state, &scoped, &scoped_new).await?;
+
+    // 6. Atomic alias swap. Raft mode only — non-Raft mode
+    //    falls through with "no_raft" as before, but at least
+    //    the sibling now has every source record.
+    {
+        let raft_guard = state.inner.raft.read().await;
+        if let Some(coord) = raft_guard.as_ref() {
             let swap = veda_coordinator::raft_types::ClusterCommand::SetCollectionAlias {
                 alias: scoped.clone(),
                 target: scoped_new.clone(),
@@ -846,14 +908,97 @@ pub async fn reindex_collection(
             }
             return Ok(Json(ReindexResponse {
                 target: new_user_name,
-                status: "alias_swapped".into(),
+                status: format!("alias_swapped (copied {copied} records)"),
             }));
         }
     }
     Ok(Json(ReindexResponse {
         target: new_user_name,
-        status: "no_raft".into(),
+        status: format!("no_raft (copied {copied} records)"),
     }))
+}
+
+/// Phase G reindex pipeline helper. Iterates the source
+/// collection's segment managers, pulls every non-tombstoned
+/// record out of every shard's growing + sealed segments, and
+/// inserts each into the corresponding sibling segment manager.
+/// Today it's a straight copy; the chunker / embedder
+/// transforms slot in here when the real pipeline integration
+/// lands. Returns the count of records copied.
+async fn copy_source_records_to_sibling(
+    state: &AppState,
+    src: &str,
+    dst: &str,
+) -> Result<usize, (StatusCode, Json<ErrorResponse>)> {
+    // Pull records from source under a read lock, then release
+    // before grabbing the write lock for the destination.
+    let records: Vec<veda_core::record::Record> = {
+        let managers = state.inner.segment_managers.read().await;
+        let Some(src_shards) = managers.get(src) else {
+            return Ok(0); // source has nothing materialised
+        };
+        let mut out = Vec::new();
+        for sm in src_shards.values() {
+            let gs = sm.growing_segment();
+            for doc_id in 0..gs.count() {
+                if gs.is_deleted(doc_id) {
+                    continue;
+                }
+                if let Some(rec) = gs.get_record(doc_id) {
+                    out.push(rec.clone());
+                }
+            }
+            for handle in sm.sealed_segments() {
+                for doc_id in 0..handle.metadata.row_count as u32 {
+                    if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                        continue;
+                    }
+                    if let Ok(rec) = handle.reader.get_record(doc_id) {
+                        out.push(rec);
+                    }
+                }
+            }
+        }
+        out
+    };
+
+    let dst_schema = {
+        let schemas = state.inner.schemas.read().await;
+        schemas.get(dst).cloned()
+    };
+    let Some(dst_schema) = dst_schema else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("sibling '{dst}' not materialised"),
+            }),
+        ));
+    };
+    let shard_count = dst_schema.shard_count();
+    let mut managers = state.inner.segment_managers.write().await;
+    let Some(dst_shards) = managers.get_mut(dst) else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("sibling '{dst}' segment managers missing"),
+            }),
+        ));
+    };
+    let mut copied = 0usize;
+    for record in records {
+        let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
+            &record.id(),
+            shard_count,
+        );
+        let Some(sm) = dst_shards.get_mut(&shard_id) else {
+            continue;
+        };
+        // Best-effort — duplicates between retries collide; ignore.
+        if sm.insert(record).is_ok() {
+            copied += 1;
+        }
+    }
+    Ok(copied)
 }
 
 fn bump_version_suffix(name: &str) -> Option<String> {
