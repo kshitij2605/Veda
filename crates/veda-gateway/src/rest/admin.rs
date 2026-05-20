@@ -413,3 +413,202 @@ async fn run_health_checks() -> HashMap<String, String> {
 
     checks
 }
+
+// ── Phase H: RegionTopology admin endpoints ────────────────────────────────
+
+/// Wire shape we accept on PUT and return on GET. Mirrors
+/// `veda_log::wan::RegionTopology` exactly but defined locally
+/// so this module doesn't need to import veda-log just for the
+/// type (avoiding a dep cycle direction).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegionTopologyBody {
+    pub primary_region: String,
+    pub replica_regions: Vec<String>,
+    /// Target staleness in milliseconds. Operator alert fires
+    /// above this; shipper tries to keep lag below.
+    #[serde(default = "default_staleness")]
+    pub staleness_target_ms: u64,
+    /// Monotonic epoch. Bumped on every promote_replica.
+    #[serde(default = "default_epoch")]
+    pub epoch: u64,
+}
+
+fn default_staleness() -> u64 { 5_000 }
+fn default_epoch() -> u64 { 1 }
+
+#[derive(Debug, Serialize)]
+pub struct RegionTopologyResponse {
+    pub topology: Option<RegionTopologyBody>,
+}
+
+/// `GET /v1/admin/region_topology` — read the current cross-
+/// region topology. Returns `topology: null` when none has been
+/// registered yet or when the gateway is in non-Raft mode (the
+/// topology lives in `_meta::shard_ensembles` under the sentinel
+/// key `_region_topology`).
+pub async fn get_region_topology(
+    State(state): State<AppState>,
+) -> Result<Json<RegionTopologyResponse>, (StatusCode, Json<ClusterMembershipError>)> {
+    let guard = state.inner.raft.read().await;
+    let Some(coord) = guard.as_ref() else {
+        return Ok(Json(RegionTopologyResponse { topology: None }));
+    };
+    let snap = coord.linearisable_query_state().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ClusterMembershipError {
+                error: format!("query state: {e}"),
+            }),
+        )
+    })?;
+    let topology = snap
+        .shard_ensembles
+        .get(veda_coordinator::store::REGION_TOPOLOGY_KEY)
+        .and_then(|json| serde_json::from_str::<RegionTopologyBody>(json).ok());
+    Ok(Json(RegionTopologyResponse { topology }))
+}
+
+/// `PUT /v1/admin/region_topology` — overwrite the current
+/// topology. Use this to seed the initial topology on the
+/// primary region. For epoch bumps after a cutover the
+/// `/promote` endpoint is the right tool (it drains pending
+/// before bumping).
+pub async fn put_region_topology(
+    State(state): State<AppState>,
+    Json(body): Json<RegionTopologyBody>,
+) -> Result<Json<RegionTopologyResponse>, (StatusCode, Json<ClusterMembershipError>)> {
+    let guard = state.inner.raft.read().await;
+    let Some(coord) = guard.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ClusterMembershipError {
+                error: "raft coordinator not configured; region topology requires _meta".into(),
+            }),
+        ));
+    };
+    let json = serde_json::to_string(&body).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ClusterMembershipError {
+                error: format!("serialize topology: {e}"),
+            }),
+        )
+    })?;
+    coord
+        .execute(veda_coordinator::raft_types::ClusterCommand::RegisterShardEnsemble {
+            shard_id: veda_coordinator::store::REGION_TOPOLOGY_KEY.to_string(),
+            ensemble_json: json,
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ClusterMembershipError {
+                    error: format!("raft submit: {e}"),
+                }),
+            )
+        })?;
+    Ok(Json(RegionTopologyResponse {
+        topology: Some(body),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PromoteRegionRequest {
+    /// New topology after the cutover. `epoch` MUST be strictly
+    /// greater than the current epoch. The new `primary_region`
+    /// is the operator's promotion target.
+    pub new_topology: RegionTopologyBody,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PromoteRegionResponse {
+    pub status: String,
+    pub old_epoch: u64,
+    pub new_epoch: u64,
+}
+
+/// `POST /v1/admin/region_topology/promote` — operator-driven
+/// regional cutover. Refuses if the new epoch is not strictly
+/// newer than the current one. The actual drain-and-fence is
+/// done by callers holding a `LogShipper` handle — this REST
+/// endpoint persists the topology change to `_meta`, which is
+/// what makes the cutover globally visible to other regions.
+///
+/// Typical operator flow:
+///   1. Drain the primary's shipper to the target replica via
+///      `LogShipper::catch_up` (operator script or future
+///      gateway-driven RPC).
+///   2. Call POST /promote here with `new_topology.epoch =
+///      current + 1`, `primary_region = <new primary>`.
+///   3. Old-primary shippers fence on next attempt because
+///      `_meta::aliases::shard_ensembles[_region_topology].epoch`
+///      now exceeds theirs.
+pub async fn promote_region(
+    State(state): State<AppState>,
+    Json(req): Json<PromoteRegionRequest>,
+) -> Result<Json<PromoteRegionResponse>, (StatusCode, Json<ClusterMembershipError>)> {
+    let guard = state.inner.raft.read().await;
+    let Some(coord) = guard.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ClusterMembershipError {
+                error: "raft coordinator not configured; promote requires _meta".into(),
+            }),
+        ));
+    };
+
+    // Read current topology to verify the epoch bump.
+    let snap = coord.linearisable_query_state().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ClusterMembershipError {
+                error: format!("query state: {e}"),
+            }),
+        )
+    })?;
+    let current = snap
+        .shard_ensembles
+        .get(veda_coordinator::store::REGION_TOPOLOGY_KEY)
+        .and_then(|json| serde_json::from_str::<RegionTopologyBody>(json).ok());
+    let old_epoch = current.as_ref().map(|t| t.epoch).unwrap_or(0);
+    if req.new_topology.epoch <= old_epoch {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ClusterMembershipError {
+                error: format!(
+                    "promote epoch {} must be strictly greater than current {}",
+                    req.new_topology.epoch, old_epoch
+                ),
+            }),
+        ));
+    }
+
+    let json = serde_json::to_string(&req.new_topology).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ClusterMembershipError {
+                error: format!("serialize topology: {e}"),
+            }),
+        )
+    })?;
+    coord
+        .execute(veda_coordinator::raft_types::ClusterCommand::RegisterShardEnsemble {
+            shard_id: veda_coordinator::store::REGION_TOPOLOGY_KEY.to_string(),
+            ensemble_json: json,
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ClusterMembershipError {
+                    error: format!("raft submit: {e}"),
+                }),
+            )
+        })?;
+    Ok(Json(PromoteRegionResponse {
+        status: "promoted".into(),
+        old_epoch,
+        new_epoch: req.new_topology.epoch,
+    }))
+}

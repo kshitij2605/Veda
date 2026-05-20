@@ -39,6 +39,15 @@ pub fn build_router(app_state: state::AppState) -> Router {
         // Admin
         .route("/v1/admin/nodes", get(admin::list_nodes))
         .route("/v1/admin/metrics", get(admin::metrics))
+        // Phase H: cross-region topology + operator-driven promote.
+        .route(
+            "/v1/admin/region_topology",
+            get(admin::get_region_topology).put(admin::put_region_topology),
+        )
+        .route(
+            "/v1/admin/region_topology/promote",
+            post(admin::promote_region),
+        )
         // Raft membership API (Phase 6).
         .route(
             "/v1/admin/cluster/join",
