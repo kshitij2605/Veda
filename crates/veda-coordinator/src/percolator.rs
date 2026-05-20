@@ -108,6 +108,7 @@ impl LockTable {
 }
 
 /// Per-key (read_ts, lock) check result.
+#[derive(Debug, Clone)]
 pub enum ReadVisibility {
     /// Key is visible at read_ts; payload may be Some(bytes) or
     /// None for tombstone.
