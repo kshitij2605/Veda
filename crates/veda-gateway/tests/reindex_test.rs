@@ -183,3 +183,120 @@ async fn reindex_copies_source_records_to_sibling() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["total"], json!(3), "sibling should hold all 3 source records; got {body}");
 }
+
+#[tokio::test]
+async fn reindex_rechunks_with_supplied_chunker_strategy() {
+    // Phase G real pipeline: supply a FixedSize chunker that
+    // splits at 50 chars. Source has one parent document split
+    // into 3 long chunks; after re-chunk the sibling holds the
+    // doc re-split at the new boundaries — more chunks, smaller
+    // each.
+    let (base, _tmp) = start_server().await;
+    let c = Client::new();
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "rechunk_pipe",
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 4, "metric": "cosine" },
+                { "name": "content", "type": "string", "filterable": true },
+                { "name": "parent_doc_id", "type": "string", "filterable": true },
+                { "name": "chunk_index", "type": "int64", "filterable": true }
+            ],
+            "seed_records": [
+                { "v": [1.0, 0.0, 0.0, 0.0], "content": "alpha alpha alpha alpha", "parent_doc_id": "doc_a", "chunk_index": 0 },
+                { "v": [0.0, 1.0, 0.0, 0.0], "content": "beta beta beta beta",     "parent_doc_id": "doc_a", "chunk_index": 1 },
+                { "v": [0.0, 0.0, 1.0, 0.0], "content": "gamma gamma gamma gamma", "parent_doc_id": "doc_a", "chunk_index": 2 }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "create: {}", resp.text().await.unwrap());
+
+    // /reindex with a FixedSize chunker. Re-embedding is OFF
+    // because the test environment has no embedding endpoint
+    // configured — chunks will land with zero-vector placeholders.
+    let resp = c
+        .post(format!("{base}/v1/collections/rechunk_pipe/reindex"))
+        .json(&json!({
+            "chunker": {
+                "FixedSize": { "chunk_size": 30, "chunk_overlap": 0 }
+            },
+            "re_embed": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "reindex: {}", resp.text().await.unwrap());
+
+    // The reconstructed parent text is the three chunks
+    // concatenated with newlines. FixedSize(30) splits it into
+    // multiple new chunks; sibling holds the rechunked version.
+    let resp = c
+        .get(format!("{base}/v1/collections/rechunk_pipe@v2/records?limit=50"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    let total = body["total"].as_u64().unwrap();
+    assert!(
+        total >= 2,
+        "rechunked sibling should have ≥2 chunks at chunk_size=30; got {total} body={body}"
+    );
+
+    // Every new chunk has parent_doc_id = "doc_a" and a
+    // chunk_index. Pin that the parent/index metadata
+    // survived the re-chunk.
+    let records = body["records"].as_array().unwrap();
+    for rec in records {
+        assert_eq!(
+            rec["fields"]["parent_doc_id"], json!("doc_a"),
+            "parent_doc_id should be preserved on re-chunk; got {rec}"
+        );
+        assert!(
+            rec["fields"]["chunk_index"].is_number(),
+            "chunk_index should be present; got {rec}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reindex_re_embed_without_embedding_endpoint_returns_424() {
+    // re_embed=true with no embedding endpoint configured =
+    // 424 Failed Dependency with a helpful message.
+    let (base, _tmp) = start_server().await;
+    let c = Client::new();
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "re_embed_no_client",
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 4, "metric": "cosine" },
+                { "name": "content", "type": "string", "filterable": true },
+                { "name": "parent_doc_id", "type": "string", "filterable": true }
+            ],
+            "seed_records": [
+                { "v": [1.0, 0.0, 0.0, 0.0], "content": "alpha", "parent_doc_id": "doc_a" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let resp = c
+        .post(format!("{base}/v1/collections/re_embed_no_client/reindex"))
+        .json(&json!({
+            "chunker": { "FixedSize": { "chunk_size": 20, "chunk_overlap": 0 } },
+            "re_embed": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 424, "expected 424 FAILED_DEPENDENCY, got {}", resp.status());
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("embedding"));
+}

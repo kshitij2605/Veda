@@ -670,6 +670,40 @@ pub struct AliasResponse {
     pub target: String,
 }
 
+/// Phase G reindex request body. All fields optional; the
+/// default (no body, or `{}`) is the straight-copy behaviour.
+/// Set `chunker` to re-chunk the source's parent documents
+/// with a new strategy; set `re_embed: true` to also re-embed
+/// the new chunks via the configured embedding client.
+#[derive(Debug, Default, Deserialize)]
+pub struct ReindexRequest {
+    /// New chunking strategy to apply. `None` = straight copy.
+    #[serde(default)]
+    pub chunker: Option<veda_core::chunking::ChunkingStrategy>,
+    /// Re-run the embedding model against each new chunk's
+    /// text. Requires the gateway's embedding client to be
+    /// configured (`VEDA_EMBED_ENDPOINT` etc.). When false,
+    /// new chunks land with no embedding field set.
+    #[serde(default)]
+    pub re_embed: bool,
+    /// Source field that holds chunk text. Default: "content".
+    #[serde(default)]
+    pub text_field: Option<String>,
+    /// Source field that holds the parent document id (records
+    /// sharing a parent get reconstructed + re-chunked
+    /// together). Default: "parent_doc_id".
+    #[serde(default)]
+    pub parent_id_field: Option<String>,
+    /// Source field that holds the chunk index within a parent
+    /// (used for reconstruction order). Default: "chunk_index".
+    #[serde(default)]
+    pub chunk_index_field: Option<String>,
+    /// Destination field for the re-embedded vector. Default:
+    /// the schema's first vector field.
+    #[serde(default)]
+    pub embedding_field: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ReindexResponse {
     /// New collection that was created with the same schema.
@@ -759,8 +793,10 @@ pub async fn reindex_collection(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(name): Path<String>,
+    body: Option<Json<ReindexRequest>>,
 ) -> Result<Json<ReindexResponse>, (StatusCode, Json<ErrorResponse>)> {
     let scoped = tenant::scope(&tenant, &name);
+    let req = body.map(|Json(r)| r).unwrap_or_default();
 
     // 1. Look up the current schema.
     let schema_json = {
@@ -881,12 +917,21 @@ pub async fn reindex_collection(
         }
     }
 
-    // 5. Copy records from source segment managers into sibling
-    //    segment managers. This is the "re-chunk pipeline"
-    //    skeleton — today it's a straight copy (no chunker
-    //    re-run); plug in chunker / embedder transforms here
-    //    when the actual pipeline integration lands.
-    let copied = copy_source_records_to_sibling(&state, &scoped, &scoped_new).await?;
+    // 5. Move records from source into the sibling. Three
+    //    modes:
+    //    - No chunker config → straight copy (legacy path).
+    //    - Chunker config, no re_embed → reconstruct each
+    //      parent document by concatenating its source chunks,
+    //      run the new chunker, emit new chunk records WITHOUT
+    //      embeddings (caller's choice; useful for offline
+    //      bulk re-chunk before a separate re-embed pass).
+    //    - Chunker config + re_embed → as above, plus embed
+    //      each new chunk via the gateway's embedding client.
+    let copied = if req.chunker.is_some() {
+        rechunk_source_into_sibling(&state, &scoped, &scoped_new, &req).await?
+    } else {
+        copy_source_records_to_sibling(&state, &scoped, &scoped_new).await?
+    };
 
     // 6. Atomic alias swap. Raft mode only — non-Raft mode
     //    falls through with "no_raft" as before, but at least
@@ -999,6 +1044,255 @@ async fn copy_source_records_to_sibling(
         }
     }
     Ok(copied)
+}
+
+/// Phase G real pipeline: re-chunk source records via the
+/// supplied chunker strategy, optionally re-embed, then write
+/// the new chunks to the sibling. Records are grouped by their
+/// `parent_id_field` value (default "parent_doc_id"); each
+/// group is concatenated in chunk-index order to reconstruct
+/// the parent text, then the new chunker runs over that text
+/// and emits the new chunks. Records WITHOUT a parent_doc_id
+/// (root documents themselves, or single-chunk insertions)
+/// are copied through unchanged. Returns the count of records
+/// inserted into the sibling.
+async fn rechunk_source_into_sibling(
+    state: &AppState,
+    src: &str,
+    dst: &str,
+    req: &ReindexRequest,
+) -> Result<usize, (StatusCode, Json<ErrorResponse>)> {
+    use veda_core::record::FieldValue;
+    use std::collections::BTreeMap;
+
+    let strategy = req.chunker.clone().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "rechunk requires chunker".into(),
+            }),
+        )
+    })?;
+    let text_field = req.text_field.as_deref().unwrap_or("content");
+    let parent_field = req.parent_id_field.as_deref().unwrap_or("parent_doc_id");
+    let chunk_idx_field = req.chunk_index_field.as_deref().unwrap_or("chunk_index");
+
+    // 1. Pull every source record under a read lock; group by
+    //    parent_id (None bucket = orphans / copy-as-is).
+    let (parented_groups, orphans): (
+        BTreeMap<String, Vec<veda_core::record::Record>>,
+        Vec<veda_core::record::Record>,
+    ) = {
+        let managers = state.inner.segment_managers.read().await;
+        let Some(src_shards) = managers.get(src) else {
+            return Ok(0);
+        };
+        let mut groups: BTreeMap<String, Vec<veda_core::record::Record>> = BTreeMap::new();
+        let mut orphans: Vec<veda_core::record::Record> = Vec::new();
+        let take_record = |out_groups: &mut BTreeMap<String, Vec<veda_core::record::Record>>,
+                           out_orphans: &mut Vec<veda_core::record::Record>,
+                           rec: veda_core::record::Record| {
+            let parent_id = rec.get(parent_field).and_then(|v| match v {
+                FieldValue::String(s) => Some(s.clone()),
+                _ => None,
+            });
+            match parent_id {
+                Some(pid) => out_groups.entry(pid).or_default().push(rec),
+                None => out_orphans.push(rec),
+            }
+        };
+        for sm in src_shards.values() {
+            let gs = sm.growing_segment();
+            for doc_id in 0..gs.count() {
+                if gs.is_deleted(doc_id) {
+                    continue;
+                }
+                if let Some(rec) = gs.get_record(doc_id) {
+                    take_record(&mut groups, &mut orphans, rec.clone());
+                }
+            }
+            for handle in sm.sealed_segments() {
+                for doc_id in 0..handle.metadata.row_count as u32 {
+                    if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                        continue;
+                    }
+                    if let Ok(rec) = handle.reader.get_record(doc_id) {
+                        take_record(&mut groups, &mut orphans, rec);
+                    }
+                }
+            }
+        }
+        (groups, orphans)
+    };
+
+    // 2. Look up the sibling's schema to find the embedding
+    //    field (defaults to the first vector field).
+    let dst_schema = {
+        let schemas = state.inner.schemas.read().await;
+        schemas.get(dst).cloned()
+    };
+    let Some(dst_schema) = dst_schema else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("sibling '{dst}' not materialised"),
+            }),
+        ));
+    };
+    let embedding_field: Option<String> = req
+        .embedding_field
+        .clone()
+        .or_else(|| dst_schema.vector_fields().first().map(|f| f.name().to_owned()));
+    let embedding_dim: Option<u32> = embedding_field.as_ref().and_then(|name| {
+        dst_schema.vector_fields().iter().find_map(|f| {
+            if f.name() == name {
+                match f.field_type() {
+                    veda_core::types::FieldType::Vector { dimension, .. } => Some(*dimension),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+    });
+    let embed_client_opt: Option<veda_core::embedding_client::EmbeddingClient> = if req.re_embed
+    {
+        let registry = state.inner.embedding_registry.read().await;
+        // Pick a text-modality model (re-chunk inputs are text).
+        registry
+            .find_by_modality(veda_core::embedding::Modality::Text)
+            .first()
+            .map(|cfg| veda_core::embedding_client::EmbeddingClient::new((*cfg).clone()))
+    } else {
+        None
+    };
+    if req.re_embed && embed_client_opt.is_none() {
+        return Err((
+            StatusCode::FAILED_DEPENDENCY,
+            Json(ErrorResponse {
+                error: "re_embed=true requires a text-modality model registered in the embedding registry".into(),
+            }),
+        ));
+    }
+
+    let shard_count = dst_schema.shard_count();
+
+    // 3. For each parent group: reconstruct text, re-chunk,
+    //    build new Records, insert. Orphans get copied through.
+    let mut new_records: Vec<veda_core::record::Record> = Vec::new();
+    for (parent_id, mut chunks) in parented_groups {
+        // Sort by chunk_index (numeric) — None falls to the end.
+        chunks.sort_by_key(|r| match r.get(chunk_idx_field) {
+            Some(FieldValue::Int32(i)) => *i as i64,
+            Some(FieldValue::Int64(i)) => *i,
+            _ => i64::MAX,
+        });
+        let reconstructed: String = chunks
+            .iter()
+            .filter_map(|r| match r.get(text_field) {
+                Some(FieldValue::String(s)) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new_chunks = veda_core::chunking::chunk_markdown(&reconstructed, &strategy);
+        // Inherit one of the source chunks' non-text scalar
+        // fields as a template (parent_doc_id, page_number, etc.
+        // stay sensible). We use the FIRST chunk in the sorted
+        // group as the template.
+        let template = chunks.first();
+        for (i, tc) in new_chunks.into_iter().enumerate() {
+            let mut rec = veda_core::record::Record::new();
+            // Carry forward scalar / non-vector / non-text
+            // fields from the template so things like
+            // collection_name, source_uri, language survive
+            // the re-chunk.
+            if let Some(tpl) = template {
+                for f in dst_schema.scalar_fields() {
+                    if f.name() == text_field
+                        || f.name() == chunk_idx_field
+                    {
+                        continue;
+                    }
+                    if let Some(v) = tpl.get(f.name()) {
+                        rec.set(f.name(), v.clone());
+                    }
+                }
+            }
+            rec.set(text_field, FieldValue::String(tc.text.clone()));
+            rec.set(parent_field, FieldValue::String(parent_id.clone()));
+            rec.set(chunk_idx_field, FieldValue::Int64(i as i64));
+            if let Some(ef) = embedding_field.as_ref()
+                && let (Some(client), Some(dim)) = (embed_client_opt.as_ref(), embedding_dim)
+            {
+                match client.embed_text(&tc.text) {
+                    Ok(v) if v.len() == dim as usize => {
+                        rec.set(
+                            ef,
+                            FieldValue::Vector(veda_core::vector::DenseVector::new(v)),
+                        );
+                    }
+                    Ok(v) => {
+                        return Err((
+                            StatusCode::FAILED_DEPENDENCY,
+                            Json(ErrorResponse {
+                                error: format!(
+                                    "embed dim mismatch: schema={dim} got={}",
+                                    v.len()
+                                ),
+                            }),
+                        ));
+                    }
+                    Err(e) => {
+                        return Err((
+                            StatusCode::FAILED_DEPENDENCY,
+                            Json(ErrorResponse {
+                                error: format!("embed_text failed: {e}"),
+                            }),
+                        ));
+                    }
+                }
+            } else if let Some(ef) = embedding_field.as_ref()
+                && let Some(dim) = embedding_dim
+            {
+                // No re_embed: zero-vector placeholder so the
+                // schema's required vector field is present.
+                rec.set(
+                    ef,
+                    FieldValue::Vector(veda_core::vector::DenseVector::new(vec![
+                        0.0;
+                        dim as usize
+                    ])),
+                );
+            }
+            new_records.push(rec);
+        }
+    }
+    new_records.extend(orphans);
+
+    // 4. Insert into sibling segment managers.
+    let mut managers = state.inner.segment_managers.write().await;
+    let Some(dst_shards) = managers.get_mut(dst) else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("sibling '{dst}' segment managers missing"),
+            }),
+        ));
+    };
+    let mut inserted = 0usize;
+    for rec in new_records {
+        let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
+            &rec.id(),
+            shard_count,
+        );
+        if let Some(sm) = dst_shards.get_mut(&shard_id)
+            && sm.insert(rec).is_ok()
+        {
+            inserted += 1;
+        }
+    }
+    Ok(inserted)
 }
 
 fn bump_version_suffix(name: &str) -> Option<String> {
