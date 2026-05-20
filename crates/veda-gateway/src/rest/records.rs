@@ -111,7 +111,7 @@ pub async fn insert(
 // flip `use_log_primary`; removed at the next major along with
 // the apply arms in `store::apply_command`.
 #[allow(deprecated)]
-async fn insert_impl(
+pub(crate) async fn insert_impl(
     state: AppState,
     name: String,
     txn_id: Option<String>,

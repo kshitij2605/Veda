@@ -70,6 +70,15 @@ pub struct CreateCollectionRequest {
     /// of the `VEDA_MVCC` env flag. `None` falls back to env.
     #[serde(default)]
     pub use_mvcc: Option<bool>,
+    /// Phase G: atomic create-and-load. When present, these
+    /// records are bulk-inserted immediately after the
+    /// collection materialises. If any insert fails the
+    /// collection is rolled back with a `DropCollection`
+    /// compensating action — the client sees one
+    /// success-or-failure response and either everything lands
+    /// or nothing does.
+    #[serde(default)]
+    pub seed_records: Option<Vec<serde_json::Map<String, serde_json::Value>>>,
 }
 
 fn default_shard_count() -> u32 {
@@ -128,6 +137,11 @@ pub struct FieldDef {
 pub struct CreateCollectionResponse {
     pub name: String,
     pub status: String,
+    /// Set only when the request supplied `seed_records`. Mirrors
+    /// the count from the bulk-insert that ran atomically with
+    /// the create. Absent / null when no seeds were requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seeded: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -331,11 +345,46 @@ async fn create_collection_impl(
         return Err((status, e));
     }
 
+    // Phase G: atomic create-and-load. The bulk insert runs
+    // immediately after materialise; any failure rolls back the
+    // collection via the regular drop path so the client never
+    // sees a half-created collection. `seed_records` is the
+    // user-facing field name, ordinary insert validation /
+    // shard-routing applies — this is the same path POST
+    // /v1/collections/:name/insert uses.
+    let seeded_count = if let Some(records) = req.seed_records {
+        let count = records.len();
+        let seed_req = crate::rest::records::InsertRequest { records };
+        match crate::rest::records::insert_impl(state.clone(), scoped_name.clone(), None, seed_req)
+            .await
+        {
+            Ok(_) => Some(count),
+            Err((seed_status, seed_err)) => {
+                // Compensating action: drop the collection so the
+                // create+seed pair is observable as
+                // all-or-nothing.
+                let _ = drop_collection_impl(state.clone(), tenant.clone(), user_name.to_owned()).await;
+                return Err((
+                    seed_status,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "create-and-seed rolled back: {}",
+                            seed_err.0.error
+                        ),
+                    }),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     Ok((
         StatusCode::CREATED,
         Json(CreateCollectionResponse {
             name: user_name.to_owned(),
             status: "created".into(),
+            seeded: seeded_count,
         }),
     ))
 }
