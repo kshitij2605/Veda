@@ -37,6 +37,12 @@ pub struct SegmentManager {
     /// requested timestamp. The existing single-version paths
     /// (`insert`, `growing_segment` reads) are unaffected.
     mvcc: Option<crate::mvcc::MvccStore>,
+    /// Optional MVCC durability WAL. When
+    /// `enable_mvcc_durable(path)` opens this, every
+    /// `insert_mvcc` / `delete_mvcc` / `set_mvcc_safe_ts` call
+    /// also appends to the WAL. Recovery on restart replays the
+    /// WAL into a fresh `MvccStore`.
+    mvcc_wal: Option<crate::mvcc_wal::MvccWal>,
 }
 
 impl SegmentManager {
@@ -62,15 +68,38 @@ impl SegmentManager {
             sealed_segments: Vec::new(),
             seal_threshold_bytes,
             mvcc: None,
+            mvcc_wal: None,
         })
     }
 
     /// Turn on the MVCC overlay. Idempotent — calling twice is
-    /// a no-op (preserves existing versions).
+    /// a no-op (preserves existing versions). In-memory only;
+    /// for crash-safe durability use `enable_mvcc_durable()`.
     pub fn enable_mvcc(&mut self) {
         if self.mvcc.is_none() {
             self.mvcc = Some(crate::mvcc::MvccStore::new());
         }
+    }
+
+    /// Turn on the MVCC overlay with WAL-backed durability. The
+    /// WAL lives at `path` (typically
+    /// `{base_dir}/mvcc.wal`); existing entries are replayed
+    /// into a fresh `MvccStore` before the manager accepts new
+    /// writes. Subsequent `insert_mvcc` / `delete_mvcc` /
+    /// `set_mvcc_safe_ts` calls append + fsync to the WAL.
+    pub fn enable_mvcc_durable(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        let path = path.as_ref().to_path_buf();
+        let mut store = crate::mvcc::MvccStore::new();
+        let (_applied, _dropped) =
+            crate::mvcc_wal::MvccWal::replay_into(&path, &mut store).map_err(|e| {
+                veda_core::error::VedaError::Index(format!("mvcc replay: {e}"))
+            })?;
+        let wal = crate::mvcc_wal::MvccWal::open(&path).map_err(|e| {
+            veda_core::error::VedaError::Index(format!("mvcc wal open: {e}"))
+        })?;
+        self.mvcc = Some(store);
+        self.mvcc_wal = Some(wal);
+        Ok(())
     }
 
     /// Whether the MVCC overlay is active on this shard.
@@ -93,9 +122,19 @@ impl SegmentManager {
             serde_json::to_vec(&record)
                 .map_err(|e| veda_core::error::VedaError::Index(format!("serde: {e}")))?,
         );
-        mvcc.put_payload(&key, commit_ts, payload).map_err(|e| {
+        mvcc.put_payload(&key, commit_ts, payload.clone()).map_err(|e| {
             veda_core::error::VedaError::Index(format!("mvcc.put: {e}"))
         })?;
+        if let Some(wal) = self.mvcc_wal.as_mut() {
+            wal.append(&crate::mvcc_wal::MvccWalEntry::Put {
+                user_key: key,
+                commit_ts,
+                payload,
+            })
+            .map_err(|e| {
+                veda_core::error::VedaError::Index(format!("mvcc wal append: {e}"))
+            })?;
+        }
         // Still write into the growing segment so existing
         // search/list paths work. v1 will read those paths via
         // the MVCC overlay too.
@@ -114,6 +153,15 @@ impl SegmentManager {
         mvcc.delete(&key, commit_ts).map_err(|e| {
             veda_core::error::VedaError::Index(format!("mvcc.delete: {e}"))
         })?;
+        if let Some(wal) = self.mvcc_wal.as_mut() {
+            wal.append(&crate::mvcc_wal::MvccWalEntry::Delete {
+                user_key: key,
+                commit_ts,
+            })
+            .map_err(|e| {
+                veda_core::error::VedaError::Index(format!("mvcc wal append: {e}"))
+            })?;
+        }
         // Tombstone the growing segment too.
         let _ = self.delete_record(*record_id)?;
         Ok(())
@@ -133,6 +181,14 @@ impl SegmentManager {
     pub fn set_mvcc_safe_ts(&mut self, ts: u128) -> bool {
         if let Some(mvcc) = self.mvcc.as_mut() {
             mvcc.set_safe_ts(ts);
+            if let Some(wal) = self.mvcc_wal.as_mut() {
+                // Best-effort: if the WAL append fails we still
+                // advanced the in-memory watermark. Log + go.
+                if let Err(e) = wal.append(&crate::mvcc_wal::MvccWalEntry::SetSafeTs { ts })
+                {
+                    tracing::warn!(error = %e, ts = ts, "mvcc wal set_safe_ts append failed");
+                }
+            }
             true
         } else {
             false

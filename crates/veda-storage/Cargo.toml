@@ -19,6 +19,7 @@ roaring = "0.10"
 bytes = { version = "1", features = ["serde"] }
 base64 = "0.22"
 bincode = "1.3"
+crc32fast = "1"
 rust-s3 = { version = "0.35", features = ["sync-rustls-tls"], default-features = false }
 async-nats = "0.38"
 tokio = { workspace = true }
