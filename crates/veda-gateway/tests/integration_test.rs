@@ -599,14 +599,14 @@ async fn test_error_create_duplicate_collection() {
         .unwrap();
     assert_eq!(resp.status(), 201);
 
-    // Create again — should fail
+    // Create again — should fail with 409 CONFLICT (duplicate).
     let resp = c
         .post(format!("{base}/v1/collections"))
         .json(&payload)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 400);
+    assert_eq!(resp.status(), 409);
     let body: Value = resp.json().await.unwrap();
     assert!(body["error"].as_str().unwrap().contains("already exists"));
 }
