@@ -112,6 +112,77 @@ impl MvccWal {
         &self.path
     }
 
+    /// Phase F WAL checkpoint. Writes the full `MvccStore`
+    /// state to `snap_path` (atomic .tmp + rename + fsync),
+    /// then truncates this WAL file. After a successful return
+    /// the on-disk representation is `snap_path` alone — any
+    /// subsequent writes append to the now-empty WAL. Replay
+    /// loads the snapshot first then plays the WAL on top.
+    ///
+    /// Bounded by the live `MvccStore` size; large stores
+    /// produce large snapshot files. Operators should tune the
+    /// checkpoint interval against MVCC churn.
+    pub fn checkpoint(
+        &mut self,
+        store: &MvccStore,
+        snap_path: impl AsRef<Path>,
+    ) -> Result<usize, MvccWalError> {
+        let (entries, safe_ts) = store.snapshot_entries();
+        let n = entries.len();
+        let payload = bincode::serialize(&(entries, safe_ts))
+            .map_err(|e| MvccWalError::Encode(format!("snapshot: {e}")))?;
+
+        // Atomic write: tmp + fsync + rename.
+        let snap = snap_path.as_ref();
+        let tmp = snap.with_extension("snap.tmp");
+        {
+            let mut f = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)?;
+            f.write_all(&payload)?;
+            f.flush()?;
+            f.sync_data()?;
+        }
+        std::fs::rename(&tmp, snap)?;
+
+        // Now truncate the WAL. Flush any pending buffered writes
+        // first, then drop and reopen to truncate cleanly.
+        self.file.flush()?;
+        self.file.get_ref().sync_data()?;
+        let path = self.path.clone();
+        let truncated = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        self.file = BufWriter::new(truncated);
+        Ok(n)
+    }
+
+    /// Load a snapshot file (written by `checkpoint`) into a
+    /// fresh `MvccStore`. Returns the count of entries
+    /// installed. Missing file = no snapshot (clean empty
+    /// state).
+    pub fn load_snapshot_into(
+        snap_path: impl AsRef<Path>,
+        store: &mut MvccStore,
+    ) -> Result<usize, MvccWalError> {
+        let path = snap_path.as_ref();
+        if !path.exists() {
+            return Ok(0);
+        }
+        let bytes = std::fs::read(path)?;
+        let (entries, safe_ts): (Vec<(crate::mvcc::MvccKey, crate::mvcc::MvccValue)>, Ts) =
+            bincode::deserialize(&bytes)
+                .map_err(|e| MvccWalError::Decode(format!("snapshot: {e}")))?;
+        let n = entries.len();
+        store.install_snapshot_entries(entries, safe_ts);
+        Ok(n)
+    }
+
     /// Replay every record from a WAL file into `store`. Stops
     /// (cleanly) at the first frame whose CRC fails — that's a
     /// torn write at shutdown and the entries past it are
@@ -302,5 +373,71 @@ mod tests {
         assert!(dropped > 0, "tail should report bytes dropped");
         assert_eq!(store.get_at(b"k1", 150).as_deref(), Some(b"alpha".as_slice()));
         assert!(store.get_at(b"k2", 150).is_none());
+    }
+
+    #[test]
+    fn checkpoint_writes_snapshot_and_truncates_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_path = dir.path().join("mvcc.wal");
+        let snap_path = dir.path().join("mvcc.wal.snap");
+        // Append 3 entries.
+        {
+            let mut wal = MvccWal::open(&wal_path).unwrap();
+            wal.append(&put_entry(b"k", 100, b"v1")).unwrap();
+            wal.append(&put_entry(b"k", 200, b"v2")).unwrap();
+            wal.append(&MvccWalEntry::SetSafeTs { ts: 50 }).unwrap();
+        }
+        // Rebuild the store, then checkpoint.
+        let mut wal = MvccWal::open(&wal_path).unwrap();
+        let mut store = MvccStore::new();
+        let (applied, _) = MvccWal::replay_into(&wal_path, &mut store).unwrap();
+        assert_eq!(applied, 3);
+        let n = wal.checkpoint(&store, &snap_path).unwrap();
+        assert!(n >= 2, "expected ≥2 versions snapshotted, got {n}");
+        // Snapshot file exists; WAL truncated.
+        assert!(snap_path.exists());
+        let wal_len = std::fs::metadata(&wal_path).unwrap().len();
+        assert_eq!(wal_len, 0, "WAL must be truncated post-checkpoint");
+        // Replay from a fresh state: snapshot loads everything,
+        // empty WAL adds nothing.
+        let mut store2 = MvccStore::new();
+        let snap_n = MvccWal::load_snapshot_into(&snap_path, &mut store2).unwrap();
+        assert!(snap_n >= 2);
+        let (wal_n, _) = MvccWal::replay_into(&wal_path, &mut store2).unwrap();
+        assert_eq!(wal_n, 0);
+        assert_eq!(store2.get_at(b"k", 150).as_deref(), Some(b"v1".as_slice()));
+        assert_eq!(store2.get_at(b"k", 250).as_deref(), Some(b"v2".as_slice()));
+        assert_eq!(store2.safe_ts(), 50);
+    }
+
+    #[test]
+    fn writes_after_checkpoint_replay_on_top_of_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_path = dir.path().join("mvcc.wal");
+        let snap_path = dir.path().join("mvcc.wal.snap");
+        let mut wal = MvccWal::open(&wal_path).unwrap();
+        wal.append(&put_entry(b"x", 100, b"snap_value")).unwrap();
+        // Rebuild + checkpoint at this point.
+        let mut store = MvccStore::new();
+        let _ = MvccWal::replay_into(&wal_path, &mut store).unwrap();
+        wal.checkpoint(&store, &snap_path).unwrap();
+        // Now write more entries AFTER the checkpoint.
+        wal.append(&put_entry(b"y", 200, b"post_value")).unwrap();
+        // Final recovery: snapshot first, then WAL.
+        let mut store2 = MvccStore::new();
+        MvccWal::load_snapshot_into(&snap_path, &mut store2).unwrap();
+        MvccWal::replay_into(&wal_path, &mut store2).unwrap();
+        assert_eq!(store2.get_at(b"x", 150).as_deref(), Some(b"snap_value".as_slice()));
+        assert_eq!(store2.get_at(b"y", 250).as_deref(), Some(b"post_value".as_slice()));
+    }
+
+    #[test]
+    fn load_snapshot_into_handles_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap_path = dir.path().join("no-such.snap");
+        let mut store = MvccStore::new();
+        let n = MvccWal::load_snapshot_into(&snap_path, &mut store).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(store.total_versions(), 0);
     }
 }

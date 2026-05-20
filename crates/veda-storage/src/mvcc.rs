@@ -228,6 +228,35 @@ impl MvccStore {
         self.store.len()
     }
 
+    /// Phase F WAL checkpoint helper: clone the full BTreeMap +
+    /// safe_ts into a `(Vec, Ts)` pair suitable for bincode
+    /// serialisation. Caller (typically `MvccWal::checkpoint`)
+    /// writes this atomically to a `mvcc.snap` file and then
+    /// truncates the WAL.
+    pub fn snapshot_entries(&self) -> (Vec<(MvccKey, MvccValue)>, Ts) {
+        let entries: Vec<(MvccKey, MvccValue)> =
+            self.store.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        (entries, self.safe_ts)
+    }
+
+    /// Phase F WAL checkpoint inverse: install the entries (and
+    /// safe_ts) into a fresh `MvccStore`. Used by replay when a
+    /// `mvcc.snap` file exists.
+    pub fn install_snapshot_entries(
+        &mut self,
+        entries: Vec<(MvccKey, MvccValue)>,
+        safe_ts: Ts,
+    ) {
+        self.store.clear();
+        self.counts.clear();
+        for (k, v) in entries {
+            let user_key = k.user_key.clone();
+            self.store.insert(k, v);
+            *self.counts.entry(user_key).or_insert(0) += 1;
+        }
+        self.safe_ts = safe_ts;
+    }
+
     /// Advance the GC safe-ts watermark. After this returns,
     /// versions with `commit_ts ≤ safe_ts` AND with a newer
     /// version present are eligible for `gc()`.
