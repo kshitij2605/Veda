@@ -240,6 +240,14 @@ pub struct CollectionSchema {
     /// the new path collection-by-collection.
     #[serde(default)]
     use_log_primary: Option<bool>,
+    /// Per-collection opt-in to Phase F MVCC reads/writes. When
+    /// `Some(true)`, the SegmentManager is constructed with
+    /// `enable_mvcc()` called and writes mirror to the
+    /// `MvccStore` overlay; reads at a given `commit_ts` use
+    /// `read_at_ts`. When `None`, the `VEDA_MVCC` env flag
+    /// decides.
+    #[serde(default)]
+    use_mvcc: Option<bool>,
 }
 
 impl CollectionSchema {
@@ -252,6 +260,7 @@ impl CollectionSchema {
             replication_factor: 1,
             stored_format: None,
             use_log_primary: None,
+            use_mvcc: None,
         }
     }
 
@@ -264,6 +273,18 @@ impl CollectionSchema {
         }
         matches!(
             std::env::var("VEDA_LOG_PRIMARY").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE")
+        )
+    }
+
+    /// Per-collection MVCC override. Same env-fallback shape as
+    /// `effective_use_log_primary`; env var is `VEDA_MVCC`.
+    pub fn effective_use_mvcc(&self) -> bool {
+        if let Some(v) = self.use_mvcc {
+            return v;
+        }
+        matches!(
+            std::env::var("VEDA_MVCC").as_deref(),
             Ok("1") | Ok("true") | Ok("TRUE")
         )
     }
@@ -357,6 +378,7 @@ pub struct CollectionSchemaBuilder {
     replication_factor: u32,
     stored_format: Option<String>,
     use_log_primary: Option<bool>,
+    use_mvcc: Option<bool>,
 }
 
 impl CollectionSchemaBuilder {
@@ -392,6 +414,13 @@ impl CollectionSchemaBuilder {
     /// override.
     pub fn use_log_primary(mut self, v: Option<bool>) -> Self {
         self.use_log_primary = v;
+        self
+    }
+
+    /// Opt this collection into the Phase F MVCC overlay. Same
+    /// shape as `use_log_primary`. Env fallback: `VEDA_MVCC`.
+    pub fn use_mvcc(mut self, v: Option<bool>) -> Self {
+        self.use_mvcc = v;
         self
     }
 
@@ -447,6 +476,7 @@ impl CollectionSchemaBuilder {
             replication_factor: self.replication_factor,
             stored_format: self.stored_format,
             use_log_primary: self.use_log_primary,
+            use_mvcc: self.use_mvcc,
         })
     }
 }
