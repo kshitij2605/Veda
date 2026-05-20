@@ -33,6 +33,12 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     if recovered > 0 {
         tracing::info!(collections = recovered, "recovered collections from data_dir on startup");
     }
+    // Phase C: optional per-shard log appliers (VEDA_LOG_APPLIER=1).
+    // Single-node default leaves them off — the writer's
+    // insert_via_log applies inline. Multi-node follower nodes
+    // turn them on; the inline apply is then skipped (see
+    // log_appliers::applier_enabled).
+    let _appliers = crate::log_appliers::spawn_for_all_known_collections(app_state.clone()).await;
 
     // Optional NATS streaming ingestion worker.
     if let Ok(url) = std::env::var("VEDA_STREAMING_NATS")

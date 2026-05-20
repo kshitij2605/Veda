@@ -913,37 +913,44 @@ async fn insert_via_log(
             })?;
 
         // (3) Apply to local SegmentManager (visibility).
-        let sm = shard_map.get_mut(&shard_id).ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("shard {shard_id} not found for '{name}'"),
-                }),
-            )
-        })?;
-        // Phase F: when MVCC is enabled for this shard, insert
-        // through the MVCC overlay (which also mirrors into the
-        // growing segment for legacy reads). Otherwise take the
-        // single-version path.
-        let commit_ts = ((hlc.physical_ns as u128) << 32) | (hlc.logical as u128);
-        if sm.has_mvcc() {
-            sm.insert_mvcc(commit_ts, record).map_err(|e| {
+        //     Phase C: when the log applier is on
+        //     (VEDA_LOG_APPLIER=1), the applier owns the
+        //     SegmentManager-side apply step. Skipping the
+        //     inline apply here avoids the double-apply that
+        //     would otherwise duplicate every record.
+        if !crate::log_appliers::applier_enabled() {
+            let sm = shard_map.get_mut(&shard_id).ok_or_else(|| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
-                        error: format!("VEDA_LOG_PRIMARY: mvcc insert failed: {e}"),
+                        error: format!("shard {shard_id} not found for '{name}'"),
                     }),
                 )
             })?;
-        } else {
-            sm.insert(record).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("VEDA_LOG_PRIMARY: segment insert failed: {e}"),
-                    }),
-                )
-            })?;
+            // Phase F: when MVCC is enabled for this shard, insert
+            // through the MVCC overlay (which also mirrors into the
+            // growing segment for legacy reads). Otherwise take the
+            // single-version path.
+            let commit_ts = ((hlc.physical_ns as u128) << 32) | (hlc.logical as u128);
+            if sm.has_mvcc() {
+                sm.insert_mvcc(commit_ts, record).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("VEDA_LOG_PRIMARY: mvcc insert failed: {e}"),
+                        }),
+                    )
+                })?;
+            } else {
+                sm.insert(record).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("VEDA_LOG_PRIMARY: segment insert failed: {e}"),
+                        }),
+                    )
+                })?;
+            }
         }
 
         applied_ids.push(rid);
@@ -961,6 +968,14 @@ async fn insert_via_log(
 
 /// Look up or create a ShardLog for `(collection_scoped, shard_id)`.
 /// Logs live under `{data_dir}/_logs/{scoped}/{shard_id}/`.
+pub(crate) async fn ensure_shard_log_for(
+    state: &AppState,
+    scoped_collection: &str,
+    shard_id: u32,
+) -> Option<std::sync::Arc<veda_log::ShardLog>> {
+    ensure_shard_log(state, scoped_collection, shard_id).await
+}
+
 async fn ensure_shard_log(
     state: &AppState,
     scoped_collection: &str,
