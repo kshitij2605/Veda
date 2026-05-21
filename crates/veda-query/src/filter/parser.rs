@@ -21,6 +21,10 @@ pub(crate) enum Token {
     In,
     Contains,
     StartsWith,
+    /// SQL-style `LIKE 'pattern'`. The parser translates this into
+    /// `Contains` (when the pattern is `%X%`) or `StartsWith` (`X%`).
+    /// GAP-1 fix (2026-05-21).
+    Like,
     Is,
     Null,
 
@@ -58,11 +62,15 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             continue;
         }
 
-        // Single-quoted string literal
-        if ch == '\'' {
+        // Single- or double-quoted string literal. UX-2 fix
+        // (2026-05-21): the lexer previously rejected double
+        // quotes with "unexpected character: '\"'", surprising
+        // users who write `field = "foo"`.
+        if ch == '\'' || ch == '"' {
+            let quote = ch;
             i += 1;
             let start = i;
-            while i < len && chars[i] != '\'' {
+            while i < len && chars[i] != quote {
                 i += 1;
             }
             if i >= len {
@@ -174,6 +182,11 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                 "IN" => Token::In,
                 "CONTAINS" => Token::Contains,
                 "STARTS_WITH" => Token::StartsWith,
+                // GAP-1 fix (2026-05-21): SQL-style LIKE. ILIKE is
+                // accepted as an alias for now (true case-insensitive
+                // matching across the index would need lowering the
+                // stored values too — tracked as a follow-up).
+                "LIKE" | "ILIKE" => Token::Like,
                 "IS" => Token::Is,
                 "NULL" => Token::Null,
                 "TRUE" => Token::BoolLit(true),
@@ -411,6 +424,45 @@ impl FilterParser {
                     other => Err(VedaError::Query(format!(
                         "STARTS_WITH expects string literal, got {other:?}"
                     ))),
+                }
+            }
+            Token::Like => {
+                // GAP-1 fix (2026-05-21): translate SQL LIKE patterns
+                // into the existing string-op variants.
+                //   '%X%' → Contains
+                //   'X%'  → StartsWith
+                //   'X'   → Eq (literal equality, no wildcards)
+                //   '%X'  → ends-with — not yet supported; emit a
+                //          clear error instead of silently doing
+                //          the wrong thing.
+                self.advance();
+                let tok = self.advance();
+                let pattern = match tok {
+                    Token::StringLit(s) => s,
+                    other => {
+                        return Err(VedaError::Query(format!(
+                            "LIKE expects string literal, got {other:?}"
+                        )))
+                    }
+                };
+                let starts = pattern.starts_with('%');
+                let ends = pattern.ends_with('%') && pattern.len() > 1;
+                let body: String = pattern.trim_matches('%').to_owned();
+                match (starts, ends) {
+                    (true, true) | (false, false) if body.contains('%') => {
+                        Err(VedaError::Query(format!(
+                            "LIKE pattern '{pattern}' has '%' in the middle — only leading and/or trailing '%' are supported"
+                        )))
+                    }
+                    (true, true) => Ok(FilterExpr::Contains { field, value: body }),
+                    (false, true) => Ok(FilterExpr::StartsWith { field, value: body }),
+                    (true, false) => Err(VedaError::Query(format!(
+                        "LIKE pattern '{pattern}' (ends-with) is not yet supported; use CONTAINS or '%{body}%'"
+                    ))),
+                    (false, false) => Ok(FilterExpr::Eq {
+                        field,
+                        value: FilterValue::String(pattern),
+                    }),
                 }
             }
             Token::Is => {
