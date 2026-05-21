@@ -23,6 +23,13 @@ use crate::tenant::{self, Tenant};
 #[derive(Debug, Deserialize)]
 pub struct EmbedInsertRequest {
     pub records: Vec<serde_json::Map<String, serde_json::Value>>,
+    /// Per-target mapping `vector_field → (source_field, optional model)`.
+    /// UX-1 fix (2026-05-21): now optional. When omitted or empty, the
+    /// handler infers mappings from the schema's
+    /// `FieldType::Vector { auto_embed: Some(AutoEmbedConfig { source, .. }) }`
+    /// declarations. Pass an explicit map to override the schema
+    /// default (per-call model override stays supported).
+    #[serde(default)]
     pub auto_embed: HashMap<String, AutoEmbedMapping>,
 }
 
@@ -69,6 +76,48 @@ pub async fn embed_insert(
     };
 
     let registry = state.inner.embedding_registry.read().await;
+
+    // UX-1 fix (2026-05-21): infer auto_embed mappings from the
+    // schema when the caller didn't supply one. Iterate vector
+    // fields that have `FieldType::Vector { auto_embed: Some(cfg) }`
+    // and add a mapping `target = field name → source = cfg.source`.
+    // Skips vector fields without a schema-level auto_embed config —
+    // an explicit request map is still required for those.
+    let mut req = req; // make mutable for the inferred insert below
+    if req.auto_embed.is_empty() {
+        use veda_core::types::FieldType;
+        let mut inferred: HashMap<String, AutoEmbedMapping> = HashMap::new();
+        for fd in schema.vector_fields() {
+            if let FieldType::Vector { auto_embed: Some(cfg), .. } = &fd.field_type() {
+                inferred.insert(
+                    fd.name().to_owned(),
+                    AutoEmbedMapping {
+                        source_field: cfg.source.clone(),
+                        model: None,
+                    },
+                );
+            }
+        }
+        if !inferred.is_empty() {
+            tracing::debug!(
+                count = inferred.len(),
+                "embed_insert: inferred auto_embed mappings from collection schema"
+            );
+            req.auto_embed = inferred;
+        } else {
+            // No request map AND nothing to infer — return a clear
+            // error rather than the silent 422 "missing field" the
+            // pre-2026-05-21 client got.
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "no `auto_embed` mappings supplied and the schema for collection '{name}' has no vector field with auto_embed configured. Pass {{\"auto_embed\":{{\"<vector_field>\":{{\"source_field\":\"<source>\"}}}}}} or set the auto_embed property on the field at create-collection time."
+                    ),
+                }),
+            ));
+        }
+    }
 
     // Two-pass model resolution:
     // Pass 1: detect if ANY auto-select mapping targets a non-text modality.
