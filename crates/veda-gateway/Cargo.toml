@@ -32,6 +32,8 @@ zip = "2"
 async-nats = "0.38"
 futures = "0.3"
 base64 = "0.22"
+argon2 = "0.5"
+constant_time_eq = "0.3"
 
 [dev-dependencies]
 jsonwebtoken = "9"

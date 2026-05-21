@@ -291,16 +291,31 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<LoginError>)> {
-    let user = state.inner.users.get(&req.username).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(LoginError {
-                error: "invalid credentials".into(),
-            }),
-        )
-    })?;
+    // SEC-1 (2026-05-21): the previous implementation did
+    // `user.password != req.password` — direct string compare on
+    // stored cleartext. Both halves are now fixed:
+    //   1. New users are stored as Argon2id PHC hashes via
+    //      `UserRecord::with_password`.
+    //   2. `verify_credentials` verifies via constant-time hash
+    //      check, with a legacy-plaintext fall-back that logs a
+    //      one-shot warn so operators migrate.
+    //
+    // We also do a constant-work lookup miss: when the username
+    // isn't found we still call `verify_credentials` against a
+    // throwaway hash so login timing doesn't reveal whether a
+    // username exists.
+    use crate::rest::state::verify_credentials;
 
-    if user.password != req.password {
+    static DUMMY_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let dummy = DUMMY_HASH.get_or_init(|| crate::rest::state::hash_password("not-a-real-password"));
+
+    let (stored, role) = match state.inner.users.get(&req.username) {
+        Some(u) => (u.password.as_str(), Some(u.role)),
+        None => (dummy.as_str(), None),
+    };
+
+    let ok = verify_credentials(stored, &req.password, &req.username) && role.is_some();
+    if !ok {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(LoginError {
@@ -309,7 +324,7 @@ pub async fn login(
         ));
     }
 
-    let token = auth::generate_token(&req.username, user.role, &state.inner.jwt_secret)
+    let token = auth::generate_token(&req.username, role.unwrap(), &state.inner.jwt_secret)
         .map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
