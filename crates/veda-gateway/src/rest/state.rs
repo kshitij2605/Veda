@@ -22,10 +22,91 @@ use veda_log::ShardLog;
 use veda_time::{LocalTso, SwappableTso, Tso};
 
 /// Represents a user in the in-memory user store.
+///
+/// **Password storage:** prefer an Argon2id PHC string (starts with
+/// `$argon2id$...`) produced by [`hash_password`]. The field name is
+/// kept as `password` for back-compat with pre-2026-05-21 callers,
+/// but [`verify_credentials`] will accept either:
+///
+/// 1. A PHC-formatted Argon2 hash — verified with the constant-time
+///    [`argon2::Argon2::verify_password`].
+/// 2. A legacy plaintext string — compared with [`constant_time_eq`]
+///    AND logged as a one-shot warning so operators see the
+///    upgrade prompt.
+///
+/// New code should use [`UserRecord::with_password`] to construct
+/// records, never write to `password` directly.
 #[derive(Clone)]
 pub struct UserRecord {
     pub password: String,
     pub role: Role,
+}
+
+impl UserRecord {
+    /// Construct a UserRecord by hashing `plaintext` with Argon2id.
+    /// The hash uses a fresh random salt; same plaintext → different
+    /// stored value on each call. Panics only if the OS RNG fails
+    /// (which would mean the system is unusable for crypto anyway).
+    pub fn with_password(plaintext: &str, role: Role) -> Self {
+        Self {
+            password: hash_password(plaintext),
+            role,
+        }
+    }
+}
+
+/// Hash a plaintext password with Argon2id and default OWASP-aligned
+/// parameters. Returns a PHC string suitable for storage. Use
+/// [`verify_credentials`] to check a candidate against this value.
+pub fn hash_password(plaintext: &str) -> String {
+    use argon2::password_hash::{rand_core::OsRng, SaltString};
+    use argon2::{Argon2, PasswordHasher};
+
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(plaintext.as_bytes(), &salt)
+        .expect("argon2 hash never fails on valid utf-8 input")
+        .to_string()
+}
+
+/// Constant-time verify of `candidate` against a stored password
+/// (either an Argon2 PHC hash or, for back-compat, a legacy
+/// plaintext). The legacy plaintext path:
+///
+/// - Uses [`constant_time_eq`] so wrong-vs-wrong-length doesn't
+///   leak via timing.
+/// - Emits a one-shot `tracing::warn!` per `username` so operators
+///   migrate. Logged once per process to avoid log spam under brute-
+///   force.
+pub fn verify_credentials(stored: &str, candidate: &str, username: &str) -> bool {
+    use argon2::password_hash::PasswordHash;
+    use argon2::{Argon2, PasswordVerifier};
+
+    if let Ok(parsed) = PasswordHash::new(stored) {
+        return Argon2::default()
+            .verify_password(candidate.as_bytes(), &parsed)
+            .is_ok();
+    }
+
+    // Legacy plaintext fallback. `constant_time_eq` returns false in
+    // constant time even for different-length inputs.
+    let ok = constant_time_eq::constant_time_eq(stored.as_bytes(), candidate.as_bytes());
+    if ok {
+        // One-shot per username so operators see it but a brute-
+        // force attempt doesn't spam logs.
+        static PLAINTEXT_WARN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
+        let set = PLAINTEXT_WARN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+        let mut guard = set.lock().unwrap();
+        if guard.insert(username.to_owned()) {
+            tracing::warn!(
+                username = %username,
+                "user '{}' is stored as plaintext — call `UserRecord::with_password` or set `VEDA_BOOTSTRAP_ADMIN_PASSWORD` so the next login re-hashes via Argon2id",
+                username
+            );
+        }
+    }
+    ok
 }
 
 /// Shared application state accessible from all handlers.
@@ -199,14 +280,29 @@ impl AppState {
     }
 
     /// Create a new AppState with auth **enabled** and a default admin user.
+    ///
+    /// SEC-2 (2026-05-21): the admin password defaults to the
+    /// `VEDA_BOOTSTRAP_ADMIN_PASSWORD` env var (recommended for
+    /// production). If unset, falls back to `"admin"` and logs a
+    /// `tracing::warn!` so operators see the bootstrap reminder.
+    /// In both cases the value is stored as an Argon2id hash, not
+    /// cleartext.
     pub fn with_auth(data_dir: &Path, jwt_secret: &str) -> Self {
+        let admin_user = std::env::var("VEDA_BOOTSTRAP_ADMIN_USERNAME")
+            .unwrap_or_else(|_| "admin".to_owned());
+        let admin_password = match std::env::var("VEDA_BOOTSTRAP_ADMIN_PASSWORD") {
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                tracing::warn!(
+                    "VEDA_BOOTSTRAP_ADMIN_PASSWORD not set — seeding default admin/admin. Set this env var (or pre-populate via `with_auth_and_users`) before any production use."
+                );
+                "admin".to_owned()
+            }
+        };
         let mut users = HashMap::new();
         users.insert(
-            "admin".to_owned(),
-            UserRecord {
-                password: "admin".to_owned(),
-                role: Role::Admin,
-            },
+            admin_user,
+            UserRecord::with_password(&admin_password, Role::Admin),
         );
         let tso_pair = make_tso_pair();
         Self {
