@@ -674,3 +674,76 @@ pub async fn set_replica_safe_ts(
         replica_safe_ts: guard.to_string(),
     }))
 }
+
+// ── GAP-3 (2026-05-21): MVCC WAL checkpoint admin endpoint ────────────
+
+#[derive(Debug, Serialize)]
+pub struct MvccCheckpointResponse {
+    pub collection: String,
+    /// Total shards considered.
+    pub shards: usize,
+    /// Shards that ran a checkpoint (MVCC durable was enabled there).
+    pub shards_checkpointed: usize,
+    /// Sum of entries snapshotted across shards.
+    pub entries: usize,
+}
+
+/// `POST /v1/admin/collections/{name}/mvcc_checkpoint` — force an
+/// atomic snapshot of the MVCC store across all shards of a
+/// collection AND truncate each shard's MVCC WAL. Operator hook
+/// for bounded WAL growth (the unbounded WAL is fine for short-
+/// lived test runs but scales poorly under sustained churn).
+///
+/// Per shard:
+///   - returns `Ok(Some(N))` when MVCC durable is enabled —
+///     snapshot file is written atomically (`.tmp` → fsync →
+///     rename) and the WAL is truncated to zero.
+///   - returns `Ok(None)` when MVCC durable is NOT enabled
+///     (counted as `shards - shards_checkpointed`).
+///
+/// 404 when the collection is unknown. 500 on any per-shard
+/// checkpoint failure — partial progress is preserved (no
+/// rollback) so subsequent calls retry only the remaining shards.
+pub async fn mvcc_checkpoint(
+    State(state): State<AppState>,
+    crate::tenant::Tenant(tenant): crate::tenant::Tenant,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<MvccCheckpointResponse>, (StatusCode, Json<ClusterMembershipError>)> {
+    let scoped = crate::tenant::scope(&tenant, &name);
+    let mut guard = state.inner.segment_managers.write().await;
+    let shard_map = guard.get_mut(&scoped).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ClusterMembershipError {
+                error: format!("collection '{name}' not found"),
+            }),
+        )
+    })?;
+
+    let mut shards_checkpointed = 0usize;
+    let mut entries = 0usize;
+    for sm in shard_map.values_mut() {
+        match sm.mvcc_checkpoint() {
+            Ok(Some(n)) => {
+                shards_checkpointed += 1;
+                entries += n;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ClusterMembershipError {
+                        error: format!("mvcc_checkpoint failed on shard: {e}"),
+                    }),
+                ));
+            }
+        }
+    }
+
+    Ok(Json(MvccCheckpointResponse {
+        collection: name.clone(),
+        shards: shard_map.len(),
+        shards_checkpointed,
+        entries,
+    }))
+}

@@ -68,6 +68,13 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/admin/cluster/noop",
             post(admin::cluster_noop),
         )
+        // GAP-3 (2026-05-21): trigger an MVCC WAL checkpoint
+        // (atomic snapshot + WAL truncate) for a collection.
+        // Per-shard fan-out; no-op on shards without MVCC.
+        .route(
+            "/v1/admin/collections/{name}/mvcc_checkpoint",
+            post(admin::mvcc_checkpoint),
+        )
         // Collections
         .route("/v1/collections", post(collections::create_collection))
         .route("/v1/collections", get(collections::list_collections))
