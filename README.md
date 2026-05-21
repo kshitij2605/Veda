@@ -153,6 +153,29 @@ The metadata Raft (`_meta`) carries only schemas, the shard plan, nodes, the TSO
 
 See [documentation/rearchitecture-overview.md](documentation/rearchitecture-overview.md) for the layered design and current phase status.
 
+## Cluster modes & admin endpoints
+
+Veda runs in two modes; the admin REST surface differs depending on which one is active.
+
+- **Single-node** (default, no Raft) — Veda comes up with `VEDA_COORDINATOR` unset (or anything ≠ `raft`). Schemas, segments, MVCC, the Percolator txn coordinator, atomic reindex, and the per-collection log all work. The `_meta`-backed admin endpoints (region topology, replica promotion, cluster membership) return **503** in this mode because there is no `_meta` to mutate.
+- **Raft** — set `VEDA_COORDINATOR=raft` to start `_meta` as a single-node openraft group. The 503 endpoints below light up; `/v1/admin/nodes` flips its `mode` field from `"single"` to `"raft"`.
+
+| Endpoint | Single-node | Raft | Notes |
+|---|---|---|---|
+| `GET /v1/admin/health` / `readiness` | ✓ | ✓ | Always reachable |
+| `GET /v1/admin/metrics` | ✓ | ✓ | Prometheus text format |
+| `GET /v1/admin/nodes` | ✓ (1 node) | ✓ (N nodes) | `mode` field reports which path is active |
+| `GET /v1/admin/region_topology` | ✓ (returns `{topology:null}`) | ✓ | Read works even without `_meta` |
+| `PUT /v1/admin/region_topology` | ✗ 503 | ✓ | Mutates `_meta::shard_ensembles` |
+| `POST /v1/admin/region_topology/promote` | ✗ 503 | ✓ | Requires `_meta` for epoch monotonicity |
+| `GET` / `POST /v1/admin/replica/safe_ts` | ✓ (local-only) | ✓ | Per-process watermark, sentinel 0 = no gating |
+| `POST /v1/admin/cluster/join` / `DELETE /cluster/nodes/{id}` | ✗ 503 | ✓ | Openraft membership change |
+| `POST /v1/admin/cluster/noop` | ✗ 503 | ✓ | Drives the Raft log for test harnesses |
+| `POST /v1/admin/collections/{name}/mvcc_checkpoint` | ✓ | ✓ | Atomic snapshot + WAL truncate; per-shard fan-out |
+| `POST /v1/auth/login` | ✓ | ✓ | Argon2id verify; set `VEDA_BOOTSTRAP_ADMIN_PASSWORD` before first start |
+
+If you don't intend to run multi-node, leave `VEDA_COORDINATOR` unset and ignore the 503 endpoints — every Phase E-onward write path goes through `veda-log` regardless.
+
 ## API Examples
 
 ### Create a collection
