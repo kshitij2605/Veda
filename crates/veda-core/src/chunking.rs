@@ -432,13 +432,41 @@ fn detect_content_types(text: &str) -> Vec<String> {
 
 // ── FixedSize ──────────────────────────────────────────────────────────
 
+/// Snap `i` down to the nearest UTF-8 char boundary at or below
+/// it. Lets us slice safely on any byte offset without panicking on
+/// multi-byte text (Japanese / Chinese / Korean / emoji).
+fn floor_char_boundary(text: &str, mut i: usize) -> usize {
+    if i >= text.len() {
+        return text.len();
+    }
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Snap `i` up to the nearest char boundary at or above it.
+fn ceil_char_boundary(text: &str, mut i: usize) -> usize {
+    if i >= text.len() {
+        return text.len();
+    }
+    while i < text.len() && !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 fn chunk_fixed_size(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<TextChunk> {
     let step = chunk_size.saturating_sub(chunk_overlap).max(1);
     let mut chunks = Vec::new();
     let mut pos = 0;
 
     while pos < text.len() {
-        let end = (pos + chunk_size).min(text.len());
+        // Multibyte-safe: floor `end` to a char boundary so the
+        // slice never lands inside a UTF-8 sequence (Japanese,
+        // Chinese, emoji, etc.).
+        let raw_end = (pos + chunk_size).min(text.len());
+        let end = floor_char_boundary(text, raw_end);
         // Try to break at a word boundary.
         let actual_end = if end < text.len() {
             text[pos..end]
@@ -449,6 +477,10 @@ fn chunk_fixed_size(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<
         } else {
             end
         };
+        // Snap the final cut to a char boundary as well (the
+        // word-boundary search may have produced a byte offset
+        // inside a multibyte char if the text contains no spaces).
+        let actual_end = floor_char_boundary(text, actual_end).max(ceil_char_boundary(text, pos + 1));
         let slice = &text[pos..actual_end];
         chunks.push(TextChunk {
             text: slice.to_owned(),
@@ -459,7 +491,9 @@ fn chunk_fixed_size(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<
             page_number: None,
             content_types: detect_content_types(slice),
         });
-        pos += step;
+        // Advance — but also snap to char boundary so the NEXT
+        // iteration's `pos..` slice doesn't blow up either.
+        pos = ceil_char_boundary(text, pos + step);
         if actual_end >= text.len() {
             break;
         }
