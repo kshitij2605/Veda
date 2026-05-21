@@ -188,14 +188,35 @@ pub(crate) async fn insert_impl(
             )
         })?;
 
-        sm.insert(record).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("insert failed: {e}"),
-                }),
-            )
-        })?;
+        // Phase F (BUG-1 fix, 2026-05-21): when the collection has
+        // `use_mvcc: true` the segment manager is initialised with an
+        // MVCC overlay. The legacy `sm.insert(record)` path stamps
+        // `commit_ts = None` on each doc, so `?at=<past_ts>` reads
+        // see every record regardless of timestamp. Mirror the
+        // `insert_via_log` pattern: when MVCC is on, allocate a
+        // commit_ts and call `insert_mvcc` so visibility filtering
+        // engages at the segment level.
+        if sm.has_mvcc() {
+            let hlc = state.inner.tso.now().await.unwrap_or_default();
+            let commit_ts = ((hlc.physical_ns as u128) << 32) | (hlc.logical as u128);
+            sm.insert_mvcc(commit_ts, record).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("mvcc insert failed: {e}"),
+                    }),
+                )
+            })?;
+        } else {
+            sm.insert(record).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("insert failed: {e}"),
+                    }),
+                )
+            })?;
+        }
 
         inserted += 1;
     }
