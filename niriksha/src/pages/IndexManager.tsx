@@ -222,6 +222,68 @@ function VectorFieldCard({ field }: { field: FieldSchema }) {
         <Cell label="Model" value={field.model ?? '—'} mono={!!field.model} />
         <Cell label="Filterable" value={field.filterable ? 'yes' : '—'} />
       </div>
+      <IndexAdvisory />
+
+    </div>
+  )
+}
+
+/**
+ * PERF-1 fix (2026-05-21 E2E campaign): the index-type tradeoff is
+ * non-obvious. Quantized variants (HnswRaBitQ, IvfPq, DiskAnn,
+ * RaBitQ*) are *slower* than Flat or HNSW until the working set
+ * spills past L3 (~100k vectors of 1024 dims). For typical
+ * dev/staging collections, picking a quantized index gives 2-4×
+ * worse latency for no memory win.
+ *
+ * Bench evidence (rag_anything corpus, 2409 × 1024-d):
+ *   HNSW         p50  1.75 ms
+ *   Flat         p50  1.21 ms  (winner at this scale)
+ *   HnswRaBitQ   p50  4.40 ms  (slowest)
+ *
+ * We don't have record_count in the schema endpoint yet, so the
+ * advisory shows for every vector field; the user can dismiss it
+ * per browser via localStorage.
+ */
+function IndexAdvisory() {
+  const KEY = 'veda.indexAdvisoryDismissed'
+  const [dismissed, setDismissed] = useState<boolean>(() => {
+    try {
+      return typeof window !== 'undefined' && window.localStorage.getItem(KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+  if (dismissed) return null
+  return (
+    <div className="mt-3 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-text-secondary">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <span className="font-medium text-warning">Index picker tip:</span>{' '}
+          <span>
+            For collections under ~100k rows, <code className="font-mono">Flat</code> or{' '}
+            <code className="font-mono">HNSW</code> typically beat quantized variants
+            (<code className="font-mono">HnswRaBitQ</code>, <code className="font-mono">IvfPq</code>,{' '}
+            <code className="font-mono">DiskAnn</code>) on latency. Quantized indexes win on
+            memory at scale (≥1M rows).
+          </span>
+          <div className="mt-1 text-text-muted">
+            Bench (2026-05-21, 2.4k × 1024-d): Flat p50 1.2 ms · HNSW p50 1.7 ms · HnswRaBitQ p50 4.4 ms.
+          </div>
+        </div>
+        <button
+          className="text-text-muted hover:text-text-primary"
+          onClick={() => {
+            try {
+              window.localStorage.setItem(KEY, '1')
+            } catch {}
+            setDismissed(true)
+          }}
+          aria-label="Dismiss advisory"
+        >
+          ×
+        </button>
+      </div>
     </div>
   )
 }
