@@ -515,6 +515,22 @@ project-mdb/
 
 If `VEDA_BLOB_BACKEND` is unset, Veda falls back to local filesystem blob storage.
 
+## Memory Scaling
+
+By default, Veda keeps all records in the `ClusterStateMachine.records` HashMap (the non-log storage path). RSS grows linearly with record count: each record costs roughly **~80 bytes of overhead plus the vector data itself**. A 24-hour soak test measured 474 MB RSS at 3,338 records growing to 1,257 MB at 13,037 records (~80 MB/h growth rate, proportional to insert throughput).
+
+For collections that will exceed **~50 000 records**, enable the on-disk log path by setting `use_log_primary: true` in the collection configuration:
+
+```bash
+curl -X POST http://localhost:6340/v1/collections   -H "Content-Type: application/json"   -d '{
+    "name": "large-collection",
+    "fields": [ ... ],
+    "use_log_primary": true
+  }'
+```
+
+With `use_log_primary` enabled, record bodies are stored on disk via the per-shard append-only log and only the index structures are held in memory. This changes the memory profile from O(records) to O(index), which is dramatically smaller for large collections.
+
 ## Monitoring & Observability
 
 ### Starting the monitoring stack
