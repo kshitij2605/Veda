@@ -52,3 +52,35 @@ fn fixed_size_chunker_handles_chunk_size_smaller_than_one_char() {
     let joined: String = chunks.iter().map(|c| c.text.as_str()).collect();
     assert!(joined.contains("空"));
 }
+
+#[test]
+fn sentence_chunker_overlap_handles_japanese_without_panic() {
+    // chunk_by_sentence keeps a tail of `chunk_overlap` bytes from the
+    // previous chunk. On Japanese text (3 bytes/char) a raw subtraction
+    // can land mid-char, panicking with "not a char boundary".
+    let text = "東京は首都です. 大阪は商都です. 名古屋は製造業です. ".repeat(30);
+    let strategy = ChunkingStrategy::Sentence {
+        max_chunk_size: 100,
+        chunk_overlap: 25,
+    };
+    let chunks = chunk_markdown(&text, &strategy);
+    assert!(chunks.len() > 1, "should produce multiple chunks");
+    for c in &chunks {
+        assert!(!c.text.is_empty());
+        let _: &str = c.text.as_str();
+    }
+}
+
+#[test]
+fn sentence_chunker_overlap_handles_emoji_boundaries() {
+    let text = "Hello world! 🌏 This is fine. Another sentence! 🎉 More text here. Final bit! 🚀 Done.".repeat(10);
+    let strategy = ChunkingStrategy::Sentence {
+        max_chunk_size: 60,
+        chunk_overlap: 15,
+    };
+    let chunks = chunk_markdown(&text, &strategy);
+    assert!(chunks.len() > 1);
+    for c in &chunks {
+        assert!(!c.text.is_empty());
+    }
+}
