@@ -156,6 +156,8 @@ pub(crate) async fn insert_impl(
     // Get blob store for processing blob fields
     let blob_store = state.inner.blob_store.read().await.clone();
 
+    let mut inserted_ids: Vec<String> = Vec::new();
+
     for raw in &req.records {
         let mut record = parse_record(raw, &schema).map_err(|e| {
             (
@@ -188,6 +190,8 @@ pub(crate) async fn insert_impl(
             )
         })?;
 
+        let rid = record.id().to_string();
+
         // Phase F (BUG-1 fix, 2026-05-21): when the collection has
         // `use_mvcc: true` the segment manager is initialised with an
         // MVCC overlay. The legacy `sm.insert(record)` path stamps
@@ -219,6 +223,7 @@ pub(crate) async fn insert_impl(
         }
 
         inserted += 1;
+        inserted_ids.push(rid);
     }
 
     // Seal growing segments so data is on disk. Track whether any shard
@@ -293,7 +298,7 @@ pub(crate) async fn insert_impl(
         StatusCode::CREATED,
         Json(InsertResponse {
             inserted,
-            ids: Vec::new(),
+            ids: inserted_ids,
         }),
     ))
 }
