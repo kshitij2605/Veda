@@ -24,6 +24,7 @@ pub mod route;
 pub mod saved_objects;
 pub mod search;
 pub mod state;
+pub mod time_parse;
 pub mod txn;
 
 /// Build the complete REST API router.
