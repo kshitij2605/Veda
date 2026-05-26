@@ -225,12 +225,10 @@ pub async fn search(
     };
     let effective_read_ts: Option<u128> = if mvcc_active_for_collection {
         Some(match req.at.as_deref() {
-            Some(s) => s.parse::<u128>().map_err(|_| {
+            Some(s) => super::time_parse::parse_read_ts(s).map_err(|e| {
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: format!("invalid at='{s}': expected decimal u128"),
-                    }),
+                    Json(ErrorResponse { error: e }),
                 )
             })?,
             None => {

@@ -474,12 +474,10 @@ pub async fn get_record(
     let mvcc_active = shard_map.values().any(|sm| sm.has_mvcc());
     if mvcc_active {
         let read_ts: u128 = match q.at.as_deref() {
-            Some(s) => s.parse::<u128>().map_err(|_| {
+            Some(s) => super::time_parse::parse_read_ts(s).map_err(|e| {
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: format!("invalid ?at= value '{s}': expected decimal u128"),
-                    }),
+                    Json(ErrorResponse { error: e }),
                 )
             })?,
             None => {
