@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-05-26
+
+Quality and DX improvements from the E2E test campaign.
+
+### Added
+- **Relative time expressions for `?at=` parameter** — MVCC snapshot reads now accept `now`, `now-1h`, `now-30m`, `now-5s` in addition to raw u128 HLC timestamps. Parses in `veda-gateway::rest::time_parse`.
+- **CJK sentence splitting** — `split_sentences` in the chunking engine now recognizes `。` (U+3002), `？` (U+FF1F), and `！` (U+FF01) as self-delimiting sentence boundaries (no trailing whitespace required, unlike ASCII `.?!`).
+- **MVCC GC stress benchmark** — `mvcc_gc_bench.rs` exercises GC correctness and throughput at 1M and 10M version scales (~400–470k versions/sec in debug mode).
+- **100k-vector scale benchmark** — `scale_benchmark.rs` now runs 100k×1024-dim vectors in release mode across Flat, HNSW, RaBitQ, RaBitQ+Rerank, and HNSW+RaBitQ. Gated behind `#[ignore]`.
+- **Multi-node cluster test plan** — `documentation/multi-node-test-plan.md` documents 3-node cluster test prerequisites and 6 test scenarios.
+- **RSS scaling limit documentation** — README documents non-log-path memory growth and recommends `use_log_primary: true` above ~50k records.
+
+### Changed
+- **Insert response always returns `ids`** — the `InsertResponse.ids` array is now populated on both the log-primary and non-log paths (previously only on log-primary).
+- **Background compaction** — segment compaction and index rebuild after insert are now spawned via `tokio::spawn` instead of running synchronously. A per-collection `AtomicBool` guard prevents concurrent compaction pileup. Insert latency is no longer blocked by I/O-heavy segment merges.
+- **Prometheus metric labels** — collection labels in all metrics now use the user-facing display name (tenant prefix stripped) instead of the internal scoped name (e.g. `my_collection` instead of `default__my_collection`).
+
+### Fixed
+- **Sentence chunker UTF-8 overlap** — `chunk_by_sentence` overlap calculation now uses `floor_char_boundary` to avoid splitting multi-byte characters.
+
 ## [0.2.1] - 2026-05-20
 
 Production-grade follow-ups to the Phase A-H rearchitecture: BookKeeper open-and-recover, auto-orchestrated ensemble changes, MVCC WAL checkpoint, native filtered search on every index, cross-region reader gating in the live request path, admin REST endpoints for region operations, and a real chunker/embedder reindex pipeline.

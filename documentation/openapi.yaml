@@ -109,7 +109,7 @@ components:
         ids:
           type: array
           items: { type: string }
-          description: "Per-record UUIDs assigned by the gateway (Raft mode only)."
+          description: "Per-record UUIDs assigned by the gateway. Always populated."
     SearchHit:
       type: object
       properties:
@@ -391,12 +391,9 @@ paths:
     post:
       summary: Insert one or more records.
       description: |
-        Raft-routed in raft mode: submits one
-        `InsertRecord` per record. The response's `ids`
-        field has the assigned UUIDs.
-        Per-shard routing happens via ShardRouter; the same
-        record is also written through the cluster-wide
-        `_meta` group until the multi-group transport ships.
+        Inserts records into the collection. Per-shard routing
+        via ShardRouter. The response `ids` array contains the
+        assigned UUID for each record.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -440,6 +437,14 @@ paths:
           name: linearisable
           required: false
           schema: { type: boolean, default: false }
+        - in: query
+          name: at
+          required: false
+          schema: { type: string }
+          description: |
+            MVCC snapshot timestamp. Same format as the search
+            `?at=` parameter: raw u128 HLC or relative expression
+            (`now`, `now-1h`, `now-30m`, `now-5s`).
       responses:
         '200': { description: ok }
         '404': { description: not found }
@@ -459,6 +464,14 @@ paths:
         - in: query
           name: offset
           schema: { type: integer, default: 0 }
+        - in: query
+          name: at
+          required: false
+          schema: { type: string }
+          description: |
+            MVCC snapshot timestamp. Same format as the search
+            `?at=` parameter: raw u128 HLC or relative expression
+            (`now`, `now-1h`, `now-30m`, `now-5s`).
       responses:
         '200': { description: ok }
     delete:
@@ -476,6 +489,15 @@ paths:
           name: name
           required: true
           schema: { type: string }
+        - in: query
+          name: at
+          required: false
+          schema: { type: string }
+          description: |
+            MVCC snapshot timestamp. Accepts a raw u128 HLC value
+            (encoding: `(physical_ns << 32) | logical`) or a relative
+            expression: `now`, `now-1h`, `now-30m`, `now-5s`. When
+            omitted, reads the latest committed state.
       requestBody:
         required: true
         content:
