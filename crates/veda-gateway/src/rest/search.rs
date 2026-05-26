@@ -464,7 +464,7 @@ pub async fn search(
     populate_hit_fields(&state, &name, &schema, &mut results).await;
 
     let took_ms = start.elapsed().as_millis() as u64;
-    metrics::histogram!(m::SEARCH_DURATION, "collection" => name.clone())
+    metrics::histogram!(m::SEARCH_DURATION, "collection" => crate::tenant::display_name(&name).to_owned())
         .record(start.elapsed().as_secs_f64());
     let count = results.len();
 

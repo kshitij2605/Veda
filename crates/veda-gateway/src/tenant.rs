@@ -118,6 +118,13 @@ pub fn scope(tenant: &TenantId, collection: &str) -> String {
     format!("{}__{}", tenant.0, collection)
 }
 
+/// Strip the tenant prefix from a scoped collection name for
+/// user-facing display (metrics, logs, API responses). Falls back
+/// to the raw name if no `__` separator is found.
+pub fn display_name(scoped: &str) -> &str {
+    scoped.split_once("__").map(|(_, name)| name).unwrap_or(scoped)
+}
+
 /// Inverse of [`scope`]. Returns `Some(collection_name)` when
 /// `key` is scoped under `tenant`, else `None`. Used by
 /// `list_collections` to filter + strip the prefix.

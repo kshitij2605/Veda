@@ -124,6 +124,8 @@ pub(crate) async fn insert_impl(
         })?
     };
 
+    let display = crate::tenant::display_name(&name).to_owned();
+
     // Phase C: log-primary is now the only data-plane path.
     // The legacy Raft-fallback that constructed
     // `ClusterCommand::InsertRecord` / `TxnWrite` was deleted in
@@ -241,7 +243,7 @@ pub(crate) async fn insert_impl(
         })?;
         if sealed.is_some() {
             any_sealed = true;
-            metrics::histogram!(m::SEAL_DURATION, "collection" => name.clone())
+            metrics::histogram!(m::SEAL_DURATION, "collection" => display.clone())
                 .record(seal_start.elapsed().as_secs_f64());
         }
     }
@@ -250,11 +252,11 @@ pub(crate) async fn insert_impl(
     if any_sealed {
         let config = veda_storage::compaction::CompactionConfig::default();
         for sm in shard_map.values_mut() {
-            metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => name.clone()).set(1.0);
+            metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => display.clone()).set(1.0);
             let compact_start = Instant::now();
             match sm.compact_if_needed(&config) {
                 Ok(removed) if removed > 0 => {
-                    metrics::histogram!(m::COMPACTION_DURATION, "collection" => name.clone())
+                    metrics::histogram!(m::COMPACTION_DURATION, "collection" => display.clone())
                         .record(compact_start.elapsed().as_secs_f64());
                     tracing::info!(removed_segments = removed, "compaction completed");
                 }
@@ -263,26 +265,26 @@ pub(crate) async fn insert_impl(
                     tracing::warn!(error = %e, "compaction failed");
                 }
             }
-            metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => name.clone()).set(0.0);
+            metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => display.clone()).set(0.0);
         }
         let total_segments: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
-        metrics::gauge!(m::SEGMENTS_TOTAL, "collection" => name.clone()).set(total_segments as f64);
+        metrics::gauge!(m::SEGMENTS_TOTAL, "collection" => display.clone()).set(total_segments as f64);
     }
 
     drop(managers);
 
     if any_sealed {
-        metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => name.clone()).set(1.0);
+        metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => display.clone()).set(1.0);
         let rebuild_start = Instant::now();
         rebuild_executors(&state, &name).await?;
-        metrics::histogram!(m::INDEX_BUILD_DURATION, "collection" => name.clone(), "index_type" => "rebuild")
+        metrics::histogram!(m::INDEX_BUILD_DURATION, "collection" => display.clone(), "index_type" => "rebuild")
             .record(rebuild_start.elapsed().as_secs_f64());
-        metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => name.clone()).set(0.0);
+        metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => display.clone()).set(0.0);
     }
 
-    metrics::histogram!(m::INSERT_DURATION, "collection" => name.clone())
+    metrics::histogram!(m::INSERT_DURATION, "collection" => display.clone())
         .record(start.elapsed().as_secs_f64());
-    metrics::counter!(m::INSERT_TOTAL, "collection" => name.clone())
+    metrics::counter!(m::INSERT_TOTAL, "collection" => display.clone())
         .increment(inserted as u64);
 
     // Update record count gauge from segment managers.
@@ -290,7 +292,7 @@ pub(crate) async fn insert_impl(
         let managers = state.inner.segment_managers.read().await;
         if let Some(shard_managers) = managers.get(&name) {
             let total: u64 = shard_managers.values().map(|sm| sm.total_records()).sum();
-            metrics::gauge!(m::RECORDS_TOTAL, "collection" => name.clone()).set(total as f64);
+            metrics::gauge!(m::RECORDS_TOTAL, "collection" => display.clone()).set(total as f64);
         }
     }
 
