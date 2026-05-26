@@ -506,26 +506,32 @@ fn chunk_fixed_size(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<
 fn split_sentences(text: &str) -> Vec<&str> {
     let mut sentences = Vec::new();
     let mut start = 0;
-    let bytes = text.as_bytes();
 
-    for i in 0..bytes.len() {
-        let is_boundary = match bytes[i] {
-            b'.' | b'?' | b'!' => {
-                // Must be followed by space or end-of-text.
-                i + 1 >= bytes.len() || bytes[i + 1] == b' ' || bytes[i + 1] == b'\n'
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    for (_idx, &(byte_pos, ch)) in chars.iter().enumerate() {
+        let is_boundary = match ch {
+            '.' | '?' | '!' => {
+                // ASCII punctuation: must be followed by whitespace, newline, or end-of-text.
+                let next_byte = byte_pos + ch.len_utf8();
+                next_byte >= text.len()
+                    || text.as_bytes().get(next_byte).map_or(true, |&b| b == b' ' || b == b'\n')
             }
-            b'\n' => true,
+            '\u{3002}' | '\u{FF1F}' | '\u{FF01}' => {
+                // CJK sentence-enders are self-delimiting (no trailing space in Japanese/Chinese).
+                true
+            }
+            '\n' => true,
             _ => false,
         };
         if is_boundary {
-            let end = i + 1;
+            let end = byte_pos + ch.len_utf8();
             let s = &text[start..end];
             if !s.trim().is_empty() {
                 sentences.push(s);
             }
             start = end;
             // Skip trailing space after sentence-ending punctuation.
-            if start < bytes.len() && bytes[start] == b' ' {
+            if start < text.len() && text.as_bytes().get(start) == Some(&b' ') {
                 start += 1;
             }
         }

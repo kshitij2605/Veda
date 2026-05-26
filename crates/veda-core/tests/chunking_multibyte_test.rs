@@ -84,3 +84,25 @@ fn sentence_chunker_overlap_handles_emoji_boundaries() {
         assert!(!c.text.is_empty());
     }
 }
+
+#[test]
+fn sentence_chunker_splits_on_cjk_full_stop() {
+    let text = "東京は首都です。大阪は商都です。名古屋は製造業の中心です。";
+    let strategy = ChunkingStrategy::Sentence {
+        max_chunk_size: 30,
+        chunk_overlap: 0,
+    };
+    let chunks = chunk_markdown(text, &strategy);
+    assert!(chunks.len() >= 3, "should split on CJK full stop, got {} chunks: {:?}", chunks.len(), chunks.iter().map(|c| &c.text).collect::<Vec<_>>());
+}
+
+#[test]
+fn sentence_chunker_splits_on_fullwidth_question_mark() {
+    let text = "これは何ですか？はい、そうです。いいえ、違います！";
+    let strategy = ChunkingStrategy::Sentence {
+        max_chunk_size: 30,
+        chunk_overlap: 0,
+    };
+    let chunks = chunk_markdown(text, &strategy);
+    assert!(chunks.len() >= 3, "should split on fullwidth punctuation, got {} chunks", chunks.len());
+}
