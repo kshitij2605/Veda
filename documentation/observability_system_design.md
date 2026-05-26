@@ -126,6 +126,8 @@ Both handlers record identical metrics after the write path completes:
 | `veda_insert_duration_seconds` | `collection` | Total insert wall-clock time |
 | `veda_insert_total` | `collection` | Incremented by number of records inserted |
 
+**Note:** The `collection` label uses the user-facing display name (tenant prefix stripped). For example, a multi-tenant collection stored internally as `default__my_collection` emits metrics with `collection="my_collection"`.
+
 #### Embedding Client
 
 **File:** `veda-core/src/embedding_client.rs`
@@ -716,7 +718,7 @@ opentelemetry-appender-tracing = "0.27"
 
 All 16 metric constants defined in `veda-core::metrics` are now recorded at their corresponding call sites:
 - `SEGMENTS_TOTAL` is updated after seal and compaction in insert handlers.
-- `COMPACTION_DURATION` and `COMPACTION_IN_PROGRESS` are recorded when `SegmentManager::compact_if_needed()` runs after segment sealing.
-- Compaction is triggered automatically after seal in insert and embed-insert handlers using `CompactionConfig::default()`.
+- `COMPACTION_DURATION` and `COMPACTION_IN_PROGRESS` are recorded when `SegmentManager::compact_if_needed()` runs in a background `tokio::spawn` task after segment sealing.
+- Compaction is triggered automatically after seal in insert and embed-insert handlers using `CompactionConfig::default()`. A per-collection `AtomicBool` guard prevents concurrent compaction pileup.
 
 Query explain now returns per-phase timing (`filter_ms`, `ann_search_ms`, `scoring_ms`) from `SearchTimings` produced by `SearchExecutor::search()`, rather than timing the outer boundary call.
