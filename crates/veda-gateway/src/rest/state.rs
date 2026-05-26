@@ -120,6 +120,8 @@ pub struct AppStateInner {
     pub schemas: RwLock<HashMap<String, CollectionSchema>>,
     /// Segment managers per collection, keyed by (collection_name, shard_id).
     pub segment_managers: RwLock<HashMap<String, HashMap<u32, SegmentManager>>>,
+    /// Per-collection guard preventing concurrent background compactions.
+    pub compaction_locks: RwLock<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// Query executors per collection.
     pub query_executors: RwLock<HashMap<String, DistributedQueryExecutor>>,
     /// Embedding model registry.
@@ -247,6 +249,7 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 schemas: RwLock::new(HashMap::new()),
                 segment_managers: RwLock::new(HashMap::new()),
+                compaction_locks: RwLock::new(HashMap::new()),
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 splade_client: RwLock::new(None),
@@ -309,6 +312,7 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 schemas: RwLock::new(HashMap::new()),
                 segment_managers: RwLock::new(HashMap::new()),
+                compaction_locks: RwLock::new(HashMap::new()),
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 splade_client: RwLock::new(None),
@@ -352,6 +356,7 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 schemas: RwLock::new(HashMap::new()),
                 segment_managers: RwLock::new(HashMap::new()),
+                compaction_locks: RwLock::new(HashMap::new()),
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 splade_client: RwLock::new(None),

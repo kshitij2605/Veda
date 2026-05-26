@@ -248,38 +248,73 @@ pub(crate) async fn insert_impl(
         }
     }
 
-    // Run compaction only if we actually sealed something.
-    if any_sealed {
-        let config = veda_storage::compaction::CompactionConfig::default();
-        for sm in shard_map.values_mut() {
-            metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => display.clone()).set(1.0);
-            let compact_start = Instant::now();
-            match sm.compact_if_needed(&config) {
-                Ok(removed) if removed > 0 => {
-                    metrics::histogram!(m::COMPACTION_DURATION, "collection" => display.clone())
-                        .record(compact_start.elapsed().as_secs_f64());
-                    tracing::info!(removed_segments = removed, "compaction completed");
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "compaction failed");
-                }
-            }
-            metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => display.clone()).set(0.0);
-        }
-        let total_segments: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
-        metrics::gauge!(m::SEGMENTS_TOTAL, "collection" => display.clone()).set(total_segments as f64);
-    }
-
     drop(managers);
 
+    // Spawn compaction + index rebuild in the background so the
+    // insert response is not blocked by I/O-heavy segment merges.
     if any_sealed {
-        metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => display.clone()).set(1.0);
-        let rebuild_start = Instant::now();
-        rebuild_executors(&state, &name).await?;
-        metrics::histogram!(m::INDEX_BUILD_DURATION, "collection" => display.clone(), "index_type" => "rebuild")
-            .record(rebuild_start.elapsed().as_secs_f64());
-        metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => display.clone()).set(0.0);
+        let bg_state = state.clone();
+        let bg_name = name.clone();
+        let bg_display = display.clone();
+        let lock = {
+            let mut locks = bg_state.inner.compaction_locks.write().await;
+            locks
+                .entry(bg_name.clone())
+                .or_insert_with(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+                .clone()
+        };
+        tokio::spawn(async move {
+            if lock.compare_exchange(
+                false, true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            ).is_err() {
+                return; // another compaction is already running
+            }
+            struct CompactGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for CompactGuard {
+                fn drop(&mut self) {
+                    self.0.store(false, std::sync::atomic::Ordering::Release);
+                }
+            }
+            let _guard = CompactGuard(lock.clone());
+
+            // Compact
+            {
+                let config = veda_storage::compaction::CompactionConfig::default();
+                let mut managers = bg_state.inner.segment_managers.write().await;
+                if let Some(shard_map) = managers.get_mut(&bg_name) {
+                    metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => bg_display.clone()).set(1.0);
+                    for sm in shard_map.values_mut() {
+                        let compact_start = Instant::now();
+                        match sm.compact_if_needed(&config) {
+                            Ok(removed) if removed > 0 => {
+                                metrics::histogram!(m::COMPACTION_DURATION, "collection" => bg_display.clone())
+                                    .record(compact_start.elapsed().as_secs_f64());
+                                tracing::info!(removed_segments = removed, "compaction completed");
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(error = %e, "compaction failed");
+                            }
+                        }
+                    }
+                    let total_segments: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
+                    metrics::gauge!(m::SEGMENTS_TOTAL, "collection" => bg_display.clone()).set(total_segments as f64);
+                    metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => bg_display.clone()).set(0.0);
+                }
+            }
+
+            // Rebuild indexes
+            metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => bg_display.clone()).set(1.0);
+            let rebuild_start = Instant::now();
+            if let Err(e) = rebuild_executors(&bg_state, &bg_name).await {
+                tracing::warn!(error = ?e, "background index rebuild failed");
+            }
+            metrics::histogram!(m::INDEX_BUILD_DURATION, "collection" => bg_display.clone(), "index_type" => "rebuild")
+                .record(rebuild_start.elapsed().as_secs_f64());
+            metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => bg_display.clone()).set(0.0);
+        });
     }
 
     metrics::histogram!(m::INSERT_DURATION, "collection" => display.clone())
