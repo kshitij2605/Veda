@@ -559,8 +559,9 @@ fn chunk_by_sentence(text: &str, max_chunk_size: usize, chunk_overlap: usize) ->
             });
             // Overlap: keep tail of current chunk.
             if chunk_overlap > 0 && current.len() > chunk_overlap {
-                let keep_from = current.len() - chunk_overlap;
-                start_offset = end_offset - chunk_overlap;
+                let keep_from = floor_char_boundary(&current, current.len() - chunk_overlap);
+                let actual_overlap = current.len() - keep_from;
+                start_offset = end_offset - actual_overlap;
                 current = current[keep_from..].to_owned();
             } else {
                 start_offset = end_offset;
