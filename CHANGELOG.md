@@ -19,7 +19,7 @@ Quality and DX improvements from the E2E test campaign.
 
 ### Changed
 - **Durable applier cursor** — the per-shard log applier persists a CRC-framed cursor at the sealed (durable) watermark and resumes from it on restart, instead of replaying the whole log from seq 1. New `veda-log::ShardLogRegistry` + `veda-log::cursor`.
-- **ShardLogRegistry replaces MultiGroupCoordinator** — the per-shard log map is now a first-class `veda-log::ShardLogRegistry`; the vestigial `MultiGroupCoordinator` (per-shard Raft groups unreachable since Phase E) is deleted. Collection drop now evicts + purges shard logs.
+- **ShardLogRegistry replaces MultiGroupCoordinator** — the per-shard log map is now a first-class `veda-log::ShardLogRegistry`; the vestigial `MultiGroupCoordinator` (per-shard Raft groups unreachable since Phase E) is deleted. Collection drop now evicts + purges shard logs and cancels the collection's running applier tasks (previously they kept ticking after the collection was gone).
 - **Insert response always returns `ids`** — the `InsertResponse.ids` array is now populated on both the log-primary and non-log paths (previously only on log-primary).
 - **Background compaction** — segment compaction and index rebuild after insert are now spawned via `tokio::spawn` instead of running synchronously. A per-collection `AtomicBool` guard prevents concurrent compaction pileup. Insert latency is no longer blocked by I/O-heavy segment merges.
 - **Prometheus metric labels** — collection labels in all metrics now use the user-facing display name (tenant prefix stripped) instead of the internal scoped name (e.g. `my_collection` instead of `default__my_collection`).
