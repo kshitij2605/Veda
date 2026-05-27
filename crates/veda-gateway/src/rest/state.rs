@@ -218,6 +218,11 @@ pub struct AppStateInner {
     /// auto-advance hook once a `ShipBatchRpc` lands. Monotonic
     /// forward: backwards-moves are no-ops.
     pub replica_safe_ts: RwLock<u128>,
+    /// Abort handles for running per-shard `LogApplier` tasks, keyed by
+    /// scoped collection name. Populated by `log_appliers::spawn_one`;
+    /// drained + aborted by [`AppState::abort_appliers`] on collection
+    /// drop. Empty unless `VEDA_LOG_APPLIER` is enabled.
+    pub applier_handles: std::sync::Mutex<HashMap<String, Vec<tokio::task::AbortHandle>>>,
 }
 
 /// Build a swappable TSO + the matching `dyn Tso` handle that
@@ -229,6 +234,25 @@ fn make_tso_pair() -> (Arc<dyn Tso>, Arc<SwappableTso>) {
 }
 
 impl AppState {
+    /// Abort + deregister all per-shard `LogApplier` tasks for
+    /// `collection`. Called on collection drop so appliers don't keep
+    /// ticking (and logging) after their shard log + SegmentManager are
+    /// gone. No-op when no appliers are registered (the default, since
+    /// they only spawn under `VEDA_LOG_APPLIER`).
+    pub(crate) fn abort_appliers(&self, collection: &str) {
+        if let Some(handles) = self
+            .inner
+            .applier_handles
+            .lock()
+            .unwrap()
+            .remove(collection)
+        {
+            for handle in handles {
+                handle.abort();
+            }
+        }
+    }
+
     /// Create a new AppState with auth **disabled** (default for tests).
     pub fn new(data_dir: &Path) -> Self {
         let tso_pair = make_tso_pair();
@@ -264,6 +288,7 @@ impl AppState {
                 open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
+                applier_handles: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -326,6 +351,7 @@ impl AppState {
                 open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
+                applier_handles: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -369,6 +395,7 @@ impl AppState {
                 open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
+                applier_handles: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }

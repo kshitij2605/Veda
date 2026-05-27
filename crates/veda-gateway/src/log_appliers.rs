@@ -86,29 +86,48 @@ pub fn spawn_one(
     shard_id: u32,
     tick: Duration,
 ) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut applier = match ShardApplier::open(&state, &collection, shard_id).await {
-            Some(a) => a,
-            None => {
-                tracing::warn!(
-                    collection = %collection,
-                    shard = shard_id,
-                    "log_applier: open failed; not spawning"
-                );
-                return;
+    let reg_key = collection.clone();
+    let handle = {
+        let state = state.clone();
+        let collection = collection.clone();
+        tokio::spawn(async move {
+            let mut applier = match ShardApplier::open(&state, &collection, shard_id).await {
+                Some(a) => a,
+                None => {
+                    tracing::warn!(
+                        collection = %collection,
+                        shard = shard_id,
+                        "log_applier: open failed; not spawning"
+                    );
+                    return;
+                }
+            };
+            let mut interval = tokio::time::interval(tick);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                match applier.tick(&state, &collection, shard_id).await {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        tracing::debug!(applied = n, next = applier.next_seq(), "log_applier tick")
+                    }
+                    Err(e) => tracing::warn!(error = %e, "log_applier tick failed"),
+                }
             }
-        };
-        let mut interval = tokio::time::interval(tick);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            interval.tick().await;
-            match applier.tick(&state, &collection, shard_id).await {
-                Ok(0) => {}
-                Ok(n) => tracing::debug!(applied = n, next = applier.next_seq(), "log_applier tick"),
-                Err(e) => tracing::warn!(error = %e, "log_applier tick failed"),
-            }
-        }
-    })
+        })
+    };
+    // Register the abort handle so `AppState::abort_appliers` (called on
+    // collection drop) can cancel this task — otherwise the applier keeps
+    // ticking after its shard log + SegmentManager are gone.
+    state
+        .inner
+        .applier_handles
+        .lock()
+        .unwrap()
+        .entry(reg_key)
+        .or_default()
+        .push(handle.abort_handle());
+    handle
 }
 
 /// Apply a batch to `sm`. Tracks which entries triggered seals
@@ -355,5 +374,40 @@ mod tests {
 
         let applier2 = ShardApplier::open(&state, "coll", 0).await.unwrap();
         assert_eq!(applier2.next_seq(), 1, "fresh applier replays unsealed entries from 1");
+    }
+
+    #[tokio::test]
+    async fn abort_appliers_cancels_and_deregisters_for_a_collection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        // Register a long-running task's abort handle under "coll",
+        // standing in for a live applier loop.
+        let handle = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        });
+        state
+            .inner
+            .applier_handles
+            .lock()
+            .unwrap()
+            .entry("coll".to_string())
+            .or_default()
+            .push(handle.abort_handle());
+        assert!(!handle.is_finished());
+
+        // Dropping the collection aborts + deregisters its appliers.
+        state.abort_appliers("coll");
+
+        let joined = handle.await;
+        assert!(
+            joined.is_err() && joined.unwrap_err().is_cancelled(),
+            "applier task should be cancelled on drop"
+        );
+        assert!(
+            !state.inner.applier_handles.lock().unwrap().contains_key("coll"),
+            "collection's applier handles should be deregistered"
+        );
     }
 }

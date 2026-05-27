@@ -1294,6 +1294,10 @@ async fn drop_collection_impl(
         ));
     }
 
+    // Stop this collection's applier tasks before their SegmentManager
+    // and shard logs are removed, so they don't tick into missing state.
+    state.abort_appliers(&scoped);
+
     {
         let mut managers = state.inner.segment_managers.write().await;
         managers.remove(&scoped);

@@ -125,9 +125,8 @@ Matches FoundationDB / Aurora / TiDB v8+ / YugabyteDB.
 What's deliberately NOT here yet (tracked follow-ups, not in v0.2.1):
 
 - Niriksha frontend redesign — separate 7-phase plan (~14 engineer-weeks). Not started.
-- Per-shard `LogApplier` task lifecycle: `spawn_one` join handles are discarded and the tick loop has no cancellation, so dropping a collection leaves its applier spinning on harmless warnings (gated behind `VEDA_LOG_APPLIER`, off by default). Track applier handles in `AppState` and `abort()` them on drop.
 
-(Done 2026-05-27: the durable `LogApplier` cursor and the `ShardLogRegistry` — which replaced the now-deleted vestigial `MultiGroupCoordinator` — both landed. Design: `documentation/2026-05-27-applier-cursor-shardlog-registry-design.md`.)
+(Done 2026-05-27: the durable `LogApplier` cursor, the `ShardLogRegistry` (which replaced the now-deleted vestigial `MultiGroupCoordinator`), and per-shard applier-task cancellation on collection drop all landed. Design: `documentation/2026-05-27-applier-cursor-shardlog-registry-design.md`.)
 
 ## Reading order for new contributors
 
