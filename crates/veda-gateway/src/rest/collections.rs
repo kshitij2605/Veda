@@ -1302,6 +1302,10 @@ async fn drop_collection_impl(
         let mut executors = state.inner.query_executors.write().await;
         executors.remove(&scoped);
     }
+    state.inner.shard_logs.remove_collection(&scoped);
+    if let Err(e) = state.inner.shard_logs.purge_collection_dir(&scoped) {
+        tracing::warn!(collection = %scoped, error = %e, "failed to purge shard-log dir on drop");
+    }
 
     let collection_dir = state.inner.data_dir.join(&scoped);
     if collection_dir.exists() {
