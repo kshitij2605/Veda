@@ -20,7 +20,6 @@
 
 pub mod linearisability_checker;
 pub mod meta_leased_tso;
-pub mod multi_group;
 pub mod network;
 pub mod percolator;
 pub mod peer_health;

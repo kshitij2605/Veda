@@ -16,7 +16,6 @@ use veda_storage::segment_manager::SegmentManager;
 use crate::auth::Role;
 use crate::auth_oidc::AuthMode;
 use crate::rest::saved_objects::SavedObjectStore;
-use veda_coordinator::multi_group::MultiGroupCoordinator;
 use veda_coordinator::raft_coordinator::RaftCoordinator;
 use veda_log::ShardLogRegistry;
 use veda_time::{LocalTso, SwappableTso, Tso};
@@ -180,15 +179,6 @@ pub struct AppStateInner {
     /// startup. Optional: if unset, the redirect is a no-op and
     /// the request proceeds (openraft forwards internally).
     pub raft_rest_peers: RwLock<HashMap<u64, String>>,
-    /// MultiGroupCoordinator hosting per-(collection, shard_id)
-    /// Raft groups. Auto-spawned by the reconcile loop when a
-    /// CreateCollection commits. Groups use the in-process
-    /// transport (start_single_group); cross-process replication
-    /// for per-shard groups needs a multiplexing Tonic service
-    /// that is its own architectural project, deferred from this
-    /// session. Today this exists to exercise the routing code
-    /// path and to surface where horizontal scaling will plug in.
-    pub multi_group: RwLock<Option<MultiGroupCoordinator>>,
     /// Timestamp oracle. Default is `LocalTso` — Phase A
     /// (`.claude/plans/structured-mixing-turing.md`). The
     /// `MetaLeasedTso` impl that consults `_meta`'s lease ships
@@ -266,7 +256,6 @@ impl AppState {
                 raft: RwLock::new(None),
                 raft_materialized_records: RwLock::new(HashMap::new()),
                 raft_rest_peers: RwLock::new(HashMap::new()),
-                multi_group: RwLock::new(None),
                 tso: tso_pair.0.clone(),
                 tso_swapper: tso_pair.1.clone(),
                 txn_coordinator: Arc::new(
@@ -329,7 +318,6 @@ impl AppState {
                 raft: RwLock::new(None),
                 raft_materialized_records: RwLock::new(HashMap::new()),
                 raft_rest_peers: RwLock::new(HashMap::new()),
-                multi_group: RwLock::new(None),
                 tso: tso_pair.0.clone(),
                 tso_swapper: tso_pair.1.clone(),
                 txn_coordinator: Arc::new(
@@ -373,7 +361,6 @@ impl AppState {
                 raft: RwLock::new(None),
                 raft_materialized_records: RwLock::new(HashMap::new()),
                 raft_rest_peers: RwLock::new(HashMap::new()),
-                multi_group: RwLock::new(None),
                 tso: tso_pair.0.clone(),
                 tso_swapper: tso_pair.1.clone(),
                 txn_coordinator: Arc::new(
@@ -738,16 +725,6 @@ impl AppState {
             }
         }
 
-        // Always-on: a MultiGroupCoordinator under
-        // {data_dir}/raft-groups/, ready to host per-shard
-        // groups the reconcile loop auto-spawns. The cluster-wide
-        // Raft handle above remains the source of truth for
-        // replicated commands; per-shard groups are populated for
-        // the routing code path and for the future multi-group
-        // transport landing.
-        let groups_dir = self.inner.data_dir.join("raft-groups");
-        let mg = MultiGroupCoordinator::new(&groups_dir);
-        *self.inner.multi_group.write().await = Some(mg);
     }
 
     /// Load an OpenAI-compatible LLM endpoint from `VEDA_LLM_*` env
