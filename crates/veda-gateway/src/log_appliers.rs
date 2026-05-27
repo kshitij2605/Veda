@@ -224,7 +224,9 @@ impl ShardApplier {
         })
     }
 
-    /// Next seq_id this applier will attempt to read.
+    /// The seq this applier would resume tailing from on restart
+    /// (`durable_cursor + 1`). This is the durable resume point, not
+    /// the live tailer position, which runs ahead between seals.
     pub fn next_seq(&self) -> u64 {
         self.durable_cursor + 1
     }
