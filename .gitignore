@@ -2,6 +2,8 @@
 /test_data
 competitive_advantages.md
 .env
+.env.*
+!.env.example
 *.swp
 *.swo
 .DS_Store
@@ -10,3 +12,7 @@ __pycache__/
 *.pyc
 .claude/
 docs/
+
+# Runtime data dirs + test artifacts
+/veda-data*/
+linearisability-history.jsonl
