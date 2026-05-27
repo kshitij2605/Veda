@@ -30,6 +30,7 @@
 //!   is verbatim from `crates/veda-coordinator/src/raft_wal.rs:68`.
 //!   `ShardLog::recover` mirrors `WalLog::replay` lines 130-228.
 
+pub mod cursor;
 pub mod format;
 pub mod reader;
 pub mod registry;
