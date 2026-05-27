@@ -302,21 +302,16 @@ What was added in the third follow-up pass (commits `d544634`,
   (vs ~2,290 stale_read without the flag). Cost: one Raft
   round-trip per read.
 
-- **MultiGroupCoordinator v1**
-  (`crates/veda-coordinator/src/multi_group.rs`): a
-  coordinator that hosts N openraft instances per process
-  keyed by `GroupId = String`. Lets a single Veda process
-  carry the `_meta` cluster-wide group AND any number of
-  per-(collection, shard) data-plane groups. Each group has
-  its own data dir, own Tonic listener (or in-process for
-  tests), own log + state machine. Two unit tests prove
-  isolation. **What this ships is the architecture; the
-  insert path is not yet rewired through per-shard groups**
-  — that's a separate commit because it touches every
-  REST handler that mutates collection data. See the module
-  doc for the explicit "what this does not yet do" list
-  (auto-spawn from CreateCollection, REST routing,
-  cross-group transactions, multi-group recovery).
+- **MultiGroupCoordinator (removed 2026-05-27)**: this was a
+  coordinator that hosted N openraft instances per process keyed
+  by `GroupId`, intended to carry per-(collection, shard)
+  data-plane Raft groups. The FoundationDB-shape rearchitecture
+  routed record writes through per-shard `veda-log` instead
+  (Phase C), and Phase E removed the `InsertRecord` command those
+  groups carried, leaving them vestigial. The struct and its
+  `crates/veda-coordinator/src/multi_group.rs` file were deleted;
+  the per-shard data plane is now `veda-log::ShardLogRegistry`.
+  See `documentation/2026-05-27-applier-cursor-shardlog-registry-design.md`.
 
 - **24-hour soak running**: `scripts/raft-soak-24h.sh` is
   in flight against the 3-node compose cluster on gpu-host-a
