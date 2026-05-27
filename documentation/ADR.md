@@ -315,7 +315,7 @@ Per-shard `LogApplier` task (`crates/veda-storage/src/log_applier.rs`) that hold
 
 ### Consequences
 - **Positive:** Clean separation — same log entries are the source of truth for every node's SegmentManager. Errors are logged but never propagate (an applier crash must not take the gateway down). The standalone module is fully unit-testable.
-- **Negative:** Visibility latency on followers is bounded by the applier tick. The writer's last_applied cursor isn't yet persisted across restart (idempotent on the storage layer, but wasteful on a cold start that re-applies everything).
+- **Negative:** Visibility latency on followers is bounded by the applier tick. *(Resolved 2026-05-27: the cold-start concern — the applier re-applying the whole log on restart because its cursor was in-memory only — is fixed. The gateway applier (`ShardApplier` in `crates/veda-gateway/src/log_appliers.rs`) now persists a durable CRC-framed cursor at the sealed watermark and resumes from it. See `documentation/2026-05-27-applier-cursor-shardlog-registry-design.md`.)*
 
 ---
 
