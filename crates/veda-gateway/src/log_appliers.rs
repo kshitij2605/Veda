@@ -111,22 +111,18 @@ pub fn spawn_one(
     })
 }
 
-/// Result of applying one batch to a SegmentManager.
-pub(crate) struct BatchOutcome {
-    /// Highest seq_id that is now durably in a sealed segment.
-    /// 0 if no seal occurred during this batch.
-    pub max_durable_seq: u64,
-}
-
 /// Apply a batch to `sm`. Tracks which entries triggered seals
 /// to compute the highest seq that is durably on disk after the batch.
+///
+/// Returns the highest seq_id now durably in a sealed segment
+/// (0 if no seal occurred during this batch).
 ///
 /// **Seal boundary rule:** when `sm.insert(entry_N)` triggers a seal,
 /// the records that were in the old growing segment (all entries applied
 /// before entry_N) are now durable. Entry_N itself goes into the NEW
 /// growing segment (not yet durable). So the durable cursor advances
 /// to the seq of the entry immediately before entry_N.
-fn apply_entries(sm: &mut SegmentManager, batch: &[LogEntryV2]) -> Result<BatchOutcome, String> {
+fn apply_entries(sm: &mut SegmentManager, batch: &[LogEntryV2]) -> Result<u64, String> {
     let mut max_durable_seq = 0u64;
     let mut prev_seq = 0u64;
 
@@ -177,7 +173,7 @@ fn apply_entries(sm: &mut SegmentManager, batch: &[LogEntryV2]) -> Result<BatchO
         prev_seq = entry.seq_id;
     }
 
-    Ok(BatchOutcome { max_durable_seq })
+    Ok(max_durable_seq)
 }
 
 async fn apply_batch(
@@ -185,7 +181,7 @@ async fn apply_batch(
     collection: &str,
     shard_id: u32,
     batch: Vec<LogEntryV2>,
-) -> Result<BatchOutcome, String> {
+) -> Result<u64, String> {
     let mut managers = state.inner.segment_managers.write().await;
     let shard_map = managers
         .get_mut(collection)
@@ -250,10 +246,10 @@ impl ShardApplier {
             return Ok(0);
         }
         let n = batch.len();
-        let outcome = apply_batch(state, collection, shard_id, batch).await?;
-        if outcome.max_durable_seq > self.durable_cursor {
-            match veda_log::cursor::write_cursor(&self.cursor_path, outcome.max_durable_seq) {
-                Ok(()) => self.durable_cursor = outcome.max_durable_seq,
+        let max_durable_seq = apply_batch(state, collection, shard_id, batch).await?;
+        if max_durable_seq > self.durable_cursor {
+            match veda_log::cursor::write_cursor(&self.cursor_path, max_durable_seq) {
+                Ok(()) => self.durable_cursor = max_durable_seq,
                 Err(e) => tracing::warn!(error = %e, "log_applier: cursor persist failed"),
             }
         }
@@ -268,4 +264,94 @@ fn uuid_from_key(key: &Bytes) -> Result<Uuid, String> {
     let mut buf = [0u8; 16];
     buf.copy_from_slice(key);
     Ok(Uuid::from_bytes(buf))
+}
+
+#[cfg(test)]
+mod tests {
+    //! #2 - durable applier cursor: resume-after-seal + replay-unsealed.
+
+    use bytes::Bytes;
+    use veda_core::record::{FieldValue, Record};
+    use veda_core::schema::{CollectionSchema, FieldDefinition};
+    use veda_core::types::DistanceMetric;
+    use veda_core::vector::DenseVector;
+    use veda_log::format::LogOp;
+    use veda_time::Hlc;
+
+    use super::ShardApplier;
+    use crate::rest::state::AppState;
+
+    fn schema(name: &str) -> CollectionSchema {
+        CollectionSchema::builder(name)
+            .add_field(FieldDefinition::vector("v", 2, DistanceMetric::Cosine))
+            .shard_count(1)
+            .build()
+            .unwrap()
+    }
+
+    fn record() -> Record {
+        let mut r = Record::new();
+        r.set("v", FieldValue::Vector(DenseVector::new(vec![1.0, 0.0])));
+        r
+    }
+
+    async fn register_sm(state: &AppState, collection: &str, seal_bytes: usize) {
+        let sm = veda_storage::segment_manager::SegmentManager::new(
+            schema(collection),
+            0,
+            &state.inner.data_dir.join(collection),
+            seal_bytes,
+        )
+        .unwrap();
+        let mut managers = state.inner.segment_managers.write().await;
+        managers.entry(collection.to_owned()).or_default().insert(0, sm);
+    }
+
+    async fn append_n(state: &AppState, collection: &str, n: u64) {
+        let log = state.inner.shard_logs.get_or_open(collection, 0).unwrap();
+        for i in 1..=n {
+            let r = record();
+            let payload = Bytes::from(serde_json::to_vec(&r).unwrap());
+            let key = Bytes::copy_from_slice(r.id().as_bytes());
+            log.append_one(Hlc::new(i, 0), 1, key, LogOp::Put, payload).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn resumes_from_persisted_cursor_after_seal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        register_sm(&state, "coll", 256).await; // tiny -> seals quickly
+        append_n(&state, "coll", 20).await;
+
+        let mut applier = ShardApplier::open(&state, "coll", 0).await.unwrap();
+        for _ in 0..20 {
+            applier.tick(&state, "coll", 0).await.unwrap();
+        }
+
+        let cursor_path = state.inner.shard_logs.shard_dir("coll", 0).join("applied.cursor");
+        let persisted = veda_log::cursor::read_cursor(&cursor_path);
+        assert!(persisted > 0, "a seal should have advanced the durable cursor");
+
+        let applier2 = ShardApplier::open(&state, "coll", 0).await.unwrap();
+        assert_eq!(applier2.next_seq(), persisted + 1, "resume from cursor+1, not 1");
+    }
+
+    #[tokio::test]
+    async fn replays_unsealed_entries_after_crash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        register_sm(&state, "coll", 64 * 1024 * 1024).await; // huge -> never seals
+        append_n(&state, "coll", 5).await;
+
+        let mut applier = ShardApplier::open(&state, "coll", 0).await.unwrap();
+        let applied = applier.tick(&state, "coll", 0).await.unwrap();
+        assert_eq!(applied, 5);
+
+        let cursor_path = state.inner.shard_logs.shard_dir("coll", 0).join("applied.cursor");
+        assert_eq!(veda_log::cursor::read_cursor(&cursor_path), 0, "no seal -> cursor stays 0");
+
+        let applier2 = ShardApplier::open(&state, "coll", 0).await.unwrap();
+        assert_eq!(applier2.next_seq(), 1, "fresh applier replays unsealed entries from 1");
+    }
 }
