@@ -18,7 +18,7 @@ use crate::auth_oidc::AuthMode;
 use crate::rest::saved_objects::SavedObjectStore;
 use veda_coordinator::multi_group::MultiGroupCoordinator;
 use veda_coordinator::raft_coordinator::RaftCoordinator;
-use veda_log::ShardLog;
+use veda_log::ShardLogRegistry;
 use veda_time::{LocalTso, SwappableTso, Tso};
 
 /// Represents a user in the in-memory user store.
@@ -212,13 +212,10 @@ pub struct AppStateInner {
     /// Open transaction handles keyed by `txn_id`. Cleared on
     /// commit / abort / orphan-resolver eviction.
     pub open_txn_handles: RwLock<HashMap<String, veda_coordinator::percolator::TxnHandle>>,
-    /// Per-(collection, shard_id) append-only logs. Phase B
-    /// scaffolding for the FoundationDB-shape data plane. Today
-    /// these are dark-write targets: `records::insert` appends
-    /// here too when `VEDA_LOG_DARK_WRITE=1`, but the existing
-    /// Raft path remains the source of truth. Phase C will cut
-    /// the Raft path and make these primary.
-    pub shard_logs: RwLock<HashMap<String, Arc<ShardLog>>>,
+    /// Per-(collection, shard_id) append-only logs, behind a
+    /// registry that owns the `{data_dir}/_logs/{scoped}/{shard:04}/`
+    /// layout and caches open handles.
+    pub shard_logs: Arc<ShardLogRegistry>,
     /// Phase H cross-region reader gating. When this gateway is
     /// running on a replica region, snapshot reads at
     /// `?at=<read_ts>` are checked against this watermark — if
@@ -276,7 +273,7 @@ impl AppState {
                     veda_coordinator::percolator::TxnCoordinator::new(tso_pair.0.clone()),
                 ),
                 open_txn_handles: RwLock::new(HashMap::new()),
-                shard_logs: RwLock::new(HashMap::new()),
+                shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
             }),
         }
@@ -339,7 +336,7 @@ impl AppState {
                     veda_coordinator::percolator::TxnCoordinator::new(tso_pair.0.clone()),
                 ),
                 open_txn_handles: RwLock::new(HashMap::new()),
-                shard_logs: RwLock::new(HashMap::new()),
+                shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
             }),
         }
@@ -383,7 +380,7 @@ impl AppState {
                     veda_coordinator::percolator::TxnCoordinator::new(tso_pair.0.clone()),
                 ),
                 open_txn_handles: RwLock::new(HashMap::new()),
-                shard_logs: RwLock::new(HashMap::new()),
+                shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
             }),
         }

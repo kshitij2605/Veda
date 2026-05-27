@@ -861,33 +861,18 @@ async fn ensure_shard_log(
     scoped_collection: &str,
     shard_id: u32,
 ) -> Option<std::sync::Arc<veda_log::ShardLog>> {
-    let key = format!("{scoped_collection}:{shard_id}");
-    {
-        let guard = state.inner.shard_logs.read().await;
-        if let Some(log) = guard.get(&key) {
-            return Some(log.clone());
-        }
-    }
-    // Slow path — construct the log on disk.
-    let dir = state
-        .inner
-        .data_dir
-        .join("_logs")
-        .join(scoped_collection)
-        .join(format!("{shard_id:04}"));
-    let log = match veda_log::ShardLog::open(&dir) {
-        Ok(l) => std::sync::Arc::new(l),
+    match state.inner.shard_logs.get_or_open(scoped_collection, shard_id) {
+        Ok(log) => Some(log),
         Err(e) => {
             tracing::warn!(
-                dir = ?dir,
+                collection = %scoped_collection,
+                shard = shard_id,
                 error = %e,
-                "ShardLog::open failed; dark-write skipped for this shard"
+                "ShardLog open failed via registry"
             );
-            return None;
+            None
         }
-    };
-    let mut guard = state.inner.shard_logs.write().await;
-    Some(guard.entry(key).or_insert(log).clone())
+    }
 }
 
 /// Public wrapper exposing the record-parsing logic to other gateway modules
