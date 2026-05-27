@@ -125,8 +125,8 @@ Matches FoundationDB / Aurora / TiDB v8+ / YugabyteDB.
 What's deliberately NOT here yet (tracked follow-ups, not in v0.2.1):
 
 - Niriksha frontend redesign — separate 7-phase plan (~14 engineer-weeks). Not started.
-- Persistent `last_applied` cursor for `LogApplier` (today idempotent on the storage layer but wasteful on cold start; cf. ADR-019).
-- `MultiGroupCoordinator` rewrite into a `ShardLogRegistry` (today the registry lives alongside the original group state for incremental migration).
+
+(Done 2026-05-27: the durable `LogApplier` cursor and the `ShardLogRegistry` — which replaced the now-deleted vestigial `MultiGroupCoordinator` — both landed. Design: `documentation/2026-05-27-applier-cursor-shardlog-registry-design.md`.)
 
 ## Reading order for new contributors
 
