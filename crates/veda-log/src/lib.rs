@@ -32,6 +32,7 @@
 
 pub mod format;
 pub mod reader;
+pub mod registry;
 pub mod replication;
 pub mod segment_file;
 pub mod shard_log;
@@ -41,6 +42,7 @@ pub mod wan;
 
 pub use format::{LogEntryV2, LogOp};
 pub use reader::LogTailer;
+pub use registry::ShardLogRegistry;
 pub use replication::{
     AppendAck, AppendRpc, EnsembleError, LocalFollower, LogEnsemble, LogFollower, LogWriter, NodeId,
 };
