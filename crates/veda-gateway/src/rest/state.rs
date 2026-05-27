@@ -111,7 +111,7 @@ pub fn verify_credentials(stored: &str, candidate: &str, username: &str) -> bool
 /// Shared application state accessible from all handlers.
 #[derive(Clone)]
 pub struct AppState {
-    pub(crate) inner: Arc<AppStateInner>,
+    pub inner: Arc<AppStateInner>,
 }
 
 pub struct AppStateInner {
