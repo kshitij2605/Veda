@@ -197,6 +197,7 @@
   --color-accent:        oklch(0.530 0.205 282);
   --color-accent-hover:  oklch(0.480 0.210 282);
   --color-accent-subtle: oklch(0.955 0.030 282);
+  --color-text-on-accent: oklch(1 0 0);   /* white text on the violet accent */
 
   /* modality — legible on white (~0.55–0.62 L) */
   --color-modality-text:  oklch(0.550 0.180 264);

@@ -39,10 +39,10 @@ const button = cva(
         ],
       },
       size: {
-        xs: 'h-6 px-2 text-[11px]',
-        sm: 'h-7 px-2.5 text-[12px]',
-        md: 'h-8 px-3 text-[13px]',
-        lg: 'h-9 px-4 text-[14px]',
+        xs: 'h-7 px-2.5 text-[12px]',
+        sm: 'h-8 px-3 text-[13px]',
+        md: 'h-9 px-3.5 text-[14px]',
+        lg: 'h-10 px-5 text-[15px]',
       },
       block: {
         true: 'w-full',
