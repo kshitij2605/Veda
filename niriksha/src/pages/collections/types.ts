@@ -30,7 +30,7 @@ export const DENSITY_DIMS: Record<
   Density,
   { rowH: number; cellPx: string; textPx: string }
 > = {
-  comfortable: { rowH: 36, cellPx: 'px-3 py-2', textPx: 'text-[12.5px]' },
+  comfortable: { rowH: 40, cellPx: 'px-3.5 py-2.5', textPx: 'text-[13px]' },
   compact: { rowH: 28, cellPx: 'px-2.5 py-1.5', textPx: 'text-[12px]' },
   dense: { rowH: 22, cellPx: 'px-2 py-0.5', textPx: 'text-[11.5px]' },
 }

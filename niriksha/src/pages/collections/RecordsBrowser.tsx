@@ -39,7 +39,7 @@ export function RecordsBrowser({ collection }: RecordsBrowserProps) {
   const savedId = searchParams.get('saved')
 
   const [page, setPage] = useUrlState<number>('p', 0)
-  const [density, setDensity] = useUrlState<Density>('d', 'compact')
+  const [density, setDensity] = useUrlState<Density>('d', 'comfortable')
   const [filters, setFilters] = useUrlState<Filter[]>('f', [])
   const [columns, setColumns] = useUrlState<string[]>(
     'cols',
