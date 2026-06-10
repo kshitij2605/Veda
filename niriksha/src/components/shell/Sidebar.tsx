@@ -90,7 +90,7 @@ export function Sidebar({
   return (
     <aside
       className={cn(
-        'flex flex-col flex-none border-r border-[var(--color-border)] bg-[var(--color-bg)] transition-[width] duration-[var(--duration-base)]',
+        'flex flex-col flex-none border-r border-[var(--color-border)] bg-[var(--color-bg-elevated)] transition-[width] duration-[var(--duration-base)]',
         collapsed ? 'w-[56px]' : 'w-[220px]',
       )}
     >
@@ -110,7 +110,7 @@ function BrandRow({ collapsed, onToggle }: { collapsed: boolean; onToggle?: () =
   return (
     <div
       className={cn(
-        'h-12 flex items-center border-b border-[var(--color-border)] gap-2',
+        'h-14 flex items-center border-b border-[var(--color-border)] gap-2',
         collapsed ? 'justify-center px-0' : 'px-3',
       )}
     >
@@ -218,11 +218,11 @@ function Item({ item, collapsed }: { item: NavItem; collapsed: boolean }) {
         title={collapsed ? item.label : undefined}
         className={({ isActive }) =>
           cn(
-            'group relative flex items-center h-7 mx-1.5 rounded-[var(--radius-sm)]',
+            'group relative flex items-center h-8 mx-1.5 rounded-[var(--radius-sm)]',
             'text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]',
             'transition-colors duration-[var(--duration-fast)]',
-            collapsed ? 'justify-center px-0' : 'gap-2 px-2 text-[12.5px]',
-            (active || isActive) && 'bg-[var(--color-bg-hover)] text-[var(--color-text)]',
+            collapsed ? 'justify-center px-0' : 'gap-2.5 px-2.5 text-[13px]',
+            (active || isActive) && 'bg-[var(--color-accent-subtle)] text-[var(--color-accent)] font-medium',
           )
         }
       >

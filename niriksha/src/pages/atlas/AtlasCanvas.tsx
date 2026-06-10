@@ -111,7 +111,14 @@ export function AtlasCanvas({
 
     // Subtle background grid
     ctx.clearRect(0, 0, width, height)
-    drawGrid(ctx, width, height)
+    drawGrid(
+      ctx,
+      width,
+      height,
+      document.documentElement.dataset.theme === 'light'
+        ? 'oklch(0.91 0.006 255)'
+        : 'oklch(0.21 0.005 252)',
+    )
 
     // Faded backdrop for non-selected points if a selection is active.
     const hasSel = selectedIds && selectedIds.size > 0
@@ -305,8 +312,8 @@ export function AtlasCanvas({
   )
 }
 
-function drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number) {
-  ctx.strokeStyle = 'oklch(0.21 0.005 252)'
+function drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number, color: string) {
+  ctx.strokeStyle = color
   ctx.lineWidth = 0.5
   const step = 40
   ctx.beginPath()
