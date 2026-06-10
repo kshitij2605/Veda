@@ -14,3 +14,13 @@ test('shows the Home link and the regrouped sections', () => {
   expect(screen.getByText('Observe')).toBeInTheDocument()
   expect(screen.getByText('Developer')).toBeInTheDocument()
 })
+
+test('collapsed sidebar hides labels (icon rail)', () => {
+  render(
+    <MemoryRouter>
+      <Sidebar onOpenPalette={() => {}} collapsed onToggle={() => {}} />
+    </MemoryRouter>,
+  )
+  expect(screen.queryByText('Home')).not.toBeInTheDocument()
+  expect(screen.queryByText('Overview')).not.toBeInTheDocument()
+})

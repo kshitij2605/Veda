@@ -9,6 +9,8 @@ import {
   GitBranch,
   Layers,
   LayoutDashboard,
+  PanelLeftClose,
+  PanelLeftOpen,
   Search,
   Settings,
   TerminalSquare,
@@ -74,31 +76,66 @@ const GROUPS: NavGroup[] = [
   },
 ]
 
-export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
+export function Sidebar({
+  onOpenPalette,
+  collapsed = false,
+  onToggle,
+}: {
+  onOpenPalette: () => void
+  collapsed?: boolean
+  onToggle?: () => void
+}) {
   return (
-    <aside className="flex flex-col w-[220px] flex-none border-r border-[var(--color-border)] bg-[var(--color-bg)]">
-      <BrandRow />
-      <PaletteButton onClick={onOpenPalette} />
+    <aside
+      className={cn(
+        'flex flex-col flex-none border-r border-[var(--color-border)] bg-[var(--color-bg)] transition-[width] duration-[var(--duration-base)]',
+        collapsed ? 'w-[56px]' : 'w-[220px]',
+      )}
+    >
+      <BrandRow collapsed={collapsed} onToggle={onToggle} />
+      <PaletteButton onClick={onOpenPalette} collapsed={collapsed} />
       <nav className="flex-1 overflow-y-auto py-1 no-scrollbar">
         {GROUPS.map((g) => (
-          <Group key={g.label} group={g} />
+          <Group key={g.label} group={g} collapsed={collapsed} />
         ))}
       </nav>
-      <Footer />
+      <Footer collapsed={collapsed} />
     </aside>
   )
 }
 
-function BrandRow() {
+function BrandRow({ collapsed, onToggle }: { collapsed: boolean; onToggle?: () => void }) {
   return (
-    <div className="h-12 flex items-center px-3 border-b border-[var(--color-border)] gap-2">
-      <BrandMark />
-      <span className="text-[13px] font-medium tracking-tight text-[var(--color-text)]">
-        Niriksha
-      </span>
-      <span className="ml-auto text-[10px] font-mono text-[var(--color-text-subtle)]">
-        v0.1.0
-      </span>
+    <div
+      className={cn(
+        'h-12 flex items-center border-b border-[var(--color-border)] gap-2',
+        collapsed ? 'justify-center px-0' : 'px-3',
+      )}
+    >
+      {!collapsed && <BrandMark />}
+      {!collapsed && (
+        <span className="text-[13px] font-medium tracking-tight text-[var(--color-text)]">
+          Niriksha
+        </span>
+      )}
+      {!collapsed && (
+        <span className="ml-auto text-[10px] font-mono text-[var(--color-text-subtle)]">
+          v0.1.0
+        </span>
+      )}
+      {onToggle && (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          className={cn(
+            'inline-flex h-6 w-6 items-center justify-center rounded-[var(--radius-sm)] text-[var(--color-text-subtle)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg-hover)] transition-colors',
+            !collapsed && 'ml-1',
+          )}
+        >
+          {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={14} />}
+        </button>
+      )}
     </div>
   )
 }
@@ -114,7 +151,20 @@ function BrandMark() {
   )
 }
 
-function PaletteButton({ onClick }: { onClick: () => void }) {
+function PaletteButton({ onClick, collapsed }: { onClick: () => void; collapsed: boolean }) {
+  if (collapsed) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label="Quick jump"
+        title="Quick jump (Cmd/Ctrl+K)"
+        className="mx-auto my-2 flex h-7 w-7 items-center justify-center rounded-[var(--radius-sm)] bg-[var(--color-base-1)] border border-[var(--color-border)] text-[var(--color-text-subtle)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg-hover)] transition-colors"
+      >
+        <Search size={13} strokeWidth={2.25} />
+      </button>
+    )
+  }
   return (
     <button
       type="button"
@@ -135,47 +185,48 @@ function PaletteButton({ onClick }: { onClick: () => void }) {
   )
 }
 
-function Group({ group }: { group: NavGroup }) {
+function Group({ group, collapsed }: { group: NavGroup; collapsed: boolean }) {
   return (
     <div className="mb-1.5">
-      <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)] font-medium">
-        {group.label}
-      </div>
+      {collapsed ? (
+        <div className="h-1.5" />
+      ) : (
+        <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)] font-medium">
+          {group.label}
+        </div>
+      )}
       <ul className="flex flex-col">
         {group.items.map((item) => (
-          <Item key={item.to} item={item} />
+          <Item key={item.to} item={item} collapsed={collapsed} />
         ))}
       </ul>
     </div>
   )
 }
 
-function Item({ item }: { item: NavItem }) {
+function Item({ item, collapsed }: { item: NavItem; collapsed: boolean }) {
   const location = useLocation()
-  // Active if path starts with item.to OR if path is `/` and item is /collections
   const active =
-    location.pathname === item.to ||
-    location.pathname.startsWith(item.to + '/') ||
-    (item.to === '/collections' && location.pathname === '/')
+    location.pathname === item.to || location.pathname.startsWith(item.to + '/')
   const Icon = item.icon
   return (
     <li>
       <NavLink
         to={item.to}
+        title={collapsed ? item.label : undefined}
         className={({ isActive }) =>
           cn(
-            'group relative flex items-center gap-2 mx-1.5 h-7 px-2 rounded-[var(--radius-sm)]',
-            'text-[12.5px] text-[var(--color-text-muted)]',
-            'hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]',
+            'group relative flex items-center h-7 mx-1.5 rounded-[var(--radius-sm)]',
+            'text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]',
             'transition-colors duration-[var(--duration-fast)]',
-            (active || isActive) &&
-              'bg-[var(--color-bg-hover)] text-[var(--color-text)]',
+            collapsed ? 'justify-center px-0' : 'gap-2 px-2 text-[12.5px]',
+            (active || isActive) && 'bg-[var(--color-bg-hover)] text-[var(--color-text)]',
           )
         }
       >
-        <Icon size={13.5} strokeWidth={2} />
-        <span className="flex-1 truncate">{item.label}</span>
-        {item.hint && (
+        <Icon size={collapsed ? 15 : 13.5} strokeWidth={2} />
+        {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
+        {!collapsed && item.hint && (
           <span className="text-[10px] font-mono text-[var(--color-text-subtle)] opacity-0 group-hover:opacity-100">
             G {item.hint}
           </span>
@@ -191,20 +242,20 @@ function Item({ item }: { item: NavItem }) {
   )
 }
 
-function Footer() {
+function Footer({ collapsed }: { collapsed: boolean }) {
+  if (collapsed) {
+    return (
+      <div className="py-2.5 border-t border-[var(--color-border)] flex items-center justify-center">
+        <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-success)]" aria-hidden />
+      </div>
+    )
+  }
   return (
     <div className="px-3 py-2.5 border-t border-[var(--color-border)] flex items-center justify-between">
-      <span className="text-[10px] text-[var(--color-text-subtle)] font-mono">
-        veda · 6340
-      </span>
+      <span className="text-[10px] text-[var(--color-text-subtle)] font-mono">veda · 6340</span>
       <span className="flex items-center gap-1">
-        <span
-          className="w-1.5 h-1.5 rounded-full bg-[var(--color-success)]"
-          aria-hidden
-        />
-        <span className="text-[10px] text-[var(--color-text-muted)]">
-          connected
-        </span>
+        <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-success)]" aria-hidden />
+        <span className="text-[10px] text-[var(--color-text-muted)]">connected</span>
       </span>
     </div>
   )
