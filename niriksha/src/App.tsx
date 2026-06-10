@@ -80,7 +80,7 @@ export default function App() {
       <AppShell>
         <Suspense fallback={<RouteFallback />}>
           <Routes>
-            <Route path="/" element={<Navigate to="/collections" replace />} />
+            <Route path="/" element={<Navigate to="/home" replace />} />
             <Route path="/home" element={<DashboardHome />} />
             <Route path="/collections" element={<CollectionBrowser />} />
             <Route path="/collections/:name" element={<CollectionBrowser />} />
@@ -102,7 +102,7 @@ export default function App() {
             <Route path="/observability" element={<Observability />} />
             <Route path="/console" element={<Console />} />
             <Route path="/settings" element={<Settings />} />
-            <Route path="*" element={<Navigate to="/collections" replace />} />
+            <Route path="*" element={<Navigate to="/home" replace />} />
           </Routes>
         </Suspense>
       </AppShell>
