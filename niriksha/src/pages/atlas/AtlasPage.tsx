@@ -17,7 +17,6 @@ import {
   type RecordRow,
 } from '../../api/collections'
 import {
-  Badge,
   Button,
   Select,
   Skeleton,
@@ -27,7 +26,7 @@ import { useUrlState } from '../../hooks/useUrlState'
 import { cn } from '../../lib/cn'
 import { AtlasCanvas, type AtlasPoint } from './AtlasCanvas'
 import { BubbleUp } from './BubbleUp'
-import { pcaTwoDim } from './pca'
+import { projectAsync, type ProjectionMethod, type ProjectHandle } from './project'
 import { RecordDrawer } from '../collections/RecordDrawer'
 
 const COLORS = [
@@ -40,6 +39,7 @@ interface AtlasState {
   vectorField: string
   colorField: string
   sample: number
+  method: ProjectionMethod
 }
 
 const DEFAULT_STATE: AtlasState = {
@@ -47,6 +47,7 @@ const DEFAULT_STATE: AtlasState = {
   vectorField: '',
   colorField: '',
   sample: 2000,
+  method: 'umap',
 }
 
 export function AtlasPage() {
@@ -68,6 +69,11 @@ export function AtlasPage() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [clusters, setClusters] = useState<Cluster[]>([])
   const [labelingClusters, setLabelingClusters] = useState(false)
+  const [umapProgress, setUmapProgress] = useState<{
+    epoch: number
+    total: number
+  } | null>(null)
+  const projHandle = useRef<ProjectHandle | null>(null)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const [canvasSize, setCanvasSize] = useState({ w: 600, h: 500 })
@@ -75,6 +81,9 @@ export function AtlasPage() {
   useEffect(() => {
     fetchCollections()
   }, [fetchCollections])
+
+  // Terminate any in-flight UMAP worker on unmount.
+  useEffect(() => () => projHandle.current?.cancel(), [])
 
   useEffect(() => {
     if (!state.collection && collections.length > 0) {
@@ -169,7 +178,13 @@ export function AtlasPage() {
           'No vector values found in the sample. Pick a populated vector field.',
         )
       }
-      const coords = pcaTwoDim(vectors)
+      setUmapProgress(null)
+      projHandle.current?.cancel()
+      const handle = projectAsync(state.method, vectors, (epoch, total) =>
+        setUmapProgress({ epoch, total }),
+      )
+      projHandle.current = handle
+      const coords = await handle.promise
       const colorMap = new Map<string, number>()
       for (const r of validRecs) {
         const k = String(r.fields[state.colorField] ?? 'unknown')
@@ -193,8 +208,9 @@ export function AtlasPage() {
       setError(e instanceof Error ? e.message : 'Failed to generate atlas')
     } finally {
       setLoading(false)
+      setUmapProgress(null)
     }
-  }, [state.collection, state.vectorField, state.colorField, state.sample])
+  }, [state.collection, state.vectorField, state.colorField, state.sample, state.method])
 
   const selectedRecords = useMemo(
     () => records.filter((r) => selectedIds.has(r.id)),
@@ -259,6 +275,8 @@ export function AtlasPage() {
         colorFields={scalarFields.map((f) => f.name)}
         sample={state.sample}
         onSample={(n) => setS('sample', n)}
+        method={state.method}
+        onMethod={(m) => setS('method', m)}
         onGenerate={handleGenerate}
         loading={loading}
         canGenerate={!!state.vectorField && !!state.collection}
@@ -274,7 +292,13 @@ export function AtlasPage() {
             <div className="absolute inset-0 flex items-center justify-center bg-[var(--color-bg)]/70 backdrop-blur-[1px]">
               <div className="flex flex-col items-center gap-2 text-[var(--color-text-muted)]">
                 <Sparkles size={20} className="text-[var(--color-accent)] animate-pulse" />
-                <span className="text-[12px]">Running PCA…</span>
+                <span className="text-[12px]">
+                  {state.method === 'umap'
+                    ? umapProgress
+                      ? `UMAP · epoch ${umapProgress.epoch}/${umapProgress.total}`
+                      : 'Starting UMAP…'
+                    : 'Running PCA…'}
+                </span>
               </div>
             </div>
           )}
@@ -360,6 +384,8 @@ function Header({
   colorFields,
   sample,
   onSample,
+  method,
+  onMethod,
   onGenerate,
   loading,
   canGenerate,
@@ -380,6 +406,8 @@ function Header({
   colorFields: string[]
   sample: number
   onSample: (n: number) => void
+  method: ProjectionMethod
+  onMethod: (m: ProjectionMethod) => void
   onGenerate: () => void
   loading: boolean
   canGenerate: boolean
@@ -424,9 +452,15 @@ function Header({
           label: `${n} pts`,
         }))}
       />
-      <Tooltip label="PCA (2-D) — UMAP / t-SNE in a follow-up">
-        <Badge label="PCA · 2D" variant="ghost" />
-      </Tooltip>
+      <Select
+        size="sm"
+        value={method}
+        onValueChange={(v) => onMethod(v as ProjectionMethod)}
+        options={[
+          { value: 'pca', label: 'PCA · 2D' },
+          { value: 'umap', label: 'UMAP · 2D' },
+        ]}
+      />
       <div className="ml-auto flex items-center gap-1.5">
         <Tooltip
           label={
@@ -511,7 +545,7 @@ function EmptyAtlas({
         </h2>
         <p className="text-[12px] text-[var(--color-text-muted)] mb-4 leading-relaxed">
           Project a sample of this collection's embeddings to 2-D with
-          PCA. Pan, zoom, hover a point for its id, click for the full
+          PCA or UMAP. Pan, zoom, hover a point for its id, click for the full
           record. Lasso a region and BubbleUp tells you which fields are
           over- or under-represented inside the selection vs the whole
           sample.
