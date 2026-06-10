@@ -106,24 +106,26 @@
   /* ── Typography ─────────────────────────────────────────────────────── */
   --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
-  --font-display: "Inter", sans-serif;
+  --font-display: "Geist", "Inter", sans-serif;
 
   --text-2xs: 10px;
   --text-xs:  11px;
   --text-sm:  12px;
-  --text-base: 13px;
-  --text-md:  14px;
-  --text-lg:  16px;
+  --text-base: 14px;
+  --text-md:  15px;
+  --text-lg:  17px;
   --text-xl:  20px;
   --text-2xl: 24px;
-  --text-3xl: 32px;
+  --text-3xl: 30px;
+  --text-4xl: 38px;
+  --text-5xl: 46px;
 
   /* ── Radii ──────────────────────────────────────────────────────────── */
-  --radius-xs: 3px;
-  --radius-sm: 5px;
-  --radius-md: 7px;
-  --radius-lg: 10px;
-  --radius-xl: 14px;
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
 
   /* ── Spacing primitives (4px grid) ──────────────────────────────────── */
   --space-px: 1px;
@@ -156,21 +158,72 @@
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-/* ── Light theme override (best-effort; dark is canonical) ─────────────── */
+/* ── Light theme — canonical default (applied via theme.ts; dark = [data-theme="dark"]
+      falls through to the @theme block above) ──────────────────────────── */
 [data-theme="light"] {
-  --color-base-0:  oklch(1.000 0     0);
-  --color-base-1:  oklch(0.985 0.003 252);
-  --color-base-2:  oklch(0.965 0.004 252);
-  --color-base-3:  oklch(0.940 0.005 252);
-  --color-base-4:  oklch(0.890 0.006 252);
-  --color-base-5:  oklch(0.820 0.006 252);
-  --color-base-6:  oklch(0.700 0.006 252);
-  --color-base-7:  oklch(0.580 0.006 252);
-  --color-base-8:  oklch(0.460 0.006 252);
-  --color-base-9:  oklch(0.340 0.006 252);
-  --color-base-10: oklch(0.220 0.005 252);
-  --color-base-11: oklch(0.140 0.004 252);
-  --color-base-12: oklch(0.060 0.003 252);
+  /* base scale — cool near-white → near-black ink (components using base-N directly) */
+  --color-base-0:  oklch(0.985 0.004 255);
+  --color-base-1:  oklch(1.000 0     0);
+  --color-base-2:  oklch(0.970 0.004 255);
+  --color-base-3:  oklch(0.918 0.006 255);
+  --color-base-4:  oklch(0.870 0.007 256);
+  --color-base-5:  oklch(0.800 0.008 258);
+  --color-base-6:  oklch(0.650 0.012 260);
+  --color-base-7:  oklch(0.560 0.014 262);
+  --color-base-8:  oklch(0.500 0.015 264);
+  --color-base-9:  oklch(0.400 0.018 265);
+  --color-base-10: oklch(0.320 0.020 265);
+  --color-base-11: oklch(0.270 0.020 266);
+  --color-base-12: oklch(0.150 0.020 266);
+
+  /* surface aliases — white cards float on a soft cool-gray canvas */
+  --color-bg:           oklch(0.985 0.004 255);
+  --color-bg-elevated:  oklch(1 0 0);
+  --color-bg-overlay:   oklch(1 0 0);
+  --color-bg-hover:     oklch(0.955 0.005 255);
+  --color-bg-active:    oklch(0.930 0.006 256);
+  --color-bg-selected:  oklch(0.955 0.020 282);
+
+  --color-border:        oklch(0.912 0.006 256);
+  --color-border-strong: oklch(0.855 0.008 258);
+
+  --color-text:          oklch(0.270 0.020 266);
+  --color-text-muted:    oklch(0.500 0.016 264);
+  --color-text-subtle:   oklch(0.620 0.013 262);
+  --color-text-disabled: oklch(0.720 0.010 260);
+  --color-text-secondary: oklch(0.400 0.018 265);
+
+  /* accent on light — slightly deeper for AA on white */
+  --color-accent:        oklch(0.530 0.205 282);
+  --color-accent-hover:  oklch(0.480 0.210 282);
+  --color-accent-subtle: oklch(0.955 0.030 282);
+
+  /* modality — legible on white (~0.55–0.62 L) */
+  --color-modality-text:  oklch(0.550 0.180 264);
+  --color-modality-image: oklch(0.580 0.150 155);
+  --color-modality-audio: oklch(0.600 0.140 70);
+  --color-modality-video: oklch(0.560 0.200 18);
+  --color-modality-doc:   oklch(0.540 0.180 300);
+  --color-modality-mixed: oklch(0.600 0.130 220);
+
+  /* chart ramp — light-tuned */
+  --color-chart-1: oklch(0.560 0.140 195);
+  --color-chart-2: oklch(0.560 0.190 282);
+  --color-chart-3: oklch(0.580 0.150 160);
+  --color-chart-4: oklch(0.640 0.150 60);
+  --color-chart-5: oklch(0.580 0.190 320);
+  --color-chart-6: oklch(0.600 0.160 30);
+  --color-chart-7: oklch(0.560 0.130 230);
+  --color-chart-8: oklch(0.640 0.150 110);
+
+  /* soft light elevation */
+  --shadow-xs: 0 0 0 1px oklch(0.2 0.02 266 / 0.05);
+  --shadow-sm: 0 1px 2px oklch(0.2 0.02 266 / 0.06), 0 0 0 1px oklch(0.2 0.02 266 / 0.04);
+  --shadow-md: 0 2px 8px -1px oklch(0.2 0.02 266 / 0.08), 0 1px 2px oklch(0.2 0.02 266 / 0.05);
+  --shadow-lg: 0 10px 30px -8px oklch(0.2 0.02 266 / 0.12), 0 2px 6px oklch(0.2 0.02 266 / 0.06);
+  --shadow-glow: 0 0 0 3px oklch(0.53 0.205 282 / 0.18);
+
+  color-scheme: light;
 }
 
 /* ── Base layer ────────────────────────────────────────────────────────── */
