@@ -71,11 +71,11 @@ export function Observability() {
     <div className="flex flex-col h-full min-h-0 bg-[var(--color-bg)]">
       <header className="flex items-center gap-2 px-4 h-12 border-b border-[var(--color-border)] flex-none">
         <BarChart3
-          size={14}
+          size={16}
           strokeWidth={2}
-          className="text-[var(--color-accent-9)]"
+          className="text-[var(--color-accent)]"
         />
-        <h1 className="text-[13.5px] font-medium text-[var(--color-text)]">
+        <h1 className="text-[16px] font-semibold tracking-tight text-[var(--color-text)]">
           Observability
         </h1>
         {lastFetched && (

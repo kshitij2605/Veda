@@ -292,8 +292,8 @@ function Composer({
   return (
     <div className="border-b border-[var(--color-border)] bg-[var(--color-bg)]">
       <div className="flex items-center gap-2 px-4 pt-3 pb-2">
-        <Atom size={14} strokeWidth={2} className="text-[var(--color-accent-9)]" />
-        <h1 className="text-[14px] font-medium text-[var(--color-text)]">Search</h1>
+        <Atom size={16} strokeWidth={2} className="text-[var(--color-accent)]" />
+        <h1 className="text-[16px] font-semibold tracking-tight text-[var(--color-text)]">Search</h1>
         <span className="text-[var(--color-text-subtle)]">·</span>
         <Select
           value={collection}

@@ -419,8 +419,8 @@ function Header({
 }) {
   return (
     <header className="flex items-center gap-2 px-4 h-12 border-b border-[var(--color-border)] flex-none bg-[var(--color-bg)] overflow-x-auto">
-      <Atom size={14} strokeWidth={2} className="text-[var(--color-accent-9)]" />
-      <h1 className="text-[14px] font-medium text-[var(--color-text)]">Atlas</h1>
+      <Atom size={16} strokeWidth={2} className="text-[var(--color-accent)]" />
+      <h1 className="text-[16px] font-semibold tracking-tight text-[var(--color-text)]">Atlas</h1>
       <span className="text-[var(--color-text-subtle)]">·</span>
       <Select
         value={collection}
