@@ -51,6 +51,8 @@ use crate::quantization::rabitq_ext::ExtRaBitQuantizer;
 use crate::traits::{SearchResult, VectorIndex};
 
 const DEFAULT_RERANK_MULTIPLIER: usize = 10;
+/// Fixed seed for the Hadamard rotation so the index reloads deterministically.
+const ROTATION_SEED: u64 = 0x5EED_1B17_4A11_0CD5;
 
 pub struct RaBitQExtRerankIndex {
     /// Stage-1 1-bit quantizer producing the candidate pool.
@@ -67,7 +69,9 @@ impl RaBitQExtRerankIndex {
     pub fn new(metric: DistanceMetric) -> Self {
         Self {
             coarse: RaBitQuantizer::new(metric),
-            rerank: ExtRaBitQuantizer::new(metric),
+            rerank: ExtRaBitQuantizer::new(metric)
+                .with_rotation(ROTATION_SEED)
+                .with_optimized_codebook(),
             deleted: HashSet::new(),
             metric,
             dimension: 0,
@@ -300,5 +304,76 @@ mod tests {
         let r = loaded.search(&vectors[5], 1).unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].id, 5);
+    }
+
+    /// Reload-safety: rotation + Lloyd-Max codebook survive a save/load cycle.
+    ///
+    /// Uses ≥256 vectors so the codebook trains on a non-trivial sample.
+    /// Asserts that search results (ids + distances) are identical before
+    /// and after the round-trip — proving the rotation and codebook are
+    /// fully persisted and re-applied on reload.
+    #[test]
+    fn rotation_and_codebook_survive_reload() {
+        let vectors = synthetic_vectors(300, 64);
+        let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
+
+        let mut idx = RaBitQExtRerankIndex::new(DistanceMetric::Cosine);
+        idx.build(&refs).unwrap();
+
+        // Verify the rerank stage has rotation and codebook active.
+        assert!(
+            idx.rerank.has_rotation(),
+            "rotation must be active after build"
+        );
+        assert!(
+            idx.rerank.has_optimized_codebook(),
+            "Lloyd-Max codebook must be active after build"
+        );
+
+        // Collect search results for several probe vectors before saving.
+        let probes: Vec<&[f32]> = vectors[0..5].iter().map(|v| v.as_slice()).collect();
+        let before: Vec<Vec<SearchResult>> = probes
+            .iter()
+            .map(|q| idx.search(q, 5).unwrap())
+            .collect();
+
+        // Save → reload via the VectorIndex::save / VectorIndex::load API
+        // (directory-based: coarse.q + rerank.q + manifest.bin).
+        let tmp = tempfile::tempdir().unwrap();
+        idx.save(tmp.path()).unwrap();
+        let loaded =
+            RaBitQExtRerankIndex::load(tmp.path(), DistanceMetric::Cosine, 64).unwrap();
+
+        // Reloaded index must still carry rotation + codebook.
+        assert!(
+            loaded.rerank.has_rotation(),
+            "rotation must survive reload"
+        );
+        assert!(
+            loaded.rerank.has_optimized_codebook(),
+            "Lloyd-Max codebook must survive reload"
+        );
+
+        // Search results must be bit-identical after reload.
+        for (i, q) in probes.iter().enumerate() {
+            let after = loaded.search(q, 5).unwrap();
+            assert_eq!(
+                before[i].len(),
+                after.len(),
+                "result count changed after reload for probe {i}"
+            );
+            for (b, a) in before[i].iter().zip(after.iter()) {
+                assert_eq!(
+                    b.id, a.id,
+                    "result id mismatch after reload for probe {i}"
+                );
+                assert!(
+                    (b.distance - a.distance).abs() < 1e-6,
+                    "distance changed after reload for probe {i}: before={} after={}",
+                    b.distance,
+                    a.distance
+                );
+            }
+        }
     }
 }
