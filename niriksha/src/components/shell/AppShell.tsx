@@ -76,7 +76,7 @@ function Header() {
   }, [fetchHealth])
   const healthy = health?.status === 'healthy'
   return (
-    <header className="h-11 flex-none border-b border-[var(--color-border)] bg-[var(--color-bg)] flex items-center px-4 gap-3">
+    <header className="h-14 flex-none border-b border-[var(--color-border)] bg-[var(--color-bg-elevated)] flex items-center px-6 gap-3">
       <div className="flex-1 min-w-0">
         <Breadcrumbs />
       </div>

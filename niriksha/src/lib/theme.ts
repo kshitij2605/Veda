@@ -2,17 +2,16 @@ export type Theme = 'dark' | 'light'
 
 const KEY = 'veda_theme'
 
-/** Persisted theme, defaulting to dark (the canonical theme). */
+/** Persisted theme, defaulting to light (the canonical theme). */
 export function getStoredTheme(): Theme {
   const v = typeof localStorage !== 'undefined' ? localStorage.getItem(KEY) : null
-  return v === 'light' ? 'light' : 'dark'
+  return v === 'dark' ? 'dark' : 'light'
 }
 
-/** Apply a theme by toggling `data-theme` on <html> (dark = no attribute). */
+/** Apply a theme via `data-theme` on <html> (light = canonical; dark sets the attribute). */
 export function applyTheme(t: Theme): void {
   const el = document.documentElement
-  if (t === 'light') el.dataset.theme = 'light'
-  else delete el.dataset.theme
+  el.dataset.theme = t
   try {
     localStorage.setItem(KEY, t)
   } catch {
