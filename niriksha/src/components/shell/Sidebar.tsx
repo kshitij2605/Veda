@@ -31,33 +31,42 @@ interface NavGroup {
 
 const GROUPS: NavGroup[] = [
   {
+    label: 'Overview',
+    items: [{ to: '/home', label: 'Home', icon: LayoutDashboard, hint: 'H' }],
+  },
+  {
     label: 'Data',
     items: [
       { to: '/collections', label: 'Collections', icon: Database, hint: 'C' },
+      { to: '/pipelines', label: 'Pipelines', icon: GitBranch },
+      { to: '/chunker', label: 'Chunker A/B', icon: Beaker },
     ],
   },
   {
-    label: 'Explore',
+    label: 'Search',
     items: [
       { to: '/search', label: 'Search', icon: Search, hint: 'S' },
       { to: '/atlas', label: 'Atlas', icon: Atom, hint: 'A' },
-      { to: '/quality', label: 'Quality Lab', icon: FlaskConical },
-      { to: '/evaluation', label: 'Evaluation', icon: Beaker },
-      { to: '/dashboards', label: 'Dashboards', icon: LayoutDashboard },
     ],
   },
   {
-    label: 'Operate',
+    label: 'Quality',
     items: [
-      { to: '/pipelines', label: 'Pipelines', icon: GitBranch },
-      { to: '/chunker', label: 'Chunker A/B', icon: Beaker },
+      { to: '/evaluation', label: 'Evaluation', icon: Beaker },
+      { to: '/quality', label: 'Quality Lab', icon: FlaskConical },
+      { to: '/dashboards', label: 'Dashboards', icon: BarChart3 },
+    ],
+  },
+  {
+    label: 'Observe',
+    items: [
+      { to: '/observability', label: 'Observability', icon: BarChart3 },
       { to: '/health', label: 'Health', icon: Activity },
       { to: '/indexes', label: 'Indexes', icon: Layers },
-      { to: '/observability', label: 'Observability', icon: BarChart3 },
     ],
   },
   {
-    label: 'Tools',
+    label: 'Developer',
     items: [
       { to: '/console', label: 'Dev Console', icon: TerminalSquare },
       { to: '/settings', label: 'Settings', icon: Settings },
