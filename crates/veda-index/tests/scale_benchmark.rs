@@ -21,6 +21,7 @@ use veda_core::types::DistanceMetric;
 use veda_index::flat::FlatIndex;
 use veda_index::hnsw::HnswIndex;
 use veda_index::hnsw::quantized::QuantizedHnswIndex;
+use veda_index::quantization::rabitq_ext_rerank::RaBitQExtRerankIndex;
 use veda_index::quantization::rabitq_rerank::RaBitQRerankIndex;
 use veda_index::quantization::rabitq_vector_index::RaBitQIndex;
 use veda_index::traits::VectorIndex;
@@ -141,6 +142,53 @@ fn print_row<I: VectorIndex + ?Sized>(
         "  {:<14}  build={:>9.1}ms  p50={:>7.3}ms  p95={:>7.3}ms  recall@10={:.3}",
         label, build_ms, p50, p95, mean_recall
     );
+}
+
+fn run_rabitq_family(label: &str, n: usize, dim: usize) {
+    eprintln!();
+    eprintln!("=== rabitq_family: {label}  n={n}  dim={dim} ===");
+    let corpus = make_corpus(n, dim);
+    let refs: Vec<&[f32]> = corpus.iter().map(|v| v.as_slice()).collect();
+
+    let mut truth_idx = FlatIndex::new(DistanceMetric::Cosine, dim as u32);
+    truth_idx.build(&refs).unwrap();
+    let queries: Vec<&Vec<f32>> = (0..QUERIES).map(|i| &corpus[(i * 7919) % n]).collect();
+    let truths: Vec<HashSet<u32>> = queries
+        .iter()
+        .map(|q| truth_idx.search(q, K).unwrap().into_iter().map(|h| h.id).collect())
+        .collect();
+
+    let raw_mb = (n * dim * 4) as f64 / (1024.0 * 1024.0);
+    eprintln!("  raw f32 corpus: {raw_mb:.1} MB");
+
+    print_row("flat (truth)", n, 0.0, &truth_idx, &queries, &truths);
+
+    let t0 = Instant::now();
+    let mut rabitq = RaBitQIndex::new(DistanceMetric::Cosine);
+    rabitq.build(&refs).unwrap();
+    print_row("rabitq", n, t0.elapsed().as_secs_f64() * 1000.0, &rabitq, &queries, &truths);
+
+    let t0 = Instant::now();
+    let mut rerank = RaBitQRerankIndex::new(DistanceMetric::Cosine);
+    rerank.build(&refs).unwrap();
+    print_row("rabitq+rerank", n, t0.elapsed().as_secs_f64() * 1000.0, &rerank, &queries, &truths);
+
+    let t0 = Instant::now();
+    let mut ext = RaBitQExtRerankIndex::new(DistanceMetric::Cosine);
+    ext.build(&refs).unwrap();
+    print_row("rabitq+extrerank", n, t0.elapsed().as_secs_f64() * 1000.0, &ext, &queries, &truths);
+}
+
+#[test]
+#[ignore]
+fn rabitq_family_1536() {
+    run_rabitq_family("d1536", 100_000, 1536);
+}
+
+#[test]
+#[ignore]
+fn rabitq_family_3072() {
+    run_rabitq_family("d3072", 100_000, 3072);
 }
 
 #[test]
