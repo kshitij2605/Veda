@@ -7,6 +7,7 @@ import {
   Database,
   FlaskConical,
   GitBranch,
+  Images,
   Layers,
   LayoutDashboard,
   PanelLeftClose,
@@ -48,6 +49,7 @@ const GROUPS: NavGroup[] = [
     label: 'Search',
     items: [
       { to: '/search', label: 'Search', icon: Search, hint: 'S' },
+      { to: '/visual', label: 'Visual Search', icon: Images },
       { to: '/atlas', label: 'Atlas', icon: Atom, hint: 'A' },
     ],
   },
