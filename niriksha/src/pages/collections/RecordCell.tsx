@@ -73,6 +73,10 @@ export function RecordCell({ field, value, className }: RecordCellProps) {
     )
   }
 
+  if (typeof value === 'string' && isBase64Image(value)) {
+    return <ImageThumb b64={value} className={className} />
+  }
+
   if (typeof value === 'string') {
     return (
       <span
@@ -105,5 +109,37 @@ function DotBadge({ label, className }: { label: string; className?: string }): 
       <span className="w-1 h-1 rounded-full bg-[var(--color-data-5)]" aria-hidden />
       {label}
     </span>
+  )
+}
+
+/** Detect a base64-encoded image by its magic prefix (jpeg/png/gif/webp). */
+function isBase64Image(s: string): boolean {
+  return (
+    s.length > 100 &&
+    (s.startsWith('/9j/') ||
+      s.startsWith('iVBORw0KGgo') ||
+      s.startsWith('R0lGOD') ||
+      s.startsWith('UklGR'))
+  )
+}
+
+function ImageThumb({ b64, className }: { b64: string; className?: string }) {
+  const mime = b64.startsWith('iVBORw0KGgo')
+    ? 'png'
+    : b64.startsWith('R0lGOD')
+      ? 'gif'
+      : b64.startsWith('UklGR')
+        ? 'webp'
+        : 'jpeg'
+  return (
+    <img
+      src={`data:image/${mime};base64,${b64}`}
+      alt=""
+      loading="lazy"
+      className={cn(
+        'h-10 w-10 rounded-[var(--radius-sm)] object-cover border border-[var(--color-border)]',
+        className,
+      )}
+    />
   )
 }
