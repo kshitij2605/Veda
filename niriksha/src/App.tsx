@@ -1,12 +1,14 @@
 import { lazy, Suspense } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { AppShell } from './components/shell/AppShell'
 
 // Lazy-load every route. The shell + the palette are part of the
-// initial bundle; the page chunks are fetched on demand. This drops
-// the initial JS from ~807 kB to ~150 kB and parallel-loads the
-// heavy modules (Monaco for Console, canvas + cluster math for
-// Atlas) only when their route is actually visited.
+// initial bundle; the page chunks are fetched on demand. The login
+// route is standalone (no shell) and lazy-loads the ogl Aurora
+// background only when visited.
+const Login = lazy(() =>
+  import('./pages/Login').then((m) => ({ default: m.Login })),
+)
 const DashboardHome = lazy(() =>
   import('./pages/DashboardHome').then((m) => ({ default: m.DashboardHome })),
 )
@@ -74,12 +76,21 @@ function RouteFallback() {
   )
 }
 
+function ShellLayout() {
+  return (
+    <AppShell>
+      <Outlet />
+    </AppShell>
+  )
+}
+
 export default function App() {
   return (
     <BrowserRouter basename="/niriksha">
-      <AppShell>
-        <Suspense fallback={<RouteFallback />}>
-          <Routes>
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route element={<ShellLayout />}>
             <Route path="/" element={<Navigate to="/home" replace />} />
             <Route path="/home" element={<DashboardHome />} />
             <Route path="/collections" element={<CollectionBrowser />} />
@@ -103,9 +114,9 @@ export default function App() {
             <Route path="/console" element={<Console />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/home" replace />} />
-          </Routes>
-        </Suspense>
-      </AppShell>
+          </Route>
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   )
 }
