@@ -33,6 +33,36 @@
   --color-accent-9:  oklch(0.760 0.160 282);
   --color-accent-11: oklch(0.890 0.075 282);
 
+  /* ── Accent ramp completion (full 0–12) ─────────────────────────────── */
+  --color-accent-1:  oklch(0.220 0.060 282);
+  --color-accent-3:  oklch(0.320 0.130 282);
+  --color-accent-6:  oklch(0.560 0.215 282);
+  --color-accent-8:  oklch(0.690 0.195 282);
+  --color-accent-10: oklch(0.830 0.120 282);
+  --color-accent-12: oklch(0.960 0.030 282);
+
+  /* ── Modality palette (categorical, colorblind-aware) ───────────────── */
+  --color-modality-text:  oklch(0.70 0.15 250);
+  --color-modality-image: oklch(0.72 0.18 320);
+  --color-modality-audio: oklch(0.74 0.16 160);
+  --color-modality-video: oklch(0.76 0.15 60);
+  --color-modality-doc:   oklch(0.70 0.14 25);
+  --color-modality-mixed: oklch(0.78 0.10 282);
+
+  /* ── Categorical chart ramp (8, perceptually spaced) ────────────────── */
+  --color-chart-1: oklch(0.70 0.13 195);
+  --color-chart-2: oklch(0.72 0.16 282);
+  --color-chart-3: oklch(0.74 0.16 160);
+  --color-chart-4: oklch(0.76 0.15 60);
+  --color-chart-5: oklch(0.70 0.17 320);
+  --color-chart-6: oklch(0.72 0.14 30);
+  --color-chart-7: oklch(0.74 0.12 230);
+  --color-chart-8: oklch(0.80 0.13 110);
+
+  /* ── Premium showcase surfaces (gated: hero/login/empty/atlas) ──────── */
+  --glow-accent: radial-gradient(60% 60% at 50% 0%, oklch(0.62 0.22 282 / 0.18), transparent 70%);
+  --gradient-hero: linear-gradient(135deg, oklch(0.62 0.22 282), oklch(0.66 0.21 320));
+
   /* ── Data hue (teal, for charts/sparklines — distinct from interactive) */
   --color-data-3:  oklch(0.460 0.090 195);
   --color-data-5:  oklch(0.620 0.110 195);
