@@ -1,5 +1,7 @@
 //! Op-level SIMD speedup, run on demand:
-//!   cargo test -p veda-core --test simd_speedup_bench -- --ignored --nocapture
+//!   cargo test --release -p veda-core --test simd_speedup_bench -- --ignored --nocapture
+//!
+//! Run in --release; debug inflates the scalar baseline and overstates the speedup.
 #![cfg(feature = "simsimd")]
 
 use std::time::Instant;
