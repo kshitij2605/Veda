@@ -46,3 +46,9 @@ pub fn manhattan_distance(a: &[f32], b: &[f32]) -> f32 {
 pub fn l2_norm_squared(a: &[f32]) -> f32 {
     a.iter().map(|x| x * x).sum()
 }
+
+pub fn i8_dot_product(a: &[i8], b: &[i8]) -> i32 {
+    // i8×i8 sums fit exactly in f64 for all practical vector dims, so the
+    // cast back to i32 is lossless.
+    <i8 as SpatialSimilarity>::dot(a, b).unwrap_or(0.0) as i32
+}
