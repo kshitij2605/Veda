@@ -1,5 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import '@testing-library/jest-dom'
+import { afterEach } from 'vitest'
+import { cleanup } from '@testing-library/react'
+
+afterEach(() => {
+  cleanup()
+})
 
 // jsdom is missing browser APIs that framer-motion / recharts rely on.
 // Report reduced-motion so animations resolve to their final value in tests.
