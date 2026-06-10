@@ -45,7 +45,8 @@ def main():
                 rec[f] = [round(random.uniform(-1, 1), 4) for _ in range(d)]
             for f, t, _ in scalars:
                 rec[f] = (f"{name}-{f}-{i}" if t == "string" else
-                          round(random.uniform(1, 999), 2) if t == "float" else bool(i % 2))
+                          round(random.uniform(1, 999), 2) if t.startswith("float") else
+                          (i % 2 == 0) if t == "bool" else i)
             recs.append(rec)
         st, body = req("POST", f"/v1/collections/{name}/insert", {"records": recs})
         print("insert", name, st, body)
