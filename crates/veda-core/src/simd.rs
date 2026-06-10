@@ -6,11 +6,13 @@
 // ── Scalar fallback implementations ─────────────────────────────────────────
 
 /// Scalar dot product of two f32 slices.
+#[cfg_attr(feature = "simsimd", allow(dead_code))]
 fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 /// Scalar L2 squared distance between two f32 slices.
+#[cfg_attr(feature = "simsimd", allow(dead_code))]
 fn l2_squared_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter()
         .zip(b.iter())
@@ -22,11 +24,13 @@ fn l2_squared_scalar(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Scalar Manhattan (L1) distance between two f32 slices.
+#[cfg_attr(feature = "simsimd", allow(dead_code))]
 fn manhattan_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
 }
 
 /// Scalar squared L2 norm of an f32 slice.
+#[cfg_attr(feature = "simsimd", allow(dead_code))]
 fn l2_norm_squared_scalar(a: &[f32]) -> f32 {
     a.iter().map(|x| x * x).sum()
 }
@@ -34,6 +38,7 @@ fn l2_norm_squared_scalar(a: &[f32]) -> f32 {
 /// Scalar i8 × i8 → i32 dot product. Fallback when AVX2 is not
 /// available or the slices are short enough that the SIMD setup
 /// cost dominates.
+#[cfg_attr(feature = "simsimd", allow(dead_code))]
 fn i8_dot_scalar(a: &[i8], b: &[i8]) -> i32 {
     a.iter()
         .zip(b.iter())
@@ -44,6 +49,7 @@ fn i8_dot_scalar(a: &[i8], b: &[i8]) -> i32 {
 // ── AVX2 + FMA implementations ─────────────────────────────────────────────
 
 #[cfg(target_arch = "x86_64")]
+#[cfg_attr(feature = "simsimd", allow(dead_code))]
 mod avx2 {
     use std::arch::x86_64::*;
 
@@ -304,33 +310,46 @@ mod avx2 {
 /// falling back to scalar otherwise.
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "slice length mismatch");
-
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "simsimd")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            return unsafe { avx2::dot_product_avx2(a, b) };
-        }
+        return crate::simd_simsimd::dot_product(a, b);
     }
-    dot_product_scalar(a, b)
+    #[cfg(not(feature = "simsimd"))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                return unsafe { avx2::dot_product_avx2(a, b) };
+            }
+        }
+        dot_product_scalar(a, b)
+    }
 }
 
 /// Compute the squared L2 distance between two f32 slices.
 pub fn l2_squared(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "slice length mismatch");
-
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "simsimd")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            return unsafe { avx2::l2_squared_avx2(a, b) };
-        }
+        return crate::simd_simsimd::l2_squared(a, b);
     }
-    l2_squared_scalar(a, b)
+    #[cfg(not(feature = "simsimd"))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                return unsafe { avx2::l2_squared_avx2(a, b) };
+            }
+        }
+        l2_squared_scalar(a, b)
+    }
 }
 
 /// Compute the Manhattan (L1) distance between two f32 slices.
 pub fn manhattan_distance(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "slice length mismatch");
-
+    // Note: simd_simsimd::manhattan_distance delegates back here (SimSIMD has no
+    // f32 L1 fast path), so we always use the AVX2/scalar path to avoid recursion.
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
@@ -347,25 +366,38 @@ pub fn manhattan_distance(a: &[f32], b: &[f32]) -> f32 {
 /// inner-loop arithmetic is ~4× faster on AVX2.
 pub fn i8_dot_product(a: &[i8], b: &[i8]) -> i32 {
     debug_assert_eq!(a.len(), b.len(), "slice length mismatch");
-
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "simsimd")]
     {
-        if is_x86_feature_detected!("avx2") {
-            return unsafe { avx2::i8_dot_avx2(a, b) };
-        }
+        return crate::simd_simsimd::i8_dot_product(a, b);
     }
-    i8_dot_scalar(a, b)
+    #[cfg(not(feature = "simsimd"))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                return unsafe { avx2::i8_dot_avx2(a, b) };
+            }
+        }
+        i8_dot_scalar(a, b)
+    }
 }
 
 /// Compute the squared L2 norm of an f32 slice.
 pub fn l2_norm_squared(a: &[f32]) -> f32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "simsimd")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            return unsafe { avx2::l2_norm_squared_avx2(a) };
-        }
+        return crate::simd_simsimd::l2_norm_squared(a);
     }
-    l2_norm_squared_scalar(a)
+    #[cfg(not(feature = "simsimd"))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                return unsafe { avx2::l2_norm_squared_avx2(a) };
+            }
+        }
+        l2_norm_squared_scalar(a)
+    }
 }
 
 /// Cosine distance: `1.0 - cosine_similarity(a, b)`.
@@ -374,22 +406,33 @@ pub fn l2_norm_squared(a: &[f32]) -> f32 {
 /// If either vector has zero norm, returns 1.0 by convention.
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "slice length mismatch");
-
-    let dot = dot_product(a, b);
-    let norm_a = l2_norm_squared(a).sqrt();
-    let norm_b = l2_norm_squared(b).sqrt();
-    let denom = norm_a * norm_b;
-
-    if denom == 0.0 {
-        return 1.0;
+    #[cfg(feature = "simsimd")]
+    {
+        return crate::simd_simsimd::cosine_distance(a, b);
     }
-
-    1.0 - (dot / denom)
+    #[cfg(not(feature = "simsimd"))]
+    {
+        let dot = dot_product(a, b);
+        let norm_a = l2_norm_squared(a).sqrt();
+        let norm_b = l2_norm_squared(b).sqrt();
+        let denom = norm_a * norm_b;
+        if denom == 0.0 {
+            return 1.0;
+        }
+        1.0 - (dot / denom)
+    }
 }
 
 /// Euclidean (L2) distance: `sqrt(l2_squared(a, b))`.
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    l2_squared(a, b).sqrt()
+    #[cfg(feature = "simsimd")]
+    {
+        return crate::simd_simsimd::euclidean_distance(a, b);
+    }
+    #[cfg(not(feature = "simsimd"))]
+    {
+        l2_squared(a, b).sqrt()
+    }
 }
 
 /// MaxSim distance (ColBERT/ColPali late-interaction): for each query row
