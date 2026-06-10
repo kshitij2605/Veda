@@ -27,6 +27,9 @@ const SearchPlayground = lazy(() =>
     default: m.SearchPlayground,
   })),
 )
+const VisualSearch = lazy(() =>
+  import('./pages/VisualSearch').then((m) => ({ default: m.VisualSearch })),
+)
 const AtlasPage = lazy(() =>
   import('./pages/atlas/AtlasPage').then((m) => ({ default: m.AtlasPage })),
 )
@@ -101,6 +104,7 @@ export default function App() {
             />
             <Route path="/search" element={<SearchPlayground />} />
             <Route path="/search/:collection" element={<SearchPlayground />} />
+            <Route path="/visual" element={<VisualSearch />} />
             <Route path="/atlas" element={<AtlasPage />} />
             <Route path="/health" element={<SystemHealth />} />
             <Route path="/indexes" element={<IndexManager />} />
