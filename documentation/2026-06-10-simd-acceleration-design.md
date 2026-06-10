@@ -135,3 +135,56 @@ single binary runs everywhere and only goes faster where the CPU allows.
 | Semantic mismatch between SimSIMD and existing kernels (cosine sign, sqeuclidean) | Parity tests assert against scalar reference for every routed op before merge. |
 | `simsimd` native build fails in some CI/target | Fallback path (`not(simsimd)`) always compiles; feature can be turned off. |
 | Default-on adds a C-toolchain build dependency | Documented; acceptable given the host already builds native deps. If it bites, revert to opt-in (one-line Cargo change). |
+
+## Task 1 outcome
+
+**Date verified:** 2026-06-10
+
+### (a) Runtime dispatch — CONFIRMED
+
+SimSIMD v6 performs runtime CPU feature detection and dispatch by default. Evidence from
+two authoritative sources in the locally cached crate at
+`~/.cargo/registry/src/index.crates.io-*/simsimd-6.*/`:
+
+**From `build.rs`** (hardcoded for every Cargo build of the crate):
+```
+.define("SIMSIMD_DYNAMIC_DISPATCH", "1")
+```
+The build comment reads: *"Build SimSIMD with dynamic SIMD dispatching."*
+This flag compiles all ISA variants into the binary and selects the best one at runtime
+via CPUID/HWCAP probing — no `-C target-cpu=native` required.
+
+**From `rust/lib.rs`** (the `capabilities` module doc):
+> *"Returns `true` when the C backend is compiled with dynamic dispatch (default for this
+> crate via `build.rs`), otherwise `false`."*
+
+**From `README.md`** (the Rust section):
+> *"SimSIMD provides a dynamic dispatch mechanism to select the most advanced micro-kernel
+> for the current CPU. You can query supported backends and use the `SimSIMD::capabilities`
+> function to select the best one."*
+
+Graceful fallback: the dynamic-dispatch path selects the highest-tier backend whose CPUID
+bits are present at startup (Sapphire Rapids → Ice Lake → Skylake → Haswell → serial, or
+the ARM equivalent). On a CPU with no AVX-512, it falls through to the AVX2 (Haswell)
+kernel; on a fully generic x86-64 it falls through to the `serial` scalar path. The binary
+runs correctly everywhere, just faster on richer ISAs.
+
+### (b) `cargo build -p veda-core --features simsimd` — CLEAN
+
+Build on iitgpu11 (x86_64, AVX-512 capable) completed successfully:
+```
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 17s
+```
+No errors or warnings from the SimSIMD native compile step.
+
+### (c) Decision — DEFAULT-ON
+
+Both gate conditions are met:
+- Runtime dispatch is confirmed (hardcoded `SIMSIMD_DYNAMIC_DISPATCH=1` in `build.rs`).
+- `cargo build -p veda-core --features simsimd` is clean on the build host.
+
+**`simsimd` will be made a default Cargo feature** in `crates/veda-core/Cargo.toml`
+(Task 5). Stock builds will automatically use AVX-512 on iitgpu11, NEON/SVE on ARM
+deployments, and fall through gracefully to AVX2 or scalar on older hardware.
+The existing `#[cfg(not(feature = "simsimd"))]` AVX2/scalar path is preserved as a
+`--no-default-features` escape hatch.
