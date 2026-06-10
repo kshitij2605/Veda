@@ -23,7 +23,7 @@ simsimd = { version = "6", optional = true }
 matrixmultiply = "0.3"
 
 [features]
-default = []
+default = ["simsimd"]
 # Use SimSIMD for distance computation when available. Adds a build-time
 # dependency on the SimSIMD C library.
 simsimd = ["dep:simsimd"]
