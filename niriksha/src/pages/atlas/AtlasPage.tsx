@@ -540,7 +540,7 @@ function EmptyAtlas({
           strokeWidth={1.5}
           className="text-[var(--color-text-subtle)] mx-auto mb-3"
         />
-        <h2 className="text-[14px] font-medium text-[var(--color-text)] mb-1">
+        <h2 className="text-[18px] font-semibold text-[var(--color-text)] mb-1.5">
           Vector Atlas
         </h2>
         <p className="text-[12px] text-[var(--color-text-muted)] mb-4 leading-relaxed">
