@@ -24,14 +24,20 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 }
 
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    // Guard: SimSIMD returns 0.0 (not an error) for zero-norm inputs, but
-    // our documented convention is 1.0 (maximum distance). Check cheaply.
-    let norm_a: f32 = a.iter().map(|x| x * x).sum();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 1.0;
+    let d = SpatialSimilarity::cosine(a, b).unwrap_or(1.0) as f32;
+    // SimSIMD returns 0.0 for zero-norm inputs (not an error), but our
+    // documented convention is 1.0 (max distance) when either norm is 0.
+    // A 0.0 result is otherwise legitimate (identical/parallel vectors), so
+    // only pay the norm check on that rare branch — keeps the hot path to a
+    // single fused kernel call.
+    if d == 0.0 {
+        let norm_a: f32 = a.iter().map(|x| x * x).sum();
+        let norm_b: f32 = b.iter().map(|x| x * x).sum();
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return 1.0;
+        }
     }
-    SpatialSimilarity::cosine(a, b).unwrap_or(1.0) as f32
+    d
 }
 
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
