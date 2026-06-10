@@ -1,4 +1,4 @@
-import { type FormEvent, Suspense, lazy, useState } from 'react'
+import { type FormEvent, Suspense, lazy, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Input } from '../components/primitives'
 import { GradientText } from '../components/reactbits/GradientText'
@@ -12,6 +12,16 @@ export function Login() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+
+  // The login is a full-screen standalone moment — force the dramatic dark
+  // theme here regardless of the app's (now light-first) default; restore on leave.
+  useEffect(() => {
+    const prev = document.documentElement.dataset.theme
+    document.documentElement.dataset.theme = 'dark'
+    return () => {
+      document.documentElement.dataset.theme = prev || 'light'
+    }
+  }, [])
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -40,15 +50,18 @@ export function Login() {
         style={{ background: 'radial-gradient(58% 50% at 50% 42%, transparent, var(--color-bg) 82%)' }}
       />
 
-      <div className="relative w-[min(380px,calc(100vw-32px))] rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[color-mix(in_oklch,var(--color-bg-elevated)_82%,transparent)] backdrop-blur-md p-7 shadow-[var(--shadow-lg)]">
+      <div className="relative w-[min(400px,calc(100vw-32px))] rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[color-mix(in_oklch,var(--color-bg-elevated)_82%,transparent)] backdrop-blur-md p-8 shadow-[var(--shadow-lg)]">
         <div className="flex flex-col items-center text-center">
           <BrandMark />
-          <div className="mt-3">
-            <GradientText className="text-[26px] font-semibold" colors={['#9a7bff', '#c66be6', '#9a7bff']}>
+          <div className="mt-4">
+            <GradientText
+              className="text-[34px] font-semibold [font-family:var(--font-display)] tracking-[-0.01em]"
+              colors={['#9a7bff', '#c66be6', '#9a7bff']}
+            >
               Veda
             </GradientText>
           </div>
-          <p className="mt-1 text-[12.5px] text-[var(--color-text-muted)]">Sign in to Niriksha</p>
+          <p className="mt-1.5 text-[14px] text-[var(--color-text-muted)]">Sign in to Niriksha</p>
         </div>
 
         <form onSubmit={onSubmit} className="mt-6 space-y-3">
