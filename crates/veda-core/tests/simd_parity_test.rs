@@ -96,3 +96,16 @@ fn f32_kernels_match_scalar_reference() {
         close(simd::euclidean_distance(&a, &b), l2sq_ref(&a, &b).sqrt(), "api euc");
     }
 }
+
+#[test]
+fn cosine_zero_norm_returns_one() {
+    // The zero-norm guard: either operand having zero norm must yield the
+    // max-distance convention (1.0), on both the direct kernel and the
+    // dispatched API. (The non-zero parity test never hits this branch.)
+    let zero = vec![0.0f32; 128];
+    let b = seeded_f32(7, 128);
+    assert_eq!(simd_simsimd::cosine_distance(&zero, &b), 1.0, "ss zero-norm");
+    assert_eq!(simd_simsimd::cosine_distance(&b, &zero), 1.0, "ss zero-norm (swapped)");
+    assert_eq!(simd_simsimd::cosine_distance(&zero, &zero), 1.0, "ss both-zero");
+    assert_eq!(simd::cosine_distance(&zero, &b), 1.0, "api zero-norm");
+}
