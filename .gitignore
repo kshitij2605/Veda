@@ -11,7 +11,7 @@ competitive_advantages.md
 __pycache__/
 *.pyc
 .claude/
-docs/
+/docs/
 
 # Runtime data dirs + test artifacts
 /veda-data*/
