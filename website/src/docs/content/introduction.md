@@ -7,8 +7,8 @@
 Most vector databases just store vectors: you bring your own embedding services, OCR pipeline, and chunking glue. Veda handles the whole pipeline natively, in a single pure-Rust engine.
 
 - **Multimodal native** — first-class support for text, image, audio, video, and PDF embeddings, with automatic modality-based model routing.
-- **Seven index algorithms** — HNSW, DiskANN (Vamana graph), IVF-PQ, Flat, RaBitQ, a suffix array for exact text patterns, and scalar indexes for metadata filtering.
-- **SIMD-optimized distances** — AVX2 fast paths with scalar fallback across 6 metrics (Cosine, Euclidean, DotProduct, Hamming, Manhattan, Jaccard).
+- **Nine index algorithms** — HNSW, DiskANN (Vamana graph), IVF-PQ, Flat, RaBitQ, Sq4 + Sq8 scalar quantization, a suffix array for exact text patterns, and scalar indexes for metadata filtering.
+- **SIMD-optimized distances** — SimSIMD kernels (AVX-512, ARM NEON, SVE) on by default, with an AVX2/scalar fallback, across 6 metrics (Cosine, Euclidean, DotProduct, Hamming, Manhattan, Jaccard).
 - **Multi-vector fusion** — RRF, WeightedSum, and Intersection strategies for cross-modal retrieval in a single API call.
 - **Built-in document intelligence** — FlashParse OCR integration plus seven chunking strategies turn raw documents into searchable vectors with zero external tooling.
 - **SQL-like filters** — combine vector search with structured metadata predicates.

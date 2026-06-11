@@ -24,14 +24,14 @@ export const FEATURES: Feature[] = [
     accent: 'var(--color-node-5)',
     title: 'Pure-Rust + SIMD',
     blurb:
-      'API to disk in one Rust binary, with AVX2/FMA distance kernels in the hot loop. No GC pauses, no CGo boundary, zero-copy mmap reads — lower, more predictable p99 latency.',
+      'API to disk in one Rust binary, with SimSIMD distance kernels (AVX-512, NEON, SVE) in the hot loop — up to ~10× faster than scalar. No GC pauses, no CGo boundary, zero-copy mmap reads.',
   },
   {
     icon: Layers,
     accent: 'var(--color-node-3)',
-    title: 'Seven index algorithms',
+    title: 'Nine index algorithms',
     blurb:
-      'HNSW, DiskANN, IVF-PQ, Flat, RaBitQ, a suffix array, and scalar indexes — pick the right recall/latency/memory tradeoff per collection, all in one engine.',
+      'HNSW, DiskANN, IVF-PQ, Flat, RaBitQ, Sq4 + Sq8 scalar quantization, a suffix array, and scalar filter indexes — pick the right recall/latency/memory tradeoff per collection.',
   },
   {
     icon: GitMerge,
