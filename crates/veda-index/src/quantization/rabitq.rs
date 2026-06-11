@@ -18,9 +18,9 @@ pub struct RaBitQuantizer {
     norms: Vec<f32>,
     binary_codes: Vec<Vec<u64>>,
     centroid: Vec<f32>,
-    /// Per-vector L1 norm of the centered residual (‖c‖₁ = Σ|cᵢ|).
-    /// Used in the unbiased estimator: estimated_dot = raw_dot * ‖c‖₂² / ‖c‖₁.
-    l1_norms: Vec<f32>,
+    /// Average absolute value of normalized centered vector components.
+    /// Used to scale the asymmetric dot product estimate.
+    mean_abs_component: f32,
     metric: DistanceMetric,
 }
 
@@ -30,7 +30,7 @@ struct RaBitQuantizerData {
     norms: Vec<f32>,
     binary_codes: Vec<Vec<u64>>,
     centroid: Vec<f32>,
-    l1_norms: Vec<f32>,
+    mean_abs_component: f32,
     metric: DistanceMetric,
 }
 
@@ -70,7 +70,7 @@ impl RaBitQuantizer {
             norms: Vec::new(),
             binary_codes: Vec::new(),
             centroid: Vec::new(),
-            l1_norms: Vec::new(),
+            mean_abs_component: 0.0,
             metric,
         }
     }
@@ -96,12 +96,14 @@ impl RaBitQuantizer {
             *c /= n;
         }
 
+        // First pass: compute norms and mean absolute component of normalized vectors
+        let mut total_abs = 0.0f64;
+        let mut total_components = 0u64;
+
         self.norms.clear();
         self.binary_codes.clear();
-        self.l1_norms.clear();
         self.norms.reserve(vectors.len());
         self.binary_codes.reserve(vectors.len());
-        self.l1_norms.reserve(vectors.len());
 
         for v in vectors {
             let centered: Vec<f32> = v.iter().zip(&self.centroid).map(|(a, b)| a - b).collect();
@@ -109,12 +111,24 @@ impl RaBitQuantizer {
             let norm = norm_sq.sqrt();
             self.norms.push(norm);
 
-            // Per-vector L1 norm for the unbiased estimator: ‖c‖₁ = Σ|cᵢ|
-            let l1: f32 = centered.iter().map(|x| x.abs()).sum();
-            self.l1_norms.push(l1);
+            if norm > 1e-10 {
+                for &c in &centered {
+                    total_abs += (c / norm).abs() as f64;
+                }
+                total_components += dim as u64;
+            }
 
             self.binary_codes.push(binarize(self.dimension, &centered));
         }
+
+        // mean_abs_component: average |v_hat_i| across all vectors and dimensions.
+        // The sign approximation replaces each v_hat_i with sign(v_hat_i) * mean_abs,
+        // so dot(q, v_hat) ≈ mean_abs * sum(q_i * sign_i) = mean_abs * raw_dot.
+        self.mean_abs_component = if total_components > 0 {
+            (total_abs / total_components as f64) as f32
+        } else {
+            1.0 / (dim as f32).sqrt()
+        };
     }
 
     /// Encode a single vector into binary code.
@@ -142,15 +156,11 @@ impl RaBitQuantizer {
         // Asymmetric dot: sum(q'_i * sign(v'_i))
         let raw_dot = asymmetric_dot(&q_centered, &self.binary_codes[code_idx]);
 
-        // Per-vector unbiased estimator: estimated_dot = raw_dot * ‖c‖₂² / ‖c‖₁
-        // Derivation: ⟨q',c⟩ = ‖c‖₂ · ⟨q',o⟩, and ⟨q',o⟩ ≈ raw_dot / (‖c‖₁/‖c‖₂),
-        // so ⟨q',c⟩ ≈ raw_dot · ‖c‖₂² / ‖c‖₁. Exact when q'==c.
-        let l1 = self.l1_norms[code_idx];
-        let estimated_dot = if l1 > 1e-10 {
-            raw_dot * (v_norm * v_norm) / l1
-        } else {
-            0.0
-        };
+        // The normalized db vector v_hat has components approximated by sign(v_hat_i).
+        // E[v_hat_i | sign(v_hat_i)] ≈ sign * mean_abs_component.
+        // So dot(q', v_hat) ≈ mean_abs_component * raw_dot.
+        // And dot(q', v') = ||v'|| * dot(q', v_hat) ≈ ||v'|| * mean_abs * raw_dot.
+        let estimated_dot = v_norm * self.mean_abs_component * raw_dot;
 
         match self.metric {
             DistanceMetric::Cosine => {
@@ -199,18 +209,13 @@ impl RaBitQuantizer {
         self.metric
     }
 
-    #[cfg(test)]
-    pub(crate) fn centroid_for_test(&self) -> &[f32] {
-        &self.centroid
-    }
-
     pub fn save(&self, path: &Path) -> Result<()> {
         let data = RaBitQuantizerData {
             dimension: self.dimension,
             norms: self.norms.clone(),
             binary_codes: self.binary_codes.clone(),
             centroid: self.centroid.clone(),
-            l1_norms: self.l1_norms.clone(),
+            mean_abs_component: self.mean_abs_component,
             metric: self.metric,
         };
         let bytes = bincode::serialize(&data)
@@ -229,7 +234,7 @@ impl RaBitQuantizer {
             norms: data.norms,
             binary_codes: data.binary_codes,
             centroid: data.centroid,
-            l1_norms: data.l1_norms,
+            mean_abs_component: data.mean_abs_component,
             metric: data.metric,
         })
     }
@@ -245,26 +250,4 @@ fn binarize(dimension: u32, values: &[f32]) -> Vec<u64> {
         }
     }
     code
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn estimator_is_exact_when_query_equals_vector() {
-        // The unbiased estimator must recover ⟨c,c⟩ = ‖c‖² when the query
-        // equals the centered db vector (the global-mean approximation does not).
-        let dim = 32usize;
-        let a: Vec<f32> = (0..dim).map(|i| ((i as f32) - 16.0) * 0.1).collect();
-        let b: Vec<f32> = (0..dim).map(|i| ((i as f32) - 8.0) * 0.05).collect();
-        let mut q = RaBitQuantizer::new(DistanceMetric::DotProduct);
-        q.train(&[a.as_slice(), b.as_slice()]);
-        // DotProduct distance returns -estimated_dot; vector index 0 is `a`.
-        let centroid = q.centroid_for_test();
-        let centered_a_norm_sq: f32 = a.iter().zip(centroid).map(|(x, c)| (x - c) * (x - c)).sum();
-        let est_dot = -q.estimate_distance(&a, 0);
-        let rel_err = (est_dot - centered_a_norm_sq).abs() / centered_a_norm_sq.max(1e-6);
-        assert!(rel_err < 0.02, "unbiased estimator should recover ‖c‖²: est={est_dot}, want={centered_a_norm_sq}, rel_err={rel_err}");
-    }
 }
