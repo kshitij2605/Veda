@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" content="#f7f8fb" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0A0C10" />
     <meta
       name="description"
       content="Veda — a next-generation multimodal vector database for the era of RAG. Native multimodal ingestion, pure-Rust performance, 7 index algorithms."
@@ -14,26 +14,15 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
 
     <title>Veda — Multimodal Vector Database</title>
 
-    <script>
-      /* Theme init before paint — light is the default; respect a stored choice. */
-      try {
-        var t = localStorage.getItem('veda_theme')
-        document.documentElement.dataset.theme = t === 'dark' ? 'dark' : 'light'
-      } catch (e) {
-        document.documentElement.dataset.theme = 'light'
-      }
-    </script>
     <style>
-      html { margin: 0 }
-      body { margin: 0 }
-      html[data-theme='light'], html[data-theme='light'] body { background: oklch(0.985 0.004 255) }
-      html[data-theme='dark'], html[data-theme='dark'] body { background: oklch(0.105 0.004 252) }
+      html { margin: 0; background: #0a0c10 }
+      body { margin: 0; background: #0a0c10 }
       #root { min-height: 100vh }
     </style>
   </head>
