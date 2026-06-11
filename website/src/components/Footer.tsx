@@ -23,12 +23,12 @@ const COLS: { title: string; links: [string, string][] }[] = [
 
 export function Footer() {
   return (
-    <footer className="border-t border-[var(--color-border)]">
-      <div className="mx-auto grid max-w-[1200px] gap-10 px-6 md:px-8 py-14 md:grid-cols-[1.6fr_1fr_1fr]">
+    <footer className="border-t border-[var(--color-border)] bg-[var(--color-bg-raised)]">
+      <div className="mx-auto grid max-w-[1320px] gap-10 px-6 md:px-10 py-16 md:grid-cols-[1.6fr_1fr_1fr]">
         <div>
           <div className="flex items-center gap-2.5">
             <BrandMark size={20} />
-            <span className="text-[18px] font-semibold [font-family:var(--font-display)] text-[var(--color-text)]">
+            <span className="text-[18px] font-bold [font-family:var(--font-display)] text-[var(--color-text)]">
               Veda
             </span>
           </div>
@@ -38,15 +38,13 @@ export function Footer() {
         </div>
         {COLS.map((c) => (
           <div key={c.title}>
-            <h3 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-subtle)]">
-              {c.title}
-            </h3>
-            <ul className="mt-3.5 space-y-2.5">
+            <h3 className="mono-label text-[var(--color-text-subtle)]">{c.title}</h3>
+            <ul className="mt-4 space-y-2.5">
               {c.links.map(([label, href]) => (
                 <li key={label}>
                   <a
                     href={href}
-                    className="text-[14px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+                    className="text-[14px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-accent)]"
                   >
                     {label}
                   </a>
@@ -57,7 +55,7 @@ export function Footer() {
         ))}
       </div>
       <div className="border-t border-[var(--color-border)]">
-        <div className="mx-auto flex max-w-[1200px] items-center justify-between px-6 md:px-8 py-5 text-[12.5px] text-[var(--color-text-subtle)]">
+        <div className="mx-auto flex max-w-[1320px] items-center justify-between px-6 md:px-10 py-5 text-[12.5px] [font-family:var(--font-mono)] text-[var(--color-text-subtle)]">
           <span>© 2026 Veda · Apache-2.0</span>
           <a
             href="https://github.com/kshitij2605/Veda"

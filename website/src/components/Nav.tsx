@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { cn } from '../lib/cn'
 import { Button } from './primitives/Button'
-import { ThemeToggle } from './primitives/ThemeToggle'
 import { BrandMark } from './BrandMark'
 import { GitHubIcon } from './GitHubIcon'
 
@@ -27,35 +26,34 @@ export function Nav() {
         scrolled ? 'glass border-b border-[var(--color-border)]' : 'border-b border-transparent',
       )}
     >
-      <div className="mx-auto flex h-16 max-w-[1200px] items-center gap-3 px-6 md:px-8">
+      <div className="mx-auto flex h-16 max-w-[1320px] items-center gap-3 px-6 md:px-10">
         <a href="#top" className="flex items-center gap-2.5">
-          <BrandMark size={22} />
-          <span className="text-[19px] font-semibold tracking-tight [font-family:var(--font-display)] text-[var(--color-text)]">
+          <BrandMark size={20} />
+          <span className="text-[19px] font-bold tracking-tight [font-family:var(--font-display)] text-[var(--color-text)]">
             Veda
           </span>
         </a>
-        <nav className="ml-7 hidden items-center gap-1 md:flex">
+        <nav className="ml-8 hidden items-center gap-1 md:flex">
           {LINKS.map((l) => (
             <a
               key={l.label}
               href={l.href}
-              className="rounded-[var(--radius-sm)] px-3 py-1.5 text-[14px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]"
+              className="mono-label rounded-[var(--radius-sm)] px-3 py-2 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
             >
               {l.label}
             </a>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-1.5">
+        <div className="ml-auto flex items-center gap-2">
           <a
             href="https://github.com/kshitij2605/Veda"
             target="_blank"
             rel="noreferrer"
             aria-label="GitHub"
-            className="inline-flex h-9 w-9 items-center justify-center rounded-[var(--radius-md)] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-[var(--radius-md)] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text)]"
           >
             <GitHubIcon size={18} />
           </a>
-          <ThemeToggle />
           <Button
             variant="primary"
             size="md"
