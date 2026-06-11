@@ -13,6 +13,8 @@ const INDEXES: [string, string, string][] = [
   ['IVF-PQ', 'Memory-constrained throughput', 'PQ compresses 8–32×'],
   ['Flat', 'Small sets, 100% recall', 'Brute-force baseline'],
   ['RaBitQ', 'Ultra-fast screening', 'Binary + Hamming'],
+  ['Sq4', '4× compression, strong recall', '4-bit scalar quant'],
+  ['Sq8', 'Highest-recall quantized', '8-bit scalar quant'],
   ['Suffix array', 'Exact text patterns', 'Hybrid text + vector'],
   ['Scalar', 'Metadata filtering', 'Range / inverted / bitmap'],
 ]
@@ -24,7 +26,7 @@ export function Architecture() {
       number="05"
       overline="Architecture"
       title="Lightweight by default, deep when you need it"
-      lede="Three mandatory services get you running in seconds. Seven index algorithms let you tune recall, latency, and memory per collection."
+      lede="Three mandatory services get you running in seconds. Nine index algorithms let you tune recall, latency, and memory per collection."
     >
       <div className="mt-12 grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
         <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-7">

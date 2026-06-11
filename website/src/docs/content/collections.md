@@ -23,7 +23,7 @@ curl -X POST http://localhost:6340/v1/collections \
 
 | Type | Notes |
 |---|---|
-| `vector` | Dense embedding; requires `dimension`, takes `metric` and optionally `model` for auto-embedding |
+| `vector` | Dense embedding; requires `dimension`, takes `metric`, optionally `model` for auto-embedding, and `index` to pick the ANN index (`hnsw` default; see [Indexes](/docs/indexes#choosing-an-index)) |
 | `sparse_vector` | Sparse embedding (e.g. SPLADE-style term weights) |
 | `multi_vector` | Multiple vectors per record |
 | `string` | Text; supports `filterable: true` and `bm25: true` for lexical search |

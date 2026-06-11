@@ -6,7 +6,7 @@ All endpoints are served under `http://<host>:6340/v1`. Authenticated requests p
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/v1/collections` | Create a collection (supports `seed_records` for atomic create-and-load, `use_log_primary` for on-disk records) |
+| `POST` | `/v1/collections` | Create a collection (supports `seed_records` for atomic create-and-load, `use_log_primary` for on-disk records; vector fields take `index`: `hnsw` · `diskann` · `ivf_pq` · `flat` · `rabitq` · `sq4` · `sq8`) |
 | `GET` | `/v1/collections` | List collections |
 | `GET` | `/v1/collections/{name}` | Get a collection's schema and stats |
 | `DELETE` | `/v1/collections/{name}` | Drop a collection |
