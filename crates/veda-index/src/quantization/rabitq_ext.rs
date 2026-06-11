@@ -471,13 +471,21 @@ impl ExtRaBitQuantizer {
         }
 
         // 99th-percentile max-abs over the centered residual to set
-        // the quantisation range (clips outliers).
-        let mut samples: Vec<f32> = Vec::with_capacity(rotated.len() * effective_dim);
-        for v in &rotated {
-            for (i, &val) in v.iter().enumerate() {
-                samples.push((val - self.centroid[i]).abs());
-            }
-        }
+        // the quantisation range (clips outliers). Cap at 2M samples
+        // to avoid O(N·D log N·D) sort on large corpora; a stride-
+        // sampled 2M subset gives a faithful p99 estimate.
+        const MAX_MAX_ABS_SAMPLES: usize = 2_000_000;
+        let total_samples = rotated.len() * effective_dim;
+        let max_abs_stride = (total_samples / MAX_MAX_ABS_SAMPLES).max(1);
+        let mut samples: Vec<f32> = rotated
+            .iter()
+            .flat_map(|v| {
+                v.iter()
+                    .enumerate()
+                    .map(|(i, &val)| (val - self.centroid[i]).abs())
+            })
+            .step_by(max_abs_stride)
+            .collect();
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let p99_idx = ((samples.len() as f32 * 0.99) as usize).min(samples.len().saturating_sub(1));
         self.max_abs = samples.get(p99_idx).copied().unwrap_or(1.0).max(1e-6);
@@ -485,15 +493,17 @@ impl ExtRaBitQuantizer {
         // Lloyd-Max codebook: trained on the SIGNED centered
         // residuals (we used absolute values for max_abs above;
         // for the codebook we want the signed distribution).
+        // Cap the sample count at 1M: sorting the full corpus at
+        // large (N, dim) (e.g. 100k × 2048) would take minutes.
+        // A 1M uniform stride captures the distribution faithfully.
         if self.train_codebook {
+            const MAX_CODEBOOK_SAMPLES: usize = 1_000_000;
+            let total = rotated.len() * effective_dim;
+            let stride = (total / MAX_CODEBOOK_SAMPLES).max(1);
             let signed_samples: Vec<f32> = rotated
                 .iter()
-                .flat_map(|v| {
-                    v.iter()
-                        .zip(&self.centroid)
-                        .map(|(a, b)| a - b)
-                        .collect::<Vec<f32>>()
-                })
+                .flat_map(|v| v.iter().zip(&self.centroid).map(|(a, b)| a - b))
+                .step_by(stride)
                 .collect();
             self.codebook = Some(LloydMaxCodebook::train(
                 &signed_samples,
