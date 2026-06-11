@@ -1,10 +1,17 @@
-/** Veda mark — three offset shards in the brand accent. */
+/** Veda mark — constellation V: a V traced through a nearest-neighbor graph. */
 export function BrandMark({ size = 20 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden>
-      <rect x="0" y="0" width="9" height="9" rx="1.5" fill="var(--color-accent)" />
-      <rect x="5" y="5" width="9" height="9" rx="1.5" fill="var(--color-accent)" opacity="0.7" />
-      <rect x="9" y="9" width="9" height="9" rx="1.5" fill="var(--color-accent)" opacity="0.45" />
+    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden>
+      <g stroke="#FFB224" strokeOpacity=".5" strokeWidth="2.8" fill="none" strokeLinecap="round">
+        <path d="M13 12 L22.5 30 L32 48 L41.5 30 L51 12" />
+        <path d="M41.5 30 L56 30" strokeOpacity=".25" strokeWidth="2" />
+      </g>
+      <circle cx="13" cy="12" r="4.6" fill="#FFB224" />
+      <circle cx="22.5" cy="30" r="4" fill="#FFB224" />
+      <circle cx="32" cy="48" r="6" fill="#FFB224" />
+      <circle cx="41.5" cy="30" r="4" fill="#FFB224" />
+      <circle cx="51" cy="12" r="4.6" fill="#FFB224" />
+      <circle cx="56" cy="30" r="2.6" fill="#F2F4F8" fillOpacity=".7" />
     </svg>
   )
 }
