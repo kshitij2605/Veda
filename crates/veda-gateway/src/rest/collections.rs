@@ -1374,6 +1374,8 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
                     "rabitq_ext_rerank" | "ext_rabitq_rerank" | "rabitq4_rerank" => {
                         veda_core::types::IndexType::RaBitQExtRerank
                     }
+                    "sq4" => veda_core::types::IndexType::Sq4,
+                    "sq8" => veda_core::types::IndexType::Sq8,
                     other => {
                         return Err(format!(
                             "field '{}': unknown vector index type '{other}'",

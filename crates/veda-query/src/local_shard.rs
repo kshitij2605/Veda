@@ -87,6 +87,22 @@ fn build_vector_index(
             idx.build(&refs)?;
             Ok(Box::new(idx))
         }
+        IndexType::Sq4 => {
+            // 4-bit per-dimension scalar quantization. Brute-force scan.
+            // ~D/2 bytes/vec. See crates/veda-index/src/quantization/scalar_index.rs.
+            use veda_index::quantization::scalar_index::ScalarQuantIndex;
+            let mut idx = ScalarQuantIndex::sq4(metric);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
+        IndexType::Sq8 => {
+            // 8-bit per-dimension scalar quantization. Brute-force scan.
+            // ~D bytes/vec; highest-recall quantized option (~0.99).
+            use veda_index::quantization::scalar_index::ScalarQuantIndex;
+            let mut idx = ScalarQuantIndex::sq8(metric);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
         // Flat (or anything else that isn't a recognised vector index type).
         _ => {
             let mut idx = FlatIndex::new(metric, dimension);
