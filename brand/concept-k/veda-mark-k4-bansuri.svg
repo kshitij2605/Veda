@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Veda K4 — bansuri: Krishna's flute as the pipeline; documents in,
+       answers out. On light: #E8960B / #6A57E8, holes match the page bg. -->
+  <rect x="8" y="29" width="48" height="9" rx="4.5" fill="#FFB224" transform="rotate(-24 32 33.5)"/>
+  <g transform="rotate(-24 32 33.5)">
+    <circle cx="22" cy="33.5" r="1.9" fill="#0A0C10"/>
+    <circle cx="29" cy="33.5" r="1.9" fill="#0A0C10"/>
+    <circle cx="36" cy="33.5" r="1.9" fill="#0A0C10"/>
+    <circle cx="43" cy="33.5" r="1.9" fill="#0A0C10"/>
+  </g>
+  <g stroke="#9D8CFF" stroke-width="1.9" stroke-linecap="round" stroke-opacity=".85">
+    <path d="M51 14 C 54 16 55 19 54 22"/>
+    <path d="M56 11 C 60 14 61.5 18.5 60 23"/>
+  </g>
+</svg>

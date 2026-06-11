@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Veda K2 — morpankh quill: Krishna's peacock feather as the quill that
+       writes knowledge, with a saffron bindu. On light: #E8960B / #6A57E8. -->
+  <path d="M16 58 C 24 44 32 30 42 16" stroke="#FFB224" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+  <g stroke="#FFB224" stroke-width="1.9" stroke-linecap="round" stroke-opacity=".8">
+    <path d="M27 39 C 23 37 20 36 16 36.5"/>
+    <path d="M31 33 C 27 30.5 24 29.5 20 30"/>
+    <path d="M35 27 C 31 24.5 28 23.5 24 24"/>
+  </g>
+  <path d="M42 16 C 36 14 31.5 15.5 29.5 19 C 33 21.5 38.5 21 42 16 Z" fill="rgba(157,140,255,.18)" stroke="#9D8CFF" stroke-width="1.8"/>
+  <ellipse cx="36.8" cy="17.8" rx="3.1" ry="2.3" fill="#9D8CFF" transform="rotate(-28 36.8 17.8)"/>
+  <circle cx="46" cy="11" r="3.2" fill="#FFB224"/>
+</svg>
