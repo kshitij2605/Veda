@@ -143,12 +143,25 @@ function BrandRow({ collapsed, onToggle }: { collapsed: boolean; onToggle?: () =
 }
 
 function BrandMark() {
-  // Geometric mark — three offset squares evoking shards.
+  // Niriksha mark — "eye of nodes": the watching eye drawn as a closed walk
+  // through six nodes, pupil at center. Theme-aware via the accent token.
   return (
-    <svg width={18} height={18} viewBox="0 0 18 18" aria-hidden>
-      <rect x="0" y="0" width="9" height="9" rx="1.5" fill="var(--color-accent-7)" />
-      <rect x="5" y="5" width="9" height="9" rx="1.5" fill="var(--color-accent-9)" opacity="0.8" />
-      <rect x="9" y="9" width="9" height="9" rx="1.5" fill="var(--color-accent-11)" opacity="0.55" />
+    <svg width={18} height={18} viewBox="0 0 64 64" aria-hidden>
+      <path
+        d="M8 34 L20 24 L44 24 L56 34 L44 44 L20 44 Z"
+        stroke="var(--color-accent)"
+        strokeOpacity=".45"
+        strokeWidth="3"
+        fill="none"
+        strokeLinejoin="round"
+      />
+      <circle cx="8" cy="34" r="3.6" fill="var(--color-accent)" />
+      <circle cx="20" cy="24" r="3.6" fill="var(--color-accent)" />
+      <circle cx="44" cy="24" r="3.6" fill="var(--color-accent)" />
+      <circle cx="56" cy="34" r="3.6" fill="var(--color-accent)" />
+      <circle cx="44" cy="44" r="3.6" fill="var(--color-accent)" />
+      <circle cx="20" cy="44" r="3.6" fill="var(--color-accent)" />
+      <circle cx="32" cy="34" r="6.5" fill="var(--color-accent)" />
     </svg>
   )
 }
