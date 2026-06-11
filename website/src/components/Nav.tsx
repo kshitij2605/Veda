@@ -5,12 +5,12 @@ import { BrandMark } from './BrandMark'
 import { GitHubIcon } from './GitHubIcon'
 
 const LINKS = [
-  { label: 'Features', href: '#features' },
-  { label: 'Architecture', href: '#architecture' },
+  { label: 'Features', href: '/#features' },
+  { label: 'Architecture', href: '/#architecture' },
   { label: 'Docs', href: '/docs' },
 ]
 
-export function Nav() {
+export function Nav({ solid = false }: { solid?: boolean }) {
   const [scrolled, setScrolled] = useState(false)
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8)
@@ -23,11 +23,13 @@ export function Nav() {
     <header
       className={cn(
         'fixed inset-x-0 top-0 z-50 transition-[background-color,border-color,backdrop-filter] duration-[var(--duration-base)]',
-        scrolled ? 'glass border-b border-[var(--color-border)]' : 'border-b border-transparent',
+        solid || scrolled
+          ? 'glass border-b border-[var(--color-border)]'
+          : 'border-b border-transparent',
       )}
     >
       <div className="mx-auto flex h-16 max-w-[1320px] items-center gap-3 px-6 md:px-10">
-        <a href="#top" className="flex items-center gap-2.5">
+        <a href="/" className="flex items-center gap-2.5">
           <BrandMark size={20} />
           <span className="text-[19px] font-bold tracking-tight [font-family:var(--font-display)] text-[var(--color-text)]">
             Veda
