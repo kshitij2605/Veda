@@ -86,7 +86,11 @@
 /* ── Base layer ────────────────────────────────────────────────────────── */
 
 @layer base {
-  html { color-scheme: dark; }
+  html {
+    color-scheme: dark;
+    /* Firefox: dark scrollbar with a visible track, flush with the window edge */
+    scrollbar-color: #3A4250 #141A24;
+  }
   html, body, #root { height: 100%; }
 
   body {
@@ -110,14 +114,14 @@
   }
   :focus:not(:focus-visible) { outline: none; }
 
-  ::-webkit-scrollbar { width: 10px; height: 10px; }
-  ::-webkit-scrollbar-track { background: var(--color-bg); }
-  ::-webkit-scrollbar-thumb {
-    background: #232833;
-    border-radius: 9999px;
-    border: 2px solid var(--color-bg);
-  }
-  ::-webkit-scrollbar-thumb:hover { background: #313845; }
+  /* Scrollbar hugs the window edge: a VISIBLY distinct track column running
+     to the screen edge + a square full-width thumb. No inset borders, no
+     pill rounding — those make the thumb float off the edge. */
+  ::-webkit-scrollbar { width: 10px; height: 10px; background: #141A24; }
+  ::-webkit-scrollbar-track { background: #141A24; }
+  ::-webkit-scrollbar-thumb { background: #3A4250; }
+  ::-webkit-scrollbar-thumb:hover { background: #4D5666; }
+  ::-webkit-scrollbar-corner { background: #141A24; }
 
   ::selection {
     background: rgba(255, 178, 36, 0.3);
