@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Veda K1 — Sudarshana chakra: Krishna's discus; a divine disc of dharma
+       (and a database is a disc that never misses). On light, use #E8960B. -->
+  <circle cx="32" cy="32" r="18" stroke="#FFB224" stroke-width="2.4" fill="none"/>
+  <circle cx="32" cy="32" r="7.5" stroke="#FFB224" stroke-width="2" fill="none"/>
+  <g stroke="#FFB224" stroke-width="2" stroke-linecap="round" stroke-opacity=".85">
+    <path d="M32 24.5 L32 14"/><path d="M32 50 L32 39.5"/>
+    <path d="M24.5 32 L14 32"/><path d="M50 32 L39.5 32"/>
+    <path d="M37.3 26.7 L44.7 19.3"/><path d="M26.7 37.3 L19.3 44.7"/>
+    <path d="M26.7 26.7 L19.3 19.3"/><path d="M37.3 37.3 L44.7 44.7"/>
+  </g>
+  <g stroke="#FFB224" stroke-width="2.2" stroke-linecap="round">
+    <path d="M32 11.5 L32 5.5"/><path d="M52.5 32 L58.5 32"/>
+    <path d="M32 52.5 L32 58.5"/><path d="M11.5 32 L5.5 32"/>
+  </g>
+  <circle cx="32" cy="32" r="3.4" fill="#FFB224"/>
+</svg>
