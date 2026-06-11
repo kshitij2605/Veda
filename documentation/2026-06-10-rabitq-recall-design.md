@@ -126,3 +126,99 @@ capturing real output.
 | B2 rotation/codebook breaks on reload | Serde round-trip test (build → ser → de → identical results) before relying on it; rotation is seed-deterministic + persisted. |
 | Cross-tool recall comparison is apples-to-oranges (different ground truth) | Use the SAME exact (Flat) top-10 ground truth on the SAME vectors for both tools. |
 | Bench wall-clock (100k × d=3072, multiple indexes) is slow | `#[ignore]` + run in release; document run time. |
+
+---
+
+## Results (2026-06-11)
+
+All measurements on gpu-host-a (x86_64, AVX-512), release build, deterministic
+pseudo-random corpus (`vec_of`), recall@10 vs `FlatIndex` exact top-10.
+
+### B1 — Baseline (d=1536, n=100k, uniform-random)
+
+| Index | recall@10 | build | p50 |
+|---|---|---|---|
+| rabitq (1-bit) | 0.331 | 11s | 336ms |
+| rabitq+rerank (1-bit + raw-f32 rerank) | 0.749 | 18s | 357ms |
+| rabitq+extrerank (1-bit + 4-bit rerank) | 0.734 | 42s* | 374ms |
+
+\* after the codebook-training subsampling fix (was ~836s before).
+
+### B2 — Rotation + Lloyd-Max codebook in the default ExtRerank → REVERTED
+
+Wiring `with_rotation().with_optimized_codebook()` into the default
+`RaBitQExtRerankIndex` **regressed** recall on BOTH distributions:
+
+| Data | extrerank no-rotation | extrerank +rotation |
+|---|---|---|
+| isotropic uniform (d=1536) | 0.734 | 0.721 |
+| anisotropic low-rank (d=1536, rank=48) | 0.870 | 0.860 |
+
+Both extrerank variants deliver the ~6.6× memory win (960 vs 6336 bytes/vec)
+— but that comes from the 4-bit quantization, NOT rotation. Rotation did not
+help even on anisotropic data (the distribution it targets). **Reverted** the
+default to plain 4-bit; rotation/codebook kept as the opt-in
+`new_with_rotation()` for future real-embedding evaluation. The
+codebook-training subsampling perf fix (836s→42s) was kept.
+
+### B3 — Per-vector unbiased estimator for 1-bit RaBitQ → REVERTED
+
+Replacing the global `mean_abs_component` with the paper's per-vector
+estimator (`raw_dot·‖c‖₂²/‖c‖₁`, exact when query==vector) did NOT improve
+recall: neutral at d=1536 (0.331→0.333, within noise) and a ~5pp regression
+at d=128 Euclidean (0.60→0.556). For high-d embeddings `‖c‖₁/‖c‖₂≈√(2D/π)` is
+nearly constant across vectors, so the per-vector correction ≈ the global mean.
+**Reverted**; the global approximation is retained.
+
+### B4 — turbovec head-to-head (d=1536, n=100k, same corpus)
+
+turbovec v0.8.0 (`pip install turbovec`), `TurboQuantIndex(dim, bit_width)`,
+brute-force quantized scan:
+
+| Method | recall@10 | build | p50 |
+|---|---|---|---|
+| **turbovec 4-bit** | **0.848** | 136s | 516ms |
+| turbovec 2-bit | 0.511 | 138s | 294ms |
+| Veda rabitq+rerank | 0.749 | 18s | 357ms |
+| Veda rabitq+extrerank | 0.734 | 42s | 374ms |
+| Veda rabitq (1-bit) | 0.331 | 11s | 336ms |
+
+**turbovec's 4-bit scalar quantization beats Veda's best RaBitQ config on
+recall (0.848 vs 0.749, +0.10)** on this benchmark. Caveats: turbovec is
+brute-force-only (no ANN graph — Veda's HNSW/DiskANN sub-ms paths are a
+separate axis turbovec lacks); turbovec builds 3–12× slower; synthetic
+uniform data is a weak proxy; and the comparison isn't apples-to-apples
+(turbovec pure-4-bit vs Veda 1-bit+rerank).
+
+## Conclusions
+
+1. **The two audit-hypothesized RaBitQ recall fixes do not help** under
+   measurement — both reverted. Veda's existing RaBitQ family (global-mean
+   1-bit estimator, no rotation) is near its practical optimum for these
+   configs. turbovec's marketed "length-renormalization / per-vector bias
+   correction" is NOT the source of its recall edge (Veda already has length
+   renorm; the per-vector estimator didn't help).
+2. **turbovec's real edge is its 4-bit scalar quantization recall/bit
+   tradeoff** (0.848), which Veda's RaBitQ family does not match (≤0.749).
+   This is a genuine, measured gap — NOT explained by the audit's
+   "already-present" hypothesis.
+
+## TurboQuant decision: RECONSIDERED → build a 4-bit scalar-quant index
+
+Given B4's measured recall advantage, the decision flips from "drop" to
+**pursue a TurboQuant-style low-bit scalar-quantization index** as its own
+follow-up sub-project (brainstorm → design → plan → implement). Open questions
+for that effort: validate the recall gap on REAL embeddings (not synthetic);
+determine whether turbovec's edge is the TQ+ per-coordinate calibration vs
+Veda's single shared codebook; and ensure any new index integrates with
+Veda's ANN-graph path rather than competing only in the brute-force niche.
+
+## Kept from this sub-project (production-relevant)
+
+- Codebook-training subsampling (`rabitq_ext.rs`): 836s→42s build with no
+  recall change — a real optimization for opt-in codebook users.
+- `RaBitQExtRerankIndex::new_with_rotation()`: opt-in rotation/codebook for
+  future real-embedding evaluation (serde-persisted, round-trip tested).
+- Benchmark infrastructure: `run_rabitq_family`, `make_anisotropic_corpus`,
+  `analytical_bytes_per_vec`, `run_anisotropic_ab` in `scale_benchmark.rs`;
+  `scripts/bench/turbovec_compare.py`.
