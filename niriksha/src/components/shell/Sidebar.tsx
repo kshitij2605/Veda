@@ -146,7 +146,7 @@ function BrandMark() {
   // Niriksha mark — "eye of nodes": the watching eye drawn as a closed walk
   // through six nodes, pupil at center. Theme-aware via the accent token.
   return (
-    <svg width={18} height={18} viewBox="0 0 64 64" aria-hidden>
+    <svg width={26} height={26} viewBox="0 0 64 64" aria-hidden>
       <path
         d="M8 34 L20 24 L44 24 L56 34 L44 44 L20 44 Z"
         stroke="var(--color-accent)"

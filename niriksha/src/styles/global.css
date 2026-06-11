@@ -41,13 +41,15 @@
   --color-accent-10: oklch(0.830 0.120 282);
   --color-accent-12: oklch(0.960 0.030 282);
 
-  /* ── Modality palette (categorical, colorblind-aware) ───────────────── */
-  --color-modality-text:  oklch(0.70 0.15 250);
-  --color-modality-image: oklch(0.72 0.18 320);
-  --color-modality-audio: oklch(0.74 0.16 160);
-  --color-modality-video: oklch(0.76 0.15 60);
-  --color-modality-doc:   oklch(0.70 0.14 25);
-  --color-modality-mixed: oklch(0.78 0.10 282);
+  /* ── Modality palette (categorical, colorblind-aware) ─────────────────
+        Same hues as the light theme so colors keep their meaning across
+        modes; only lightness/chroma are tuned for the dark canvas. ────── */
+  --color-modality-text:  oklch(0.70 0.15 264);
+  --color-modality-image: oklch(0.72 0.15 155);
+  --color-modality-audio: oklch(0.75 0.15 70);
+  --color-modality-video: oklch(0.68 0.19 18);
+  --color-modality-doc:   oklch(0.70 0.16 300);
+  --color-modality-mixed: oklch(0.74 0.12 220);
 
   /* ── Categorical chart ramp (8, perceptually spaced) ────────────────── */
   --color-chart-1: oklch(0.70 0.13 195);
@@ -156,6 +158,33 @@
   --duration-slow:    240ms;
   --ease-out:    cubic-bezier(0.22, 0.61, 0.36, 1);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ── Dynamic-read tokens (dark defaults) ─────────────────────────────────
+      These are consumed from JS (getComputedStyle / template-built var()
+      names), which Tailwind's scanner can't see — so it tree-shakes them
+      out of @theme. Plain :root CSS is always emitted. The light block
+      below overrides them for light mode. ─────────────────────────────── */
+:root {
+  --color-modality-text:  oklch(0.70 0.15 264);
+  --color-modality-image: oklch(0.72 0.15 155);
+  --color-modality-audio: oklch(0.75 0.15 70);
+  --color-modality-video: oklch(0.68 0.19 18);
+  --color-modality-doc:   oklch(0.70 0.16 300);
+  --color-modality-mixed: oklch(0.74 0.12 220);
+
+  --color-chart-1: oklch(0.70 0.13 195);
+  --color-chart-2: oklch(0.72 0.16 282);
+  --color-chart-3: oklch(0.74 0.16 160);
+  --color-chart-4: oklch(0.76 0.15 60);
+  --color-chart-5: oklch(0.70 0.17 320);
+  --color-chart-6: oklch(0.72 0.14 30);
+  --color-chart-7: oklch(0.74 0.12 230);
+  --color-chart-8: oklch(0.80 0.13 110);
+
+  --color-data-3: oklch(0.460 0.090 195);
+  --color-data-5: oklch(0.620 0.110 195);
+  --color-data-7: oklch(0.760 0.090 195);
 }
 
 /* ── Light theme — canonical default (applied via theme.ts; dark = [data-theme="dark"]
