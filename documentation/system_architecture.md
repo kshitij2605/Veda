@@ -114,8 +114,11 @@ pub type ShardId = u32;
 **`FieldType`** -- 13 variants:
 - `Vector { dimension: u32, metric: DistanceMetric }`, `SparseVector`, `String`, `Int32`, `Int64`, `Float32`, `Float64`, `Bool`, `Timestamp`, `Array(Box<FieldType>)`, `Json`, `Blob`, `Uuid`
 
-**`IndexType`** -- 10 variants:
-- `Hnsw`, `DiskAnn`, `IvfPq`, `Flat`, `SuffixArray`, `Inverted`, `Range`, `Bitmap`, `Hash`, `None`
+**`IndexType`** -- 17 variants:
+- ANN graph / exact: `Hnsw`, `DiskAnn`, `IvfPq`, `Flat`, `Cagra` (GPU cuVS)
+- Quantization: `RaBitQ`, `RaBitQRerank`, `HnswRaBitQ`, `RaBitQExtRerank`, `Sq4` (4-bit/dim scalar), `Sq8` (8-bit/dim scalar)
+- Text / scalar: `SuffixArray`, `Inverted`, `Range`, `Bitmap`, `Hash`
+- `None`
 
 ### 3.2 DenseVector
 

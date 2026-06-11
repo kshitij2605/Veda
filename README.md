@@ -22,8 +22,8 @@
 ### Storage + retrieval
 - **Multimodal native** -- first-class support for text, image, audio, video, and PDF embeddings
 - **4 ANN index types** -- HNSW, DiskANN (Vamana graph), IVF-PQ, and Flat (brute-force)
-- **RaBitQ + SQ8 quantization** -- memory-efficient vector compression with minimal recall loss
-- **SIMD-optimized distances** -- AVX2 fast paths with scalar fallback; 6 metrics (Cosine, Euclidean, DotProduct, Hamming, Manhattan, Jaccard)
+- **Quantization indexes** -- RaBitQ (1-bit), RaBitQ+rerank, RaBitQExt (4-bit rerank), plus standalone `Sq4` (4-bit/dim) and `Sq8` (8-bit/dim) scalar quantization -- memory-efficient compression with minimal recall loss
+- **SIMD-optimized distances** -- SimSIMD-backed AVX-512 / ARM NEON / SVE selected at runtime (AVX2/scalar fallback via `--no-default-features`); 6 metrics (Cosine, Euclidean, DotProduct, Hamming, Manhattan, Jaccard)
 - **SQL-like filter expressions** -- combine vector search with structured metadata filters
 - **Multi-vector fusion** -- RRF, WeightedSum, and Intersection strategies for cross-modal retrieval
 - **Pattern search** -- suffix array-backed substring and fuzzy matching on text fields
