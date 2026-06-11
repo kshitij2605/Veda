@@ -46,6 +46,40 @@ fn make_corpus(n: usize, dim: usize) -> Vec<Vec<f32>> {
     (0..n as u32).map(|i| vec_of(i, dim)).collect()
 }
 
+/// Anisotropic corpus: each vector is a random combination of `rank`
+/// fixed basis directions plus small isotropic noise, then L2-normalized.
+/// Variance concentrates in `rank` dims — mimicking real embedding
+/// distributions (unlike `make_corpus`'s isotropic uniform vectors).
+fn make_anisotropic_corpus(n: usize, dim: usize, rank: usize) -> Vec<Vec<f32>> {
+    // Fixed random basis (rank x dim), seeded.
+    let basis: Vec<Vec<f32>> = (0..rank).map(|r| vec_of(1_000_000 + r as u32, dim)).collect();
+    (0..n)
+        .map(|i| {
+            // Per-vector coefficients over the basis (heavy-tailed: first
+            // dirs dominate) + small noise.
+            let coeffs = vec_of(i as u32, rank);
+            let noise = vec_of(2_000_000 + i as u32, dim);
+            let mut v = vec![0.0f32; dim];
+            for (r, b) in basis.iter().enumerate() {
+                // decay weight so early basis dirs carry more variance
+                let w = coeffs[r] / ((r + 1) as f32);
+                for d in 0..dim {
+                    v[d] += w * b[d];
+                }
+            }
+            for d in 0..dim {
+                v[d] += 0.05 * noise[d];
+            }
+            // L2 normalize (cosine space)
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 1e-9 {
+                for x in &mut v { *x /= norm; }
+            }
+            v
+        })
+        .collect()
+}
+
 fn percentile(mut sorted: Vec<f64>, p: f64) -> f64 {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let idx = ((sorted.len() as f64 - 1.0) * p).round() as usize;
@@ -210,4 +244,47 @@ fn scale_1m_dim_768() {
     // 1M rows, dim 768 — close to a real BGE-M3 production shard.
     // Runs ~10-15 min on a desktop; gated behind --ignored.
     run_scale("large", 1_000_000, 768);
+}
+
+fn analytical_bytes_per_vec(label: &str, dim: usize) -> f64 {
+    // 1-bit coarse = dim/8; raw-f32 rerank = dim*4; 4-bit ext rerank = dim*0.5
+    match label {
+        "rabitq" => (dim as f64) / 8.0 + 4.0,                 // codes + norm
+        "rabitq+rerank" => (dim as f64) / 8.0 + (dim as f64) * 4.0, // + raw f32
+        l if l.starts_with("extrerank") => (dim as f64) / 8.0 + (dim as f64) * 0.5, // + 4-bit
+        _ => 0.0,
+    }
+}
+
+fn run_anisotropic_ab(n: usize, dim: usize, rank: usize) {
+    eprintln!();
+    eprintln!("=== anisotropic A/B: n={n} dim={dim} rank={rank} ===");
+    let corpus = make_anisotropic_corpus(n, dim, rank);
+    let refs: Vec<&[f32]> = corpus.iter().map(|v| v.as_slice()).collect();
+    let mut truth = FlatIndex::new(DistanceMetric::Cosine, dim as u32);
+    truth.build(&refs).unwrap();
+    let queries: Vec<&Vec<f32>> = (0..QUERIES).map(|i| &corpus[(i * 7919) % n]).collect();
+    let truths: Vec<std::collections::HashSet<u32>> = queries.iter()
+        .map(|q| truth.search(q, K).unwrap().into_iter().map(|h| h.id).collect()).collect();
+
+    let mut rerank = RaBitQRerankIndex::new(DistanceMetric::Cosine);
+    rerank.build(&refs).unwrap();
+    print_row("rabitq+rerank", n, 0.0, &rerank, &queries, &truths);
+    eprintln!("    bytes/vec ≈ {:.0}", analytical_bytes_per_vec("rabitq+rerank", dim));
+
+    let mut ext_legacy = RaBitQExtRerankIndex::new_legacy(DistanceMetric::Cosine);
+    ext_legacy.build(&refs).unwrap();
+    print_row("extrerank-legacy", n, 0.0, &ext_legacy, &queries, &truths);
+    eprintln!("    bytes/vec ≈ {:.0}", analytical_bytes_per_vec("extrerank", dim));
+
+    let mut ext_rot = RaBitQExtRerankIndex::new(DistanceMetric::Cosine);
+    ext_rot.build(&refs).unwrap();
+    print_row("extrerank-rotation", n, 0.0, &ext_rot, &queries, &truths);
+    eprintln!("    bytes/vec ≈ {:.0}", analytical_bytes_per_vec("extrerank", dim));
+}
+
+#[test]
+#[ignore]
+fn anisotropic_ab_1536() {
+    run_anisotropic_ab(50_000, 1536, 48);
 }

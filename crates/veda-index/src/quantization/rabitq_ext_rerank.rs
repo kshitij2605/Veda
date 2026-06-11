@@ -82,6 +82,21 @@ impl RaBitQExtRerankIndex {
     pub fn set_rerank_multiplier(&mut self, m: usize) {
         self.rerank_multiplier = m.max(1);
     }
+
+    /// Benchmark/comparison helper: build with the LEGACY config — no
+    /// Hadamard rotation, no optimized codebook (plain 4-bit Extended-RaBitQ).
+    /// Used to A/B the rotation+codebook wiring; not for production use.
+    #[doc(hidden)]
+    pub fn new_legacy(metric: DistanceMetric) -> Self {
+        Self {
+            coarse: RaBitQuantizer::new(metric),
+            rerank: ExtRaBitQuantizer::new(metric),
+            deleted: HashSet::new(),
+            metric,
+            dimension: 0,
+            rerank_multiplier: DEFAULT_RERANK_MULTIPLIER,
+        }
+    }
 }
 
 impl VectorIndex for RaBitQExtRerankIndex {
