@@ -108,3 +108,56 @@ productionized + using the shared `ScalarQuantizer` rather than a throwaway).
 | Real embeddings not extractable | Skip gracefully; rely on synthetic uniform+aniso (consistent, well-understood technique). |
 | Brute-force scan too slow at scale | v1 matches turbovec's brute-force model; graph integration is the documented follow-up for latency. |
 | `IndexType` additions ripple into match arms across crates | Grep all `match` on `IndexType`; add arms (most will route to the new index builders or error clearly). |
+
+---
+
+## Results (2026-06-11)
+
+All on gpu-host-a (x86_64, AVX-512), recall@10 vs FlatIndex exact top-10.
+
+### Synthetic (d=1536, n=50k, uniform), measured via the kept `sq_recall_targets_1536` bench
+
+| Index | recall@10 | bytes/vec | vs turbovec 4-bit (0.848) |
+|---|---|---|---|
+| **Sq8** (8-bit/dim) | **0.995** | 1536 | +0.147 |
+| **Sq4** (4-bit/dim) | **0.879** | 768 | +0.031 (at equal memory) |
+
+Asserted thresholds (sq8 ≥ 0.97, sq4 ≥ 0.82) pass with margin.
+
+### Real BGE-M3 embeddings (T1; n=13,046, d=1024, extracted from sealed-segment `.vec` files)
+
+| Index | recall@10 |
+|---|---|
+| Sq8 (8-bit/dim) | 1.000 |
+| Sq4 (4-bit/dim) | 1.000 |
+
+Both perfect at this corpus size; the synthetic d=1536 figures (0.995 / 0.879) are
+the conservative production estimate (larger corpora tighten the rank-10/11 margin).
+
+## Outcome
+
+Veda now has two first-class scalar-quant indexes in `veda-index`:
+- **`IndexType::Sq4`** — 4-bit/dim, ~D/2 bytes/vec, recall 0.879 (synthetic d=1536) —
+  **beats turbovec's 4-bit (0.848) at the same memory**, closing the only real gap
+  the turbovec head-to-head (sub-project B / B4) surfaced.
+- **`IndexType::Sq8`** — 8-bit/dim, ~D bytes/vec, recall 0.995 — Veda's
+  highest-recall quantized option, now reachable as a standalone index (it was
+  previously an internal-only quantizer).
+
+Both wrap a generalized `ScalarQuantizer` (per-dim min/max calibration, 4/8-bit
+packing, serde persistence) via a thin `ScalarQuantIndex` (`VectorIndex`), and are
+accepted by the REST collection-create parser as `"sq4"` / `"sq8"`.
+
+The turbovec investigation's full arc: the marketed "length-renorm / per-vector
+bias correction" was NOT turbovec's edge (sub-project B reverted both as
+non-improving); the real edge was simply "4-bit per-dimension scalar quant," which
+Veda now matches (and exceeds at 8-bit). No research-grade TurboQuant
+reimplementation was needed.
+
+## Follow-ups (out of scope here)
+
+- Graph-integrated scalar quant (an `Hnsw+Sq4` analog to `HnswRaBitQ`) for sub-ms
+  latency at scale (Sq4/Sq8 are brute-force scan, like turbovec).
+- Runtime SIMD for the 4-bit scan.
+- End-to-end gateway/schema surfacing + docs for the new index types (the REST
+  parser accepts them; user-facing docs/UX is a separate task).
