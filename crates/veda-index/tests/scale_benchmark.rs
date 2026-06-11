@@ -272,12 +272,12 @@ fn run_anisotropic_ab(n: usize, dim: usize, rank: usize) {
     print_row("rabitq+rerank", n, 0.0, &rerank, &queries, &truths);
     eprintln!("    bytes/vec ≈ {:.0}", analytical_bytes_per_vec("rabitq+rerank", dim));
 
-    let mut ext_legacy = RaBitQExtRerankIndex::new_legacy(DistanceMetric::Cosine);
-    ext_legacy.build(&refs).unwrap();
-    print_row("extrerank-legacy", n, 0.0, &ext_legacy, &queries, &truths);
+    let mut ext_default = RaBitQExtRerankIndex::new(DistanceMetric::Cosine);
+    ext_default.build(&refs).unwrap();
+    print_row("extrerank-default", n, 0.0, &ext_default, &queries, &truths);
     eprintln!("    bytes/vec ≈ {:.0}", analytical_bytes_per_vec("extrerank", dim));
 
-    let mut ext_rot = RaBitQExtRerankIndex::new(DistanceMetric::Cosine);
+    let mut ext_rot = RaBitQExtRerankIndex::new_with_rotation(DistanceMetric::Cosine);
     ext_rot.build(&refs).unwrap();
     print_row("extrerank-rotation", n, 0.0, &ext_rot, &queries, &truths);
     eprintln!("    bytes/vec ≈ {:.0}", analytical_bytes_per_vec("extrerank", dim));

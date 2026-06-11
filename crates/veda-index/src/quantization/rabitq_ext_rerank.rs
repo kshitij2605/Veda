@@ -69,9 +69,7 @@ impl RaBitQExtRerankIndex {
     pub fn new(metric: DistanceMetric) -> Self {
         Self {
             coarse: RaBitQuantizer::new(metric),
-            rerank: ExtRaBitQuantizer::new(metric)
-                .with_rotation(ROTATION_SEED)
-                .with_optimized_codebook(),
+            rerank: ExtRaBitQuantizer::new(metric),
             deleted: HashSet::new(),
             metric,
             dimension: 0,
@@ -83,14 +81,18 @@ impl RaBitQExtRerankIndex {
         self.rerank_multiplier = m.max(1);
     }
 
-    /// Benchmark/comparison helper: build with the LEGACY config — no
-    /// Hadamard rotation, no optimized codebook (plain 4-bit Extended-RaBitQ).
-    /// Used to A/B the rotation+codebook wiring; not for production use.
+    /// Opt-in variant with Hadamard rotation + Lloyd-Max codebook on the
+    /// rerank stage. Benchmarks (synthetic isotropic AND anisotropic) showed
+    /// this REGRESSES recall vs the plain 4-bit default at equal memory, so it
+    /// is NOT the default — exposed for experimentation / future real-embedding
+    /// evaluation. See documentation/2026-06-10-rabitq-recall-design.md.
     #[doc(hidden)]
-    pub fn new_legacy(metric: DistanceMetric) -> Self {
+    pub fn new_with_rotation(metric: DistanceMetric) -> Self {
         Self {
             coarse: RaBitQuantizer::new(metric),
-            rerank: ExtRaBitQuantizer::new(metric),
+            rerank: ExtRaBitQuantizer::new(metric)
+                .with_rotation(ROTATION_SEED)
+                .with_optimized_codebook(),
             deleted: HashSet::new(),
             metric,
             dimension: 0,
@@ -332,7 +334,7 @@ mod tests {
         let vectors = synthetic_vectors(300, 64);
         let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
 
-        let mut idx = RaBitQExtRerankIndex::new(DistanceMetric::Cosine);
+        let mut idx = RaBitQExtRerankIndex::new_with_rotation(DistanceMetric::Cosine);
         idx.build(&refs).unwrap();
 
         // Verify the rerank stage has rotation and codebook active.
