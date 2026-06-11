@@ -6,26 +6,34 @@ export function HowItWorks() {
   const ref = useReveal<HTMLDivElement>()
   return (
     <Section
+      number="04"
       overline="How it works"
       title="From raw files to search, in one pipeline"
       lede="Veda's document endpoint runs the entire ingestion path natively — no Unstructured.io, no LangChain loaders, no glue code."
     >
-      <div ref={ref} className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+      <div
+        ref={ref}
+        className="mt-14 grid gap-px overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-border)] sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6"
+      >
         {PIPELINE.map((s, i) => {
           const Icon = s.icon
           return (
             <div
               key={s.title}
-              className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-5 shadow-[var(--shadow-sm)]"
+              className="group bg-[var(--color-bg)] p-6 transition-colors duration-[var(--duration-base)] hover:bg-[var(--color-surface)]"
             >
-              <div className="flex items-center gap-2 text-[var(--color-accent)]">
-                <span className="text-[12px] [font-family:var(--font-mono)] text-[var(--color-text-subtle)]">
+              <div className="flex items-center justify-between">
+                <span className="[font-family:var(--font-mono)] text-[12px] text-[var(--color-accent)]">
                   {String(i + 1).padStart(2, '0')}
                 </span>
-                <Icon size={18} strokeWidth={2} />
+                <span className="text-[var(--color-text-subtle)] transition-colors group-hover:text-[var(--color-accent)]">
+                  <Icon size={18} strokeWidth={2} />
+                </span>
               </div>
-              <h3 className="mt-3 text-[15px] font-semibold text-[var(--color-text)]">{s.title}</h3>
-              <p className="mt-1 text-[13px] leading-relaxed text-[var(--color-text-muted)]">{s.caption}</p>
+              <h3 className="mt-5 text-[16px] [font-family:var(--font-display)] font-bold text-[var(--color-text)]">
+                {s.title}
+              </h3>
+              <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--color-text-muted)]">{s.caption}</p>
             </div>
           )
         })}

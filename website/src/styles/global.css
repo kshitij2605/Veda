@@ -20,7 +20,7 @@
   /* ── Ink ──────────────────────────────────────────────────────────── */
   --color-text:        #F2F4F8;
   --color-text-muted:  #9BA3B0;
-  --color-text-subtle: #6B7280;
+  --color-text-subtle: #7E8795; /* ≥4.5:1 on the obsidian canvas (small mono labels) */
 
   /* ── Saffron accent (the one hot color) ───────────────────────────── */
   --color-accent:     #FFB224;
