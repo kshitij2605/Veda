@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Niriksha A2 — node almond eye: lid arcs through nodes, ring pupil.
+       Dark-background colorway. On light, use #6A57E8. -->
+  <path d="M10 32 Q32 12 54 32" stroke="#9D8CFF" stroke-opacity=".5" stroke-width="2" fill="none"/>
+  <path d="M10 32 Q32 52 54 32" stroke="#9D8CFF" stroke-opacity=".5" stroke-width="2" fill="none"/>
+  <circle cx="10" cy="32" r="3" fill="#9D8CFF"/>
+  <circle cx="54" cy="32" r="3" fill="#9D8CFF"/>
+  <circle cx="32" cy="22" r="2.4" fill="#9D8CFF" fill-opacity=".8"/>
+  <circle cx="32" cy="42" r="2.4" fill="#9D8CFF" fill-opacity=".8"/>
+  <circle cx="32" cy="32" r="5.5" fill="#9D8CFF"/>
+  <circle cx="32" cy="32" r="9" stroke="#9D8CFF" stroke-opacity=".7" stroke-width="1.8" fill="none"/>
+</svg>

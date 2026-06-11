@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Niriksha D1 — Sanjaya's divya-drishti: the divine sight that watched the
+       Mahabharata from afar; the eye crowned with saffron rays.
+       Dark-background colorway. On light: eye #6A57E8, rays #E8960B, pupil-dot page bg. -->
+  <path d="M8 38 Q32 18 56 38" stroke="#9D8CFF" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <path d="M8 38 Q32 54 56 38" stroke="#9D8CFF" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <circle cx="32" cy="37" r="6.5" fill="#9D8CFF"/>
+  <circle cx="32" cy="37" r="2.3" fill="#0A0C10"/>
+  <g stroke="#FFB224" stroke-width="2.4" stroke-linecap="round">
+    <path d="M32 14 L32 6"/>
+    <path d="M19 17 L14.5 10"/>
+    <path d="M45 17 L49.5 10"/>
+    <path d="M9 26 L3.5 21"/>
+    <path d="M55 26 L60.5 21"/>
+  </g>
+</svg>
