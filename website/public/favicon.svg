@@ -1,4 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="6" fill="#7c6af0"/>
-  <text x="16" y="22" text-anchor="middle" font-family="system-ui, sans-serif" font-weight="700" font-size="18" fill="#fff">V</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <g stroke="#FFB224" stroke-opacity=".55" stroke-width="3.4" fill="none" stroke-linecap="round">
+    <path d="M13 12 L22.5 30 L32 48 L41.5 30 L51 12"/>
+  </g>
+  <circle cx="13" cy="12" r="5.2" fill="#FFB224"/>
+  <circle cx="22.5" cy="30" r="4.5" fill="#FFB224"/>
+  <circle cx="32" cy="48" r="6.8" fill="#FFB224"/>
+  <circle cx="41.5" cy="30" r="4.5" fill="#FFB224"/>
+  <circle cx="51" cy="12" r="5.2" fill="#FFB224"/>
 </svg>
