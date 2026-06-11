@@ -1,8 +1,22 @@
 # Veda + Niriksha — Brand Marks
 
-Three candidate logo families, each a matched Veda/Niriksha pair. Open
-`logo-concepts.html` in a browser for the full board (marks, wordmark lockups,
-light-background and favicon-size tests). **Status: awaiting final selection.**
+**Status: FINAL.** The selected marks live in `final/`:
+
+| | Mark | Favicon | Identity |
+|---|---|---|---|
+| **Veda** | `final/veda-mark.svg` | `final/veda-favicon.svg` | **Constellation V** — a V traced through a nearest-neighbor graph, saffron `#FFB224` (light: `#E8960B`) |
+| **Niriksha** | `final/niriksha-mark.svg` | `final/niriksha-favicon.svg` | **Eye of nodes** — the watching eye drawn as a closed walk through six nodes, violet `#9D8CFF` (light: `#6A57E8`; in the dashboard it uses `var(--color-accent)`) |
+
+Applied in: `website/src/components/BrandMark.tsx` + `website/public/favicon.svg`
+(Veda), `niriksha/src/components/shell/Sidebar.tsx` (Niriksha mark),
+`niriksha/src/pages/Login.tsx` (Veda mark — the login is the doorway to Veda),
+`niriksha/public/favicon.svg`.
+
+---
+
+The exploration below is kept for history. Boards: `logo-concepts.html` (v1),
+`logo-concepts-v2.html` (refined A + ancient-India), `logo-concepts-v3.html`
+(Niriksha iterations), `logo-concepts-v4.html` (Krishna-set Veda iterations).
 
 ## Concepts
 
