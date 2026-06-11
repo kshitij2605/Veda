@@ -1,14 +1,13 @@
 import { useEffect, useRef } from 'react'
 import { gsap } from 'gsap'
+import { ScrollTrigger } from 'gsap/ScrollTrigger'
+
+gsap.registerPlugin(ScrollTrigger)
 
 /**
- * Staggered entrance for the direct children of the returned ref, on mount:
- * fade + rise. Runs once (deps default to []). No-ops under
- * `prefers-reduced-motion` (children stay at their final state).
- *
- * Deliberately not ScrollTrigger-based: the app scrolls inside an inner
- * `<main>` (overflow-auto), not the window, so a mount reveal is reliable
- * and never leaves content stuck invisible.
+ * Staggered fade-rise of the direct children of the returned ref when the
+ * container scrolls into view (the site scrolls the window, so ScrollTrigger
+ * is reliable here). No-ops under `prefers-reduced-motion`.
  */
 export function useReveal<T extends HTMLElement = HTMLDivElement>(deps: unknown[] = []) {
   const ref = useRef<T>(null)
@@ -21,10 +20,11 @@ export function useReveal<T extends HTMLElement = HTMLDivElement>(deps: unknown[
     const ctx = gsap.context(() => {
       gsap.from(items, {
         opacity: 0,
-        y: 14,
-        duration: 0.5,
+        y: 18,
+        duration: 0.55,
         ease: 'power2.out',
         stagger: 0.07,
+        scrollTrigger: { trigger: el, start: 'top 82%', once: true },
       })
     }, el)
     return () => ctx.revert()
