@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Niriksha — "Shard Aperture": four shards rotated into an iris around a focal point.
+       Dark-background colorway. On light, use #6A57E8 and #15181E for the pupil. -->
+  <rect x="24" y="3"  width="16" height="16" rx="4.5" fill="#9D8CFF" transform="rotate(45 32 11)"/>
+  <rect x="45" y="24" width="16" height="16" rx="4.5" fill="#9D8CFF" opacity=".75" transform="rotate(45 53 32)"/>
+  <rect x="24" y="45" width="16" height="16" rx="4.5" fill="#9D8CFF" opacity=".55" transform="rotate(45 32 53)"/>
+  <rect x="3"  y="24" width="16" height="16" rx="4.5" fill="#9D8CFF" opacity=".35" transform="rotate(45 11 32)"/>
+  <circle cx="32" cy="32" r="5" fill="#F2F4F8"/>
+</svg>

@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { background: #0A0C10; color: #F2F4F8; font-family: 'Space Grotesk', sans-serif; padding: 48px 56px; }
+  .mono { font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: #7E8795; }
+  .accent { color: #FFB224; }
+  h1 { font-size: 28px; margin-bottom: 6px; }
+  .concept { margin-top: 44px; border-top: 1px solid rgba(255,255,255,.08); padding-top: 28px; }
+  .concept h2 { font-size: 20px; margin: 6px 0 18px; }
+  .row { display: flex; gap: 20px; align-items: stretch; flex-wrap: wrap; }
+  .tile { background: #12151C; border: 1px solid rgba(255,255,255,.08); border-radius: 12px; padding: 22px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
+  .tile.light { background: #F5F6F8; border-color: #E3E5EA; }
+  .tile .cap { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: #7E8795; }
+  .lockup { display: flex; align-items: center; gap: 12px; }
+  .lockup .name { font-weight: 700; font-size: 30px; letter-spacing: -0.02em; }
+  .small-row { display: flex; gap: 18px; align-items: center; }
+  .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; flex: 1; min-width: 360px; }
+</style>
+</head>
+<body>
+
+<p class="mono">Logo concepts — Veda + Niriksha family</p>
+<h1>Three directions, each a matched pair</h1>
+
+<!-- ════════ CONCEPT A — kNN constellation ════════ -->
+<div class="concept">
+  <p class="mono accent">Concept A / kNN Constellation</p>
+  <h2>The database is a graph; the dashboard is the eye watching it</h2>
+  <div class="row">
+    <div class="tile" style="width:200px">
+      <svg width="120" height="120" viewBox="0 0 64 64">
+        <g stroke="#FFB224" stroke-opacity=".45" stroke-width="2" fill="none">
+          <path d="M13 12 L22.5 30 L32 48 L41.5 30 L51 12"/>
+          <path d="M41.5 30 L56 30" stroke-opacity=".25" stroke-width="1.5"/>
+        </g>
+        <circle cx="13" cy="12" r="3.5" fill="#FFB224"/>
+        <circle cx="22.5" cy="30" r="3" fill="#FFB224"/>
+        <circle cx="32" cy="48" r="5" fill="#FFB224"/>
+        <circle cx="41.5" cy="30" r="3" fill="#FFB224"/>
+        <circle cx="51" cy="12" r="3.5" fill="#FFB224"/>
+        <circle cx="56" cy="30" r="2.2" fill="#F2F4F8" fill-opacity=".7"/>
+      </svg>
+      <span class="cap">Veda mark</span>
+    </div>
+    <div class="tile" style="width:200px">
+      <svg width="120" height="120" viewBox="0 0 64 64">
+        <g stroke="#9D8CFF" stroke-opacity=".45" stroke-width="2" fill="none">
+          <path d="M8 32 L32 15 L56 32 L32 49 Z"/>
+        </g>
+        <circle cx="8" cy="32" r="3" fill="#9D8CFF"/>
+        <circle cx="32" cy="15" r="3" fill="#9D8CFF"/>
+        <circle cx="56" cy="32" r="3" fill="#9D8CFF"/>
+        <circle cx="32" cy="49" r="3" fill="#9D8CFF"/>
+        <circle cx="32" cy="32" r="6" fill="#9D8CFF"/>
+        <circle cx="32" cy="32" r="10.5" stroke="#9D8CFF" stroke-width="2" fill="none"/>
+        <g stroke="#9D8CFF" stroke-width="2" stroke-opacity=".85">
+          <path d="M32 17.5 L32 21.5"/><path d="M32 42.5 L32 46.5"/>
+          <path d="M17.5 32 L21.5 32"/><path d="M42.5 32 L46.5 32"/>
+        </g>
+      </svg>
+      <span class="cap">Niriksha mark</span>
+    </div>
+    <div class="grid2">
+      <div class="tile">
+        <div class="lockup">
+          <svg width="34" height="34" viewBox="0 0 64 64">
+            <g stroke="#FFB224" stroke-opacity=".45" stroke-width="2.6" fill="none"><path d="M13 12 L22.5 30 L32 48 L41.5 30 L51 12"/></g>
+            <circle cx="13" cy="12" r="4.4" fill="#FFB224"/><circle cx="22.5" cy="30" r="3.8" fill="#FFB224"/>
+            <circle cx="32" cy="48" r="6" fill="#FFB224"/><circle cx="41.5" cy="30" r="3.8" fill="#FFB224"/><circle cx="51" cy="12" r="4.4" fill="#FFB224"/>
+          </svg>
+          <span class="name">Veda</span>
+        </div>
+        <div class="lockup">
+          <svg width="34" height="34" viewBox="0 0 64 64">
+            <g stroke="#9D8CFF" stroke-opacity=".5" stroke-width="2.4" fill="none"><path d="M8 32 L32 15 L56 32 L32 49 Z"/></g>
+            <circle cx="32" cy="32" r="7" fill="#9D8CFF"/>
+            <circle cx="32" cy="32" r="12" stroke="#9D8CFF" stroke-width="2.4" fill="none"/>
+          </svg>
+          <span class="name" style="font-size:26px">Niriksha</span>
+        </div>
+        <span class="cap">Lockups</span>
+      </div>
+      <div class="tile light">
+        <div class="small-row">
+          <svg width="64" height="64" viewBox="0 0 64 64">
+            <g stroke="#E8960B" stroke-opacity=".5" stroke-width="2" fill="none"><path d="M13 12 L22.5 30 L32 48 L41.5 30 L51 12"/></g>
+            <circle cx="13" cy="12" r="3.5" fill="#E8960B"/><circle cx="22.5" cy="30" r="3" fill="#E8960B"/>
+            <circle cx="32" cy="48" r="5" fill="#E8960B"/><circle cx="41.5" cy="30" r="3" fill="#E8960B"/><circle cx="51" cy="12" r="3.5" fill="#E8960B"/>
+          </svg>
+          <svg width="32" height="32" viewBox="0 0 64 64">
+            <g stroke="#E8960B" stroke-opacity=".5" stroke-width="3" fill="none"><path d="M13 12 L22.5 30 L32 48 L41.5 30 L51 12"/></g>
+            <circle cx="13" cy="12" r="5" fill="#E8960B"/><circle cx="22.5" cy="30" r="4.4" fill="#E8960B"/>
+            <circle cx="32" cy="48" r="6.6" fill="#E8960B"/><circle cx="41.5" cy="30" r="4.4" fill="#E8960B"/><circle cx="51" cy="12" r="5" fill="#E8960B"/>
+          </svg>
+          <svg width="16" height="16" viewBox="0 0 64 64">
+            <g stroke="#E8960B" stroke-width="4" fill="none"><path d="M13 12 L22.5 30 L32 48 L41.5 30 L51 12"/></g>
+            <circle cx="32" cy="48" r="8" fill="#E8960B"/>
+          </svg>
+        </div>
+        <span class="cap" style="color:#8A8F98">On light + favicon sizes</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ CONCEPT B — Shard Aperture ════════ -->
+<div class="concept">
+  <p class="mono accent">Concept B / Shard Aperture</p>
+  <h2>Evolve the existing shards: storage steps for Veda, an aperture for Niriksha</h2>
+  <div class="row">
+    <div class="tile" style="width:200px">
+      <svg width="120" height="120" viewBox="0 0 64 64">
+        <rect x="6" y="6" width="23" height="23" rx="6" fill="#FFB224"/>
+        <rect x="20.5" y="20.5" width="23" height="23" rx="6" fill="#FFB224" opacity=".62"/>
+        <rect x="35" y="35" width="23" height="23" rx="6" fill="#FFB224" opacity=".34"/>
+      </svg>
+      <span class="cap">Veda mark</span>
+    </div>
+    <div class="tile" style="width:200px">
+      <svg width="120" height="120" viewBox="0 0 64 64">
+        <g>
+          <rect x="24" y="3"  width="16" height="16" rx="4.5" fill="#9D8CFF" transform="rotate(45 32 11)"/>
+          <rect x="45" y="24" width="16" height="16" rx="4.5" fill="#9D8CFF" opacity=".75" transform="rotate(45 53 32)"/>
+          <rect x="24" y="45" width="16" height="16" rx="4.5" fill="#9D8CFF" opacity=".55" transform="rotate(45 32 53)"/>
+          <rect x="3"  y="24" width="16" height="16" rx="4.5" fill="#9D8CFF" opacity=".35" transform="rotate(45 11 32)"/>
+          <circle cx="32" cy="32" r="5" fill="#F2F4F8"/>
+        </g>
+      </svg>
+      <span class="cap">Niriksha mark</span>
+    </div>
+    <div class="grid2">
+      <div class="tile">
+        <div class="lockup">
+          <svg width="32" height="32" viewBox="0 0 64 64">
+            <rect x="6" y="6" width="23" height="23" rx="6" fill="#FFB224"/>
+            <rect x="20.5" y="20.5" width="23" height="23" rx="6" fill="#FFB224" opacity=".62"/>
+            <rect x="35" y="35" width="23" height="23" rx="6" fill="#FFB224" opacity=".34"/>
+          </svg>
+          <span class="name">Veda</span>
+        </div>
+        <div class="lockup">
+          <svg width="32" height="32" viewBox="0 0 64 64">
+            <rect x="24" y="3" width="16" height="16" rx="4.5" fill="#9D8CFF" transform="rotate(45 32 11)"/>
+            <rect x="45" y="24" width="16" height="16" rx="4.5" fill="#9D8CFF" opacity=".75" transform="rotate(45 53 32)"/>
+            <rect x="24" y="45" width="16" height="16" rx="4.5" fill="#9D8CFF" opacity=".55" transform="rotate(45 32 53)"/>
+            <rect x="3" y="24" width="16" height="16" rx="4.5" fill="#9D8CFF" opacity=".35" transform="rotate(45 11 32)"/>
+            <circle cx="32" cy="32" r="5" fill="#F2F4F8"/>
+          </svg>
+          <span class="name" style="font-size:26px">Niriksha</span>
+        </div>
+        <span class="cap">Lockups</span>
+      </div>
+      <div class="tile light">
+        <div class="small-row">
+          <svg width="64" height="64" viewBox="0 0 64 64">
+            <rect x="6" y="6" width="23" height="23" rx="6" fill="#E8960B"/>
+            <rect x="20.5" y="20.5" width="23" height="23" rx="6" fill="#E8960B" opacity=".62"/>
+            <rect x="35" y="35" width="23" height="23" rx="6" fill="#E8960B" opacity=".34"/>
+          </svg>
+          <svg width="32" height="32" viewBox="0 0 64 64">
+            <rect x="6" y="6" width="23" height="23" rx="6" fill="#E8960B"/>
+            <rect x="20.5" y="20.5" width="23" height="23" rx="6" fill="#E8960B" opacity=".62"/>
+            <rect x="35" y="35" width="23" height="23" rx="6" fill="#E8960B" opacity=".34"/>
+          </svg>
+          <svg width="16" height="16" viewBox="0 0 64 64">
+            <rect x="4" y="4" width="26" height="26" rx="7" fill="#E8960B"/>
+            <rect x="21" y="21" width="26" height="26" rx="7" fill="#E8960B" opacity=".55"/>
+          </svg>
+        </div>
+        <span class="cap" style="color:#8A8F98">On light + favicon sizes</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ CONCEPT C — Typographic + Bindu ════════ -->
+<div class="concept">
+  <p class="mono accent">Concept C / Typographic + Bindu</p>
+  <h2>A bold geometric letter with a Sanskrit bindu — minimal, typographic</h2>
+  <div class="row">
+    <div class="tile" style="width:200px">
+      <svg width="120" height="120" viewBox="0 0 64 64">
+        <path d="M8 14 L25 54 H39 L56 14 H43.5 L32 42.5 L20.5 14 Z" fill="#F2F4F8"/>
+        <circle cx="56" cy="9" r="5.5" fill="#FFB224"/>
+      </svg>
+      <span class="cap">Veda mark</span>
+    </div>
+    <div class="tile" style="width:200px">
+      <svg width="120" height="120" viewBox="0 0 64 64">
+        <rect x="10" y="10" width="10" height="44" rx="2" fill="#F2F4F8"/>
+        <rect x="44" y="10" width="10" height="44" rx="2" fill="#F2F4F8"/>
+        <circle cx="25" cy="19" r="3.6" fill="#FFB224"/>
+        <circle cx="32" cy="32" r="4.6" fill="#FFB224"/>
+        <circle cx="39" cy="45" r="3.6" fill="#FFB224"/>
+      </svg>
+      <span class="cap">Niriksha mark</span>
+    </div>
+    <div class="grid2">
+      <div class="tile">
+        <div class="lockup">
+          <svg width="32" height="32" viewBox="0 0 64 64">
+            <path d="M8 14 L25 54 H39 L56 14 H43.5 L32 42.5 L20.5 14 Z" fill="#F2F4F8"/>
+            <circle cx="56" cy="9" r="6" fill="#FFB224"/>
+          </svg>
+          <span class="name">Veda</span>
+        </div>
+        <div class="lockup">
+          <svg width="32" height="32" viewBox="0 0 64 64">
+            <rect x="10" y="10" width="10" height="44" rx="2" fill="#F2F4F8"/>
+            <rect x="44" y="10" width="10" height="44" rx="2" fill="#F2F4F8"/>
+            <circle cx="25" cy="19" r="4" fill="#FFB224"/>
+            <circle cx="32" cy="32" r="5" fill="#FFB224"/>
+            <circle cx="39" cy="45" r="4" fill="#FFB224"/>
+          </svg>
+          <span class="name" style="font-size:26px">Niriksha</span>
+        </div>
+        <span class="cap">Lockups</span>
+      </div>
+      <div class="tile light">
+        <div class="small-row">
+          <svg width="64" height="64" viewBox="0 0 64 64">
+            <path d="M8 14 L25 54 H39 L56 14 H43.5 L32 42.5 L20.5 14 Z" fill="#15181E"/>
+            <circle cx="56" cy="9" r="5.5" fill="#E8960B"/>
+          </svg>
+          <svg width="32" height="32" viewBox="0 0 64 64">
+            <path d="M8 14 L25 54 H39 L56 14 H43.5 L32 42.5 L20.5 14 Z" fill="#15181E"/>
+            <circle cx="56" cy="9" r="7" fill="#E8960B"/>
+          </svg>
+          <svg width="16" height="16" viewBox="0 0 64 64">
+            <path d="M8 14 L25 54 H39 L56 14 H43.5 L32 42.5 L20.5 14 Z" fill="#15181E"/>
+            <circle cx="55" cy="10" r="9" fill="#E8960B"/>
+          </svg>
+        </div>
+        <span class="cap" style="color:#8A8F98">On light + favicon sizes</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
