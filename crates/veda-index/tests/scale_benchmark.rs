@@ -480,3 +480,50 @@ fn run_anisotropic_ab(n: usize, dim: usize, rank: usize) {
 fn anisotropic_ab_1536() {
     run_anisotropic_ab(50_000, 1536, 48);
 }
+
+#[test]
+#[ignore]
+fn sq_recall_targets_1536() {
+    use veda_index::quantization::scalar_index::ScalarQuantIndex;
+    let dim = 1536usize;
+    let n = 50_000usize;
+    let corpus = make_corpus(n, dim);
+    let refs: Vec<&[f32]> = corpus.iter().map(|v| v.as_slice()).collect();
+    let mut truth = FlatIndex::new(DistanceMetric::Cosine, dim as u32);
+    truth.build(&refs).unwrap();
+    let queries: Vec<&Vec<f32>> = (0..QUERIES).map(|i| &corpus[(i * 7919) % n]).collect();
+    let truths: Vec<std::collections::HashSet<u32>> = queries
+        .iter()
+        .map(|q| truth.search(q, K).unwrap().into_iter().map(|h| h.id).collect())
+        .collect();
+
+    // Helper: compute mean recall@K over all queries for a given index.
+    fn measure_recall(
+        idx: &dyn veda_index::traits::VectorIndex,
+        queries: &[&Vec<f32>],
+        truths: &[std::collections::HashSet<u32>],
+        name: &str,
+    ) -> f64 {
+        let mut sum = 0.0f64;
+        for (q, t) in queries.iter().zip(truths) {
+            let ids: Vec<u32> = idx.search(q, K).unwrap().iter().map(|h| h.id).collect();
+            sum += recall_at_k(&ids, t);
+        }
+        let r = sum / queries.len() as f64;
+        eprintln!("{name} recall@10={r:.3}");
+        r
+    }
+
+    let mut sq8 = ScalarQuantIndex::sq8(DistanceMetric::Cosine);
+    sq8.build(&refs).unwrap();
+    let mut sq4 = ScalarQuantIndex::sq4(DistanceMetric::Cosine);
+    sq4.build(&refs).unwrap();
+
+    eprintln!("sq8 = {} B/vec, sq4 = {} B/vec", dim, dim / 2);
+
+    let r8 = measure_recall(&sq8, &queries, &truths, "sq8(8bit)");
+    let r4 = measure_recall(&sq4, &queries, &truths, "sq4(4bit)");
+
+    assert!(r8 >= 0.97, "sq8 recall {r8:.3} below 0.97");
+    assert!(r4 >= 0.82, "sq4 recall {r4:.3} below 0.82 (turbovec ~0.85)");
+}
