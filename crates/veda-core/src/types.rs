@@ -147,6 +147,12 @@ pub enum IndexType {
     /// full f32) at the same recall envelope for typical
     /// embedding distributions.
     RaBitQExtRerank,
+    /// 4-bit per-dimension scalar quantization. ~D/2 bytes/vec;
+    /// turbovec-competitive recall. Brute-force scan.
+    Sq4,
+    /// 8-bit per-dimension scalar quantization. ~D bytes/vec;
+    /// highest-recall quantized option (~0.99). Brute-force scan.
+    Sq8,
     SuffixArray,
     Inverted,
     Range,
