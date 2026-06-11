@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Niriksha — "Typographic + Bindu": an N whose diagonal is a trail of
+       observation points. Dark-background colorway. On light, use #15181E
+       for the stems and #E8960B for the dots. -->
+  <rect x="10" y="10" width="10" height="44" rx="2" fill="#F2F4F8"/>
+  <rect x="44" y="10" width="10" height="44" rx="2" fill="#F2F4F8"/>
+  <circle cx="25" cy="19" r="3.6" fill="#FFB224"/>
+  <circle cx="32" cy="32" r="4.6" fill="#FFB224"/>
+  <circle cx="39" cy="45" r="3.6" fill="#FFB224"/>
+</svg>

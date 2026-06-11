@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Veda — "Typographic + Bindu": bold geometric V with a saffron bindu
+       (Sanskrit dot, a nod to the name's roots).
+       Dark-background colorway. On light, use #15181E for the V and #E8960B for the bindu. -->
+  <path d="M8 14 L25 54 H39 L56 14 H43.5 L32 42.5 L20.5 14 Z" fill="#F2F4F8"/>
+  <circle cx="56" cy="9" r="5.5" fill="#FFB224"/>
+</svg>
