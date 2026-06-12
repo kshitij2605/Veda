@@ -14,7 +14,7 @@ use crate::filter::record_eval::evaluate_record;
 use crate::filter::FilterExpr;
 
 /// A search request for a single dense vector field.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VectorSearchRequest {
     pub field: String,
     pub query_vector: Vec<f32>,
