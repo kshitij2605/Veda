@@ -31,6 +31,22 @@ curl -X POST http://localhost:6340/v1/collections/products/search \
 
 Scalar indexes (range / inverted / bitmap) pre-filter candidates before the ANN walk.
 
+### JSON-path filtering
+
+Filters can reach *into* `json` fields with dotted paths — the leading segment names the field, the rest traverse the nested document, and the leaf is compared as a scalar:
+
+```bash
+curl -X POST http://localhost:6340/v1/collections/products/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": {"vector": {"field": "embedding", "values": [...]}},
+    "limit": 10,
+    "filter": "meta.user.tier = '\''gold'\''"
+  }'
+```
+
+A missing path simply matches nothing. JSON-path filters work on every filter site — search, record listing, and the [analytics endpoints](/docs/rest-api#analytics).
+
 ## Lexical, sparse, and hybrid queries
 
 The `query` object accepts other retrieval modes over appropriately-typed fields:

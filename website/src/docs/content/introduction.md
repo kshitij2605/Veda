@@ -17,7 +17,7 @@ Most vector databases just store vectors: you bring your own embedding services,
 
 ## Beyond the basics
 
-Veda also ships a distributed data plane (per-shard append-only logs with quorum replication, MVCC snapshot reads at `?at=<ts>`, Percolator-style snapshot-isolation transactions, atomic reindex with alias cutover, cross-region WAN log shipping), JWT authentication with role-based access control, an OpenTelemetry-first observability stack, the **Niriksha** visualization dashboard, and a Python SDK.
+Veda also ships a distributed data plane (per-shard append-only logs with quorum replication, MVCC snapshot reads at `?at=<ts>`, Percolator-style snapshot-isolation transactions, atomic reindex with alias cutover, cross-region WAN log shipping), JWT authentication with role-based access control and per-record [row-level security](/docs/collections#row-level-security), [JSON-path filtering](/docs/search#json-path-filtering), [record TTL](/docs/collections#record-ttl) with a [cron scheduler](/docs/rest-api#scheduled-jobs), [analytics aggregations](/docs/rest-api#analytics), an OpenTelemetry-first observability stack, the **Niriksha** visualization dashboard, and a Python SDK.
 
 ## How these docs are organized
 

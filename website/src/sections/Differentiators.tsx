@@ -23,7 +23,7 @@ export function Differentiators() {
             <div
               key={f.title}
               className={`group bg-[var(--color-bg)] p-7 transition-colors duration-[var(--duration-base)] hover:bg-[var(--color-surface)] ${
-                last ? 'sm:col-span-2 lg:col-span-3' : ''
+                last ? 'lg:col-span-2' : ''
               }`}
             >
               <div className="flex items-center justify-between">

@@ -1,5 +1,5 @@
 import { type ComponentType } from 'react'
-import { Boxes, Cpu, Layers, GitMerge, FileText, Server, Activity } from 'lucide-react'
+import { Boxes, Cpu, Layers, GitMerge, FileText, Server, Activity, Shield } from 'lucide-react'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
 
@@ -60,5 +60,12 @@ export const FEATURES: Feature[] = [
     title: 'OpenTelemetry-first observability',
     blurb:
       'Metrics, traces, and logs out of the box — Prometheus, Tempo, Loki, Grafana — with per-phase search timing and a pre-built dashboard.',
+  },
+  {
+    icon: Shield,
+    accent: 'var(--color-node-1)',
+    title: 'An app platform, not just an index',
+    blurb:
+      'JSON-path filters (meta.user.tier = "gold"), per-record row-level security, record TTL with scheduled sweeps, cron jobs, and OLAP-style aggregations — built into the engine.',
   },
 ]
