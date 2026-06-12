@@ -14,6 +14,8 @@ use veda_query::search::{SearchTimings, VectorSearchRequest};
 use super::collections::ErrorResponse;
 use super::state::AppState;
 use crate::tenant::{self, Tenant};
+use crate::auth::Claims;
+use crate::rls;
 
 // ── Request types ────────────────────────────────────────────────────────
 
@@ -203,6 +205,7 @@ pub async fn search(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(name): Path<String>,
+    claims: Option<axum::Extension<Claims>>,
     Json(mut req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, (StatusCode, Json<ErrorResponse>)> {
     let name = tenant::scope(&tenant, &name);
@@ -227,6 +230,26 @@ pub async fn search(
             )
         })?
     };
+
+    // RLS: if the collection has an owner field, inject an owner-equality
+    // predicate so non-Admin callers only see their own records.
+    if let Some(owner_field) = schema.rls_owner_field() {
+        let is_admin = claims
+            .as_ref()
+            .map(|axum::Extension(c)| rls::is_admin(c))
+            .unwrap_or(true); // auth disabled -> no restriction
+        if !is_admin {
+            let user = claims
+                .as_ref()
+                .map(|axum::Extension(c)| c.sub.clone())
+                .unwrap_or_default();
+            let user_filter = req.filter.as_deref().and_then(|s| {
+                veda_query::filter::parser::FilterParser::parse(s).ok()
+            });
+            let effective = rls::inject_owner_filter(user_filter, owner_field, &user, false);
+            req.filter = effective.map(|f| rls::filter_expr_to_string(&f));
+        }
+    }
 
     // Phase F: resolve the snapshot timestamp once up front so
     // the executor request structs carry it and apply

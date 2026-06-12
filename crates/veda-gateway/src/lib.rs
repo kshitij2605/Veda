@@ -2,6 +2,7 @@ pub mod auth;
 pub mod auth_oidc;
 pub mod log_appliers;
 pub mod rbac;
+pub mod rls;
 pub mod rest;
 pub mod server;
 pub mod streaming;

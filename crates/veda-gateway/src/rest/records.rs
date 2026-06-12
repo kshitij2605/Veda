@@ -20,6 +20,8 @@ use veda_storage::blob_store::ArcBlobStore;
 use super::collections::ErrorResponse;
 use super::state::AppState;
 use crate::tenant::{self, Tenant};
+use crate::auth::Claims;
+use crate::rls;
 
 // ── Request / Response types ─────────────────────────────────────────────
 
@@ -80,6 +82,7 @@ pub async fn insert(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(name): Path<String>,
+    claims: Option<axum::Extension<Claims>>,
     headers: axum::http::HeaderMap,
     Json(req): Json<InsertRequest>,
 ) -> axum::response::Response {
@@ -99,10 +102,35 @@ pub async fn insert(
         .get(crate::rest::txn::TXN_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
-    match insert_impl(state, scoped, txn_id, req).await {
+    let claims = claims.map(|axum::Extension(c)| c);
+    match insert_impl_rls(state, scoped, txn_id, req, claims).await {
         Ok((status, body)) => (status, body).into_response(),
         Err((status, body)) => (status, body).into_response(),
     }
+}
+
+/// RLS-aware insert wrapper. Enforces the owner field on each raw
+/// record before handing off to the real insert implementation.
+async fn insert_impl_rls(
+    state: AppState,
+    name: String,
+    txn_id: Option<String>,
+    mut req: InsertRequest,
+    claims: Option<Claims>,
+) -> Result<(StatusCode, Json<InsertResponse>), (StatusCode, Json<ErrorResponse>)> {
+    // Look up schema to check for rls_owner_field.
+    let rls_field = {
+        let schemas = state.inner.schemas.read().await;
+        schemas.get(&name).and_then(|s| s.rls_owner_field().map(str::to_owned))
+    };
+    if let Some(ref owner_field) = rls_field {
+        let dummy_admin = Claims { sub: String::new(), role: crate::auth::Role::Admin, exp: u64::MAX };
+        let c = claims.as_ref().unwrap_or(&dummy_admin);
+        for raw in req.records.iter_mut() {
+            rls::enforce_owner_on_insert(raw, owner_field, c)?;
+        }
+    }
+    insert_impl(state, name, txn_id, req).await
 }
 
 pub(crate) async fn insert_impl(
@@ -345,10 +373,12 @@ pub async fn list_records(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(name): Path<String>,
+    claims: Option<axum::Extension<Claims>>,
     Query(q): Query<ListRecordsQuery>,
 ) -> Result<Json<ListRecordsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = claims.map(|axum::Extension(c)| c);
     let name = tenant::scope(&tenant, &name);
-    {
+    let rls_field = {
         let schemas = state.inner.schemas.read().await;
         if !schemas.contains_key(&name) {
             return Err((
@@ -358,7 +388,14 @@ pub async fn list_records(
                 }),
             ));
         }
-    }
+        schemas.get(&name).and_then(|s| s.rls_owner_field().map(str::to_owned))
+    };
+    // For RLS: compute the owner value to filter by (None = admin/no-rls = no filter)
+    let rls_owner: Option<String> = rls_field.as_deref().and_then(|_| {
+        claims.as_ref().and_then(|c| {
+            if rls::is_admin(c) { None } else { Some(c.sub.clone()) }
+        })
+    });
 
     let managers = state.inner.segment_managers.read().await;
     let shard_map = managers.get(&name).ok_or_else(|| {
@@ -382,6 +419,9 @@ pub async fn list_records(
                 continue;
             }
             if let Some(rec) = gs.get_record(doc_id) {
+                if !record_passes_rls_owner(rec, rls_field.as_deref(), rls_owner.as_deref()) {
+                    continue;
+                }
                 total += 1;
                 if seen >= q.offset && records.len() < q.limit {
                     records.push(record_to_response(rec));
@@ -396,6 +436,9 @@ pub async fn list_records(
                     continue;
                 }
                 if let Ok(rec) = handle.reader.get_record(doc_id) {
+                    if !record_passes_rls_owner(&rec, rls_field.as_deref(), rls_owner.as_deref()) {
+                        continue;
+                    }
                     total += 1;
                     if seen >= q.offset && records.len() < q.limit {
                         records.push(record_to_response(&rec));
@@ -435,8 +478,10 @@ pub async fn get_record(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path((name, id_str)): Path<(String, String)>,
+    claims: Option<axum::Extension<Claims>>,
     Query(q): Query<GetRecordQuery>,
 ) -> Result<Json<GetRecordResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let claims = claims.map(|axum::Extension(c)| c);
     let name = tenant::scope(&tenant, &name);
     let record_id: Uuid = id_str.parse().map_err(|_| {
         (
@@ -480,8 +525,8 @@ pub async fn get_record(
         }
     }
 
-    // Check collection exists
-    {
+    // Check collection exists; extract rls_owner_field for later.
+    let (rls_field, rls_owner) = {
         let schemas = state.inner.schemas.read().await;
         if !schemas.contains_key(&name) {
             return Err((
@@ -491,7 +536,14 @@ pub async fn get_record(
                 }),
             ));
         }
-    }
+        let field = schemas.get(&name).and_then(|s| s.rls_owner_field().map(str::to_owned));
+        let owner: Option<String> = field.as_deref().and_then(|_| {
+            claims.as_ref().and_then(|c| {
+                if rls::is_admin(c) { None } else { Some(c.sub.clone()) }
+            })
+        });
+        (field, owner)
+    };
 
     let managers = state.inner.segment_managers.read().await;
     let shard_map = managers.get(&name).ok_or_else(|| {
@@ -573,6 +625,11 @@ pub async fn get_record(
                 && rec.id() == record_id
                 && !gs.is_deleted(doc_id)
             {
+                if !record_passes_rls_owner(rec, rls_field.as_deref(), rls_owner.as_deref()) {
+                    return Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
+                        error: format!("record '{record_id}' not found"),
+                    })));
+                }
                 return Ok(Json(record_to_response(rec)));
             }
         }
@@ -586,6 +643,11 @@ pub async fn get_record(
                 if let Ok(rec) = handle.reader.get_record(doc_id)
                     && rec.id() == record_id
                 {
+                    if !record_passes_rls_owner(&rec, rls_field.as_deref(), rls_owner.as_deref()) {
+                        return Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
+                            error: format!("record '{record_id}' not found"),
+                        })));
+                    }
                     return Ok(Json(record_to_response(&rec)));
                 }
             }
@@ -1056,6 +1118,24 @@ fn parse_sparse_value(value: &serde_json::Value, dimension: u32) -> Result<Spars
         }
     } else {
         Err("expected object for sparse_vector field".into())
+    }
+}
+
+
+/// Returns true when the record passes the RLS owner check.
+/// - rls_field is None or rls_owner is None: always pass (no RLS or admin).
+/// - Otherwise: pass only if record[rls_field] == rls_owner.
+fn record_passes_rls_owner(
+    rec: &veda_core::record::Record,
+    rls_field: Option<&str>,
+    rls_owner: Option<&str>,
+) -> bool {
+    match (rls_field, rls_owner) {
+        (Some(field), Some(owner)) => match rec.get(field) {
+            Some(FieldValue::String(s)) => s == owner,
+            _ => false,
+        },
+        _ => true,
     }
 }
 

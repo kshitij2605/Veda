@@ -248,6 +248,13 @@ pub struct CollectionSchema {
     /// decides.
     #[serde(default)]
     use_mvcc: Option<bool>,
+    /// Per-collection Row-Level Security. When ,
+    /// non-Admin users only read/write records where
+    /// . Admin users bypass the
+    /// filter. Existing collections without this field deserialise
+    /// to  (backward-compatible).
+    #[serde(default)]
+    rls_owner_field: Option<String>,
 }
 
 impl CollectionSchema {
@@ -261,6 +268,7 @@ impl CollectionSchema {
             stored_format: None,
             use_log_primary: None,
             use_mvcc: None,
+            rls_owner_field: None,
         }
     }
 
@@ -368,6 +376,11 @@ impl CollectionSchema {
     pub fn replication_factor(&self) -> u32 {
         self.replication_factor
     }
+
+    /// Return the configured RLS owner field name, if any.
+    pub fn rls_owner_field(&self) -> Option<&str> {
+        self.rls_owner_field.as_deref()
+    }
 }
 
 /// Builder for constructing a [`CollectionSchema`] with validation.
@@ -379,6 +392,7 @@ pub struct CollectionSchemaBuilder {
     stored_format: Option<String>,
     use_log_primary: Option<bool>,
     use_mvcc: Option<bool>,
+    rls_owner_field: Option<String>,
 }
 
 impl CollectionSchemaBuilder {
@@ -421,6 +435,12 @@ impl CollectionSchemaBuilder {
     /// shape as `use_log_primary`. Env fallback: `VEDA_MVCC`.
     pub fn use_mvcc(mut self, v: Option<bool>) -> Self {
         self.use_mvcc = v;
+        self
+    }
+
+    /// Enable Row-Level Security for this collection.
+    pub fn rls_owner_field(mut self, field: Option<String>) -> Self {
+        self.rls_owner_field = field;
         self
     }
 
@@ -477,6 +497,7 @@ impl CollectionSchemaBuilder {
             stored_format: self.stored_format,
             use_log_primary: self.use_log_primary,
             use_mvcc: self.use_mvcc,
+            rls_owner_field: self.rls_owner_field,
         })
     }
 }
