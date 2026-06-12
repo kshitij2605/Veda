@@ -35,6 +35,7 @@ futures = "0.3"
 # that, the tokenizer falls back to cjk_bigram with a one-shot warn.
 lindera = { version = "0.32", optional = true, default-features = false, features = ["ipadic"] }
 rust-stemmers = "1"
+zstd = "0.13"
 
 [features]
 default = []

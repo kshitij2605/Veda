@@ -4766,6 +4766,7 @@ dependencies = [
  "veda-core",
  "veda-log",
  "veda-time",
+ "zstd",
 ]
 
 [[package]]
