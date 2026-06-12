@@ -8,6 +8,7 @@ use crate::auth;
 use crate::tenant;
 
 pub mod admin;
+pub mod aggregate;
 pub mod chunk_preview;
 pub mod collections;
 pub mod document;
@@ -153,6 +154,19 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/collections/{name}/evaluate",
             get(evaluate::evaluate),
+        )
+        // Analytics aggregations (Feature E)
+        .route(
+            "/v1/collections/{name}/aggregate",
+            get(aggregate::aggregate),
+        )
+        .route(
+            "/v1/collections/{name}/histogram",
+            get(aggregate::histogram),
+        )
+        .route(
+            "/v1/collections/{name}/field-stats",
+            get(aggregate::field_stats),
         )
         // Cross-encoder rerank
         .route(
