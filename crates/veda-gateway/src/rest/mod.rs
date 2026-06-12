@@ -8,13 +8,15 @@ use crate::auth;
 use crate::tenant;
 
 pub mod admin;
+pub mod aggregate;
 pub mod chunk_preview;
 pub mod collections;
 pub mod document;
 pub mod embed;
 pub mod embed_insert;
-pub mod llm;
 pub mod evaluate;
+pub mod jobs;
+pub mod llm;
 pub mod mcp;
 pub mod metrics_middleware;
 pub mod query_log;
@@ -75,6 +77,15 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/admin/collections/{name}/mvcc_checkpoint",
             post(admin::mvcc_checkpoint),
+        )
+        // Cron-style scheduled jobs (admin-only).
+        .route(
+            "/v1/admin/jobs",
+            get(jobs::list_jobs).post(jobs::create_job),
+        )
+        .route(
+            "/v1/admin/jobs/{name}",
+            delete(jobs::delete_job),
         )
         // Collections
         .route("/v1/collections", post(collections::create_collection))
@@ -143,6 +154,19 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/collections/{name}/evaluate",
             get(evaluate::evaluate),
+        )
+        // Analytics aggregations (Feature E)
+        .route(
+            "/v1/collections/{name}/aggregate",
+            get(aggregate::aggregate),
+        )
+        .route(
+            "/v1/collections/{name}/histogram",
+            get(aggregate::histogram),
+        )
+        .route(
+            "/v1/collections/{name}/field-stats",
+            get(aggregate::field_stats),
         )
         // Cross-encoder rerank
         .route(

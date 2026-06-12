@@ -205,6 +205,7 @@ impl DistributedQueryExecutor {
                 k: query.limit,
                 metric,
                 filter: filter.map(|s| s.to_owned()),
+                filter_expr: None,
                 truncate_to: None,
                 read_ts: None,
             };

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use veda_core::error::{Result, VedaError};
-use veda_core::record::{FieldValue, Record};
+use veda_core::record::{FieldValue, Record, EXPIRES_AT_FIELD};
 use veda_core::schema::CollectionSchema;
 use veda_core::types::{FieldType, SegmentId};
 
@@ -498,6 +498,10 @@ impl SegmentWriter {
                     if let Some(value) = record.get(name) {
                         scalar_data.insert(name.to_owned(), value.clone());
                     }
+                }
+                // Persist the reserved TTL field even when not in the schema.
+                if let Some(v) = record.get(EXPIRES_AT_FIELD) {
+                    scalar_data.insert(EXPIRES_AT_FIELD.to_owned(), v.clone());
                 }
                 let line = serde_json::to_string(&scalar_data)?;
                 writeln!(self.record_writer, "{line}")?;

@@ -16,6 +16,7 @@ use veda_storage::segment_manager::SegmentManager;
 use crate::auth::Role;
 use crate::auth_oidc::AuthMode;
 use crate::rest::saved_objects::SavedObjectStore;
+use crate::scheduler::JobRegistry;
 use veda_coordinator::raft_coordinator::RaftCoordinator;
 use veda_log::ShardLogRegistry;
 use veda_time::{LocalTso, SwappableTso, Tso};
@@ -223,6 +224,10 @@ pub struct AppStateInner {
     /// drained + aborted by [`AppState::abort_appliers`] on collection
     /// drop. Empty unless `VEDA_LOG_APPLIER` is enabled.
     pub applier_handles: std::sync::Mutex<HashMap<String, Vec<tokio::task::AbortHandle>>>,
+    /// Cron-style scheduled-job registry. Persisted to
+    /// `{data_dir}/_scheduled_jobs.json`. Managed by the scheduler
+    /// tick loop spawned in [`crate::server::start_server`].
+    pub job_registry: Arc<JobRegistry>,
 }
 
 /// Build a swappable TSO + the matching `dyn Tso` handle that
@@ -289,6 +294,7 @@ impl AppState {
                 shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
                 applier_handles: std::sync::Mutex::new(HashMap::new()),
+                job_registry: Arc::new(JobRegistry::new(data_dir)),
             }),
         }
     }
@@ -352,6 +358,7 @@ impl AppState {
                 shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
                 applier_handles: std::sync::Mutex::new(HashMap::new()),
+                job_registry: Arc::new(JobRegistry::new(data_dir)),
             }),
         }
     }
@@ -396,6 +403,7 @@ impl AppState {
                 shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
                 applier_handles: std::sync::Mutex::new(HashMap::new()),
+                job_registry: Arc::new(JobRegistry::new(data_dir)),
             }),
         }
     }

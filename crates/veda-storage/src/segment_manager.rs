@@ -365,6 +365,70 @@ impl SegmentManager {
         None
     }
 
+    /// TTL-aware record lookup. Identical to `lookup_record` but also filters
+    /// out records whose `_expires_at` field is `<= now_secs`.
+    ///
+    /// `now_secs` is the caller-supplied Unix epoch SECONDS (injected for
+    /// determinism in tests; use `SystemTime::now()` at query start in prod).
+    ///
+    /// Records without `_expires_at` are always returned (backward compat).
+    pub fn lookup_record_at(&self, id: uuid::Uuid, now_secs: i64) -> Option<Record> {
+        let rec = self.lookup_record(id)?;
+        if rec.is_expired_at(now_secs) { None } else { Some(rec) }
+    }
+
+    /// Scan all segments and mark every record whose `_expires_at <= now_secs`
+    /// as deleted in the delete_bitmap.  Reuses the existing `delete_record`
+    /// path so compaction will later purge these rows physically.
+    ///
+    /// Returns the count of records newly marked deleted.
+    ///
+    /// `now_secs` is injected (not `SystemTime::now()`) for determinism in tests.
+    pub fn sweep_expired(&mut self, now_secs: i64) -> usize {
+        let mut swept = 0usize;
+
+        // Growing segment — iterate doc_ids directly.
+        let count = self.growing.count();
+        for doc_id in 0..count {
+            if self.growing.is_deleted(doc_id) {
+                continue;
+            }
+            let expired = self
+                .growing
+                .get_record(doc_id)
+                .map(|r| r.is_expired_at(now_secs))
+                .unwrap_or(false);
+            if expired {
+                self.growing.mark_deleted(doc_id);
+                swept += 1;
+            }
+        }
+
+        // Sealed segments.
+        for handle in &mut self.sealed_segments {
+            let row_count = handle.metadata.row_count as u32;
+            for doc_id in 0..row_count {
+                if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                    continue;
+                }
+                let expired = handle
+                    .reader
+                    .get_record(doc_id)
+                    .map(|r| r.is_expired_at(now_secs))
+                    .unwrap_or(false);
+                if expired {
+                    handle.reader.delete_bitmap_mut().mark_deleted(doc_id);
+                    swept += 1;
+                }
+            }
+        }
+
+        if swept > 0 {
+            tracing::info!(swept, now_secs, "ttl: swept expired records");
+        }
+        swept
+    }
+
     /// Move a sealed segment to a new storage tier. Hot ↔ Warm transitions
     /// only affect index-build behaviour at the next executor rebuild —
     /// no data is moved. Returns `true` if the segment was found and updated.
