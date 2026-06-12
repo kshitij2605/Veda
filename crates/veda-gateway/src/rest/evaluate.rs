@@ -200,6 +200,7 @@ pub async fn evaluate(
                 k: 2,
                 metric,
                 filter: None,
+                filter_expr: None,
                 truncate_to: None,
                 read_ts: None,
             };

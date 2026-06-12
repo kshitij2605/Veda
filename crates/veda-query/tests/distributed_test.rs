@@ -170,6 +170,7 @@ fn test_single_shard_search() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -212,6 +213,7 @@ fn test_multi_shard_fanout() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -264,6 +266,7 @@ fn test_multi_shard_with_filter() {
         filter: Some("category = 'electronics'".into()),
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -359,6 +362,7 @@ fn test_empty_shard() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -393,6 +397,7 @@ fn test_k_larger_than_total() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -461,6 +466,7 @@ fn test_local_shard_searcher_growing_segment() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (results, _timings) = searcher.search_shard(0, &request).unwrap();
@@ -513,6 +519,7 @@ fn test_local_shard_searcher_with_sealed_segments() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (results, _timings) = searcher.search_shard(0, &request).unwrap();
@@ -576,6 +583,7 @@ fn test_distributed_with_local_shards() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();

@@ -9,6 +9,7 @@ use veda_core::metrics as m;
 use veda_core::types::DistanceMetric;
 use veda_query::distributed::DistributedQueryExecutor;
 use veda_query::fusion::{FieldQuery, FusionStrategy, MultiVectorQuery};
+use veda_query::filter::ast::FilterExpr;
 use veda_query::search::{SearchTimings, VectorSearchRequest};
 
 use super::collections::ErrorResponse;
@@ -23,6 +24,9 @@ use crate::rls;
 pub struct SearchRequest {
     pub query: QueryBody,
     pub filter: Option<String>,
+    /// Pre-parsed filter expression set by RLS injection. Not deserialized from JSON.
+    #[serde(skip)]
+    pub filter_expr: Option<FilterExpr>,
     #[serde(default = "default_limit")]
     pub limit: usize,
     #[serde(default)]
@@ -246,8 +250,10 @@ pub async fn search(
             let user_filter = req.filter.as_deref().and_then(|s| {
                 veda_query::filter::parser::FilterParser::parse(s).ok()
             });
-            let effective = rls::inject_owner_filter(user_filter, owner_field, &user, false);
-            req.filter = effective.map(|f| rls::filter_expr_to_string(&f));
+            // Inject the trusted owner predicate at the AST level.
+            // Never re-serialize to a string: a quote in the username would
+            // break out of the string literal and bypass RLS.
+            req.filter_expr = rls::inject_owner_filter(user_filter, owner_field, &user, false);
         }
     }
 
@@ -376,6 +382,7 @@ pub async fn search(
             k: req.limit,
             metric,
             filter: req.filter.clone(),
+            filter_expr: req.filter_expr.clone(),
             read_ts: effective_read_ts,
         };
         let (response, timings) = executor
@@ -684,6 +691,7 @@ fn execute_single_vector(
         k: req.limit,
         metric,
         filter: req.filter.clone(),
+        filter_expr: req.filter_expr.clone(),
         truncate_to: req.truncate_to,
         read_ts,
     };
@@ -1081,6 +1089,7 @@ fn execute_sparse_vector(
         k: req.limit,
         metric,
         filter: req.filter.clone(),
+        filter_expr: req.filter_expr.clone(),
         read_ts,
     };
 

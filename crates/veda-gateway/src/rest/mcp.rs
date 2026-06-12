@@ -366,6 +366,7 @@ async fn tool_search(
         k: limit,
         metric,
         filter,
+        filter_expr: None,
         truncate_to: None,
         read_ts: None,
     };
