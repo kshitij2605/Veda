@@ -13,8 +13,9 @@ pub mod collections;
 pub mod document;
 pub mod embed;
 pub mod embed_insert;
-pub mod llm;
 pub mod evaluate;
+pub mod jobs;
+pub mod llm;
 pub mod mcp;
 pub mod metrics_middleware;
 pub mod query_log;
@@ -75,6 +76,15 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/admin/collections/{name}/mvcc_checkpoint",
             post(admin::mvcc_checkpoint),
+        )
+        // Cron-style scheduled jobs (admin-only).
+        .route(
+            "/v1/admin/jobs",
+            get(jobs::list_jobs).post(jobs::create_job),
+        )
+        .route(
+            "/v1/admin/jobs/{name}",
+            delete(jobs::delete_job),
         )
         // Collections
         .route("/v1/collections", post(collections::create_collection))

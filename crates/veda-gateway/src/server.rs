@@ -40,6 +40,10 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     // log_appliers::applier_enabled).
     let _appliers = crate::log_appliers::spawn_for_all_known_collections(app_state.clone()).await;
 
+    // Cron-style scheduled-job scheduler tick loop (60s interval).
+    let _scheduler = crate::scheduler::spawn_scheduler(app_state.clone());
+    tracing::info!("scheduler: tick loop started (60s interval)");
+
     // Optional NATS streaming ingestion worker.
     if let Ok(url) = std::env::var("VEDA_STREAMING_NATS")
         && !url.is_empty()

@@ -4,6 +4,7 @@ pub mod log_appliers;
 pub mod rbac;
 pub mod rls;
 pub mod rest;
+pub mod scheduler;
 pub mod server;
 pub mod streaming;
 pub mod tenant;
