@@ -34,6 +34,11 @@ pub struct VectorSearchRequest {
     /// superseded versions never surface as hits. `None` =
     /// no version filtering (legacy / non-MVCC).
     pub read_ts: Option<u128>,
+    /// Pre-parsed filter expression. When set, the executor uses this directly
+    /// instead of parsing `filter`. Allows the gateway to inject a trusted
+    /// owner predicate (RLS) at the AST level without string round-tripping.
+    #[serde(skip)]
+    pub filter_expr: Option<FilterExpr>,
 }
 
 /// A search request for a single sparse vector field.
@@ -46,6 +51,8 @@ pub struct SparseSearchRequest {
     pub filter: Option<String>,
     /// Phase F MVCC snapshot timestamp. See [`VectorSearchRequest::read_ts`].
     pub read_ts: Option<u128>,
+    /// Pre-parsed filter expression (RLS-safe, bypasses string round-trip).
+    pub filter_expr: Option<FilterExpr>,
 }
 
 /// A search request for a single multi-vector (ColPali) field.
@@ -58,6 +65,8 @@ pub struct MultiVectorSearchRequest {
     pub filter: Option<String>,
     /// Phase F MVCC snapshot timestamp. See [`VectorSearchRequest::read_ts`].
     pub read_ts: Option<u128>,
+    /// Pre-parsed filter expression (RLS-safe, bypasses string round-trip).
+    pub filter_expr: Option<FilterExpr>,
 }
 
 /// A search response containing scored records.
@@ -108,10 +117,16 @@ impl SearchExecutor {
         use std::time::Instant;
 
         // 1. Parse filter expression.
+        // Prefer a pre-parsed filter_expr (e.g. injected by RLS at the AST level)
+        // so trusted predicates never travel through the string serializer.
         let filter_start = Instant::now();
-        let filter_expr: Option<FilterExpr> = match &request.filter {
-            Some(filter_str) => Some(FilterParser::parse(filter_str)?),
-            None => None,
+        let filter_expr: Option<FilterExpr> = if let Some(expr) = request.filter_expr.clone() {
+            Some(expr)
+        } else {
+            match &request.filter {
+                Some(filter_str) => Some(FilterParser::parse(filter_str)?),
+                None => None,
+            }
         };
         let filter_ms = filter_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -174,9 +189,13 @@ impl SearchExecutor {
         use std::time::Instant;
 
         let filter_start = Instant::now();
-        let filter_expr: Option<FilterExpr> = match &request.filter {
-            Some(s) => Some(FilterParser::parse(s)?),
-            None => None,
+        let filter_expr: Option<FilterExpr> = if let Some(expr) = request.filter_expr.clone() {
+            Some(expr)
+        } else {
+            match &request.filter {
+                Some(s) => Some(FilterParser::parse(s)?),
+                None => None,
+            }
         };
         let filter_ms = filter_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -343,9 +362,13 @@ impl SearchExecutor {
         use veda_core::simd;
 
         let filter_start = Instant::now();
-        let filter_expr: Option<FilterExpr> = match &request.filter {
-            Some(s) => Some(FilterParser::parse(s)?),
-            None => None,
+        let filter_expr: Option<FilterExpr> = if let Some(expr) = request.filter_expr.clone() {
+            Some(expr)
+        } else {
+            match &request.filter {
+                Some(s) => Some(FilterParser::parse(s)?),
+                None => None,
+            }
         };
         let filter_ms = filter_start.elapsed().as_secs_f64() * 1000.0;
 

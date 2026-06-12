@@ -82,6 +82,7 @@ fn test_unfiltered_search() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) =
@@ -122,6 +123,7 @@ fn test_filtered_search_category() {
         filter: Some("category = 'electronics'".into()),
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) =
@@ -166,6 +168,7 @@ fn test_filtered_search_range() {
         filter: Some("price BETWEEN 100 AND 200".into()),
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) =
@@ -206,6 +209,7 @@ fn test_combined_filter() {
         filter: Some("category = 'electronics' AND price < 200".into()),
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) =
@@ -271,6 +275,7 @@ fn test_sealed_segment_search() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
@@ -324,6 +329,7 @@ fn test_sealed_segment_filtered_search() {
         filter: Some("category = 'books'".into()),
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
@@ -394,6 +400,7 @@ fn test_multi_segment_merge() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) =
@@ -447,6 +454,7 @@ fn test_k_zero_returns_empty() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) =
@@ -473,6 +481,7 @@ fn test_k_larger_than_matching() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) =
@@ -501,6 +510,7 @@ fn test_no_segments_empty_result() {
         filter: None,
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings): (veda_query::search::SearchResponse, _) =
@@ -542,6 +552,7 @@ fn test_sealed_segment_range_filter() {
         filter: Some("price BETWEEN 100 AND 200".into()),
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
@@ -583,6 +594,7 @@ fn test_filter_matches_nothing() {
         filter: Some("category = 'nonexistent'".into()),
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) =
@@ -609,6 +621,7 @@ fn test_record_eval_ne_filter() {
         filter: Some("category != 'electronics'".into()),
     truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
 
     let (response, _timings) =
