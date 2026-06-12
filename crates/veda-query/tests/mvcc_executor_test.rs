@@ -48,6 +48,7 @@ fn search_at_past_ts_filters_future_versions() {
         filter: None,
         truncate_to: None,
         read_ts: Some(150),
+        filter_expr: None,
     };
     let (hits, _t) = searcher.search_shard(0, &query).unwrap();
     // Only the record committed at ts=100 is visible at read_ts=150.
@@ -72,6 +73,7 @@ fn search_at_far_future_ts_sees_every_visible_record() {
         filter: None,
         truncate_to: None,
         read_ts: Some(u128::MAX),
+        filter_expr: None,
     };
     let (hits, _t) = searcher.search_shard(0, &query).unwrap();
     assert_eq!(hits.len(), 3);
@@ -102,6 +104,7 @@ fn search_supersession_drops_older_version_at_high_read_ts() {
         filter: None,
         truncate_to: None,
         read_ts: Some(250),
+        filter_expr: None,
     };
     let (hits, _t) = searcher.search_shard(0, &query).unwrap();
     // v1 has been superseded; only one hit, and it's v2.
@@ -134,6 +137,7 @@ fn search_without_read_ts_returns_every_doc() {
         filter: None,
         truncate_to: None,
         read_ts: None,
+        filter_expr: None,
     };
     let (hits, _t) = searcher.search_shard(0, &query).unwrap();
     assert_eq!(hits.len(), 2);
@@ -167,6 +171,7 @@ fn sealed_segment_carries_commit_ts_through_seal_reopen() {
         filter: None,
         truncate_to: None,
         read_ts: Some(150),
+        filter_expr: None,
     };
     let (hits, _t) = searcher.search_shard(0, &query).unwrap();
     assert_eq!(
@@ -198,6 +203,7 @@ fn sealed_segment_without_commit_ts_treats_every_doc_visible() {
         filter: None,
         truncate_to: None,
         read_ts: Some(0), // would drop every MVCC doc; legacy stays
+        filter_expr: None,
     };
     let (hits, _t) = searcher.search_shard(0, &query).unwrap();
     assert_eq!(hits.len(), 2, "legacy sealed segment should pass through");

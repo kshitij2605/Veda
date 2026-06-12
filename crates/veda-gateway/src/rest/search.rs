@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -9,11 +9,14 @@ use veda_core::metrics as m;
 use veda_core::types::DistanceMetric;
 use veda_query::distributed::DistributedQueryExecutor;
 use veda_query::fusion::{FieldQuery, FusionStrategy, MultiVectorQuery};
+use veda_query::filter::ast::FilterExpr;
 use veda_query::search::{SearchTimings, VectorSearchRequest};
 
 use super::collections::ErrorResponse;
 use super::state::AppState;
 use crate::tenant::{self, Tenant};
+use crate::auth::Claims;
+use crate::rls;
 
 // ── Request types ────────────────────────────────────────────────────────
 
@@ -21,6 +24,9 @@ use crate::tenant::{self, Tenant};
 pub struct SearchRequest {
     pub query: QueryBody,
     pub filter: Option<String>,
+    /// Pre-parsed filter expression set by RLS injection. Not deserialized from JSON.
+    #[serde(skip)]
+    pub filter_expr: Option<FilterExpr>,
     #[serde(default = "default_limit")]
     pub limit: usize,
     #[serde(default)]
@@ -203,6 +209,7 @@ pub async fn search(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(name): Path<String>,
+    claims: Option<axum::Extension<Claims>>,
     Json(mut req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, (StatusCode, Json<ErrorResponse>)> {
     let name = tenant::scope(&tenant, &name);
@@ -227,6 +234,28 @@ pub async fn search(
             )
         })?
     };
+
+    // RLS: if the collection has an owner field, inject an owner-equality
+    // predicate so non-Admin callers only see their own records.
+    if let Some(owner_field) = schema.rls_owner_field() {
+        let is_admin = claims
+            .as_ref()
+            .map(|axum::Extension(c)| rls::is_admin(c))
+            .unwrap_or(true); // auth disabled -> no restriction
+        if !is_admin {
+            let user = claims
+                .as_ref()
+                .map(|axum::Extension(c)| c.sub.clone())
+                .unwrap_or_default();
+            let user_filter = req.filter.as_deref().and_then(|s| {
+                veda_query::filter::parser::FilterParser::parse(s).ok()
+            });
+            // Inject the trusted owner predicate at the AST level.
+            // Never re-serialize to a string: a quote in the username would
+            // break out of the string literal and bypass RLS.
+            req.filter_expr = rls::inject_owner_filter(user_filter, owner_field, &user, false);
+        }
+    }
 
     // Phase F: resolve the snapshot timestamp once up front so
     // the executor request structs carry it and apply
@@ -353,6 +382,7 @@ pub async fn search(
             k: req.limit,
             metric,
             filter: req.filter.clone(),
+            filter_expr: req.filter_expr.clone(),
             read_ts: effective_read_ts,
         };
         let (response, timings) = executor
@@ -481,7 +511,13 @@ pub async fn search(
     // Populate fields on each hit by looking up the stored record. Without
     // this every SearchHit.fields is an empty Map, which is unusable for
     // RAG — callers would have to do N follow-up GET-by-id calls.
-    populate_hit_fields(&state, &name, &schema, &mut results).await;
+    // TTL: capture now once; populate_hit_fields drops hits whose record
+    // has expired (no sweep required).
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let results = populate_hit_fields(&state, &name, &schema, results, now_secs).await;
 
     let took_ms = start.elapsed().as_millis() as u64;
     metrics::histogram!(m::SEARCH_DURATION, "collection" => crate::tenant::display_name(&name).to_owned())
@@ -533,6 +569,11 @@ async fn apply_rerank(
         )
     })?;
     // O(1) per-candidate text lookup via the UUID index.
+    // Use lookup_record_at so expired records are excluded from reranking too.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let mut texts: Vec<String> = Vec::with_capacity(results.len());
     let mut keep_indices: Vec<usize> = Vec::with_capacity(results.len());
     for (i, hit) in results.iter().enumerate() {
@@ -540,7 +581,7 @@ async fn apply_rerank(
             continue;
         };
         for sm in shard_map.values() {
-            if let Some(rec) = sm.lookup_record(id) {
+            if let Some(rec) = sm.lookup_record_at(id, now_secs) {
                 if let Some(FieldValue::String(s)) = rec.get(&cfg.field) {
                     texts.push(s.clone());
                     keep_indices.push(i);
@@ -589,16 +630,17 @@ async fn populate_hit_fields(
     state: &AppState,
     collection: &str,
     schema: &veda_core::schema::CollectionSchema,
-    hits: &mut [SearchHit],
-) {
+    hits: Vec<SearchHit>,
+    now_secs: i64,
+) -> Vec<SearchHit> {
     use veda_core::types::FieldType;
 
     if hits.is_empty() {
-        return;
+        return hits;
     }
     let managers = state.inner.segment_managers.read().await;
     let Some(shard_map) = managers.get(collection) else {
-        return;
+        return hits;
     };
 
     let vector_field_names: std::collections::HashSet<&str> = schema
@@ -612,13 +654,14 @@ async fn populate_hit_fields(
     // SegmentManager.lookup_record helper walks growing-segment HashMap
     // then sealed-segment per-segment HashMap, returning a fully
     // materialized Record. No more collection-wide scans.
-    for hit in hits.iter_mut() {
+    let mut out: Vec<SearchHit> = Vec::with_capacity(hits.len());
+    for mut hit in hits {
         let Ok(id) = hit.id.parse::<uuid::Uuid>() else {
             continue;
         };
         let mut record: Option<veda_core::record::Record> = None;
         for sm in shard_map.values() {
-            if let Some(rec) = sm.lookup_record(id) {
+            if let Some(rec) = sm.lookup_record_at(id, now_secs) {
                 record = Some(rec);
                 break;
             }
@@ -645,7 +688,9 @@ async fn populate_hit_fields(
             }
         }
         hit.fields = map;
+        out.push(hit);
     }
+    out
 }
 
 fn execute_single_vector(
@@ -661,6 +706,7 @@ fn execute_single_vector(
         k: req.limit,
         metric,
         filter: req.filter.clone(),
+        filter_expr: req.filter_expr.clone(),
         truncate_to: req.truncate_to,
         read_ts,
     };
@@ -1058,6 +1104,7 @@ fn execute_sparse_vector(
         k: req.limit,
         metric,
         filter: req.filter.clone(),
+        filter_expr: req.filter_expr.clone(),
         read_ts,
     };
 

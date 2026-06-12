@@ -411,6 +411,7 @@ impl ShardSearcher for LocalShardSearcher {
                     k: request.k,
                     metric: request.metric,
                     filter: request.filter.clone(),
+                    filter_expr: request.filter_expr.clone(),
                     truncate_to: None, // already truncated
                     read_ts: request.read_ts,
                 };
@@ -581,9 +582,14 @@ impl ShardSearcher for LocalShardSearcher {
 
         // Search filter -- shared across segments.
         let filter_start = Instant::now();
-        let filter_expr: Option<crate::filter::FilterExpr> = match &request.filter {
-            Some(s) => Some(crate::filter::parser::FilterParser::parse(s)?),
-            None => None,
+        // Prefer a pre-parsed filter_expr (e.g. injected by RLS at AST level).
+        let filter_expr: Option<crate::filter::FilterExpr> = if let Some(expr) = request.filter_expr.clone() {
+            Some(expr)
+        } else {
+            match &request.filter {
+                Some(s) => Some(crate::filter::parser::FilterParser::parse(s)?),
+                None => None,
+            }
         };
         let filter_ms = filter_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -823,9 +829,14 @@ fn search_sealed_segment_ref(
     let row_count = reader.row_count() as u32;
     let segment_id = reader.metadata().id;
 
-    let filter_expr: Option<FilterExpr> = match &request.filter {
-        Some(filter_str) => Some(FilterParser::parse(filter_str)?),
-        None => None,
+    // Prefer a pre-parsed filter_expr (e.g. injected by RLS at AST level).
+    let filter_expr: Option<FilterExpr> = if let Some(expr) = request.filter_expr.clone() {
+        Some(expr)
+    } else {
+        match &request.filter {
+            Some(filter_str) => Some(FilterParser::parse(filter_str)?),
+            None => None,
+        }
     };
 
     // MRL truncation: brute-force at truncated dim instead of using the

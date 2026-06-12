@@ -316,7 +316,7 @@ impl ColumnarWriter {
         record: &veda_core::record::Record,
         schema: &veda_core::schema::CollectionSchema,
     ) -> Result<u32> {
-        use veda_core::record::FieldValue;
+        use veda_core::record::{FieldValue, EXPIRES_AT_FIELD};
         use veda_core::types::FieldType;
 
         let mut fields: HashMap<String, (ColumnType, FieldValue)> = HashMap::new();
@@ -342,6 +342,14 @@ impl ColumnarWriter {
                 }
                 fields.insert(name.to_owned(), (ct, v.clone()));
             }
+        }
+        // Persist the reserved TTL field as an Int64 column even when
+        // it is not declared in the schema.
+        if let Some(FieldValue::Int64(ts)) = record.get(EXPIRES_AT_FIELD) {
+            fields.insert(
+                EXPIRES_AT_FIELD.to_owned(),
+                (ColumnType::Int64, FieldValue::Int64(*ts)),
+            );
         }
         let doc_id = self.ids.len() as u32;
         self.push(id, &fields)?;

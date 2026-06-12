@@ -79,6 +79,10 @@ pub struct CreateCollectionRequest {
     /// or nothing does.
     #[serde(default)]
     pub seed_records: Option<Vec<serde_json::Map<String, serde_json::Value>>>,
+    /// Per-collection Row-Level Security. When set, non-Admin users
+    /// can only read/write records where . Admin users bypass the filter entirely.
+    #[serde(default)]
+    pub rls_owner_field: Option<String>,
 }
 
 fn default_shard_count() -> u32 {
@@ -255,7 +259,8 @@ async fn create_collection_impl(
         .shard_count(req.shard_count)
         .replication_factor(req.replication_factor)
         .use_log_primary(req.use_log_primary)
-        .use_mvcc(req.use_mvcc);
+        .use_mvcc(req.use_mvcc)
+        .rls_owner_field(req.rls_owner_field.clone());
     if let Some(fmt) = req.stored_format.as_deref() {
         match fmt.to_lowercase().as_str() {
             "jsonl" | "columnar" => builder = builder.stored_format(fmt.to_lowercase()),

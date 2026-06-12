@@ -7,6 +7,13 @@ use crate::sparse::SparseVec;
 use crate::types::RecordId;
 use crate::vector::DenseVector;
 
+/// Reserved field name for per-record TTL (expiry).
+///
+/// The value must be a `FieldValue::Int64` holding a Unix epoch SECONDS
+/// timestamp. A record is considered expired at read time when
+/// `_expires_at <= now_secs`. Records without this field never expire.
+pub const EXPIRES_AT_FIELD: &str = "_expires_at";
+
 /// A dynamically-typed field value that can be stored in a [`Record`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FieldValue {
@@ -87,6 +94,28 @@ impl Record {
     /// Check whether the record contains the named field.
     pub fn has_field(&self, field: &str) -> bool {
         self.fields.contains_key(field)
+    }
+
+    /// Return the TTL expiry as Unix epoch SECONDS, or `None` if not set.
+    ///
+    /// Reads `_expires_at` as an `Int64`. Any other variant (or absent field)
+    /// is treated as "no expiry".
+    pub fn expires_at_secs(&self) -> Option<i64> {
+        match self.fields.get(EXPIRES_AT_FIELD) {
+            Some(FieldValue::Int64(ts)) => Some(*ts),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if this record has expired at `now_secs`.
+    ///
+    /// `now_secs` is the caller-supplied Unix epoch SECONDS (injected for
+    /// determinism in tests). Records without `_expires_at` never expire.
+    pub fn is_expired_at(&self, now_secs: i64) -> bool {
+        match self.expires_at_secs() {
+            Some(ts) => ts <= now_secs,
+            None => false,
+        }
     }
 }
 
