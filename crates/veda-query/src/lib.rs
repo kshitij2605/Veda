@@ -8,4 +8,5 @@ pub mod light_colpali;
 pub mod local_shard;
 pub mod muvera;
 pub mod plaid;
+pub mod remote_shard;
 pub mod search;

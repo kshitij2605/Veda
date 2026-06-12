@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package veda.query;
+
+// Phase D multi-node distributed search transport.
+//
+// Mirrors the veda-log tonic pattern: the query itself rides as an
+// opaque `bytes` payload (bincode of `VectorSearchRequest`) so we do
+// not have to re-model the whole query grammar in protobuf. Only the
+// lightweight Phase-1 hit payload (ids + scores) crosses the wire on
+// SearchShard — never vectors or full documents. Full records are
+// pulled separately, on demand, via FetchRecords for the final top-k.
+service ShardSearch {
+  rpc SearchShard(SearchShardRequest) returns (SearchShardReply);
+  rpc FetchRecords(FetchRecordsRequest) returns (FetchRecordsReply);
+}
+
+message SearchShardRequest {
+  string collection = 1;
+  uint32 shard_id = 2;
+  // bincode encoding of veda_query::search::VectorSearchRequest.
+  bytes query = 3;
+  uint32 k = 4;
+}
+
+// Lightweight Phase-1 hit: ids + score only. No vectors / documents.
+message ScoredRecordMsg {
+  bytes id = 1;          // 16-byte UUID
+  bytes segment_id = 2;  // 16-byte UUID
+  uint32 doc_id = 3;
+  float distance = 4;
+}
+
+message SearchShardReply {
+  repeated ScoredRecordMsg results = 1;
+  uint32 total_candidates = 2;
+  // Per-phase timings (ms), aggregated for this shard.
+  double filter_ms = 3;
+  double ann_search_ms = 4;
+  double scoring_ms = 5;
+}
+
+message FetchRecordsRequest {
+  string collection = 1;
+  repeated bytes ids = 2; // each a 16-byte UUID
+}
+
+message FetchRecordsReply {
+  // bincode encoding of veda_core::record::Record, one per found id.
+  // Order matches request order, skipping ids not found on this node.
+  repeated bytes records = 1;
+}
