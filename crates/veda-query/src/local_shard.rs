@@ -149,6 +149,15 @@ impl LocalShardSearcher {
         }
     }
 
+    /// Look up a full record by UUID across this shard's segments.
+    ///
+    /// Passthrough to the underlying `SegmentManager` so the gRPC fetch
+    /// service (`remote_shard::ShardSearchService::fetch_records`) can
+    /// resolve top-k ids to full records without exposing the manager.
+    pub fn lookup_record(&self, id: Uuid) -> Option<veda_core::record::Record> {
+        self.segment_manager.lookup_record(id)
+    }
+
     /// Build per-field vector indexes for all sealed segments.
     ///
     /// The index type is taken from the field definition's `index_type`
