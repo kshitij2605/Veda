@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -511,7 +511,13 @@ pub async fn search(
     // Populate fields on each hit by looking up the stored record. Without
     // this every SearchHit.fields is an empty Map, which is unusable for
     // RAG — callers would have to do N follow-up GET-by-id calls.
-    populate_hit_fields(&state, &name, &schema, &mut results).await;
+    // TTL: capture now once; populate_hit_fields drops hits whose record
+    // has expired (no sweep required).
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let results = populate_hit_fields(&state, &name, &schema, results, now_secs).await;
 
     let took_ms = start.elapsed().as_millis() as u64;
     metrics::histogram!(m::SEARCH_DURATION, "collection" => crate::tenant::display_name(&name).to_owned())
@@ -563,6 +569,11 @@ async fn apply_rerank(
         )
     })?;
     // O(1) per-candidate text lookup via the UUID index.
+    // Use lookup_record_at so expired records are excluded from reranking too.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let mut texts: Vec<String> = Vec::with_capacity(results.len());
     let mut keep_indices: Vec<usize> = Vec::with_capacity(results.len());
     for (i, hit) in results.iter().enumerate() {
@@ -570,7 +581,7 @@ async fn apply_rerank(
             continue;
         };
         for sm in shard_map.values() {
-            if let Some(rec) = sm.lookup_record(id) {
+            if let Some(rec) = sm.lookup_record_at(id, now_secs) {
                 if let Some(FieldValue::String(s)) = rec.get(&cfg.field) {
                     texts.push(s.clone());
                     keep_indices.push(i);
@@ -619,16 +630,17 @@ async fn populate_hit_fields(
     state: &AppState,
     collection: &str,
     schema: &veda_core::schema::CollectionSchema,
-    hits: &mut [SearchHit],
-) {
+    hits: Vec<SearchHit>,
+    now_secs: i64,
+) -> Vec<SearchHit> {
     use veda_core::types::FieldType;
 
     if hits.is_empty() {
-        return;
+        return hits;
     }
     let managers = state.inner.segment_managers.read().await;
     let Some(shard_map) = managers.get(collection) else {
-        return;
+        return hits;
     };
 
     let vector_field_names: std::collections::HashSet<&str> = schema
@@ -642,13 +654,14 @@ async fn populate_hit_fields(
     // SegmentManager.lookup_record helper walks growing-segment HashMap
     // then sealed-segment per-segment HashMap, returning a fully
     // materialized Record. No more collection-wide scans.
-    for hit in hits.iter_mut() {
+    let mut out: Vec<SearchHit> = Vec::with_capacity(hits.len());
+    for mut hit in hits {
         let Ok(id) = hit.id.parse::<uuid::Uuid>() else {
             continue;
         };
         let mut record: Option<veda_core::record::Record> = None;
         for sm in shard_map.values() {
-            if let Some(rec) = sm.lookup_record(id) {
+            if let Some(rec) = sm.lookup_record_at(id, now_secs) {
                 record = Some(rec);
                 break;
             }
@@ -675,7 +688,9 @@ async fn populate_hit_fields(
             }
         }
         hit.fields = map;
+        out.push(hit);
     }
+    out
 }
 
 fn execute_single_vector(

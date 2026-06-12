@@ -408,6 +408,11 @@ pub async fn list_records(
     })?;
 
     // Two-pass: count non-deleted records, then collect window [offset, offset+limit).
+    // TTL: records whose _expires_at <= now_secs are excluded at query time.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let mut total: u64 = 0;
     let mut seen: usize = 0;
     let mut records: Vec<GetRecordResponse> = Vec::with_capacity(q.limit);
@@ -420,6 +425,9 @@ pub async fn list_records(
             }
             if let Some(rec) = gs.get_record(doc_id) {
                 if !record_passes_rls_owner(rec, rls_field.as_deref(), rls_owner.as_deref()) {
+                    continue;
+                }
+                if rec.is_expired_at(now_secs) {
                     continue;
                 }
                 total += 1;
@@ -437,6 +445,9 @@ pub async fn list_records(
                 }
                 if let Ok(rec) = handle.reader.get_record(doc_id) {
                     if !record_passes_rls_owner(&rec, rls_field.as_deref(), rls_owner.as_deref()) {
+                        continue;
+                    }
+                    if rec.is_expired_at(now_secs) {
                         continue;
                     }
                     total += 1;
@@ -620,6 +631,11 @@ pub async fn get_record(
     for sm in shard_map.values() {
         // Check growing segment
         let gs = sm.growing_segment();
+        // Compute now_secs for TTL exclusion at query time.
+        let now_secs_get = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         for doc_id in 0..gs.count() {
             if let Some(rec) = gs.get_record(doc_id)
                 && rec.id() == record_id
@@ -628,6 +644,11 @@ pub async fn get_record(
                 if !record_passes_rls_owner(rec, rls_field.as_deref(), rls_owner.as_deref()) {
                     return Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
                         error: format!("record '{record_id}' not found"),
+                    })));
+                }
+                if rec.is_expired_at(now_secs_get) {
+                    return Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
+                        error: format!("record not found"),
                     })));
                 }
                 return Ok(Json(record_to_response(rec)));
@@ -646,6 +667,11 @@ pub async fn get_record(
                     if !record_passes_rls_owner(&rec, rls_field.as_deref(), rls_owner.as_deref()) {
                         return Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
                             error: format!("record '{record_id}' not found"),
+                        })));
+                    }
+                    if rec.is_expired_at(now_secs_get) {
+                        return Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
+                            error: format!("record not found"),
                         })));
                     }
                     return Ok(Json(record_to_response(&rec)));
