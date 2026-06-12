@@ -197,13 +197,29 @@ impl JobRegistry {
     }
 }
 
-/// Dispatch a job kind. Currently all stubs; wiring to real ops is deferred.
-async fn dispatch(kind: &JobKind, _state: &AppState) {
+/// Dispatch a job kind.
+///
+/// `TtlSweep` calls `SegmentManager::sweep_expired` on all shards of the
+/// named collection using the real wall-clock time at dispatch.
+/// All other kinds remain stubs — their wiring is deferred to later phases.
+async fn dispatch(kind: &JobKind, state: &AppState) {
     match kind {
         JobKind::TtlSweep { collection } => {
+            let now_secs = Utc::now().timestamp();
+            let mut total_swept = 0usize;
+            {
+                let mut mgrs = state.inner.segment_managers.write().await;
+                if let Some(shards) = mgrs.get_mut(collection.as_str()) {
+                    for sm in shards.values_mut() {
+                        total_swept += sm.sweep_expired(now_secs);
+                    }
+                }
+            }
             tracing::info!(
                 collection = %collection,
-                "scheduler: would run TTL sweep — TODO: wire to real TTL sweep op"
+                swept = total_swept,
+                now_secs,
+                "scheduler: TTL sweep complete"
             );
         }
         JobKind::Reindex { collection } => {
