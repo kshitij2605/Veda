@@ -25,6 +25,14 @@
 //! responsibility. A writer that encounters a record with one of those
 //! values for a scalar field will error and the caller should fall
 //! back to JSONL.
+//!
+//! ## Compression
+//!
+//! When `ColumnarWriter::new_compressed` is used, each column's `.col`
+//! payload is zstd-compressed before writing. The `.meta` file carries
+//! a `compressed: true` flag so the reader decompresses on open. Old
+//! segments with `compressed: false` (or the field absent) load via the
+//! original mmap path — backward-compatible with no migration required.
 
 use std::collections::HashMap;
 use std::fs;
@@ -41,6 +49,9 @@ use veda_core::record::FieldValue;
 const COLUMNS_DIR: &str = "columns";
 const ID_COL: &str = "__record_id__.col";
 const FORMAT_MARKER: &str = "storage_format.txt";
+
+/// Default zstd compression level (1–22; 3 is the library default).
+const ZSTD_LEVEL: i32 = 3;
 
 /// On-disk type tag stored in each column's `.meta` so the reader
 /// knows how to decode bytes without re-checking the segment schema.
@@ -80,6 +91,11 @@ struct ColumnMeta {
     /// to allocate a bitmap.
     #[serde(default)]
     null_bitmap: Vec<u8>,
+    /// `true` when the `.col` file is zstd-compressed. Old segments
+    /// that predate compression will deserialize this as `false` via
+    /// the serde default.
+    #[serde(default)]
+    compressed: bool,
 }
 
 /// Writer for the columnar format. One instance covers all scalar /
@@ -88,6 +104,8 @@ pub struct ColumnarWriter {
     dir: PathBuf,
     columns: HashMap<String, ColumnAccumulator>,
     ids: Vec<Uuid>,
+    /// When true, `seal` writes zstd-compressed `.col` files.
+    compress: bool,
 }
 
 struct ColumnAccumulator {
@@ -180,11 +198,18 @@ impl ColumnAccumulator {
         self.null_bits.push(true);
     }
 
-    fn write(&self, dir: &Path, field: &str) -> Result<()> {
-        // <field>.col — payload bytes
+    fn write(&self, dir: &Path, field: &str, compress: bool) -> Result<()> {
+        // <field>.col — payload bytes, optionally zstd-compressed
         let col_path = dir.join(format!("{field}.col"));
-        fs::write(&col_path, &self.bytes)?;
-        // <field>.idx — offsets for variable-width
+        if compress {
+            let compressed = zstd::encode_all(self.bytes.as_slice(), ZSTD_LEVEL)
+                .map_err(|e| VedaError::Storage(format!("columnar: zstd compress {field}: {e}")))?;
+            fs::write(&col_path, &compressed)?;
+        } else {
+            fs::write(&col_path, &self.bytes)?;
+        }
+        // <field>.idx — offsets for variable-width (always uncompressed;
+        // it's metadata, not payload, and is tiny)
         if self.column_type.fixed_width().is_none() {
             let idx_path = dir.join(format!("{field}.idx"));
             // Append the end-of-bytes offset so reader doesn't need a
@@ -196,7 +221,7 @@ impl ColumnAccumulator {
             idx_buf.extend_from_slice(&(self.bytes.len() as u64).to_le_bytes());
             fs::write(&idx_path, &idx_buf)?;
         }
-        // <field>.meta — type tag + null bitmap if any null
+        // <field>.meta — type tag + null bitmap if any null + compression flag
         let any_null = self.null_bits.iter().any(|b| *b);
         let null_bitmap = if any_null {
             pack_bits(&self.null_bits)
@@ -207,6 +232,7 @@ impl ColumnAccumulator {
             column_type: self.column_type,
             row_count: self.null_bits.len() as u64,
             null_bitmap,
+            compressed: compress,
         };
         let meta_path = dir.join(format!("{field}.meta"));
         fs::write(&meta_path, serde_json::to_vec(&meta)?)?;
@@ -232,11 +258,25 @@ fn bit_at(bytes: &[u8], i: usize) -> bool {
 impl ColumnarWriter {
     /// Start a new columnar writer for the segment at `segment_dir`.
     /// The writer creates `segment_dir/columns/` lazily on `seal`.
+    /// Column data is written uncompressed (legacy behaviour).
     pub fn new(segment_dir: &Path) -> Self {
         Self {
             dir: segment_dir.to_owned(),
             columns: HashMap::new(),
             ids: Vec::new(),
+            compress: false,
+        }
+    }
+
+    /// Like `new`, but `seal` will zstd-compress each column's `.col`
+    /// file before writing. The `.meta` sidecar records the flag so
+    /// the reader can decompress transparently.
+    pub fn new_compressed(segment_dir: &Path) -> Self {
+        Self {
+            dir: segment_dir.to_owned(),
+            columns: HashMap::new(),
+            ids: Vec::new(),
+            compress: true,
         }
     }
 
@@ -316,9 +356,10 @@ impl ColumnarWriter {
 
         // Per-field columns
         for (name, col) in &self.columns {
-            col.write(&columns_dir, name)?;
+            col.write(&columns_dir, name, self.compress)?;
         }
-        // UUID column: 16 bytes per row, big-endian.
+        // UUID column: 16 bytes per row, big-endian. Not compressed —
+        // it's the hot lookup table for uuid→doc_id and is mmap'd directly.
         let mut id_buf = Vec::with_capacity(self.ids.len() * 16);
         for id in &self.ids {
             id_buf.extend_from_slice(id.as_bytes());
@@ -333,6 +374,26 @@ impl ColumnarWriter {
     }
 }
 
+/// Column data — either memory-mapped (uncompressed, legacy) or heap-
+/// allocated after decompression. Both expose `&[u8]` via `as_slice`.
+enum ColData {
+    Mmap(Arc<Mmap>),
+    Owned(Vec<u8>),
+}
+
+impl ColData {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Mmap(m) => m.as_ref(),
+            Self::Owned(v) => v.as_slice(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+}
+
 /// Reader for the columnar format. Constructed once per segment open.
 pub struct ColumnarStoredFields {
     columns: HashMap<String, OpenColumn>,
@@ -343,7 +404,9 @@ pub struct ColumnarStoredFields {
 
 struct OpenColumn {
     meta: ColumnMeta,
-    col_mmap: Arc<Mmap>,
+    /// Column payload — mmap'd for uncompressed columns, heap-allocated
+    /// after zstd decompression for compressed ones.
+    col_data: ColData,
     /// Cached offsets (variable-width). Empty for fixed-width.
     offsets: Vec<u64>,
 }
@@ -393,8 +456,23 @@ impl ColumnarStoredFields {
                 let meta: ColumnMeta = serde_json::from_slice(&meta_bytes)
                     .map_err(|e| VedaError::Storage(format!("columnar: meta parse: {e}")))?;
                 let col_path = columns_dir.join(format!("{field}.col"));
-                let col_file = fs::File::open(&col_path)?;
-                let col_mmap = unsafe { Mmap::map(&col_file)? };
+
+                // Load column payload: decompress into heap if compressed,
+                // otherwise mmap for zero-copy access.
+                let col_data = if meta.compressed {
+                    let compressed_bytes = fs::read(&col_path)?;
+                    let decompressed = zstd::decode_all(compressed_bytes.as_slice())
+                        .map_err(|e| {
+                            VedaError::Storage(format!(
+                                "columnar: zstd decompress {field}: {e}"
+                            ))
+                        })?;
+                    ColData::Owned(decompressed)
+                } else {
+                    let col_file = fs::File::open(&col_path)?;
+                    let col_mmap = unsafe { Mmap::map(&col_file)? };
+                    ColData::Mmap(Arc::new(col_mmap))
+                };
 
                 let mut offsets: Vec<u64> = Vec::new();
                 if meta.column_type.fixed_width().is_none() {
@@ -413,7 +491,7 @@ impl ColumnarStoredFields {
                     field.to_owned(),
                     OpenColumn {
                         meta,
-                        col_mmap: Arc::new(col_mmap),
+                        col_data,
                         offsets,
                     },
                 );
@@ -458,35 +536,36 @@ impl ColumnarStoredFields {
         if !col.meta.null_bitmap.is_empty() && bit_at(&col.meta.null_bitmap, i) {
             return Ok(None);
         }
+        let data = col.col_data.as_slice();
         let v = match col.meta.column_type {
             ColumnType::Int32 => {
                 let mut b = [0u8; 4];
-                b.copy_from_slice(&col.col_mmap[i * 4..(i + 1) * 4]);
+                b.copy_from_slice(&data[i * 4..(i + 1) * 4]);
                 FieldValue::Int32(i32::from_le_bytes(b))
             }
             ColumnType::Int64 => {
                 let mut b = [0u8; 8];
-                b.copy_from_slice(&col.col_mmap[i * 8..(i + 1) * 8]);
+                b.copy_from_slice(&data[i * 8..(i + 1) * 8]);
                 FieldValue::Int64(i64::from_le_bytes(b))
             }
             ColumnType::Timestamp => {
                 let mut b = [0u8; 8];
-                b.copy_from_slice(&col.col_mmap[i * 8..(i + 1) * 8]);
+                b.copy_from_slice(&data[i * 8..(i + 1) * 8]);
                 FieldValue::Timestamp(i64::from_le_bytes(b))
             }
             ColumnType::Float32 => {
                 let mut b = [0u8; 4];
-                b.copy_from_slice(&col.col_mmap[i * 4..(i + 1) * 4]);
+                b.copy_from_slice(&data[i * 4..(i + 1) * 4]);
                 FieldValue::Float32(f32::from_le_bytes(b))
             }
             ColumnType::Float64 => {
                 let mut b = [0u8; 8];
-                b.copy_from_slice(&col.col_mmap[i * 8..(i + 1) * 8]);
+                b.copy_from_slice(&data[i * 8..(i + 1) * 8]);
                 FieldValue::Float64(f64::from_le_bytes(b))
             }
-            ColumnType::Bool => FieldValue::Bool(col.col_mmap[i] != 0),
+            ColumnType::Bool => FieldValue::Bool(data[i] != 0),
             ColumnType::Uuid => {
-                let bytes = &col.col_mmap[i * 16..(i + 1) * 16];
+                let bytes = &data[i * 16..(i + 1) * 16];
                 FieldValue::Uuid(
                     Uuid::from_slice(bytes)
                         .map_err(|e| VedaError::Storage(format!("uuid slice: {e}")))?,
@@ -496,9 +575,9 @@ impl ColumnarStoredFields {
                 let start = col.offsets.get(i).copied().ok_or_else(|| {
                     VedaError::Storage(format!("columnar: doc_id {doc_id} out of range"))
                 })? as usize;
-                let end = col.offsets.get(i + 1).copied().unwrap_or(col.col_mmap.len() as u64)
+                let end = col.offsets.get(i + 1).copied().unwrap_or(col.col_data.len() as u64)
                     as usize;
-                let s = std::str::from_utf8(&col.col_mmap[start..end])
+                let s = std::str::from_utf8(&data[start..end])
                     .map_err(|e| VedaError::Storage(format!("columnar utf8: {e}")))?
                     .to_owned();
                 if matches!(col.meta.column_type, ColumnType::BlobRef) {
@@ -656,5 +735,123 @@ mod tests {
         );
         let m1 = r.get_scalar_map(1).unwrap();
         assert!(m1.is_empty());
+    }
+
+    /// Compressed columns round-trip: write N records with sizable text
+    /// fields using `ColumnarWriter::new_compressed`, read them back —
+    /// all values must be byte-identical to what was written.
+    #[test]
+    fn compressed_columns_roundtrip() {
+        let tmp = tempdir().unwrap();
+        let seg = tmp.path();
+        let mut w = ColumnarWriter::new_compressed(seg);
+
+        let n = 50usize;
+        let mut ids = Vec::with_capacity(n);
+        let mut expected_texts = Vec::with_capacity(n);
+        let mut expected_ints = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let id = Uuid::new_v4();
+            ids.push(id);
+            let text = format!(
+                "The quick brown fox jumps over the lazy dog. Record number {i}. \
+                 Lorem ipsum dolor sit amet consectetur adipiscing elit."
+            );
+            expected_texts.push(text.clone());
+            expected_ints.push(i as i64);
+
+            let mut fields = HashMap::new();
+            fields.insert(
+                "body".to_owned(),
+                (ColumnType::String, FieldValue::String(text)),
+            );
+            fields.insert(
+                "seq".to_owned(),
+                (ColumnType::Int64, FieldValue::Int64(i as i64)),
+            );
+            w.push(id, &fields).unwrap();
+        }
+        w.seal().unwrap();
+
+        let r = ColumnarStoredFields::open(seg).unwrap();
+        assert_eq!(r.row_count(), n as u64);
+
+        for i in 0..n {
+            let doc_id = r.doc_id_for_uuid(&ids[i]).expect("uuid must resolve");
+            assert_eq!(
+                r.get_field("body", doc_id).unwrap(),
+                Some(FieldValue::String(expected_texts[i].clone())),
+                "body mismatch at row {i}"
+            );
+            assert_eq!(
+                r.get_field("seq", doc_id).unwrap(),
+                Some(FieldValue::Int64(expected_ints[i])),
+                "seq mismatch at row {i}"
+            );
+        }
+    }
+
+    /// Compression shrinks repetitive text: the on-disk `.col` file for
+    /// a highly-repetitive string column must be smaller than the raw
+    /// uncompressed payload.
+    #[test]
+    fn compression_shrinks_repetitive_text() {
+        // Write uncompressed
+        let tmp_plain = tempdir().unwrap();
+        let seg_plain = tmp_plain.path();
+        // Write compressed
+        let tmp_comp = tempdir().unwrap();
+        let seg_comp = tmp_comp.path();
+
+        let n = 200usize;
+        let repetitive_text =
+            "abcdefghijklmnopqrstuvwxyz ".repeat(40); // ~1 080 bytes per record
+
+        let build = |seg: &Path, compress: bool| {
+            let mut w = if compress {
+                ColumnarWriter::new_compressed(seg)
+            } else {
+                ColumnarWriter::new(seg)
+            };
+            for _ in 0..n {
+                let id = Uuid::new_v4();
+                let mut fields = HashMap::new();
+                fields.insert(
+                    "body".to_owned(),
+                    (ColumnType::String, FieldValue::String(repetitive_text.clone())),
+                );
+                w.push(id, &fields).unwrap();
+            }
+            w.seal().unwrap();
+        };
+
+        build(seg_plain, false);
+        build(seg_comp, true);
+
+        let plain_col = seg_plain.join("columns").join("body.col");
+        let comp_col  = seg_comp.join("columns").join("body.col");
+
+        let plain_size = fs::metadata(&plain_col).unwrap().len();
+        let comp_size  = fs::metadata(&comp_col).unwrap().len();
+
+        // Expect at least 50% reduction on highly repetitive input.
+        assert!(
+            comp_size < plain_size / 2,
+            "expected compressed ({comp_size} B) < plain/2 ({} B), but it wasn't",
+            plain_size / 2
+        );
+
+        // Also verify the compressed segment still round-trips correctly.
+        let r = ColumnarStoredFields::open(seg_comp).unwrap();
+        assert_eq!(r.row_count(), n as u64);
+        // Spot-check a few rows
+        for doc_id in [0u32, 50, 199] {
+            assert_eq!(
+                r.get_field("body", doc_id).unwrap(),
+                Some(FieldValue::String(repetitive_text.clone())),
+                "round-trip failed at doc_id {doc_id}"
+            );
+        }
     }
 }

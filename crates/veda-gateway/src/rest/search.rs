@@ -59,6 +59,10 @@ pub struct QueryBody {
     pub multi_vector: Option<Vec<MultiVectorField>>,
     /// Built-in BM25 full-text query against a `bm25 = true` string field.
     pub bm25: Option<Bm25Query>,
+    /// Phrase / proximity query. Matches docs where the analyzed query terms
+    /// appear in order with at most `slop` extra positions between consecutive
+    /// terms (slop=0 = exact adjacency). Ranked by BM25 score.
+    pub match_phrase: Option<MatchPhraseQuery>,
     /// Hybrid query: combines a dense vector leg and a BM25 leg with RRF.
     /// Use this instead of multi_vector when you want dense + BM25 fusion.
     pub hybrid: Option<HybridQuery>,
@@ -74,6 +78,18 @@ pub struct Bm25Query {
     pub field: String,
     /// Raw user-facing query text.
     pub query: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MatchPhraseQuery {
+    /// String field with `bm25 = true` in the schema.
+    pub field: String,
+    /// The phrase text to search for.
+    pub query: String,
+    /// Maximum total extra positions allowed between consecutive query terms.
+    /// `0` (default) = strict adjacency; `1` = one intervening token allowed, etc.
+    #[serde(default)]
+    pub slop: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,6 +423,10 @@ pub async fn search(
         // `bm25 = true` in the schema. Runs the same tokenizer at ingest
         // and query time; no Lucene/Tantivy bundling required.
         execute_bm25(&state, &name, bm25_query, req.limit).await?
+    } else if let Some(ref phrase_query) = req.query.match_phrase {
+        // Phrase / proximity search: requires the analyzed query terms to
+        // appear in order with at most `slop` extra positions between them.
+        execute_match_phrase(&state, &name, phrase_query, req.limit).await?
     } else if let Some(ref hybrid_query) = req.query.hybrid {
         // Dense + BM25 hybrid via Reciprocal Rank Fusion. Each leg is
         // scored independently; RRF folds the rankings into one set.
@@ -439,7 +459,7 @@ pub async fn search(
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "query must contain 'vector', 'sparse_vector', 'colpali', 'multi_vector', 'bm25', or 'hybrid'".into(),
+                error: "query must contain 'vector', 'sparse_vector', 'colpali', 'multi_vector', 'bm25', 'match_phrase', or 'hybrid'".into(),
             }),
         ));
     };
@@ -714,6 +734,73 @@ async fn execute_bm25(
                 continue;
             };
             let scored = idx.search(&query.query, k.max(1));
+            for (doc_id, score) in scored {
+                if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                    continue;
+                }
+                if let Ok(rec) = handle.reader.get_record(doc_id) {
+                    merged.push((rec.id(), score));
+                }
+            }
+        }
+    }
+    drop(managers);
+
+    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    merged.truncate(k);
+    let hits: Vec<SearchHit> = merged
+        .into_iter()
+        .map(|(id, s)| SearchHit {
+            id: id.to_string(),
+            distance: -s,
+            fields: serde_json::Map::new(),
+        })
+        .collect();
+    Ok(hits)
+}
+
+/// Phrase / proximity search across all sealed and growing segments of a
+/// collection. Each segment scores independently via `Bm25Index::search_phrase`;
+/// results are merged, sorted by descending score, and truncated to `k`.
+/// Returns hits with `distance = -bm25_score` (lower = better, consistent
+/// with the bag-of-words BM25 leg).
+async fn execute_match_phrase(
+    state: &AppState,
+    collection: &str,
+    query: &MatchPhraseQuery,
+    k: usize,
+) -> Result<Vec<SearchHit>, (StatusCode, Json<ErrorResponse>)> {
+    let managers = state.inner.segment_managers.read().await;
+    let Some(shard_map) = managers.get(collection) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("collection '{collection}' not found"),
+            }),
+        ));
+    };
+
+    let mut merged: Vec<(uuid::Uuid, f32)> = Vec::new();
+    for sm in shard_map.values() {
+        // Growing segment
+        let gs = sm.growing_segment();
+        if let Some(idx) = gs.bm25_index(&query.field) {
+            let scored = idx.search_phrase(&query.query, query.slop, k.max(1));
+            for (doc_id, score) in scored {
+                if gs.is_deleted(doc_id) {
+                    continue;
+                }
+                if let Some(rec) = gs.get_record(doc_id) {
+                    merged.push((rec.id(), score));
+                }
+            }
+        }
+        // Sealed segments
+        for handle in sm.sealed_segments() {
+            let Some(idx) = handle.reader.bm25_index(&query.field) else {
+                continue;
+            };
+            let scored = idx.search_phrase(&query.query, query.slop, k.max(1));
             for (doc_id, score) in scored {
                 if handle.reader.delete_bitmap().is_deleted(doc_id) {
                     continue;

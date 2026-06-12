@@ -3375,6 +3375,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-stemmers"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e46a2036019fdb888131db7a4c847a1063a7493f971ed94ea82c67eada63ca54"
+dependencies = [
+ "serde",
+ "serde_derive",
+]
+
+[[package]]
 name = "rust_decimal"
 version = "1.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4693,12 +4703,18 @@ dependencies = [
 name = "veda-query"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "prost",
  "rand 0.8.5",
  "roaring",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
  "tracing",
  "uuid",
  "veda-core",
@@ -4745,6 +4761,7 @@ dependencies = [
  "metrics",
  "roaring",
  "rust-s3",
+ "rust-stemmers",
  "serde",
  "serde_json",
  "tempfile",
@@ -4755,6 +4772,7 @@ dependencies = [
  "veda-core",
  "veda-log",
  "veda-time",
+ "zstd",
 ]
 
 [[package]]
