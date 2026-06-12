@@ -6,7 +6,7 @@ All endpoints are served under `http://<host>:6340/v1`. Authenticated requests p
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/v1/collections` | Create a collection (supports `seed_records` for atomic create-and-load, `use_log_primary` for on-disk records; vector fields take `index`: `hnsw` · `diskann` · `ivf_pq` · `flat` · `rabitq` · `sq4` · `sq8`) |
+| `POST` | `/v1/collections` | Create a collection (supports `seed_records` for atomic create-and-load, `use_log_primary` for on-disk records, `rls_owner_field` for [row-level security](/docs/collections#row-level-security); vector fields take `index`: `hnsw` · `diskann` · `ivf_pq` · `flat` · `rabitq` · `sq4` · `sq8`) |
 | `GET` | `/v1/collections` | List collections |
 | `GET` | `/v1/collections/{name}` | Get a collection's schema and stats |
 | `DELETE` | `/v1/collections/{name}` | Drop a collection |
@@ -38,6 +38,43 @@ All endpoints are served under `http://<host>:6340/v1`. Authenticated requests p
 ```
 
 See [Search & fusion](/docs/search) for `multi_vector` fusion, hybrid queries, and snapshot reads.
+
+## Analytics
+
+Read-only OLAP-style aggregations over the columnar store. All three honor the filter DSL (including [JSON-path filters](/docs/search#json-path-filtering)) and row-level security.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/collections/{name}/aggregate` | `?field=&metric={count\|sum\|avg\|min\|max}&group_by=&filter=` — scalar metric, optionally bucketed per group |
+| `GET` | `/v1/collections/{name}/histogram` | `?field=&bins=&filter=` — equal-width numeric histogram (default 10 bins) |
+| `GET` | `/v1/collections/{name}/field-stats` | `?field=&filter=` — total/null counts, cardinality, numeric or string-length summaries |
+
+```bash
+# Average price per category, electronics under $500 only
+curl "http://localhost:6340/v1/collections/products/aggregate?field=price&metric=avg&group_by=category&filter=price%20%3C%20500"
+```
+
+## Scheduled jobs
+
+Admin-only cron scheduler. A job is a cron expression plus a typed kind — `ttl_sweep`, `reindex`, `compact`, or `evaluate`, each scoped to a collection — deliberately not arbitrary code. Jobs persist in the data directory and reload on restart. (`ttl_sweep` is fully wired today; the other kinds are registered hooks.)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/admin/jobs` | Register or overwrite a job (`400` on an invalid cron expression) |
+| `GET` | `/v1/admin/jobs` | List registered jobs |
+| `DELETE` | `/v1/admin/jobs/{name}` | Remove a job |
+
+```bash
+# Sweep expired records from the cache collection every 5 minutes
+curl -X POST http://localhost:6340/v1/admin/jobs \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "name": "cache-ttl-sweep",
+    "cron": "0 */5 * * * *",
+    "kind": {"kind": "ttl_sweep", "collection": "cache"}
+  }'
+```
 
 ## Documents
 

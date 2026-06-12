@@ -96,6 +96,41 @@ curl "http://localhost:6340/v1/collections/products/records?limit=50"
 curl http://localhost:6340/v1/collections/products/records/<id>
 ```
 
+## Row-level security
+
+A collection may declare an `rls_owner_field` at creation. When set, every read (search, get, list) is automatically restricted to records whose owner field equals the authenticated JWT subject — the predicate is AND-combined with any filter you pass — and inserts must set the owner to the caller's subject. The Admin role bypasses both, mirroring RBAC.
+
+```bash
+curl -X POST http://localhost:6340/v1/collections \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "name": "notes",
+    "rls_owner_field": "owner",
+    "fields": [
+      {"name": "embedding", "type": "vector", "dimension": 1024, "metric": "cosine"},
+      {"name": "owner", "type": "string", "filterable": true},
+      {"name": "body", "type": "string"}
+    ]
+  }'
+```
+
+## Record TTL
+
+Give any record an expiry by setting the reserved `_expires_at` field (unix seconds) — no schema change needed:
+
+```bash
+curl -X POST http://localhost:6340/v1/collections/cache/insert \
+  -H "Content-Type: application/json" \
+  -d '{
+    "records": [
+      {"embedding": [...], "key": "session-42", "_expires_at": 1765532800}
+    ]
+  }'
+```
+
+Expired records are excluded at **query time** from search, rerank, `GET /records/{id}`, and record listings. To physically purge them, schedule a `ttl_sweep` [job](/docs/rest-api#scheduled-jobs) for the collection.
+
 ## Atomic create-and-load
 
 `POST /v1/collections` accepts `seed_records` to create a collection and load initial data atomically — if the insert fails, the collection creation is rolled back via a compensating drop.
