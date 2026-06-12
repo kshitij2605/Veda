@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use veda_core::error::{Result, VedaError};
 
@@ -70,6 +71,51 @@ impl TokenizerKind {
     }
 }
 
+/// Token-filter configuration persisted alongside the tokenizer.
+///
+/// All flags default to `false` so that older indexes (which lack this
+/// field in their JSON) load cleanly and continue to behave identically
+/// to before this feature was added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AnalyzerConfig {
+    /// Strip HTML tags and decode common HTML entities before tokenizing.
+    #[serde(default)]
+    pub strip_html: bool,
+    /// Drop English stopwords after tokenizing.
+    #[serde(default)]
+    pub remove_stopwords: bool,
+    /// Apply Snowball English stemming to each remaining token.
+    #[serde(default)]
+    pub stem_english: bool,
+}
+
+impl AnalyzerConfig {
+    /// No filters — identical to the original behaviour. Used by `new()`.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Full English analyzer: HTML strip + stopword removal + English stemming.
+    pub fn english() -> Self {
+        Self {
+            strip_html: true,
+            remove_stopwords: true,
+            stem_english: true,
+        }
+    }
+}
+
+/// English stopwords (ISO 639-1 "en", matching the Lucene/ES default set).
+static ENGLISH_STOPWORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "but", "if", "in", "on", "at", "to",
+    "for", "of", "with", "by", "from", "is", "are", "was", "were", "be",
+    "been", "being", "have", "has", "had", "do", "does", "did", "will",
+    "would", "could", "should", "may", "might", "shall", "can", "not",
+    "no", "nor", "as", "up", "out", "so", "yet", "both", "either",
+    "that", "this", "these", "those", "i", "me", "my", "we", "our",
+    "you", "your", "he", "she", "it", "they", "them", "their",
+];
+
 /// Per-segment BM25 inverted index.
 ///
 /// `postings` is `term → Vec<(doc_id, term_freq)>` sorted by doc_id at
@@ -89,6 +135,10 @@ pub struct Bm25Index {
     /// is later changed.
     #[serde(default)]
     tokenizer: TokenizerKind,
+    /// Token-filter configuration. Defaults to all-false (no filters) so
+    /// older persisted indexes that lack this field load cleanly.
+    #[serde(default)]
+    analyzer: AnalyzerConfig,
 }
 
 impl Bm25Index {
@@ -105,6 +155,15 @@ impl Bm25Index {
         }
     }
 
+    /// Construct with a tokenizer and a full `AnalyzerConfig`.
+    pub fn with_analyzer(tokenizer: TokenizerKind, analyzer: AnalyzerConfig) -> Self {
+        Self {
+            tokenizer,
+            analyzer,
+            ..Self::default()
+        }
+    }
+
     pub fn tokenizer(&self) -> TokenizerKind {
         self.tokenizer
     }
@@ -112,7 +171,7 @@ impl Bm25Index {
     /// Add `text` for `doc_id`. Caller is responsible for inserting in
     /// increasing doc_id order (the segment writer does this).
     pub fn insert(&mut self, doc_id: u32, text: &str) {
-        let tokens = run_tokenizer(self.tokenizer, text);
+        let tokens = run_analyzer(self.tokenizer, &self.analyzer, text);
         let len = tokens.len() as u32;
 
         // Aggregate term frequencies for this doc first.
@@ -152,7 +211,7 @@ impl Bm25Index {
             return Vec::new();
         }
         let avg_dl = self.avg_doc_length();
-        let q_tokens = run_tokenizer(self.tokenizer, query);
+        let q_tokens = run_analyzer(self.tokenizer, &self.analyzer, query);
 
         // Dedup query terms — repeated tokens don't add new evidence in
         // standard BM25 (we already sum across all matching docs).
@@ -199,6 +258,109 @@ impl Bm25Index {
         let idx: Self = serde_json::from_slice(&bytes)
             .map_err(|e| VedaError::Storage(format!("bm25 load parse: {e}")))?;
         Ok(idx)
+    }
+}
+
+/// Full analyzer pipeline: char filters → tokenizer → token filters.
+///
+/// This is the single entry point called at BOTH index time (in `insert`)
+/// and query time (in `search`), guaranteeing symmetric analysis.
+pub fn run_analyzer(kind: TokenizerKind, cfg: &AnalyzerConfig, text: &str) -> Vec<String> {
+    // 1. Char filter: strip HTML tags + decode common entities.
+    let cleaned: String;
+    let text = if cfg.strip_html {
+        cleaned = strip_html(text);
+        &cleaned
+    } else {
+        text
+    };
+
+    // 2. Tokenize via the existing tokenizer.
+    let mut tokens = run_tokenizer(kind, text);
+
+    // 3. Token filters.
+    if cfg.remove_stopwords {
+        tokens.retain(|t| !ENGLISH_STOPWORDS.contains(&t.as_str()));
+    }
+    if cfg.stem_english {
+        let stemmer = Stemmer::create(Algorithm::English);
+        tokens = tokens
+            .into_iter()
+            .map(|t| stemmer.stem(&t).into_owned())
+            .collect();
+    }
+
+    tokens
+}
+
+/// Remove HTML tags (`<...>`) and decode the most common named and
+/// numeric entities. Tags become spaces; entities become their plain-text
+/// equivalents. The result is suitable for passing on to a tokenizer.
+fn strip_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_tag = false;
+    let mut entity_buf = String::new();
+    let mut in_entity = false;
+
+    for c in text.chars() {
+        match c {
+            '<' => {
+                if in_entity {
+                    // Malformed entity — flush literally.
+                    out.push('&');
+                    out.push_str(&entity_buf);
+                    entity_buf.clear();
+                    in_entity = false;
+                }
+                in_tag = true;
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if in_tag => { /* consume tag content */ }
+            '&' => {
+                in_entity = true;
+                entity_buf.clear();
+            }
+            ';' if in_entity => {
+                let decoded = decode_entity(&entity_buf);
+                out.push_str(decoded);
+                entity_buf.clear();
+                in_entity = false;
+            }
+            _ if in_entity => {
+                entity_buf.push(c);
+                // Safety valve: if the buffer grows beyond a reasonable
+                // entity length, treat as literal text.
+                if entity_buf.len() > 10 {
+                    out.push('&');
+                    out.push_str(&entity_buf);
+                    entity_buf.clear();
+                    in_entity = false;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    // Flush any dangling entity.
+    if in_entity {
+        out.push('&');
+        out.push_str(&entity_buf);
+    }
+    out
+}
+
+/// Map a bare entity name (without `&` / `;`) to its replacement text.
+fn decode_entity(name: &str) -> &'static str {
+    match name {
+        "amp" => "and",
+        "lt" => "<",
+        "gt" => ">",
+        "quot" => "\"",
+        "apos" | "#39" => "'",
+        "nbsp" => " ",
+        _ => "",
     }
 }
 
@@ -481,5 +643,80 @@ mod tests {
         let h1 = idx.search("alpha", 3);
         let h2 = loaded.search("alpha", 3);
         assert_eq!(h1, h2);
+    }
+
+    // ── New tests for AnalyzerConfig / ES-parity features ──────────────
+
+    #[test]
+    fn stemming_matches_singular_and_plural() {
+        // With English stemming, a doc containing "foxes" must be found by querying "fox".
+        let mut idx = Bm25Index::with_analyzer(TokenizerKind::Whitespace, AnalyzerConfig::english());
+        idx.insert(0, "the quick brown foxes jumped");
+        idx.insert(1, "a lazy dog");
+        let hits = idx.search("fox", 10);
+        assert!(
+            hits.iter().any(|(id, _)| *id == 0),
+            "querying 'fox' should match doc 0 ('foxes') via stemming; hits={hits:?}"
+        );
+    }
+
+    #[test]
+    fn stopwords_are_dropped() {
+        let cfg = AnalyzerConfig::english();
+        let toks = run_analyzer(TokenizerKind::Whitespace, &cfg, "the quick a fox");
+        assert!(
+            !toks.contains(&"the".to_string()) && !toks.contains(&"a".to_string()),
+            "stopwords dropped: {toks:?}"
+        );
+        // "fox" → stemmed to "fox" by Snowball (already a stem).
+        assert!(
+            toks.iter().any(|t| t.starts_with("fox") || t == "fox"),
+            "content words kept: {toks:?}"
+        );
+    }
+
+    #[test]
+    fn char_filter_strips_html_and_entities() {
+        let cfg = AnalyzerConfig::english();
+        let toks = run_analyzer(TokenizerKind::Whitespace, &cfg, "<p>Tom &amp; Jerry</p>");
+        // HTML tags removed; &amp; mapped to "and" (a stopword → may be dropped).
+        assert!(
+            toks.iter().any(|t| t == "tom"),
+            "html stripped, 'tom' present: {toks:?}"
+        );
+        assert!(
+            toks.iter().any(|t| t == "jerri" || t == "jerry"),
+            "'jerry' present (stemmed ok): {toks:?}"
+        );
+        assert!(
+            !toks.iter().any(|t| t.contains('<') || t.contains("&amp")),
+            "no markup/entities: {toks:?}"
+        );
+    }
+
+    #[test]
+    fn analyzer_config_persists_and_applies_at_query_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bm25.bin");
+        let mut idx = Bm25Index::with_analyzer(TokenizerKind::Whitespace, AnalyzerConfig::english());
+        idx.insert(0, "running runners run");
+        idx.save(&p).unwrap();
+        let idx2 = Bm25Index::load(&p).unwrap();
+        // The persisted analyzer (stemming) must apply to the QUERY too:
+        // "run" stems to "run"; the indexed tokens are also stemmed → match.
+        assert!(
+            idx2.search("run", 10).iter().any(|(id, _)| *id == 0),
+            "stemmed query must match stemmed indexed tokens after save/load"
+        );
+    }
+
+    #[test]
+    fn none_analyzer_is_backward_compatible() {
+        // AnalyzerConfig::none() must produce the exact same tokens as the
+        // old run_tokenizer path (no filters applied at all).
+        let text = "The quick brown Fox";
+        let old = run_tokenizer(TokenizerKind::Whitespace, text);
+        let new = run_analyzer(TokenizerKind::Whitespace, &AnalyzerConfig::none(), text);
+        assert_eq!(old, new, "none() analyzer must be byte-identical to the old tokenizer");
     }
 }
