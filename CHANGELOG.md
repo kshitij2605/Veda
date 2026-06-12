@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-06-12
+
+Postgres-extension-parity features, built Rust-native on Veda's existing primitives (filter DSL, columnar store, tokio background tasks, RBAC/JWT) — no Postgres extension code was forked. See `documentation/2026-06-12-postgres-parity-features.md` for the full feasibility assessment and design notes.
+
+### Added
+- **JSONB-style path filtering** — the filter DSL now accepts dotted field paths (`meta.user.tier = "gold"`) that traverse into nested `FieldValue::Json` values via `serde_json::Value::pointer`, coercing the leaf to a comparable scalar. Non-JSON fields and missing paths are unaffected (missing path → no match). Implemented in `veda-query::filter::record_eval::resolve_field`; works on every filter site (search, records, aggregations).
+- **Row-level security (RLS)** — a collection may declare an optional `rls_owner_field` at create time (`POST /v1/collections`). When set, the gateway AND-injects `<owner_field> == <jwt-subject>` into the parsed `FilterExpr` on every read (search/get/list) and enforces `owner == subject` on insert; the Admin role bypasses. Injection happens at the AST level (`veda-gateway::rls::inject_owner_filter`) via a new `filter_expr: Option<FilterExpr>` carried on the search requests — the trusted predicate is never round-tripped through an unescaped filter string.
+- **Cron-style scheduled jobs** — admin-only scheduler with `POST /v1/admin/jobs` (register/overwrite), `GET /v1/admin/jobs` (list), `DELETE /v1/admin/jobs/{name}`. Jobs carry a cron expression (validated by the `cron` crate; 400 on invalid) and a typed `JobKind` enum (`TtlSweep`, `Reindex`, `Compact`, `Evaluate`) — not arbitrary code. The registry persists to JSON in the data dir and reloads on restart; a single tokio loop ticks and dispatches due jobs (`is_due` is deterministic on an injected `now` for testability). `TtlSweep` is wired to the record-TTL sweeper; `Reindex`/`Compact`/`Evaluate` are registered hooks whose dispatch is stubbed pending later wiring.
+- **Record TTL + expiry sweeper** — a reserved record field `_expires_at` (unix seconds) marks a record's expiry. Expired records are excluded at query time from search (`populate_hit_fields` + rerank), `GET /records/{id}`, and `GET /records` via `SegmentManager::lookup_record_at(id, now)`, and are physically purged by `SegmentManager::sweep_expired(now)` driven by a `TtlSweep` scheduled job. `Record::expires_at_secs()` / `is_expired_at(now)` and `veda_core::record::EXPIRES_AT_FIELD` back the convention; the reserved field now persists through segment seal (previously a non-schema field was dropped).
+- **Analytics aggregations** — three read-only OLAP endpoints over the columnar store, all honoring the filter DSL (and RLS injection):
+  - `GET /v1/collections/{name}/aggregate?field=&metric={count|sum|avg|min|max}&group_by=&filter=` — scalar metric with optional grouping; numeric metrics validate the field is numeric.
+  - `GET /v1/collections/{name}/histogram?field=&bins=&filter=` — equal-width numeric histogram (default 10 bins).
+  - `GET /v1/collections/{name}/field-stats?field=&filter=` — total/null counts, cardinality, and numeric (min/max/avg) or string (min/max length) summaries.
+
 ## [0.2.2] - 2026-05-26
 
 Quality and DX improvements from the E2E test campaign.

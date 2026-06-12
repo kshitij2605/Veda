@@ -24,10 +24,12 @@
 - **4 ANN index types** -- HNSW, DiskANN (Vamana graph), IVF-PQ, and Flat (brute-force)
 - **Quantization indexes** -- RaBitQ (1-bit), RaBitQ+rerank, RaBitQExt (4-bit rerank), plus standalone `Sq4` (4-bit/dim) and `Sq8` (8-bit/dim) scalar quantization -- memory-efficient compression with minimal recall loss
 - **SIMD-optimized distances** -- SimSIMD-backed AVX-512 / ARM NEON / SVE selected at runtime (AVX2/scalar fallback via `--no-default-features`); 6 metrics (Cosine, Euclidean, DotProduct, Hamming, Manhattan, Jaccard)
-- **SQL-like filter expressions** -- combine vector search with structured metadata filters
+- **SQL-like filter expressions** -- combine vector search with structured metadata filters, including dotted-path queries into nested JSON fields (e.g. `meta.user.tier = "gold"`)
 - **Multi-vector fusion** -- RRF, WeightedSum, and Intersection strategies for cross-modal retrieval
 - **Pattern search** -- suffix array-backed substring and fuzzy matching on text fields
 - **Built-in blob storage** -- store raw files alongside embeddings via MinIO/S3-compatible backends
+- **Record TTL** -- set a reserved `_expires_at` (unix seconds) field on any record; expired records are excluded from search/get/list at query time and physically purged by a background sweeper
+- **Analytics aggregations** -- OLAP-style `count`/`sum`/`avg`/`min`/`max` with optional `group_by`, plus numeric histograms and per-field statistics, computed over the columnar store and honoring the filter DSL
 
 ### Distributed data plane (FoundationDB-shape)
 - **Per-shard append-only log** (`veda-log`) -- record writes go through `veda-log`, not the metadata Raft. BookKeeper-style quorum replication (E, Qw, Qa) with epoch fencing; Tonic gRPC transport for cross-process followers. BookKeeper open-and-recover truncate at writer handover; `rebuild_ensemble` swaps out failed nodes; `ShardLog::copy_to` ships a snapshot to a joining follower.
@@ -45,6 +47,8 @@
 - **Auto-embedding pipeline** -- automatic embedding generation with modality validation
 - **Niriksha dashboard** -- built-in visualization and exploration UI for multimodal vector data
 - **JWT authentication + RBAC** -- Admin, Editor, and Viewer roles with token-based auth
+- **Row-level security** -- a collection may declare an `rls_owner_field`; the gateway then AND-injects `owner == <jwt-subject>` into every read filter and enforces owner-on-write at the AST level, so a user sees and mutates only the records they own (Admin bypasses)
+- **Scheduled jobs** -- cron-style admin scheduler (`/v1/admin/jobs`) with a typed job-kind enum (`TtlSweep`, `Reindex`, `Compact`, `Evaluate`); schedule persists across restart. `TtlSweep` is wired to the record-TTL sweeper; the other kinds are registered hooks pending their dispatch wiring
 - **Full observability stack** -- Prometheus metrics, OpenTelemetry tracing, query explain, health checks, and a pre-built Grafana dashboard
 - **Python SDK** -- `veda-client` package for idiomatic Python access
 - **`veda-admin` CLI** -- offline maintenance tool (currently scaffold)
@@ -172,6 +176,7 @@ Veda runs in two modes; the admin REST surface differs depending on which one is
 | `POST /v1/admin/cluster/join` / `DELETE /cluster/nodes/{id}` | ✗ 503 | ✓ | Openraft membership change |
 | `POST /v1/admin/cluster/noop` | ✗ 503 | ✓ | Drives the Raft log for test harnesses |
 | `POST /v1/admin/collections/{name}/mvcc_checkpoint` | ✓ | ✓ | Atomic snapshot + WAL truncate; per-shard fan-out |
+| `GET` / `POST /v1/admin/jobs`, `DELETE /v1/admin/jobs/{name}` | ✓ | ✓ | Cron-style scheduled jobs (admin-only); schedule persists in the data dir |
 | `POST /v1/auth/login` | ✓ | ✓ | Argon2id verify; set `VEDA_BOOTSTRAP_ADMIN_PASSWORD` before first start |
 
 If you don't intend to run multi-node, leave `VEDA_COORDINATOR` unset and ignore the 503 endpoints — every Phase E-onward write path goes through `veda-log` regardless.

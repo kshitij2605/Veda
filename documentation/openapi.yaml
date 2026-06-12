@@ -95,6 +95,14 @@ components:
           items: { $ref: '#/components/schemas/FieldDef' }
         shard_count: { type: integer, default: 1 }
         replication_factor: { type: integer, default: 1 }
+        rls_owner_field:
+          type: string
+          nullable: true
+          description: |
+            Row-level security. When set, names the record field that
+            holds the owner. The gateway then AND-injects
+            `<rls_owner_field> == <jwt-subject>` into every read filter
+            and enforces owner-on-write at the AST level. Admin bypasses.
     InsertRequest:
       type: object
       required: [records]
@@ -128,7 +136,11 @@ components:
             One of `vector`, `bm25`, `sparse_vector`, `hybrid`,
             `colpali`, `multi_vector` — see the Rust types in
             `crates/veda-gateway/src/rest/search.rs`.
-        filter: { type: string, description: "SQL-like filter DSL." }
+        filter:
+          type: string
+          description: |
+            SQL-like filter DSL. Supports dotted paths into nested JSON
+            fields, e.g. `meta.user.tier = "gold"`.
         limit: { type: integer }
         explain: { type: boolean }
         truncate_to: { type: integer, nullable: true }
@@ -216,6 +228,59 @@ components:
         orphan_sample:
           type: array
           items: { type: string }
+    CreateJobRequest:
+      type: object
+      required: [name, cron, kind]
+      properties:
+        name: { type: string, description: "Unique job name; re-registering overwrites." }
+        cron: { type: string, description: "Cron expression (validated by the `cron` crate)." }
+        kind:
+          type: object
+          description: |
+            Tagged `JobKind`. Exactly one of `TtlSweep`, `Reindex`,
+            `Compact`, `Evaluate`, each carrying `{ collection }`.
+            e.g. `{ "TtlSweep": { "collection": "docs" } }`. Only
+            `TtlSweep` is wired to an action today.
+    JobResponse:
+      type: object
+      properties:
+        name: { type: string }
+        cron: { type: string }
+        kind: { type: object }
+        last_run: { type: integer, nullable: true, description: "Unix seconds of the last dispatch." }
+    AggregateResponse:
+      type: object
+      properties:
+        groups:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string, description: "Group value (empty string when no group_by)." }
+              value: { type: number }
+    HistogramResponse:
+      type: object
+      properties:
+        bins:
+          type: array
+          items:
+            type: object
+            properties:
+              lo: { type: number }
+              hi: { type: number }
+              count: { type: integer }
+    FieldStatsResponse:
+      type: object
+      properties:
+        field: { type: string }
+        total_count: { type: integer }
+        null_count: { type: integer }
+        cardinality: { type: integer }
+        min: { type: number, nullable: true, description: "Numeric fields only." }
+        max: { type: number, nullable: true, description: "Numeric fields only." }
+        avg: { type: number, nullable: true, description: "Numeric fields only." }
+        min_length: { type: integer, nullable: true, description: "String fields only." }
+        max_length: { type: integer, nullable: true, description: "String fields only." }
 
 paths:
   /v1/admin/health:
@@ -588,6 +653,134 @@ paths:
       security: [ { bearerAuth: [] } ]
       responses:
         '200': { description: ok }
+
+  /v1/admin/jobs:
+    get:
+      summary: List scheduled jobs (admin-only).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: { $ref: '#/components/schemas/JobResponse' }
+    post:
+      summary: Register or overwrite a scheduled job (admin-only).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateJobRequest' }
+      responses:
+        '201': { description: registered }
+        '400': { description: invalid cron expression }
+
+  /v1/admin/jobs/{name}:
+    delete:
+      summary: Remove a scheduled job by name (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: removed }
+        '404': { description: not found }
+
+  /v1/collections/{name}/aggregate:
+    get:
+      summary: Scalar aggregation over a field, with optional grouping.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+        - in: query
+          name: field
+          required: true
+          schema: { type: string }
+        - in: query
+          name: metric
+          required: true
+          schema: { type: string, enum: [count, sum, avg, min, max] }
+        - in: query
+          name: group_by
+          required: false
+          schema: { type: string }
+        - in: query
+          name: filter
+          required: false
+          schema: { type: string, description: "SQL-like filter DSL (RLS-injected when configured)." }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AggregateResponse' }
+        '400': { description: "non-numeric field for a numeric metric, or invalid filter" }
+        '404': { description: collection not found }
+
+  /v1/collections/{name}/histogram:
+    get:
+      summary: Equal-width numeric histogram over a field.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+        - in: query
+          name: field
+          required: true
+          schema: { type: string }
+        - in: query
+          name: bins
+          required: false
+          schema: { type: integer, default: 10 }
+        - in: query
+          name: filter
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HistogramResponse' }
+        '404': { description: collection not found }
+
+  /v1/collections/{name}/field-stats:
+    get:
+      summary: Per-field statistics (counts, cardinality, numeric/string summaries).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+        - in: query
+          name: field
+          required: true
+          schema: { type: string }
+        - in: query
+          name: filter
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FieldStatsResponse' }
+        '404': { description: collection not found }
 
   /v1/saved_objects/{id}:
     put:
