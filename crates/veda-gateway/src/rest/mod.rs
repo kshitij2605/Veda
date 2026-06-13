@@ -7,6 +7,7 @@ use tower_http::trace::TraceLayer;
 use crate::auth;
 use crate::tenant;
 
+pub mod a2a;
 pub mod admin;
 pub mod agents;
 pub mod aggregate;
@@ -174,8 +175,10 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/collections/{name}/rerank",
             post(rerank::rerank),
         )
-        // Model Context Protocol (MCP) for AI agents
-        .route("/v1/mcp", post(mcp::handle_mcp))
+        // Model Context Protocol (MCP) for AI agents — Streamable HTTP
+        // transport: POST carries a JSON-RPC message; GET (server->client
+        // SSE) is unsupported (stateless) and returns 405.
+        .route("/v1/mcp", get(mcp::handle_mcp_get).post(mcp::handle_mcp))
         // Adaptive query router (recommends retrieval strategy for a query)
         .route("/v1/route", post(route::route))
         // Veda Agents — CRUD + tool catalog/execute + converse + conversations
@@ -190,6 +193,9 @@ pub fn build_router(app_state: state::AppState) -> Router {
                 .delete(agents::delete_agent),
         )
         .route("/v1/agents/{id}/converse", post(agents::converse))
+        // Agent-to-Agent (A2A) — discovery card + sync JSON-RPC message/send
+        .route("/v1/a2a/{agent_id}/card", get(a2a::agent_card))
+        .route("/v1/a2a/{agent_id}", post(a2a::message_send))
         .route(
             "/v1/agent-tools",
             get(agents::list_tools).post(agents::create_tool),

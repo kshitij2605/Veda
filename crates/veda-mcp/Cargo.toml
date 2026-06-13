@@ -1,0 +1,22 @@
+[package]
+name = "veda-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "veda-mcp"
+path = "src/main.rs"
+
+[lib]
+name = "veda_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
+reqwest = { version = "0.12", features = ["json"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net"] }

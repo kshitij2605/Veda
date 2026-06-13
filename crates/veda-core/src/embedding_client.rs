@@ -13,19 +13,23 @@ use crate::metrics as m;
 /// and falls back to a deterministic mock for testing.
 pub struct EmbeddingClient {
     config: EmbeddingModelConfig,
+    http: reqwest::Client,
 }
 
 impl EmbeddingClient {
     pub fn new(config: EmbeddingModelConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            http: reqwest::Client::new(),
+        }
     }
 
     /// Embed a text string. Uses HTTP for real endpoints, mock otherwise.
     #[instrument(name = "embed_text", skip(self, text), fields(model = %self.config.name, input_len = text.len()))]
-    pub fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
+    pub async fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
         self.validate_input(text.as_bytes(), Modality::Text)?;
         if self.is_real_endpoint() {
-            self.embed_text_http(text)
+            self.embed_text_http(text).await
         } else {
             Ok(deterministic_vector(text.as_bytes(), self.config.output_dimension))
         }
@@ -34,10 +38,10 @@ impl EmbeddingClient {
     /// Embed raw bytes (image, audio, video, pdf).
     /// Uses HTTP for real endpoints, mock otherwise.
     #[instrument(name = "embed_bytes", skip(self, data), fields(model = %self.config.name, modality = %modality, input_size = data.len()))]
-    pub fn embed_bytes(&self, data: &[u8], modality: Modality) -> Result<Vec<f32>> {
+    pub async fn embed_bytes(&self, data: &[u8], modality: Modality) -> Result<Vec<f32>> {
         self.validate_input(data, modality)?;
         if self.is_real_endpoint() {
-            self.embed_bytes_http(data, modality)
+            self.embed_bytes_http(data, modality).await
         } else {
             Ok(deterministic_vector(data, self.config.output_dimension))
         }
@@ -107,13 +111,13 @@ impl EmbeddingClient {
         }))
     }
 
-    fn embed_bytes_http(&self, data: &[u8], modality: Modality) -> Result<Vec<f32>> {
+    async fn embed_bytes_http(&self, data: &[u8], modality: Modality) -> Result<Vec<f32>> {
         let start = Instant::now();
-        let client = reqwest::blocking::Client::new();
         let body = self.build_multimodal_payload(data, modality)?;
 
         let url = format!("{}/v1/embeddings", self.config.endpoint.trim_end_matches('/'));
-        let mut request = client
+        let mut request = self
+            .http
             .post(&url)
             .json(&body)
             .timeout(std::time::Duration::from_secs(self.config.timeout_seconds as u64));
@@ -124,11 +128,12 @@ impl EmbeddingClient {
 
         let resp = request
             .send()
+            .await
             .map_err(|e| VedaError::Storage(format!("embedding request failed: {e}")))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+            let body = resp.text().await.unwrap_or_default();
             return Err(VedaError::Storage(format!(
                 "embedding endpoint returned {status}: {body}"
             )));
@@ -136,6 +141,7 @@ impl EmbeddingClient {
 
         let json: serde_json::Value = resp
             .json()
+            .await
             .map_err(|e| VedaError::Storage(format!("embedding response parse failed: {e}")))?;
 
         let embedding = json["data"][0]["embedding"]
@@ -151,16 +157,16 @@ impl EmbeddingClient {
         Ok(embedding)
     }
 
-    fn embed_text_http(&self, text: &str) -> Result<Vec<f32>> {
+    async fn embed_text_http(&self, text: &str) -> Result<Vec<f32>> {
         let start = Instant::now();
-        let client = reqwest::blocking::Client::new();
         let body = serde_json::json!({
             "model": self.config.name,
             "input": text
         });
 
         let url = format!("{}/v1/embeddings", self.config.endpoint.trim_end_matches('/'));
-        let mut request = client
+        let mut request = self
+            .http
             .post(&url)
             .json(&body)
             .timeout(std::time::Duration::from_secs(self.config.timeout_seconds as u64));
@@ -171,11 +177,12 @@ impl EmbeddingClient {
 
         let resp = request
             .send()
+            .await
             .map_err(|e| VedaError::Storage(format!("embedding request failed: {e}")))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+            let body = resp.text().await.unwrap_or_default();
             return Err(VedaError::Storage(format!(
                 "embedding endpoint returned {status}: {body}"
             )));
@@ -183,6 +190,7 @@ impl EmbeddingClient {
 
         let json: serde_json::Value = resp
             .json()
+            .await
             .map_err(|e| VedaError::Storage(format!("embedding response parse failed: {e}")))?;
 
         // Parse OpenAI-compatible response: {"data": [{"embedding": [...]}]}
@@ -292,5 +300,18 @@ mod tests {
         let b64_part = url.strip_prefix("data:image/jpeg;base64,").unwrap();
         let decoded = BASE64_STANDARD.decode(b64_part).unwrap();
         assert_eq!(decoded, data);
+    }
+
+    #[tokio::test]
+    async fn test_embed_bytes_mock_returns_deterministic_vector() {
+        let client = EmbeddingClient::new(mock_config());
+        let data = b"fake-image-bytes";
+
+        let v1 = client.embed_bytes(data, Modality::Image).await.unwrap();
+        let v2 = client.embed_bytes(data, Modality::Image).await.unwrap();
+
+        // Right dimension and deterministic across calls (mock path).
+        assert_eq!(v1.len(), 128);
+        assert_eq!(v1, v2);
     }
 }

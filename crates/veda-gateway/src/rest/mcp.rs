@@ -8,41 +8,42 @@
 //!
 //! ## Tools exposed
 //!
-//! - `list_collections` — list all collections by name.
-//! - `describe_collection` — get schema + record count for a named collection.
-//! - `search` — text query auto-embedded via configured text model, returns
-//!   top-k hits with id + distance.
-//! - `upsert_record` — insert one record (caller supplies fields as JSON).
+//! The full built-in catalog ([`crate::agent::catalog::ToolCatalog::builtin_specs`])
+//! is surfaced — `tools/list` renders every builtin (including its MCP
+//! `annotations`) and `tools/call` dispatches any builtin id:
+//!
+//! - `list_collections`, `describe_collection`, `get_record`, `route`,
+//!   `aggregate`, `filter_query` — read-only tools.
+//! - `search` — cross-modal (text/image) query auto-embedded into Veda's
+//!   unified vector space, returns top-k hits with id + distance.
+//! - `upsert_record` — insert one record (mutating).
 //!
 //! ## Notes
 //!
 //! - Auth: when JWT auth is enabled, the MCP endpoint requires the same
 //!   `Authorization: Bearer ...` header as other protected routes; auth is
 //!   handled by the gateway-wide middleware.
-//! - Errors follow JSON-RPC 2.0: `{ "jsonrpc": "2.0", "id": ..., "error":
-//!   { "code": -32600|-32601|-32602|-32603, "message": ... } }`.
+//! - *Protocol* errors (bad JSON-RPC, unknown method, unknown tool name)
+//!   follow JSON-RPC 2.0: `{ "jsonrpc": "2.0", "id": ..., "error": { "code":
+//!   -32600|-32601|-32602|-32700, "message": ... } }`.
+//! - *Tool-execution* errors are NOT JSON-RPC errors: per MCP they are a
+//!   successful `result` carrying a `CallToolResult` with `isError: true`,
+//!   so the calling model can read the message and self-correct.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::catalog::{ToolContext, ToolErrorKind};
+use crate::agent::catalog::ToolContext;
 
 use super::state::AppState;
 
-const PROTOCOL_VERSION: &str = "2025-03-26";
+const PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// Tool ids exposed over the MCP transport. The catalog holds more
-/// builtins (e.g. `get_record`, `route`); MCP intentionally surfaces
-/// only this original set so external clients see an unchanged tool
-/// list.
-const MCP_EXPOSED_TOOLS: [&str; 4] = [
-    "list_collections",
-    "describe_collection",
-    "search",
-    "upsert_record",
-];
+/// Protocol versions this server can speak. The first entry is preferred.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26"];
 
 // ---------------------------------------------------------------------------
 // JSON-RPC envelope
@@ -98,14 +99,46 @@ fn err(id: serde_json::Value, code: i32, message: impl Into<String>) -> JsonRpcR
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// MCP Streamable HTTP POST endpoint (stateless).
+///
+/// Honors the `MCP-Protocol-Version` header leniently: absent → assume a
+/// supported version (proceed); present and unsupported → HTTP 400. The
+/// success/error JSON-RPC envelope is returned as `application/json` (the
+/// spec allows a plain JSON response when there is no SSE stream). Veda is
+/// stateless, so no `Mcp-Session-Id` is issued and any client-sent session id
+/// is ignored.
+///
+/// `HeaderMap` is placed before the `Json` body extractor: in axum the body
+/// extractor consumes the request and must come last.
 pub async fn handle_mcp(
     State(state): State<AppState>,
     crate::tenant::Tenant(tenant): crate::tenant::Tenant,
+    headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
-) -> (StatusCode, Json<JsonRpcResponse>) {
+) -> axum::response::Response {
+    // Lenient MCP-Protocol-Version check: only reject a header that is
+    // *present and unsupported*.
+    if let Some(v) = headers.get("mcp-protocol-version") {
+        let ok_version = v
+            .to_str()
+            .ok()
+            .map(|s| SUPPORTED_PROTOCOL_VERSIONS.contains(&s))
+            .unwrap_or(false);
+        if !ok_version {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "unsupported MCP-Protocol-Version",
+                    "supported": SUPPORTED_PROTOCOL_VERSIONS,
+                })),
+            )
+                .into_response();
+        }
+    }
+
     let id = req.id.unwrap_or(serde_json::Value::Null);
     let resp = match req.method.as_str() {
-        "initialize" => handle_initialize(),
+        "initialize" => handle_initialize(req.params),
         "tools/list" => handle_tools_list(&state),
         "tools/call" => handle_tools_call(&state, &tenant, req.params).await,
         "ping" => Ok(serde_json::json!({})),
@@ -116,16 +149,38 @@ pub async fn handle_mcp(
         Ok(result) => ok(id, result),
         Err((code, msg)) => err(id, code, msg),
     };
-    (StatusCode::OK, Json(body))
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// MCP Streamable HTTP GET endpoint.
+///
+/// Clients issue `GET /v1/mcp` to open a server→client SSE stream. Veda has
+/// no server-initiated messages, so this is unsupported: return 405 with an
+/// `Allow: POST` header rather than hanging on an empty stream.
+pub async fn handle_mcp_get() -> impl IntoResponse {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        [(axum::http::header::ALLOW, "POST")],
+        "GET not supported: Veda's MCP endpoint has no server-initiated stream; use POST.",
+    )
 }
 
 // ---------------------------------------------------------------------------
 // initialize
 // ---------------------------------------------------------------------------
 
-fn handle_initialize() -> Result<serde_json::Value, (i32, String)> {
+fn handle_initialize(params: Option<serde_json::Value>) -> Result<serde_json::Value, (i32, String)> {
+    // Negotiate the protocol version: echo the client's requested version
+    // if we support it, otherwise fall back to our preferred version.
+    let requested = params
+        .as_ref()
+        .and_then(|p| p["protocolVersion"].as_str());
+    let negotiated = match requested {
+        Some(v) if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) => v,
+        _ => PROTOCOL_VERSION,
+    };
     Ok(serde_json::json!({
-        "protocolVersion": PROTOCOL_VERSION,
+        "protocolVersion": negotiated,
         "serverInfo": {
             "name": "veda",
             "version": env!("CARGO_PKG_VERSION"),
@@ -141,12 +196,12 @@ fn handle_initialize() -> Result<serde_json::Value, (i32, String)> {
 // ---------------------------------------------------------------------------
 
 fn handle_tools_list(state: &AppState) -> Result<serde_json::Value, (i32, String)> {
-    let catalog = &state.inner.tool_catalog;
-    let exposed: Vec<String> = MCP_EXPOSED_TOOLS.iter().map(|s| (*s).to_owned()).collect();
-    // `specs_for` preserves builtin order, which matches the original
-    // hard-coded ordering of the four MCP tools.
-    let tools: Vec<serde_json::Value> = catalog
-        .specs_for(&exposed)
+    // Expose the full builtin catalog over MCP — each spec renders its
+    // own `{name, description, inputSchema, annotations}` entry.
+    let tools: Vec<serde_json::Value> = state
+        .inner
+        .tool_catalog
+        .builtin_specs()
         .iter()
         .map(|s| s.to_mcp_entry())
         .collect();
@@ -169,12 +224,10 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
 
-    // Only the original four tools are reachable over MCP, even though
-    // the catalog holds more builtins.
-    if !MCP_EXPOSED_TOOLS.contains(&tool_name) {
-        return Err((-32601, format!("unknown tool: {tool_name}")));
-    }
-
+    // Any builtin the catalog knows is callable. An unknown id is
+    // dispatched too and surfaces as an error outcome
+    // (`"unknown tool: ..."`), which we map to the JSON-RPC -32601
+    // protocol error below.
     let ctx = ToolContext::new(state, tenant);
     let outcome = state.inner.tool_catalog.dispatch(&ctx, tool_name, args).await;
     if outcome.is_error {
@@ -182,18 +235,26 @@ async fn handle_tools_call(
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| outcome.content.to_string());
-        // Argument-validation failures map to JSON-RPC "Invalid params"
-        // (-32602); not-found and internal failures both surface as
-        // "Internal error" (-32603), matching the pre-refactor behavior.
-        let code = match outcome.error_kind {
-            Some(ToolErrorKind::InvalidArgs) => -32602,
-            Some(ToolErrorKind::NotFound) | Some(ToolErrorKind::Internal) | None => -32603,
-        };
-        return Err((code, msg));
+        // An *unknown tool* is a protocol error ("Method not found",
+        // -32601) — the tool genuinely doesn't exist. Every other error
+        // is a *tool-execution* failure: per MCP, return a successful
+        // JSON-RPC result with `isError: true` (a `CallToolResult`) so the
+        // calling LLM can read the message and self-correct.
+        if msg.starts_with("unknown tool") {
+            return Err((-32601, msg));
+        }
+        // `error_kind` (InvalidArgs | NotFound | Internal) is carried by
+        // the outcome but does not change the wire shape — all become an
+        // `isError` result.
+        return Ok(serde_json::json!({
+            "content": [{ "type": "text", "text": msg }],
+            "isError": true
+        }));
     }
 
     Ok(serde_json::json!({
         "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome.content).unwrap_or_default() }],
+        "structuredContent": outcome.content,
         "isError": false
     }))
 }

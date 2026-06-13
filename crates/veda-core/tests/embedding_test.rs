@@ -109,10 +109,10 @@ fn test_validate_modality_model_not_found() {
 
 // ── 3. Mock embedding client — text returns correct dimension ───────────
 
-#[test]
-fn test_embed_text_correct_dimension() {
+#[tokio::test]
+async fn test_embed_text_correct_dimension() {
     let client = EmbeddingClient::new(clip_model());
-    let vec = client.embed_text("hello world").unwrap();
+    let vec = client.embed_text("hello world").await.unwrap();
     assert_eq!(vec.len(), 768);
 
     // Should be normalized (L2 norm ≈ 1.0)
@@ -120,14 +120,14 @@ fn test_embed_text_correct_dimension() {
     assert!((norm - 1.0).abs() < 1e-4, "vector should be normalized, got norm={norm}");
 }
 
-#[test]
-fn test_embed_text_deterministic() {
+#[tokio::test]
+async fn test_embed_text_deterministic() {
     let client = EmbeddingClient::new(clip_model());
-    let v1 = client.embed_text("hello world").unwrap();
-    let v2 = client.embed_text("hello world").unwrap();
+    let v1 = client.embed_text("hello world").await.unwrap();
+    let v2 = client.embed_text("hello world").await.unwrap();
     assert_eq!(v1, v2, "same input should produce same vector");
 
-    let v3 = client.embed_text("goodbye world").unwrap();
+    let v3 = client.embed_text("goodbye world").await.unwrap();
     assert_ne!(v1, v3, "different input should produce different vector");
 }
 
