@@ -9,6 +9,7 @@ import agentsMcp from './content/agents-mcp.md?raw'
 import restApi from './content/rest-api.md?raw'
 import pythonSdk from './content/python-sdk.md?raw'
 import observability from './content/observability.md?raw'
+import opsAdvisor from './content/ops-advisor.md?raw'
 
 export interface DocPageEntry {
   slug: string
@@ -46,6 +47,7 @@ export const DOCS: DocGroup[] = [
       { slug: 'rest-api', title: 'REST API', md: restApi },
       { slug: 'python-sdk', title: 'Python SDK', md: pythonSdk },
       { slug: 'observability', title: 'Observability', md: observability },
+      { slug: 'ops-advisor', title: 'Ops Advisor', md: opsAdvisor },
     ],
   },
 ]

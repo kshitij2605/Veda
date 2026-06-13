@@ -162,3 +162,17 @@ Write skew is allowed (snapshot isolation); lost updates are prevented; read-onl
 | `POST` | `/v1/admin/collections/{name}/mvcc_checkpoint` | Atomic MVCC snapshot + WAL truncate |
 
 Endpoints marked Raft-only return `503` in single-node mode — see [Cluster modes](/docs/installation#cluster-modes).
+
+## Ops Advisor (Insights)
+
+Admin-only automated-operations surface. See [Ops Advisor](/docs/ops-advisor) for the full guide.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/admin/insights` | Open events (`?severity=`, `?scope=` filters), severity-sorted |
+| `GET` | `/v1/admin/insights/history` | Closed events (bounded history) |
+| `GET` | `/v1/admin/insights/rules` | Rule catalog with effective config per rule |
+| `PUT` | `/v1/admin/insights/rules/{id}` | Tune `enabled` / `muted` / `severity_override` / `thresholds` / `auto_remediate` |
+| `GET/PUT` | `/v1/admin/insights/channels` | Alert-channel config (secrets write-only on `GET`) |
+| `POST` | `/v1/admin/insights/run` | Force one evaluation tick → `{ opened, closed }` |
+| `POST` | `/v1/admin/insights/{event_id}/ack` | Acknowledge an open event |

@@ -555,7 +555,7 @@ paths:
             schema: { $ref: '#/components/schemas/CreateCollectionRequest' }
       responses:
         '201': { description: created }
-        '307': { description: follower; resubmit at Location: }
+        '307': { description: "follower; resubmit at Location header" }
         '409': { description: already exists }
 
   /v1/collections/{name}:
@@ -583,7 +583,7 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: dropped }
-        '307': { description: follower; resubmit at Location: }
+        '307': { description: "follower; resubmit at Location header" }
         '404': { description: not found }
 
   /v1/collections/{name}/insert:
@@ -610,7 +610,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/InsertResponse' }
-        '307': { description: follower; resubmit at Location: }
+        '307': { description: "follower; resubmit at Location header" }
         '404': { description: collection not found }
 
   /v1/collections/{name}/records/{id}:

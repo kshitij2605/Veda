@@ -26,6 +26,10 @@
 - **SIMD-optimized distances** -- SimSIMD-backed AVX-512 / ARM NEON / SVE selected at runtime (AVX2/scalar fallback via `--no-default-features`); 6 metrics (Cosine, Euclidean, DotProduct, Hamming, Manhattan, Jaccard)
 - **SQL-like filter expressions** -- combine vector search with structured metadata filters, including dotted-path queries into nested JSON fields (e.g. `meta.user.tier = "gold"`)
 - **Multi-vector fusion** -- RRF, WeightedSum, and Intersection strategies for cross-modal retrieval
+- **Full-text BM25 + analyzer** -- Lucene-style BM25 scoring with a configurable analyzer pipeline (char filters, tokenizer, **stemming** + **stopword** removal) applied identically at index and query time
+- **Phrase / proximity queries** -- positional postings power `match_phrase` (exact-adjacency and slop-N proximity), BM25-ranked
+- **Hybrid search** -- fuse dense vectors, sparse SPLADE vectors, and BM25 full-text in one query (RRF / weighted)
+- **Segment compression** -- sealed stored-field columns are `zstd`-compressed at seal time (the mmap'd vector `.vec` fast path is deliberately left uncompressed)
 - **Pattern search** -- suffix array-backed substring and fuzzy matching on text fields
 - **Built-in blob storage** -- store raw files alongside embeddings via MinIO/S3-compatible backends
 - **Record TTL** -- set a reserved `_expires_at` (unix seconds) field on any record; expired records are excluded from search/get/list at query time and physically purged by a background sweeper
@@ -40,6 +44,7 @@
 - **Atomic create-and-load** -- `POST /v1/collections` accepts `seed_records`; insert failure rolls back the collection via a compensating drop.
 - **Real reindex pipeline** -- `POST /v1/collections/{name}/reindex` accepts `{chunker, re_embed, ...}`. Groups source records by `parent_doc_id`, sorts by `chunk_index`, reconstructs parent text, re-chunks via the supplied strategy, and (when `re_embed: true`) re-embeds via the registry's text-modality model. The atomic alias swap finalises the cutover at commit_ts. `SetCollectionAlias` is the same primitive underneath -- a name can be pointed at a sibling (e.g. `docs` → `docs@v2`) atomically. Returns `424 FAILED_DEPENDENCY` when `re_embed` is requested with no embedding endpoint configured.
 - **Cross-region WAN log shipping** -- async replication of per-shard logs to replica regions with bounded staleness. Cross-region reads call `check_read_ts` on the live `/records` and `/search` path; reads ahead of the replica's `safe_ts` return `503` with explicit lag information. Operator-driven `promote_replica` cutover drains pending writes then bumps the topology epoch (fences old primaries). Admin REST: `GET/PUT /v1/admin/region-topology`, `POST /v1/admin/promote-region`, `GET/PUT /v1/admin/replica-safe-ts`.
+- **True multi-node distributed search** -- a gRPC search service (`RemoteShardSearcher`) does scatter-gather across shards with a query-then-fetch split: Phase 1 returns lightweight `ScoredRecord`s for the global top-k merge, Phase 2 fetches the full records from the owning node. Per-shard placement comes from `route_query`; local and remote shards interleave behind the same `ShardSearcher` trait.
 
 ### Pipelines + tooling
 - **7 chunking strategies** -- MarkdownRecursive, MarkdownHeading (3 levels), Semantic, Sentence (with CJK punctuation support), FixedSize, Page, None
