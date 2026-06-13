@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod auth;
 pub mod auth_oidc;
 pub mod log_appliers;

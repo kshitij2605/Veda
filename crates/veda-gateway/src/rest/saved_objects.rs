@@ -89,6 +89,56 @@ impl SavedObjectStore {
         }
     }
 
+    /// Insert or replace an object by its id, stamping timestamps the
+    /// same way the HTTP `upsert` handler does (server-authoritative
+    /// `updated_at`; preserve `created_at` on an existing row, else
+    /// set it now). Returns the stored object. Used by in-process
+    /// features (e.g. Veda Agents) that persist through the same store
+    /// rather than the REST surface.
+    pub async fn put(&self, mut obj: SavedObject) -> SavedObject {
+        let now = now_ms();
+        {
+            let mut m = self.inner.write().await;
+            if let Some(prev) = m.get(&obj.id) {
+                if obj.created_at == 0 {
+                    obj.created_at = prev.created_at;
+                }
+            } else if obj.created_at == 0 {
+                obj.created_at = now;
+            }
+            obj.updated_at = now;
+            m.insert(obj.id.clone(), obj.clone());
+        }
+        self.write_through().await;
+        obj
+    }
+
+    /// Fetch a single object by id.
+    pub async fn get(&self, id: &str) -> Option<SavedObject> {
+        self.inner.read().await.get(id).cloned()
+    }
+
+    /// All objects whose `type` tag equals `kind`, newest-first
+    /// (same ordering as `snapshot`).
+    pub async fn list_by_type(&self, kind: &str) -> Vec<SavedObject> {
+        self.snapshot()
+            .await
+            .into_iter()
+            .filter(|o| o.kind == kind)
+            .collect()
+    }
+
+    /// Remove an object by id (idempotent). Returns whether a row was
+    /// removed.
+    pub async fn remove(&self, id: &str) -> bool {
+        let removed = {
+            let mut m = self.inner.write().await;
+            m.remove(id).is_some()
+        };
+        self.write_through().await;
+        removed
+    }
+
     async fn snapshot(&self) -> Vec<SavedObject> {
         let m = self.inner.read().await;
         let mut out: Vec<SavedObject> = m.values().cloned().collect();
