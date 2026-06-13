@@ -2,10 +2,11 @@
 //!
 //! This module defines the agent feature's data model ([`model`]) and
 //! thin persistence helpers ([`store`]) over the gateway's existing
-//! `SavedObjectStore`. The tool catalog, executor, and REST surface are
-//! added in later tasks.
+//! `SavedObjectStore`. The tool catalog ([`catalog`]) and executor
+//! ([`executor`]) build on top; the REST surface is added in a later task.
 
 pub mod catalog;
+pub mod executor;
 pub mod model;
 pub mod store;
 pub mod tools;
