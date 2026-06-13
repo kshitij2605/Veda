@@ -6,15 +6,19 @@
 //! executor — the MCP endpoint renders/dispatches a subset of these via
 //! the catalog rather than carrying its own copies.
 
-use veda_core::embedding::Modality;
+use base64::prelude::*;
+use veda_core::embedding::{EmbeddingModelConfig, Modality};
 use veda_core::embedding_client::EmbeddingClient;
 use veda_core::record::Record;
 use veda_core::types::{DistanceMetric, FieldType};
 use veda_query::adaptive::route_query;
+use veda_query::filter::parser::FilterParser;
+use veda_query::filter::record_eval::evaluate_record;
 use veda_query::search::VectorSearchRequest;
 
 use crate::agent::catalog::{ToolContext, ToolOutcome, ToolSpec};
-use crate::rest::records::{field_value_to_json, parse_record_public};
+use crate::rest::aggregate::{aggregate_core, AggErrorKind, AggregateQuery};
+use crate::rest::records::{field_value_to_json, parse_record_public, record_passes_rls_owner};
 
 /// The full set of built-in tool specs (id == MCP/OpenAI tool name).
 pub fn builtin_specs() -> Vec<ToolSpec> {
@@ -43,17 +47,19 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
         ToolSpec {
             id: "search".to_owned(),
             name: "search".to_owned(),
-            description: "Text search over a Veda collection. The query is auto-embedded using the collection's configured text embedding model. Returns the top-k nearest records by vector similarity.".to_owned(),
+            description: "Cross-modal search over a Veda collection. Supply EITHER a text `query` OR a base64-encoded `query_image_b64` image as the retrieval query (exactly one). The query is auto-embedded into Veda's unified multimodal vector space using the collection's text model (for text) or the registry's image model (for images), so an image query can retrieve text/image/document records and vice-versa. Returns the top-k nearest records by vector similarity.".to_owned(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "collection": { "type": "string", "description": "Collection to search" },
-                    "query": { "type": "string", "description": "Natural-language query text" },
+                    "query": { "type": "string", "description": "Natural-language query text. Provide this OR query_image_b64, not both." },
+                    "query_image_b64": { "type": "string", "description": "Base64-encoded image bytes used as the retrieval query (cross-modal). Provide this OR query, not both." },
+                    "mode": { "type": "string", "enum": ["auto", "dense", "hybrid", "sparse", "colpali"], "default": "auto", "description": "Retrieval mode. 'auto' (default) maps to dense for the MVP." },
                     "field": { "type": "string", "description": "Vector field name (optional; defaults to the first vector field on the collection)" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 },
                     "filter": { "type": "string", "description": "Optional SQL-like filter expression, e.g. \"category = 'electronics' AND price < 500\"" }
                 },
-                "required": ["collection", "query"]
+                "required": ["collection"]
             }),
             kind: "builtin".to_owned(),
         },
@@ -95,6 +101,38 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                     "query": { "type": "string", "description": "Natural-language query to analyse" }
                 },
                 "required": ["query"]
+            }),
+            kind: "builtin".to_owned(),
+        },
+        ToolSpec {
+            id: "aggregate".to_owned(),
+            name: "aggregate".to_owned(),
+            description: "Compute a scalar OLAP metric (count/sum/avg/min/max) over a field in a Veda collection, optionally grouped by another field and/or filtered. Returns one value per group.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "collection": { "type": "string", "description": "Collection to aggregate over" },
+                    "field": { "type": "string", "description": "Field to aggregate. Must be numeric for sum/avg/min/max; any field for count." },
+                    "metric": { "type": "string", "enum": ["count", "sum", "avg", "min", "max"], "description": "Aggregation metric" },
+                    "group_by": { "type": "string", "description": "Optional field to group results by" },
+                    "filter": { "type": "string", "description": "Optional SQL-like filter expression" }
+                },
+                "required": ["collection", "field", "metric"]
+            }),
+            kind: "builtin".to_owned(),
+        },
+        ToolSpec {
+            id: "filter_query".to_owned(),
+            name: "filter_query".to_owned(),
+            description: "Return records matching a SQL-like filter expression from a Veda collection (no vector search). Row-level security and TTL are enforced. Returns up to `limit` records with their fields.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "collection": { "type": "string", "description": "Collection to scan" },
+                    "filter": { "type": "string", "description": "SQL-like filter expression, e.g. \"price < 500 AND category = 'books'\"" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 }
+                },
+                "required": ["collection", "filter"]
             }),
             kind: "builtin".to_owned(),
         },
@@ -166,14 +204,149 @@ pub async fn describe_collection(ctx: &ToolContext<'_>, args: serde_json::Value)
     }))
 }
 
+/// Retrieval mode for the multimodal `search` tool. Parsed from the
+/// `mode` argument; `auto` is the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    Auto,
+    Dense,
+    Hybrid,
+    Sparse,
+    Colpali,
+}
+
+impl SearchMode {
+    /// Parse the `mode` argument. Unknown values are an error.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            "dense" => Ok(Self::Dense),
+            "hybrid" => Ok(Self::Hybrid),
+            "sparse" => Ok(Self::Sparse),
+            "colpali" => Ok(Self::Colpali),
+            other => Err(format!(
+                "invalid mode '{other}'; expected one of auto|dense|hybrid|sparse|colpali"
+            )),
+        }
+    }
+}
+
+/// Whether the collection/embedder for `field` can produce a sparse
+/// query representation. bge-m3-style models that declare a
+/// `SparseVector` field on the schema support it.
+fn supports_sparse(schema: &veda_core::schema::CollectionSchema) -> bool {
+    schema
+        .fields()
+        .iter()
+        .any(|f| matches!(f.field_type(), FieldType::SparseVector { .. }))
+}
+
+/// Map a [`SearchMode`] + a single dense query `vector` to the REST
+/// [`QueryBody`] the search executor consumes. The single-vector
+/// embedding path produces a dense vector, so only `dense`/`auto` yield
+/// an executable query for the MVP; the other modes are recognised and
+/// validated here but reported as unsupported (clear message) until the
+/// matching query-representation embedders are wired.
+///
+/// Returns the populated [`QueryBody`] (only its `vector` leg is set) or
+/// an error message suitable for `invalid_args`.
+pub fn build_query_body(
+    mode: SearchMode,
+    field: &str,
+    vector: Vec<f32>,
+    sparse_supported: bool,
+) -> Result<crate::rest::search::QueryBody, String> {
+    use crate::rest::search::{QueryBody, SingleVectorQuery};
+    let dense = || QueryBody {
+        vector: Some(SingleVectorQuery { field: field.to_owned(), values: vector.clone() }),
+        sparse_vector: None,
+        colpali: None,
+        multi_vector: None,
+        bm25: None,
+        match_phrase: None,
+        hybrid: None,
+        fusion: None,
+        fusion_params: None,
+    };
+    match mode {
+        // TODO: wire adaptive router for auto
+        SearchMode::Auto | SearchMode::Dense => Ok(dense()),
+        SearchMode::Sparse => {
+            if !sparse_supported {
+                return Err(
+                    "mode 'sparse' requires a collection with a sparse-vector field and a \
+                     sparse-capable embedder".to_owned(),
+                );
+            }
+            Err("mode 'sparse' is not yet supported via the agent search tool (the query \
+                 embedder produces a dense vector); use mode 'dense' or 'auto'".to_owned())
+        }
+        SearchMode::Hybrid => Err(
+            "mode 'hybrid' is not yet supported via the agent search tool; use 'dense' or 'auto'"
+                .to_owned(),
+        ),
+        SearchMode::Colpali => Err(
+            "mode 'colpali' is not yet supported via the agent search tool; use 'dense' or 'auto'"
+                .to_owned(),
+        ),
+    }
+}
+
+/// Select the embedding model for a query of the given modality.
+///
+/// For a TEXT query we prefer the model bound to the target vector field
+/// (matching how records were embedded); falling back to any
+/// text-capable model. For an IMAGE query we always pick an image-capable
+/// model from the registry (the unified multimodal space), reusing the
+/// same `find_by_modality` path as `/v1/embed`.
+pub fn select_query_model(
+    registry: &veda_core::embedding::EmbeddingModelRegistry,
+    bound_model: Option<&str>,
+    modality: Modality,
+) -> Result<EmbeddingModelConfig, String> {
+    if modality == Modality::Text {
+        if let Some(name) = bound_model {
+            return registry
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("bound model '{name}' not in registry"));
+        }
+    }
+    registry
+        .find_by_modality(modality)
+        .first()
+        .map(|c| (*c).clone())
+        .ok_or_else(|| format!("no embedding model configured for modality '{modality}'"))
+}
+
 pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
     let Some(user_collection) = args["collection"].as_str() else {
         return ToolOutcome::invalid_args("collection is required");
     };
     let scoped = crate::tenant::scope(ctx.tenant, user_collection);
     let collection = scoped.as_str();
-    let Some(query) = args["query"].as_str() else {
-        return ToolOutcome::invalid_args("query is required");
+
+    // Exactly one of query / query_image_b64.
+    let text_query = args["query"].as_str().filter(|s| !s.is_empty());
+    let image_b64 = args["query_image_b64"].as_str().filter(|s| !s.is_empty());
+    let (modality, query_text, query_bytes): (Modality, Option<&str>, Option<Vec<u8>>) =
+        match (text_query, image_b64) {
+            (Some(q), None) => (Modality::Text, Some(q), None),
+            (None, Some(b)) => match BASE64_STANDARD.decode(b) {
+                Ok(bytes) => (Modality::Image, None, Some(bytes)),
+                Err(e) => return ToolOutcome::invalid_args(format!("invalid base64 in query_image_b64: {e}")),
+            },
+            (Some(_), Some(_)) => {
+                return ToolOutcome::invalid_args("provide exactly one of `query` or `query_image_b64`, not both");
+            }
+            (None, None) => {
+                return ToolOutcome::invalid_args("one of `query` or `query_image_b64` is required");
+            }
+        };
+
+    let mode = match SearchMode::parse(args["mode"].as_str().unwrap_or("auto")) {
+        Ok(m) => m,
+        Err(e) => return ToolOutcome::invalid_args(e),
     };
     let limit = args["limit"].as_u64().unwrap_or(10) as usize;
     let filter = args["filter"].as_str().map(|s| s.to_owned());
@@ -202,38 +375,43 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
         FieldType::Vector { metric, .. } => *metric,
         _ => DistanceMetric::Cosine,
     };
-
-    // Find a text-supporting embedding model. Prefer the one bound to
-    // this field if any; otherwise auto-select.
     let bound_model = match field_def.field_type() {
         FieldType::Vector { model_id, .. } => model_id.clone(),
         _ => None,
     };
+
+    // Select the model for this query's modality (image → image model,
+    // text → field-bound/text model) — the unified cross-modal space.
     let model = {
         let registry = ctx.state.inner.embedding_registry.read().await;
-        if let Some(name) = bound_model {
-            match registry.get(&name).cloned() {
-                Some(m) => m,
-                None => {
-                    return ToolOutcome::internal(format!("bound model '{name}' not in registry"))
-                }
-            }
-        } else {
-            match registry
-                .find_by_modality(Modality::Text)
-                .first()
-                .map(|c| (*c).clone())
-            {
-                Some(m) => m,
-                None => return ToolOutcome::internal("no text embedding model configured"),
-            }
+        match select_query_model(&registry, bound_model.as_deref(), modality) {
+            Ok(m) => m,
+            Err(e) => return ToolOutcome::internal(e),
         }
     };
 
+    // Embed the query: text via embed_text, image bytes via embed_bytes.
     let client = EmbeddingClient::new(model);
-    let vector = match client.embed_text(query) {
-        Ok(v) => v,
-        Err(e) => return ToolOutcome::internal(format!("embedding failed: {e}")),
+    let vector = match (query_text, query_bytes) {
+        (Some(q), _) => match client.embed_text(q) {
+            Ok(v) => v,
+            Err(e) => return ToolOutcome::internal(format!("embedding failed: {e}")),
+        },
+        (None, Some(bytes)) => match client.embed_bytes(&bytes, modality) {
+            Ok(v) => v,
+            Err(e) => return ToolOutcome::internal(format!("embedding failed: {e}")),
+        },
+        (None, None) => unreachable!("modality was resolved above"),
+    };
+
+    // Map mode → QueryBody. Only the dense leg is executable in the MVP.
+    let query_body = match build_query_body(mode, &field_name, vector, supports_sparse(&schema)) {
+        Ok(qb) => qb,
+        Err(e) => return ToolOutcome::invalid_args(e),
+    };
+    let Some(vec_query) = query_body.vector else {
+        // build_query_body only returns Ok for dense/auto today.
+        return ToolOutcome::internal("unexpected non-dense query body");
     };
 
     let executors = ctx.state.inner.query_executors.read().await;
@@ -242,7 +420,7 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
     };
     let request = VectorSearchRequest {
         field: field_name.clone(),
-        query_vector: vector,
+        query_vector: vec_query.values,
         k: limit,
         metric,
         filter,
@@ -392,6 +570,133 @@ pub async fn route(_ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
         Ok(v) => ToolOutcome::ok(v),
         Err(e) => ToolOutcome::internal(format!("serialize route: {e}")),
     }
+}
+
+pub async fn aggregate(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
+    let Some(user_collection) = args["collection"].as_str() else {
+        return ToolOutcome::invalid_args("collection is required");
+    };
+    let Some(field) = args["field"].as_str() else {
+        return ToolOutcome::invalid_args("field is required");
+    };
+    let Some(metric) = args["metric"].as_str() else {
+        return ToolOutcome::invalid_args("metric is required");
+    };
+    if !matches!(metric, "count" | "sum" | "avg" | "min" | "max") {
+        return ToolOutcome::invalid_args(format!(
+            "invalid metric '{metric}'; expected count|sum|avg|min|max"
+        ));
+    }
+    let scoped = crate::tenant::scope(ctx.tenant, user_collection);
+    let query = AggregateQuery {
+        field: field.to_owned(),
+        metric: metric.to_owned(),
+        group_by: args["group_by"].as_str().map(str::to_owned),
+        filter: args["filter"].as_str().map(str::to_owned),
+    };
+    match aggregate_core(ctx.state, scoped.as_str(), &query).await {
+        Ok(resp) => {
+            let groups: Vec<serde_json::Value> = resp
+                .groups
+                .into_iter()
+                .map(|g| serde_json::json!({ "key": g.key, "value": g.value }))
+                .collect();
+            ToolOutcome::ok(serde_json::json!({ "groups": groups }))
+        }
+        Err(e) => match e.kind {
+            AggErrorKind::NotFound => ToolOutcome::not_found(e.message),
+            AggErrorKind::BadRequest => ToolOutcome::invalid_args(e.message),
+            AggErrorKind::Internal => ToolOutcome::internal(e.message),
+        },
+    }
+}
+
+pub async fn filter_query(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
+    let Some(user_collection) = args["collection"].as_str() else {
+        return ToolOutcome::invalid_args("collection is required");
+    };
+    let Some(filter) = args["filter"].as_str() else {
+        return ToolOutcome::invalid_args("filter is required");
+    };
+    let limit = args["limit"].as_u64().unwrap_or(100) as usize;
+    let scoped = crate::tenant::scope(ctx.tenant, user_collection);
+    let collection = scoped.as_str();
+
+    let filter_expr = match FilterParser::parse(filter) {
+        Ok(e) => e,
+        Err(e) => return ToolOutcome::invalid_args(format!("invalid filter: {e}")),
+    };
+
+    // RLS: a scoped (`Some`) user only sees rows they own when the
+    // collection declares an owner field; `None` (admin) bypasses.
+    let rls_field = {
+        let schemas = ctx.state.inner.schemas.read().await;
+        match schemas.get(collection) {
+            Some(s) => s.rls_owner_field().map(str::to_owned),
+            None => return ToolOutcome::not_found(format!("collection '{user_collection}' not found")),
+        }
+    };
+    let rls_owner = rls_field.as_deref().and(ctx.user);
+
+    let managers = ctx.state.inner.segment_managers.read().await;
+    let Some(shard_map) = managers.get(collection) else {
+        return ToolOutcome::not_found(format!("collection '{user_collection}' not found"));
+    };
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let mut records = Vec::new();
+    'outer: for sm in shard_map.values() {
+        let gs = sm.growing_segment();
+        for doc_id in 0..gs.count() {
+            if gs.is_deleted(doc_id) {
+                continue;
+            }
+            if let Some(rec) = gs.get_record(doc_id) {
+                if rec.is_expired_at(now_secs) {
+                    continue;
+                }
+                if !record_passes_rls_owner(rec, rls_field.as_deref(), rls_owner) {
+                    continue;
+                }
+                if !evaluate_record(&filter_expr, rec) {
+                    continue;
+                }
+                records.push(record_json(rec));
+                if records.len() >= limit {
+                    break 'outer;
+                }
+            }
+        }
+        for handle in sm.sealed_segments() {
+            for doc_id in 0..handle.metadata.row_count as u32 {
+                if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                    continue;
+                }
+                if let Ok(rec) = handle.reader.get_record(doc_id) {
+                    if rec.is_expired_at(now_secs) {
+                        continue;
+                    }
+                    if !record_passes_rls_owner(&rec, rls_field.as_deref(), rls_owner) {
+                        continue;
+                    }
+                    if !evaluate_record(&filter_expr, &rec) {
+                        continue;
+                    }
+                    records.push(record_json(&rec));
+                    if records.len() >= limit {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+
+    let count = records.len();
+    ToolOutcome::ok(serde_json::json!({ "records": records, "count": count }))
 }
 
 /// Serialise a record to `{ "id", "fields" }` — matching the REST
