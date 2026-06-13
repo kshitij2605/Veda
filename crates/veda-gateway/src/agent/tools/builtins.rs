@@ -64,7 +64,8 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                     "mode": { "type": "string", "enum": ["auto", "dense", "hybrid", "sparse", "colpali"], "default": "auto", "description": "Retrieval mode. 'auto' (default) maps to dense for the MVP." },
                     "field": { "type": "string", "description": "Vector field name (optional; defaults to the first vector field on the collection)" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 },
-                    "filter": { "type": "string", "description": "Optional SQL-like filter expression, e.g. \"category = 'electronics' AND price < 500\"" }
+                    "filter": { "type": "string", "description": "Optional SQL-like filter expression, e.g. \"category = 'electronics' AND price < 500\"" },
+                    "fields": { "type": "array", "items": { "type": "string" }, "description": "Optional list of field names to return for each hit; omitted = all fields." }
                 },
                 "required": ["collection"]
             }),
@@ -403,6 +404,15 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
     };
     let limit = args["limit"].as_u64().unwrap_or(10) as usize;
     let filter = args["filter"].as_str().map(|s| s.to_owned());
+    // Optional field projection: narrow each hit's `fields` map to these
+    // names. An empty array is treated as `None` (return all fields).
+    let keep_fields: Option<Vec<String>> = args["fields"].as_array().and_then(|arr| {
+        let names: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        if names.is_empty() { None } else { Some(names) }
+    });
 
     let schema = {
         let schemas = ctx.state.inner.schemas.read().await;
@@ -499,13 +509,53 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
         Err(e) => return ToolOutcome::internal(format!("search failed: {e}")),
     };
 
+    // Hydrate each hit's record fields (O(1) UUID→Record lookup per hit,
+    // skipping vector fields), then apply the optional `fields` projection.
+    // Mirrors REST `/search` field hydration so the agent surface matches.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let vector_field_names: std::collections::HashSet<&str> = schema
+        .fields()
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.field_type(),
+                FieldType::Vector { .. } | FieldType::MultiVector { .. } | FieldType::SparseVector { .. }
+            )
+        })
+        .map(|f| f.name())
+        .collect();
+    let managers = ctx.state.inner.segment_managers.read().await;
+    let shard_map = managers.get(collection);
+
     let hits: Vec<serde_json::Value> = response
         .results
         .into_iter()
         .map(|r| {
+            let mut fields = serde_json::Map::new();
+            if let Some(shard_map) = shard_map {
+                let rec = shard_map
+                    .values()
+                    .find_map(|sm| sm.lookup_record_at(r.id, now_secs));
+                if let Some(rec) = rec {
+                    for field_def in schema.fields() {
+                        let name = field_def.name();
+                        if vector_field_names.contains(name) {
+                            continue;
+                        }
+                        if let Some(value) = rec.get(name) {
+                            fields.insert(name.to_string(), field_value_to_json(value));
+                        }
+                    }
+                }
+            }
+            project_fields(&mut fields, &keep_fields);
             serde_json::json!({
                 "id": r.id.to_string(),
                 "distance": r.distance,
+                "fields": fields,
             })
         })
         .collect();
@@ -765,6 +815,24 @@ pub async fn filter_query(ctx: &ToolContext<'_>, args: serde_json::Value) -> Too
     ToolOutcome::ok(serde_json::json!({ "records": records, "count": count }))
 }
 
+/// Narrow a hit's `fields` map to only the requested `keep` names.
+///
+/// Pure and testable. `None` (or, per the caller, an empty request array)
+/// leaves the map untouched — all fields are returned. A requested name
+/// that is absent from the map is simply skipped (no error). Field order
+/// follows the `keep` list. Only the record `fields` map is affected;
+/// the hit's `id`/`distance` are never touched (they live outside this map).
+fn project_fields(fields: &mut serde_json::Map<String, serde_json::Value>, keep: &Option<Vec<String>>) {
+    let Some(keep) = keep else { return };
+    let mut projected = serde_json::Map::new();
+    for name in keep {
+        if let Some(value) = fields.remove(name) {
+            projected.insert(name.clone(), value);
+        }
+    }
+    *fields = projected;
+}
+
 /// Serialise a record to `{ "id", "fields" }` — matching the REST
 /// `GetRecordResponse` shape so the agent/MCP surfaces stay consistent.
 fn record_json(rec: &Record) -> serde_json::Value {
@@ -843,5 +911,60 @@ mod tests {
     fn rls_invalid_user_filter_errors() {
         let r = search_rls_filter_expr(Some("= = ="), Some("owner"), Some("alice"));
         assert!(r.is_err());
+    }
+
+    fn sample_fields() -> serde_json::Map<String, serde_json::Value> {
+        serde_json::json!({
+            "title": "Hello",
+            "body": "World",
+            "author": "alice",
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    #[test]
+    fn project_fields_keeps_only_requested() {
+        let mut fields = sample_fields();
+        project_fields(&mut fields, &Some(vec!["title".to_owned()]));
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields.get("title").and_then(|v| v.as_str()), Some("Hello"));
+        assert!(!fields.contains_key("body"));
+        assert!(!fields.contains_key("author"));
+    }
+
+    #[test]
+    fn project_fields_none_keeps_all() {
+        let mut fields = sample_fields();
+        project_fields(&mut fields, &None);
+        assert_eq!(fields.len(), 3);
+        assert!(fields.contains_key("title"));
+        assert!(fields.contains_key("body"));
+        assert!(fields.contains_key("author"));
+    }
+
+    #[test]
+    fn project_fields_absent_name_omitted_no_error() {
+        let mut fields = sample_fields();
+        project_fields(&mut fields, &Some(vec!["title".to_owned(), "missing".to_owned()]));
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields.get("title").and_then(|v| v.as_str()), Some("Hello"));
+        assert!(!fields.contains_key("missing"));
+    }
+
+    #[test]
+    fn search_spec_advertises_fields_param() {
+        let spec = builtin_specs()
+            .into_iter()
+            .find(|s| s.id == "search")
+            .expect("search spec present");
+        let props = &spec.input_schema["properties"];
+        // existing params preserved + the new `fields` projection param.
+        for p in ["collection", "query", "query_image_b64", "mode", "field", "limit", "filter", "fields"] {
+            assert!(props.get(p).is_some(), "search schema missing '{p}'");
+        }
+        assert_eq!(props["fields"]["type"], "array");
+        assert_eq!(props["fields"]["items"]["type"], "string");
     }
 }
