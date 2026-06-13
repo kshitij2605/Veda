@@ -1151,7 +1151,7 @@ fn parse_sparse_value(value: &serde_json::Value, dimension: u32) -> Result<Spars
 /// Returns true when the record passes the RLS owner check.
 /// - rls_field is None or rls_owner is None: always pass (no RLS or admin).
 /// - Otherwise: pass only if record[rls_field] == rls_owner.
-fn record_passes_rls_owner(
+pub(crate) fn record_passes_rls_owner(
     rec: &veda_core::record::Record,
     rls_field: Option<&str>,
     rls_owner: Option<&str>,
