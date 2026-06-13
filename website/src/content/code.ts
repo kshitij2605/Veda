@@ -45,4 +45,18 @@ curl -X POST \\
 
 # -> searchable vectors. No external OCR or embedding tooling.`,
   },
+  {
+    label: 'Ask an agent',
+    code: `# The built-in agent calls tools and grounds its answer
+curl -X POST localhost:6340/v1/agents/veda-agent/converse \\
+  -H 'content-type: application/json' \\
+  -d '{
+    "input": "Which index does Veda use for ANN search?
+              Search the docs collection."
+  }'
+
+# -> { "response": "...",
+#      "steps": [ tool_call, tool_result, reasoning ] }
+# Or connect Claude Desktop / Cursor over MCP -> /v1/mcp`,
+  },
 ]
