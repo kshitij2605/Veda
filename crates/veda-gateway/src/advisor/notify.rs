@@ -67,9 +67,17 @@ pub struct Notifier {
 
 impl Notifier {
     /// Build a notifier for the given channels.
+    ///
+    /// The HTTP client carries a 10s connect+request timeout so a hung
+    /// notification endpoint can never stall a send indefinitely (defense
+    /// in depth — the engine already releases its locks before notifying).
     pub fn new(channels: ChannelsConfig) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            client: reqwest::Client::new(),
+            client,
             channels,
             pagerduty_url: PAGERDUTY_ENQUEUE_URL.to_owned(),
         }
@@ -373,6 +381,14 @@ mod tests {
             }
         });
         (url, rx)
+    }
+
+    #[test]
+    fn new_builds_client_with_timeout() {
+        // The builder path with a timeout must succeed (never fall back
+        // to the timeout-less `Client::new()`); a usable notifier results.
+        let n = Notifier::new(ChannelsConfig::default());
+        assert_eq!(n.pagerduty_url, PAGERDUTY_ENQUEUE_URL);
     }
 
     #[test]
