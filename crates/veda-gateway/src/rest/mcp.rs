@@ -31,7 +31,8 @@
 //!   so the calling model can read the message and self-correct.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
@@ -98,11 +99,43 @@ fn err(id: serde_json::Value, code: i32, message: impl Into<String>) -> JsonRpcR
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// MCP Streamable HTTP POST endpoint (stateless).
+///
+/// Honors the `MCP-Protocol-Version` header leniently: absent → assume a
+/// supported version (proceed); present and unsupported → HTTP 400. The
+/// success/error JSON-RPC envelope is returned as `application/json` (the
+/// spec allows a plain JSON response when there is no SSE stream). Veda is
+/// stateless, so no `Mcp-Session-Id` is issued and any client-sent session id
+/// is ignored.
+///
+/// `HeaderMap` is placed before the `Json` body extractor: in axum the body
+/// extractor consumes the request and must come last.
 pub async fn handle_mcp(
     State(state): State<AppState>,
     crate::tenant::Tenant(tenant): crate::tenant::Tenant,
+    headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
-) -> (StatusCode, Json<JsonRpcResponse>) {
+) -> axum::response::Response {
+    // Lenient MCP-Protocol-Version check: only reject a header that is
+    // *present and unsupported*.
+    if let Some(v) = headers.get("mcp-protocol-version") {
+        let ok_version = v
+            .to_str()
+            .ok()
+            .map(|s| SUPPORTED_PROTOCOL_VERSIONS.contains(&s))
+            .unwrap_or(false);
+        if !ok_version {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "unsupported MCP-Protocol-Version",
+                    "supported": SUPPORTED_PROTOCOL_VERSIONS,
+                })),
+            )
+                .into_response();
+        }
+    }
+
     let id = req.id.unwrap_or(serde_json::Value::Null);
     let resp = match req.method.as_str() {
         "initialize" => handle_initialize(req.params),
@@ -116,7 +149,20 @@ pub async fn handle_mcp(
         Ok(result) => ok(id, result),
         Err((code, msg)) => err(id, code, msg),
     };
-    (StatusCode::OK, Json(body))
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// MCP Streamable HTTP GET endpoint.
+///
+/// Clients issue `GET /v1/mcp` to open a server→client SSE stream. Veda has
+/// no server-initiated messages, so this is unsupported: return 405 with an
+/// `Allow: POST` header rather than hanging on an empty stream.
+pub async fn handle_mcp_get() -> impl IntoResponse {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        [(axum::http::header::ALLOW, "POST")],
+        "GET not supported: Veda's MCP endpoint has no server-initiated stream; use POST.",
+    )
 }
 
 // ---------------------------------------------------------------------------
