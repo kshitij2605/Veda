@@ -1643,10 +1643,96 @@ async fn test_mcp_initialize_and_list_tools() {
     let body: Value = resp.json().await.unwrap();
     let tools = body["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"list_collections"));
-    assert!(names.contains(&"describe_collection"));
-    assert!(names.contains(&"search"));
-    assert!(names.contains(&"upsert_record"));
+    // The full builtin catalog (8 tools) is now exposed over MCP.
+    for expected in [
+        "list_collections",
+        "describe_collection",
+        "search",
+        "upsert_record",
+        "get_record",
+        "route",
+        "aggregate",
+        "filter_query",
+    ] {
+        assert!(names.contains(&expected), "missing MCP tool {expected}");
+    }
+    assert_eq!(tools.len(), 8, "expected the full 8-tool catalog");
+
+    // Every entry has an inputSchema and an annotations object.
+    for t in tools {
+        assert!(t["inputSchema"].is_object(), "{} inputSchema", t["name"]);
+        let ann = &t["annotations"];
+        assert!(ann.is_object(), "{} annotations", t["name"]);
+        assert!(ann["readOnlyHint"].is_boolean());
+        assert!(ann["destructiveHint"].is_boolean());
+        assert!(ann["title"].as_str().is_some());
+    }
+
+    // Read tools are read-only/non-destructive; upsert_record is the
+    // sole mutating/destructive tool.
+    let find = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap();
+    assert_eq!(find("search")["annotations"]["readOnlyHint"], true);
+    assert_eq!(find("search")["annotations"]["destructiveHint"], false);
+    assert_eq!(find("aggregate")["annotations"]["readOnlyHint"], true);
+    assert_eq!(find("upsert_record")["annotations"]["readOnlyHint"], false);
+    assert_eq!(find("upsert_record")["annotations"]["destructiveHint"], true);
+
+    // The multimodal search schema flows through unchanged.
+    let search_props = &find("search")["inputSchema"]["properties"];
+    assert!(search_props["query_image_b64"].is_object());
+    assert!(search_props["mode"].is_object());
+}
+
+#[tokio::test]
+async fn test_mcp_aggregate_tool_call() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    // Collection with a numeric, filterable field.
+    c.post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "mcp_agg",
+            "fields": [
+                { "name": "embedding", "type": "vector", "dimension": 4, "metric": "cosine" },
+                { "name": "price", "type": "float64", "filterable": true }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let records: Vec<Value> = [10.0, 20.0, 30.0]
+        .iter()
+        .map(|p| json!({ "embedding": [1.0, 0.0, 0.0, 0.0], "price": p }))
+        .collect();
+    let resp = c
+        .post(format!("{base}/v1/collections/mcp_agg/insert"))
+        .json(&json!({ "records": records }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // `aggregate` is a newly-exposed builtin — call it over MCP.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "aggregate",
+                "arguments": { "collection": "mcp_agg", "field": "price", "metric": "sum" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert!(body.get("error").is_none(), "body: {body}");
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["groups"][0]["value"], 60.0);
 }
 
 #[tokio::test]
@@ -1706,10 +1792,13 @@ async fn test_mcp_unknown_method_returns_error() {
 }
 
 #[tokio::test]
-async fn test_mcp_invalid_args_returns_32602() {
+async fn test_mcp_tool_arg_error_returns_iserror_result() {
     let (base, _tmp) = start_test_server().await;
     let c = client();
-    // `search` without the required `query` argument -> invalid params.
+    // `search` without the required `query` argument is a TOOL-execution
+    // error: per MCP it must come back as a successful JSON-RPC result with
+    // `isError: true` (a CallToolResult), NOT a JSON-RPC -32602 error, so the
+    // calling model can read the message and self-correct.
     let resp = c
         .post(format!("{base}/v1/mcp"))
         .json(&json!({
@@ -1725,7 +1814,258 @@ async fn test_mcp_invalid_args_returns_32602() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], -32602, "body: {body}");
+    assert!(body.get("error").is_none(), "must not be a JSON-RPC error: {body}");
+    assert_eq!(body["result"]["isError"], true, "body: {body}");
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(!text.is_empty(), "error message must be non-empty: {body}");
+}
+
+#[tokio::test]
+async fn test_mcp_tool_notfound_returns_iserror_result() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    // `aggregate` on a collection that does not exist is a NotFound
+    // tool-execution error -> isError result, not a JSON-RPC error.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "aggregate",
+                "arguments": { "collection": "does_not_exist", "field": "price", "metric": "sum" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert!(body.get("error").is_none(), "must not be a JSON-RPC error: {body}");
+    assert_eq!(body["result"]["isError"], true, "body: {body}");
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(!text.is_empty(), "error message must be non-empty: {body}");
+}
+
+#[tokio::test]
+async fn test_mcp_unknown_tool_name_returns_32601() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    // An unknown TOOL NAME is a protocol error (the tool doesn't exist),
+    // so it stays a JSON-RPC -32601, distinct from a tool that ran and failed.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "no_such_tool",
+                "arguments": {}
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32601, "body: {body}");
+}
+
+#[tokio::test]
+async fn test_mcp_success_has_structured_content() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    c.post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "mcp_struct",
+            "fields": [{ "name": "embedding", "type": "vector", "dimension": 4, "metric": "cosine" }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // A successful tools/call returns BOTH a content[0].text block AND a
+    // structuredContent object (MCP 2025-06-18) equal to the tool's JSON.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "list_collections",
+                "arguments": {}
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["result"]["isError"], false, "body: {body}");
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed_text: Value = serde_json::from_str(text).unwrap();
+    let structured = &body["result"]["structuredContent"];
+    assert!(structured.is_object(), "structuredContent must be present: {body}");
+    // structuredContent is the raw tool JSON, equal to the parsed text block.
+    assert_eq!(*structured, parsed_text, "structuredContent must equal tool JSON");
+    assert!(structured["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n.as_str() == Some("mcp_struct")));
+}
+
+#[tokio::test]
+async fn test_mcp_initialize_protocol_negotiation() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    // Client requesting 2025-06-18 gets it echoed back.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["result"]["protocolVersion"], "2025-06-18", "body: {body}");
+
+    // Client requesting the older 2025-03-26 gets that echoed back.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-03-26" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["result"]["protocolVersion"], "2025-03-26", "body: {body}");
+
+    // No protocolVersion -> our preferred 2025-06-18.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "initialize",
+            "params": {}
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["result"]["protocolVersion"], "2025-06-18", "body: {body}");
+
+    // An unsupported version -> our preferred 2025-06-18.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "initialize",
+            "params": { "protocolVersion": "1999-01-01" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["result"]["protocolVersion"], "2025-06-18", "body: {body}");
+}
+
+// ── MCP Streamable HTTP transport ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_mcp_post_with_supported_protocol_version_header() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    // A supported MCP-Protocol-Version header is accepted; response is the
+    // unchanged JSON-RPC result with Content-Type: application/json.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .header("MCP-Protocol-Version", "2025-06-18")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 30,
+            "method": "tools/list"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(ct.starts_with("application/json"), "content-type: {ct}");
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["result"]["tools"].as_array().unwrap().len() == 8);
+}
+
+#[tokio::test]
+async fn test_mcp_post_without_protocol_version_header_is_lenient() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    // No MCP-Protocol-Version header -> still 200 (lenient).
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/list"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_mcp_post_with_unsupported_protocol_version_header_400() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    // An unsupported MCP-Protocol-Version header -> HTTP 400.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .header("MCP-Protocol-Version", "1999-01-01")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 32,
+            "method": "tools/list"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn test_mcp_get_returns_405() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    // GET /v1/mcp (server->client SSE) is unsupported -> 405 with Allow: POST.
+    let resp = c.get(format!("{base}/v1/mcp")).send().await.unwrap();
+    assert_eq!(resp.status(), 405);
+    let allow = resp
+        .headers()
+        .get("allow")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(allow.contains("POST"), "allow: {allow}");
 }
 
 // ── Array fields ───────────────────────────────────────────────────────────

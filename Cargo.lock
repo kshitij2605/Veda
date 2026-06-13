@@ -4679,6 +4679,7 @@ dependencies = [
  "serde_json",
  "simsimd",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -4759,6 +4760,16 @@ dependencies = [
  "tonic-build",
  "tracing",
  "veda-time",
+]
+
+[[package]]
+name = "veda-mcp"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "reqwest",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -41,16 +41,35 @@ pub struct ToolSpec {
     pub input_schema: serde_json::Value,
     /// Coarse category, e.g. `"builtin"` or `"custom"`.
     pub kind: String,
+    /// Whether the tool only reads state (no mutations). Drives the MCP
+    /// `readOnlyHint` annotation. Defaults to `false`.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Whether the tool may perform destructive/irreversible updates.
+    /// Drives the MCP `destructiveHint` annotation. Defaults to `false`.
+    #[serde(default)]
+    pub destructive: bool,
+    /// Short human-readable title for the tool (MCP `title` annotation).
+    /// Falls back to `name` when absent.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 impl ToolSpec {
     /// Render this spec as an MCP `tools/list` entry:
-    /// `{ "name", "description", "inputSchema" }`.
+    /// `{ "name", "description", "inputSchema", "annotations" }`. The
+    /// `annotations` object carries the MCP behavioural hints
+    /// (`title`, `readOnlyHint`, `destructiveHint`).
     pub fn to_mcp_entry(&self) -> serde_json::Value {
         serde_json::json!({
             "name": self.name,
             "description": self.description,
             "inputSchema": self.input_schema,
+            "annotations": {
+                "title": self.title.clone().unwrap_or_else(|| self.name.clone()),
+                "readOnlyHint": self.read_only,
+                "destructiveHint": self.destructive,
+            },
         })
     }
 
@@ -327,6 +346,42 @@ mod tests {
         assert_eq!(entry["name"], "search");
         assert_eq!(entry["description"], serde_json::json!(spec.description));
         assert_eq!(entry["inputSchema"], spec.input_schema);
+        // Annotations carry the MCP behavioural hints. `search` is a
+        // read-only, non-destructive tool with a human title.
+        let ann = &entry["annotations"];
+        assert!(ann.is_object(), "annotations object present");
+        assert_eq!(ann["readOnlyHint"], true);
+        assert_eq!(ann["destructiveHint"], false);
+        assert!(ann["title"].as_str().is_some());
+    }
+
+    #[test]
+    fn to_mcp_entry_annotations_reflect_mutation() {
+        let cat = ToolCatalog::new();
+        // upsert_record is the one mutating/destructive builtin.
+        let spec = cat.builtin_specs().iter().find(|s| s.id == "upsert_record").unwrap();
+        let ann = spec.to_mcp_entry()["annotations"].clone();
+        assert_eq!(ann["readOnlyHint"], false);
+        assert_eq!(ann["destructiveHint"], true);
+    }
+
+    #[test]
+    fn read_tools_are_read_only_and_nondestructive() {
+        let cat = ToolCatalog::new();
+        for id in [
+            "list_collections",
+            "describe_collection",
+            "search",
+            "get_record",
+            "route",
+            "aggregate",
+            "filter_query",
+        ] {
+            let spec = cat.builtin_specs().iter().find(|s| s.id == id).unwrap();
+            assert!(spec.read_only, "{id} should be read_only");
+            assert!(!spec.destructive, "{id} should be non-destructive");
+            assert!(spec.title.is_some(), "{id} should have a title");
+        }
     }
 
     #[tokio::test]

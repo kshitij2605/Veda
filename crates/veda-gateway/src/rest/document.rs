@@ -637,7 +637,7 @@ async fn process_single_file(
 
             // Embed text content into vector fields.
             for (target_field, client) in &text_embed_targets {
-                match client.embed_text(&chunk.text) {
+                match client.embed_text(&chunk.text).await {
                     Ok(vector) => {
                         record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
                     }
@@ -734,7 +734,7 @@ async fn process_single_file(
 
             // Embed image data into vector fields.
             for (target_field, client) in &image_embed_targets {
-                match client.embed_bytes(img_data, Modality::Image) {
+                match client.embed_bytes(img_data, Modality::Image).await {
                     Ok(vector) => {
                         record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
                     }

@@ -1181,7 +1181,7 @@ async fn rechunk_source_into_sibling(
             if let Some(ef) = embedding_field.as_ref()
                 && let (Some(client), Some(dim)) = (embed_client_opt.as_ref(), embedding_dim)
             {
-                match client.embed_text(&tc.text) {
+                match client.embed_text(&tc.text).await {
                     Ok(v) if v.len() == dim as usize => {
                         rec.set(
                             ef,

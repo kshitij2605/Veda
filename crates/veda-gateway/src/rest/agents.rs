@@ -59,7 +59,7 @@ fn service_unavailable(msg: impl Into<String>) -> GatewayError {
 /// Extract the optional authenticated subject for RLS: `None` when the
 /// caller is an admin (or auth is disabled / no claims), else `Some(sub)`
 /// so the tools enforce owner scoping.
-fn rls_user(claims: &Option<Claims>) -> Option<String> {
+pub(crate) fn rls_user(claims: &Option<Claims>) -> Option<String> {
     match claims {
         Some(c) if !crate::rls::is_admin(c) => Some(c.sub.clone()),
         _ => None,
@@ -278,6 +278,79 @@ pub async fn execute_tool(
     Ok(Json(outcome.content))
 }
 
+// ── Shared agent-turn helper ─────────────────────────────────────────────
+
+use crate::agent::executor::RunResult;
+
+/// Failure modes of [`run_agent_turn`], mapped to HTTP/JSON-RPC by callers.
+pub(crate) enum AgentTurnError {
+    /// No LLM is configured (→ 503).
+    NoLlm,
+    /// The requested agent does not exist (→ 404). Carries the user id.
+    NotFound(String),
+}
+
+/// Run a single agent turn: resolve the agent (tenant-scoped, with the
+/// `veda-agent` default fallback), build the model honoring any per-agent
+/// override, assemble the system prompt + tool context, and drive the
+/// executor loop over `history` + `input`. Shared by `converse` and the
+/// A2A `message/send` handler so the loop is not duplicated.
+///
+/// Returns the [`RunResult`] alongside the resolved [`Agent`] (callers may
+/// want the scoped id for persistence). Conversation persistence is the
+/// caller's responsibility.
+pub(crate) async fn run_agent_turn(
+    state: &AppState,
+    tenant: &TenantId,
+    user: Option<&str>,
+    agent_id: &str,
+    history: &[ConversationMessage],
+    input: &str,
+) -> Result<(Agent, RunResult), AgentTurnError> {
+    // 1. LLM must be configured.
+    let llm_cfg = state
+        .inner
+        .llm_config
+        .read()
+        .await
+        .clone()
+        .ok_or(AgentTurnError::NoLlm)?;
+
+    // 2. Resolve the agent (tenant-scoped), falling back to the in-memory
+    //    default agent only for the well-known `veda-agent` id.
+    let scoped_agent_id = tenant::scope(tenant, agent_id);
+    let agent = match store::get_agent(&state.inner.saved_objects, &scoped_agent_id).await {
+        Some(a) => a,
+        None if agent_id == "veda-agent" => default_agent(),
+        None => return Err(AgentTurnError::NotFound(agent_id.to_owned())),
+    };
+
+    // 3. Build the model honoring any per-agent override.
+    let client = build_client(llm_cfg, &agent);
+
+    // 4. System prompt with the modality-awareness block.
+    let summary = executor::collections_modality_summary(state, tenant).await;
+    let sys = executor::build_system_prompt(&agent, &summary);
+
+    // 5. Tool context with RLS user.
+    let ctx = ToolContext::new(state, tenant).with_user(user);
+
+    // 6. Run the tool-calling loop.
+    let result = executor::run(
+        &client,
+        &state.inner.tool_catalog,
+        &ctx,
+        &agent,
+        &sys,
+        history,
+        input,
+        DEFAULT_MAX_STEPS,
+    )
+    .await;
+
+    Ok((agent, result))
+}
+
 // ── Converse ─────────────────────────────────────────────────────────────
 
 /// Build an [`LlmClient`] from the gateway's global config, applying the
@@ -305,23 +378,8 @@ pub async fn converse(
     claims: Option<axum::Extension<Claims>>,
     Json(req): Json<ConverseRequest>,
 ) -> Result<Json<ConverseResponse>, GatewayError> {
-    // 1. LLM must be configured.
-    let llm_cfg = state.inner.llm_config.read().await.clone().ok_or_else(|| {
-        service_unavailable(
-            "VEDA_LLM_ENDPOINT not configured. Set the env var to enable agent converse.",
-        )
-    })?;
-
-    // 2. Resolve the agent (tenant-scoped), falling back to the in-memory
-    //    default agent only for the well-known `veda-agent` id.
+    // Load or create the conversation (converse-specific persistence).
     let scoped_agent_id = tenant::scope(&tenant, &id);
-    let agent = match store::get_agent(&state.inner.saved_objects, &scoped_agent_id).await {
-        Some(a) => a,
-        None if id == "veda-agent" => default_agent(),
-        None => return Err(not_found(format!("agent '{id}' not found"))),
-    };
-
-    // 3. Load or create the conversation.
     let mut conversation = match &req.conversation_id {
         Some(cid) => {
             let scoped_cid = tenant::scope(&tenant, cid);
@@ -339,17 +397,9 @@ pub async fn converse(
     };
     let history = conversation.messages.clone();
 
-    // 4. Build the model honoring any per-agent override.
-    let client = build_client(llm_cfg, &agent);
-
-    // 5. System prompt with the modality-awareness block.
-    let summary = executor::collections_modality_summary(&state, &tenant).await;
-    let sys = executor::build_system_prompt(&agent, &summary);
-
-    // 6. Tool context with RLS user.
+    // RLS user from the claims.
     let claims = claims.map(|axum::Extension(c)| c);
     let user = rls_user(&claims);
-    let ctx = ToolContext::new(&state, &tenant).with_user(user.as_deref());
 
     // Attachments: image-as-auto-retrieval is deferred (phase 3). For now
     // we only note their presence in the user input so the model is aware.
@@ -361,20 +411,25 @@ pub async fn converse(
         _ => req.input.clone(),
     };
 
-    // 7. Run the tool-calling loop.
-    let result = executor::run(
-        &client,
-        &state.inner.tool_catalog,
-        &ctx,
-        &agent,
-        &sys,
+    // Run the turn via the shared helper (resolves agent, builds the model
+    // + prompt + tool context, drives the executor loop).
+    let (_agent, result) = run_agent_turn(
+        &state,
+        &tenant,
+        user.as_deref(),
+        &id,
         &history,
         &user_input,
-        DEFAULT_MAX_STEPS,
     )
-    .await;
+    .await
+    .map_err(|e| match e {
+        AgentTurnError::NoLlm => service_unavailable(
+            "VEDA_LLM_ENDPOINT not configured. Set the env var to enable agent converse.",
+        ),
+        AgentTurnError::NotFound(aid) => not_found(format!("agent '{aid}' not found")),
+    })?;
 
-    // 8. Persist: user turn + new assistant/tool messages + steps.
+    // Persist: user turn + new assistant/tool messages + steps.
     conversation.messages.push(ConversationMessage {
         role: "user".to_owned(),
         content: Some(user_input),
