@@ -1,17 +1,23 @@
 //! Veda-native ops advisor (AutoOps-style).
 //!
-//! This module is the *foundation* of the advisor: it only provides
-//! the **snapshot collector** — a point-in-time picture of cluster
-//! state that later rules and anomaly detectors evaluate. There are
-//! no rules, events, REST routes, or notifications here yet; those
-//! land in follow-up tasks.
+//! The advisor turns a point-in-time [`snapshot::OpsSnapshot`] into
+//! durable, actionable [`event::OpsEvent`]s:
 //!
-//! [`OpsSnapshot::collect`] reads live `AppState` (segment managers,
-//! nodes, health probes, the recent query log, process RSS, and a
-//! handful of Prometheus counters). [`SnapshotHistory`] is a bounded
-//! ring buffer of snapshots that later detectors mine for rates and
-//! trends.
+//! * [`snapshot`] — the **snapshot collector** + bounded history.
+//! * [`rules`] — the built-in [`rules::Rule`] catalog; each rule maps a
+//!   snapshot to zero or more [`rules::RuleHit`]s.
+//! * [`event`] — the [`event::OpsEvent`] model + the persisted
+//!   [`event::EventStore`] that reconciles hits into open/close
+//!   transitions.
+//! * [`config`] — per-rule [`config::RuleConfig`] knobs.
+//!
+//! Anomaly detection, notifications, auto-remediation, and the REST
+//! surface land in follow-up tasks; nothing here sends, executes, or
+//! exposes anything.
 
+pub mod config;
+pub mod event;
+pub mod rules;
 pub mod snapshot;
 
 pub use snapshot::{
