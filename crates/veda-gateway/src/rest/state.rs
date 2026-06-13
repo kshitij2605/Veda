@@ -228,6 +228,10 @@ pub struct AppStateInner {
     /// `{data_dir}/_scheduled_jobs.json`. Managed by the scheduler
     /// tick loop spawned in [`crate::server::start_server`].
     pub job_registry: Arc<JobRegistry>,
+    /// Shared built-in tool catalog, used by the MCP server and the
+    /// agent executor so both surfaces share one set of tool specs and
+    /// implementations.
+    pub tool_catalog: Arc<crate::agent::catalog::ToolCatalog>,
 }
 
 /// Build a swappable TSO + the matching `dyn Tso` handle that
@@ -295,6 +299,7 @@ impl AppState {
                 replica_safe_ts: RwLock::new(0),
                 applier_handles: std::sync::Mutex::new(HashMap::new()),
                 job_registry: Arc::new(JobRegistry::new(data_dir)),
+                tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
             }),
         }
     }
@@ -359,6 +364,7 @@ impl AppState {
                 replica_safe_ts: RwLock::new(0),
                 applier_handles: std::sync::Mutex::new(HashMap::new()),
                 job_registry: Arc::new(JobRegistry::new(data_dir)),
+                tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
             }),
         }
     }
@@ -404,6 +410,7 @@ impl AppState {
                 replica_safe_ts: RwLock::new(0),
                 applier_handles: std::sync::Mutex::new(HashMap::new()),
                 job_registry: Arc::new(JobRegistry::new(data_dir)),
+                tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
             }),
         }
     }

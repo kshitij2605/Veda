@@ -8,6 +8,7 @@ use crate::auth;
 use crate::tenant;
 
 pub mod admin;
+pub mod agents;
 pub mod aggregate;
 pub mod chunk_preview;
 pub mod collections;
@@ -177,6 +178,41 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route("/v1/mcp", post(mcp::handle_mcp))
         // Adaptive query router (recommends retrieval strategy for a query)
         .route("/v1/route", post(route::route))
+        // Veda Agents — CRUD + tool catalog/execute + converse + conversations
+        .route(
+            "/v1/agents",
+            get(agents::list_agents).post(agents::create_agent),
+        )
+        .route(
+            "/v1/agents/{id}",
+            get(agents::get_agent)
+                .put(agents::put_agent)
+                .delete(agents::delete_agent),
+        )
+        .route("/v1/agents/{id}/converse", post(agents::converse))
+        .route(
+            "/v1/agent-tools",
+            get(agents::list_tools).post(agents::create_tool),
+        )
+        .route("/v1/agent-tools/catalog", get(agents::catalog))
+        .route(
+            "/v1/agent-tools/{id}",
+            get(agents::get_tool)
+                .put(agents::put_tool)
+                .delete(agents::delete_tool),
+        )
+        .route(
+            "/v1/agent-tools/{id}/execute",
+            post(agents::execute_tool),
+        )
+        .route(
+            "/v1/conversations",
+            get(agents::list_conversations),
+        )
+        .route(
+            "/v1/conversations/{id}",
+            get(agents::get_conversation).delete(agents::delete_conversation),
+        )
         // Document processing (OCR)
         .route(
             "/v1/collections/{name}/process-document",

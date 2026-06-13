@@ -118,6 +118,29 @@ impl Accumulator {
     }
 }
 
+/// Coarse failure category for [`aggregate_core`], so non-HTTP callers
+/// (e.g. the agent `aggregate` tool) can map it to their own error kind
+/// without depending on `StatusCode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggErrorKind {
+    NotFound,
+    BadRequest,
+    Internal,
+}
+
+/// Structured error from [`aggregate_core`].
+#[derive(Debug, Clone)]
+pub struct AggError {
+    pub kind: AggErrorKind,
+    pub message: String,
+}
+
+impl AggError {
+    fn new(kind: AggErrorKind, message: impl Into<String>) -> Self {
+        Self { kind, message: message.into() }
+    }
+}
+
 pub async fn aggregate(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -125,12 +148,26 @@ pub async fn aggregate(
     Query(q): Query<AggregateQuery>,
 ) -> Result<Json<AggregateResponse>, GatewayError> {
     let name = tenant::scope(&tenant, &name);
+    aggregate_core(&state, &name, &q).await.map(Json).map_err(|e| match e.kind {
+        AggErrorKind::NotFound => not_found(e.message),
+        AggErrorKind::BadRequest => bad_request(e.message),
+        AggErrorKind::Internal => internal(e.message),
+    })
+}
 
+/// Core aggregation over a *tenant-scoped* collection name. Shared by the
+/// REST `/aggregate` handler and the agent `aggregate` tool so both apply
+/// identical record-walk, filter, and metric semantics.
+pub async fn aggregate_core(
+    state: &AppState,
+    name: &str,
+    q: &AggregateQuery,
+) -> Result<AggregateResponse, AggError> {
     // Validate collection exists.
     {
         let schemas = state.inner.schemas.read().await;
-        if !schemas.contains_key(&name) {
-            return Err(not_found(format!("collection '{name}' not found")));
+        if !schemas.contains_key(name) {
+            return Err(AggError::new(AggErrorKind::NotFound, format!("collection '{name}' not found")));
         }
     }
 
@@ -139,14 +176,15 @@ pub async fn aggregate(
 
     // Parse optional filter.
     let filter_expr = q.filter.as_deref()
-        .map(|s| FilterParser::parse(s).map_err(|e| bad_request(format!("invalid filter: {e}"))))
+        .map(|s| FilterParser::parse(s)
+            .map_err(|e| AggError::new(AggErrorKind::BadRequest, format!("invalid filter: {e}"))))
         .transpose()?;
 
     let now = now_secs();
 
     let managers = state.inner.segment_managers.read().await;
-    let shard_map = managers.get(&name)
-        .ok_or_else(|| internal("no segment managers for collection"))?;
+    let shard_map = managers.get(name)
+        .ok_or_else(|| AggError::new(AggErrorKind::Internal, "no segment managers for collection"))?;
 
     // key → Accumulator
     let mut accums: HashMap<String, Accumulator> = HashMap::new();
@@ -205,7 +243,7 @@ pub async fn aggregate(
     }).collect();
     groups.sort_by(|a, b| a.key.cmp(&b.key));
 
-    Ok(Json(AggregateResponse { groups }))
+    Ok(AggregateResponse { groups })
 }
 
 fn accumulate_record(
@@ -217,7 +255,7 @@ fn accumulate_record(
     bucket_key: &str,
     accums: &mut HashMap<String, Accumulator>,
     saw_non_numeric: &mut bool,
-) -> Result<(), GatewayError> {
+) -> Result<(), AggError> {
     let fv = rec.get(field);
 
     // For numeric metrics, validate the value is numeric.
@@ -231,7 +269,7 @@ fn accumulate_record(
                 if as_f64(v).is_none() {
                     if !*saw_non_numeric {
                         *saw_non_numeric = true;
-                        return Err(bad_request(format!(
+                        return Err(AggError::new(AggErrorKind::BadRequest, format!(
                             "field '{field}' is not numeric; cannot apply numeric metric"
                         )));
                     }
