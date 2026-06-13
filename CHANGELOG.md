@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-06-14
+
+Ops Advisor ("Insights") — an AutoOps-style automated operations layer (detection → root-cause → recommendation → alerting), validated end-to-end against a live server. See `documentation/2026-06-14-autoops-ops-advisor.md` for the full guide.
+
+### Added
+- **Ops advisor engine** — new `crates/veda-gateway/src/advisor/` module with a background tick (`spawn_advisor`, interval via `VEDA_ADVISOR_INTERVAL_SECS`, default 30s) that samples an `OpsSnapshot` (per-collection segments/records, compaction state, nodes, replica `safe_ts`, health probes, query-log latency, process RSS, Prometheus counters) into a bounded history buffer.
+- **Rule catalog (15 rules)** — threshold+correlation rules: `compaction_backlog`, `seal_stalled`, `high_search_latency`, `slow_query_surge`, `high_error_rate`, `embedding_unhealthy`, `dependency_down`, `memory_pressure`, `replica_lag`, `node_unhealthy`, `no_compaction_progress`, plus 4 anomaly detectors (`anomaly_search_latency`, `anomaly_error_rate`, `anomaly_insert_rate`, `anomaly_rss`) using EWMA/σ baselines. Each rule yields an event with severity (High/Medium/Low), root-cause detail, and a recommendation.
+- **Event lifecycle** — an `EventStore` opens an event on first fire (dedup per rule+scope), refreshes in place, and **auto-closes** when the condition clears; bounded history; persisted to `{data_dir}/_ops_events.json`.
+- **Alerting** — notify on open/close transitions via **generic webhook, Slack, PagerDuty (Events API v2 trigger/resolve keyed by event id), and email (async SMTP via `lettre`)**. Severity-routed (per-channel `min_severity`), per-channel/per-event failure-isolated, async-only HTTP with a 10s client timeout. Channel config persisted; secrets are write-only (redacted on `GET`).
+- **Opt-in auto-remediation** — per-rule `auto_remediate` (default **off**); when enabled, an opened event can trigger a safe `RemediationAction` (real compaction via the existing path; reindex is best-effort) — rate-limited (≤1/5min/scope) and recorded on the event.
+- **Insights REST API (admin-only)** — `GET /v1/admin/insights` (open events), `/insights/history`, `/insights/rules` (catalog + effective config), `PUT /insights/rules/{id}` (tune threshold/severity/enabled/muted/auto_remediate), `GET|PUT /insights/channels` (secrets write-only), `POST /insights/run` (force a tick), `POST /insights/{event_id}/ack`. Config persisted to `{data_dir}/_advisor_config.json`.
+- **Niriksha Insights page** — a dashboard "Insights" page (open/history events, severity badges, event detail drawer with root cause + recommendation + remediation affordance, rule settings, alert-channel config) + a sidebar open-event-count badge + a command-palette entry.
+
+### Fixed
+- **Advisor availability** — the engine tick previously held the `events` lock across the notification/remediation network awaits while the notifier had no HTTP timeout, so a hung webhook could freeze the Insights API and the tick loop. The reconcile phase is now synchronous under-lock; notify/remediation run lock-free; the `events` lock is re-acquired only briefly to annotate; and the notifier client has a 10s timeout.
+
 ## [0.2.4] - 2026-06-13
 
 Agentic layer and a real Model Context Protocol (MCP) surface, validated end-to-end against a live LLM (Qwen3.5-122B) + embedder (BGE-M3). See `documentation/2026-06-13-agents-and-mcp.md` for the full guide.

@@ -61,6 +61,15 @@
 
 See [documentation/2026-06-13-agents-and-mcp.md](documentation/2026-06-13-agents-and-mcp.md) for the full agentic + MCP guide.
 
+### Ops Advisor (Insights)
+- **Automated issue detection** -- a background advisor samples an operational snapshot (per-collection segments/records, compaction state, nodes, replica lag, health, query latency, RSS, request/error counters) and evaluates a catalog of **15 Veda-native rules** (compaction backlog, seal stalled, high search latency, slow-query surge, high error rate, embedding/dependency down, replica lag, memory pressure, node unhealthy, … plus 4 anomaly detectors). Each detected condition opens an **event** with a severity (High/Medium/Low), a root-cause **detail**, and a concrete **recommendation**; events **auto-close** when the condition clears.
+- **Anomaly detection** -- EWMA/σ baselines over search-latency, error-rate, insert-rate, and RSS flag deviations beyond a configurable sigma once warmed up.
+- **Alerting** -- on event open/close transitions, notify via **generic webhook, Slack, PagerDuty (Events API v2), and email (SMTP)** — async, severity-routed, per-channel failure-isolated. Channel secrets are write-only (redacted on read).
+- **Opt-in auto-remediation** -- per rule (off by default), the advisor can trigger a safe action (e.g. compaction) on an open event, rate-limited per scope.
+- **REST + UI** -- admin API at `/v1/admin/insights` (open events), `/insights/history`, `/insights/rules` (+ `PUT` to tune thresholds/severity/mute/auto-remediate), `/insights/channels`, `POST /insights/run`, `POST /insights/{id}/ack`; plus a Niriksha **Insights** page (event list + detail drawer + rule settings + channel config) with a sidebar open-event badge.
+
+See [documentation/2026-06-14-autoops-ops-advisor.md](documentation/2026-06-14-autoops-ops-advisor.md) for the full Ops Advisor guide.
+
 ## Quick Start
 
 ### Docker Compose (recommended)
