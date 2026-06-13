@@ -10,6 +10,7 @@ Most vector databases just store vectors: you bring your own embedding services,
 - **Nine index algorithms** — HNSW, DiskANN (Vamana graph), IVF-PQ, Flat, RaBitQ, Sq4 + Sq8 scalar quantization, a suffix array for exact text patterns, and scalar indexes for metadata filtering.
 - **SIMD-optimized distances** — SimSIMD kernels (AVX-512, ARM NEON, SVE) on by default, with an AVX2/scalar fallback, across 6 metrics (Cosine, Euclidean, DotProduct, Hamming, Manhattan, Jaccard).
 - **Multi-vector fusion** — RRF, WeightedSum, and Intersection strategies for cross-modal retrieval in a single API call.
+- **Agents & MCP** — a built-in agentic layer and an MCP server, so any MCP client (Claude Desktop, Cursor, VS Code) gets cross-modal retrieval over your data, secured by JWT auth and row-level security.
 - **Built-in document intelligence** — FlashParse OCR integration plus seven chunking strategies turn raw documents into searchable vectors with zero external tooling.
 - **SQL-like filters** — combine vector search with structured metadata predicates.
 - **Blob storage** — store the raw files alongside their embeddings via MinIO or any S3-compatible backend.
@@ -22,7 +23,7 @@ Veda also ships a distributed data plane (per-shard append-only logs with quorum
 ## How these docs are organized
 
 - **Getting started** — [Quick start](/docs/quickstart) gets a cluster running and serving queries in minutes; [Installation & config](/docs/installation) covers building from source, cluster modes, and configuration.
-- **Core concepts** — [Collections & fields](/docs/collections), [Indexes](/docs/indexes), [Search & fusion](/docs/search), and the [Document pipeline](/docs/document-pipeline).
+- **Core concepts** — [Collections & fields](/docs/collections), [Indexes](/docs/indexes), [Search & fusion](/docs/search), the [Document pipeline](/docs/document-pipeline), and [Agents & MCP](/docs/agents-mcp).
 - **Reference** — the [REST API](/docs/rest-api), the [Python SDK](/docs/python-sdk), and [Observability](/docs/observability).
 
 ## License

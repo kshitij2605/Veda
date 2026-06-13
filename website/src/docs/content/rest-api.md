@@ -92,6 +92,43 @@ curl -X POST http://localhost:6340/v1/admin/jobs \
 | `POST` | `/v1/llm/complete` | LLM completion passthrough (used by Niriksha features) |
 | `POST` | `/v1/route` | Modality routing helper |
 
+## Agents, tools & MCP
+
+The agentic layer and MCP surface. See [Agents & MCP](/docs/agents-mcp) for the full guide.
+
+**Agents**
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/agents` | List agents |
+| `POST` | `/v1/agents` | Create or upsert an agent (empty `id` → generated) |
+| `GET/PUT/DELETE` | `/v1/agents/{id}` | Manage one agent |
+| `POST` | `/v1/agents/{id}/converse` | Run a tool-calling turn — body `{ input, conversation_id?, attachments? }`; `503` without an LLM, `404` for an unknown non-default agent |
+
+**Tools**
+
+| Method | Path | Description |
+|---|---|---|
+| `GET/POST` | `/v1/agent-tools` | List / create custom tools |
+| `GET/PUT/DELETE` | `/v1/agent-tools/{id}` | Manage one custom tool |
+| `GET` | `/v1/agent-tools/catalog` | Built-in tool specs (id, description, `inputSchema`, annotations) |
+| `POST` | `/v1/agent-tools/{id}/execute` | Run one tool directly (invalid→400, not-found→404, internal→500) |
+
+**Conversations**
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/conversations` | List conversations |
+| `GET/DELETE` | `/v1/conversations/{id}` | Fetch / delete one conversation |
+
+**MCP & A2A**
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/mcp` | JSON-RPC 2.0 MCP server (protocol `2025-06-18`): `initialize`, `tools/list`, `tools/call`, `ping`. `GET` → `405` |
+| `GET` | `/v1/a2a/{agent_id}/card` | A2A AgentCard (skills derived from the agent's tools) |
+| `POST` | `/v1/a2a/{agent_id}` | A2A JSON-RPC `message/send` — one-shot agent turn; `503` without an LLM |
+
 ## Transactions
 
 Percolator-style snapshot-isolation transactions:

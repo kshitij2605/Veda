@@ -18,13 +18,10 @@ export function Differentiators() {
       >
         {FEATURES.map((f, i) => {
           const Icon = f.icon
-          const last = i === FEATURES.length - 1
           return (
             <div
               key={f.title}
-              className={`group bg-[var(--color-bg)] p-7 transition-colors duration-[var(--duration-base)] hover:bg-[var(--color-surface)] ${
-                last ? 'lg:col-span-2' : ''
-              }`}
+              className="group bg-[var(--color-bg)] p-7 transition-colors duration-[var(--duration-base)] hover:bg-[var(--color-surface)]"
             >
               <div className="flex items-center justify-between">
                 <span style={{ color: f.accent }}>
@@ -37,7 +34,7 @@ export function Differentiators() {
               <h3 className="mt-5 text-[18px] [font-family:var(--font-display)] font-bold tracking-tight text-[var(--color-text)] transition-colors group-hover:text-[var(--color-accent)]">
                 {f.title}
               </h3>
-              <p className={`mt-2 text-[14px] leading-relaxed text-[var(--color-text-muted)] ${last ? 'max-w-3xl' : ''}`}>
+              <p className="mt-2 text-[14px] leading-relaxed text-[var(--color-text-muted)]">
                 {f.blurb}
               </p>
             </div>

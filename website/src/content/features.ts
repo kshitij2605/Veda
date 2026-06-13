@@ -1,5 +1,5 @@
 import { type ComponentType } from 'react'
-import { Boxes, Cpu, Layers, GitMerge, FileText, Server, Activity, Shield } from 'lucide-react'
+import { Boxes, Cpu, Layers, GitMerge, FileText, Server, Activity, Shield, Bot } from 'lucide-react'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
 
@@ -67,5 +67,12 @@ export const FEATURES: Feature[] = [
     title: 'An app platform, not just an index',
     blurb:
       'JSON-path filters (meta.user.tier = "gold"), per-record row-level security, record TTL with scheduled sweeps, cron jobs, and OLAP-style aggregations — built into the engine.',
+  },
+  {
+    icon: Bot,
+    accent: 'var(--color-node-3)',
+    title: 'Agents & MCP server',
+    blurb:
+      'Connect Claude Desktop, Cursor, or any MCP client to your data — and get cross-modal retrieval no text-only vector DB can offer. Built-in agents, an 8-tool catalog, and A2A, all behind Veda’s JWT auth and row-level security.',
   },
 ]
