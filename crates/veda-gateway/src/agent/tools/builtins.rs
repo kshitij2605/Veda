@@ -114,14 +114,14 @@ pub async fn list_collections(ctx: &ToolContext<'_>, _args: serde_json::Value) -
 
 pub async fn describe_collection(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
     let Some(user_name) = args["name"].as_str() else {
-        return ToolOutcome::error("name is required");
+        return ToolOutcome::invalid_args("name is required");
     };
     let name = crate::tenant::scope(ctx.tenant, user_name);
     let schema = {
         let schemas = ctx.state.inner.schemas.read().await;
         match schemas.get(&name).cloned() {
             Some(s) => s,
-            None => return ToolOutcome::error(format!("collection '{user_name}' not found")),
+            None => return ToolOutcome::not_found(format!("collection '{user_name}' not found")),
         }
     };
     let managers = ctx.state.inner.segment_managers.read().await;
@@ -168,12 +168,12 @@ pub async fn describe_collection(ctx: &ToolContext<'_>, args: serde_json::Value)
 
 pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
     let Some(user_collection) = args["collection"].as_str() else {
-        return ToolOutcome::error("collection is required");
+        return ToolOutcome::invalid_args("collection is required");
     };
     let scoped = crate::tenant::scope(ctx.tenant, user_collection);
     let collection = scoped.as_str();
     let Some(query) = args["query"].as_str() else {
-        return ToolOutcome::error("query is required");
+        return ToolOutcome::invalid_args("query is required");
     };
     let limit = args["limit"].as_u64().unwrap_or(10) as usize;
     let filter = args["filter"].as_str().map(|s| s.to_owned());
@@ -182,7 +182,7 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
         let schemas = ctx.state.inner.schemas.read().await;
         match schemas.get(collection).cloned() {
             Some(s) => s,
-            None => return ToolOutcome::error(format!("collection '{collection}' not found")),
+            None => return ToolOutcome::not_found(format!("collection '{collection}' not found")),
         }
     };
 
@@ -193,10 +193,10 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
     } else if let Some(first) = vec_fields.first() {
         first.name().to_owned()
     } else {
-        return ToolOutcome::error(format!("collection '{collection}' has no vector fields"));
+        return ToolOutcome::invalid_args(format!("collection '{collection}' has no vector fields"));
     };
     let Some(field_def) = schema.get_field(&field_name) else {
-        return ToolOutcome::error(format!("field '{field_name}' not found"));
+        return ToolOutcome::invalid_args(format!("field '{field_name}' not found"));
     };
     let metric = match field_def.field_type() {
         FieldType::Vector { metric, .. } => *metric,
@@ -215,7 +215,7 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
             match registry.get(&name).cloned() {
                 Some(m) => m,
                 None => {
-                    return ToolOutcome::error(format!("bound model '{name}' not in registry"))
+                    return ToolOutcome::internal(format!("bound model '{name}' not in registry"))
                 }
             }
         } else {
@@ -225,7 +225,7 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
                 .map(|c| (*c).clone())
             {
                 Some(m) => m,
-                None => return ToolOutcome::error("no text embedding model configured"),
+                None => return ToolOutcome::internal("no text embedding model configured"),
             }
         }
     };
@@ -233,12 +233,12 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
     let client = EmbeddingClient::new(model);
     let vector = match client.embed_text(query) {
         Ok(v) => v,
-        Err(e) => return ToolOutcome::error(format!("embedding failed: {e}")),
+        Err(e) => return ToolOutcome::internal(format!("embedding failed: {e}")),
     };
 
     let executors = ctx.state.inner.query_executors.read().await;
     let Some(executor) = executors.get(collection) else {
-        return ToolOutcome::error("no query executor");
+        return ToolOutcome::internal("no query executor");
     };
     let request = VectorSearchRequest {
         field: field_name.clone(),
@@ -252,7 +252,7 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
     };
     let response = match executor.search(&request) {
         Ok((response, _)) => response,
-        Err(e) => return ToolOutcome::error(format!("search failed: {e}")),
+        Err(e) => return ToolOutcome::internal(format!("search failed: {e}")),
     };
 
     let hits: Vec<serde_json::Value> = response
@@ -270,39 +270,39 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
 
 pub async fn upsert_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
     let Some(user_collection) = args["collection"].as_str() else {
-        return ToolOutcome::error("collection is required");
+        return ToolOutcome::invalid_args("collection is required");
     };
     let scoped = crate::tenant::scope(ctx.tenant, user_collection);
     let collection = scoped.as_str();
     let Some(raw) = args["record"].as_object() else {
-        return ToolOutcome::error("record must be an object");
+        return ToolOutcome::invalid_args("record must be an object");
     };
 
     let schema = {
         let schemas = ctx.state.inner.schemas.read().await;
         match schemas.get(collection).cloned() {
             Some(s) => s,
-            None => return ToolOutcome::error(format!("collection '{collection}' not found")),
+            None => return ToolOutcome::not_found(format!("collection '{collection}' not found")),
         }
     };
     let record: Record = match parse_record_public(raw, &schema) {
         Ok(r) => r,
-        Err(e) => return ToolOutcome::error(format!("parse_record: {e}")),
+        Err(e) => return ToolOutcome::invalid_args(format!("parse_record: {e}")),
     };
 
     let mut managers = ctx.state.inner.segment_managers.write().await;
     let Some(shard_map) = managers.get_mut(collection) else {
-        return ToolOutcome::error("segment managers missing");
+        return ToolOutcome::internal("segment managers missing");
     };
     let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
         &record.id(),
         schema.shard_count(),
     );
     let Some(sm) = shard_map.get_mut(&shard_id) else {
-        return ToolOutcome::error(format!("shard {shard_id} not found"));
+        return ToolOutcome::internal(format!("shard {shard_id} not found"));
     };
     if let Err(e) = sm.insert(record) {
-        return ToolOutcome::error(format!("insert failed: {e}"));
+        return ToolOutcome::internal(format!("insert failed: {e}"));
     }
     let id = sm.growing_segment().count(); // approximate
     ToolOutcome::ok(serde_json::json!({ "ok": true, "doc_id_estimate": id }))
@@ -310,28 +310,33 @@ pub async fn upsert_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> To
 
 pub async fn get_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
     let Some(user_collection) = args["collection"].as_str() else {
-        return ToolOutcome::error("collection is required");
+        return ToolOutcome::invalid_args("collection is required");
     };
     let Some(id_str) = args["id"].as_str() else {
-        return ToolOutcome::error("id is required");
+        return ToolOutcome::invalid_args("id is required");
     };
     let scoped = crate::tenant::scope(ctx.tenant, user_collection);
     let collection = scoped.as_str();
     let record_id: veda_core::types::RecordId = match id_str.parse() {
         Ok(u) => u,
-        Err(_) => return ToolOutcome::error(format!("invalid UUID: '{id_str}'")),
+        Err(_) => return ToolOutcome::invalid_args(format!("invalid UUID: '{id_str}'")),
     };
 
-    {
+    // Look up the collection's RLS owner field. For a scoped (`Some`)
+    // user we require the record's owner to match; `None` (admin/system)
+    // bypasses. Reuses the same predicate as the REST read path.
+    let rls_field = {
         let schemas = ctx.state.inner.schemas.read().await;
-        if !schemas.contains_key(collection) {
-            return ToolOutcome::error(format!("collection '{user_collection}' not found"));
+        match schemas.get(collection) {
+            Some(s) => s.rls_owner_field().map(str::to_owned),
+            None => return ToolOutcome::not_found(format!("collection '{user_collection}' not found")),
         }
-    }
+    };
+    let rls_owner = rls_field.as_deref().and(ctx.user);
 
     let managers = ctx.state.inner.segment_managers.read().await;
     let Some(shard_map) = managers.get(collection) else {
-        return ToolOutcome::error(format!("collection '{user_collection}' not found"));
+        return ToolOutcome::not_found(format!("collection '{user_collection}' not found"));
     };
 
     let now_secs = std::time::SystemTime::now()
@@ -347,7 +352,10 @@ pub async fn get_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolO
                 && !gs.is_deleted(doc_id)
             {
                 if rec.is_expired_at(now_secs) {
-                    return ToolOutcome::error("record not found");
+                    return ToolOutcome::not_found("record not found");
+                }
+                if !crate::rest::records::record_passes_rls_owner(rec, rls_field.as_deref(), rls_owner) {
+                    return ToolOutcome::not_found("record not found");
                 }
                 return ToolOutcome::ok(record_json(rec));
             }
@@ -361,7 +369,10 @@ pub async fn get_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolO
                     && rec.id() == record_id
                 {
                     if rec.is_expired_at(now_secs) {
-                        return ToolOutcome::error("record not found");
+                        return ToolOutcome::not_found("record not found");
+                    }
+                    if !crate::rest::records::record_passes_rls_owner(&rec, rls_field.as_deref(), rls_owner) {
+                        return ToolOutcome::not_found("record not found");
                     }
                     return ToolOutcome::ok(record_json(&rec));
                 }
@@ -369,17 +380,17 @@ pub async fn get_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolO
         }
     }
 
-    ToolOutcome::error(format!("record '{record_id}' not found"))
+    ToolOutcome::not_found(format!("record '{record_id}' not found"))
 }
 
 pub async fn route(_ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
     let Some(query) = args["query"].as_str() else {
-        return ToolOutcome::error("query is required");
+        return ToolOutcome::invalid_args("query is required");
     };
     let rec = route_query(query);
     match serde_json::to_value(&rec) {
         Ok(v) => ToolOutcome::ok(v),
-        Err(e) => ToolOutcome::error(format!("serialize route: {e}")),
+        Err(e) => ToolOutcome::internal(format!("serialize route: {e}")),
     }
 }
 

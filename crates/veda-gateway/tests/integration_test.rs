@@ -1705,6 +1705,29 @@ async fn test_mcp_unknown_method_returns_error() {
     assert_eq!(body["error"]["code"], -32601);
 }
 
+#[tokio::test]
+async fn test_mcp_invalid_args_returns_32602() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    // `search` without the required `query` argument -> invalid params.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "search",
+                "arguments": { "collection": "anything" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32602, "body: {body}");
+}
+
 // ── Array fields ───────────────────────────────────────────────────────────
 
 #[tokio::test]

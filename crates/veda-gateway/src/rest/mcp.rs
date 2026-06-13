@@ -27,7 +27,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::catalog::ToolContext;
+use crate::agent::catalog::{ToolContext, ToolErrorKind};
 
 use super::state::AppState;
 
@@ -182,7 +182,14 @@ async fn handle_tools_call(
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| outcome.content.to_string());
-        return Err((-32603, msg));
+        // Argument-validation failures map to JSON-RPC "Invalid params"
+        // (-32602); not-found and internal failures both surface as
+        // "Internal error" (-32603), matching the pre-refactor behavior.
+        let code = match outcome.error_kind {
+            Some(ToolErrorKind::InvalidArgs) => -32602,
+            Some(ToolErrorKind::NotFound) | Some(ToolErrorKind::Internal) | None => -32603,
+        };
+        return Err((code, msg));
     }
 
     Ok(serde_json::json!({

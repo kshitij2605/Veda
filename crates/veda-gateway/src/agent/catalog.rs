@@ -93,6 +93,19 @@ impl<'a> ToolContext<'a> {
     }
 }
 
+/// Transport-agnostic category of a tool failure. Surfaces (MCP,
+/// executor) map this to their own error representation — the catalog
+/// never encodes protocol-specific codes itself.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolErrorKind {
+    /// Caller supplied missing/ill-typed arguments.
+    InvalidArgs,
+    /// The requested collection/record does not exist (or is hidden).
+    NotFound,
+    /// An internal failure (embedding, search, insert, serialization…).
+    Internal,
+}
+
 /// Structured result of a single tool invocation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolOutcome {
@@ -101,6 +114,9 @@ pub struct ToolOutcome {
     pub content: serde_json::Value,
     /// True when the tool failed; `content` then carries the error.
     pub is_error: bool,
+    /// Failure category (`None` on success). Lets transports choose a
+    /// suitable error code without the catalog knowing about them.
+    pub error_kind: Option<ToolErrorKind>,
 }
 
 impl ToolOutcome {
@@ -108,14 +124,36 @@ impl ToolOutcome {
         Self {
             content,
             is_error: false,
+            error_kind: None,
         }
     }
 
-    pub fn error(message: impl Into<String>) -> Self {
+    fn error_with(message: impl Into<String>, kind: ToolErrorKind) -> Self {
         Self {
             content: serde_json::json!({ "error": message.into() }),
             is_error: true,
+            error_kind: Some(kind),
         }
+    }
+
+    /// Missing or ill-typed arguments (e.g. `"query is required"`).
+    pub fn invalid_args(message: impl Into<String>) -> Self {
+        Self::error_with(message, ToolErrorKind::InvalidArgs)
+    }
+
+    /// Requested collection/record not found (or hidden by RLS).
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::error_with(message, ToolErrorKind::NotFound)
+    }
+
+    /// Internal failure (embedding/search/insert/serialization).
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::error_with(message, ToolErrorKind::Internal)
+    }
+
+    /// Back-compat alias for [`ToolOutcome::internal`].
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::internal(message)
     }
 }
 
@@ -361,6 +399,92 @@ mod tests {
             )
             .await;
         assert!(out.is_error);
+    }
+
+    fn rls_schema(name: &str) -> CollectionSchema {
+        CollectionSchema::builder(name)
+            .add_field(FieldDefinition::vector("embedding", 4, DistanceMetric::Cosine))
+            .add_field(FieldDefinition::new("owner", FieldType::String).with_filterable(true))
+            .rls_owner_field(Some("owner".to_owned()))
+            .shard_count(1)
+            .build()
+            .unwrap()
+    }
+
+    /// Seed an RLS-enabled collection with one record per owner; return
+    /// the (alice_record_id, bob_record_id).
+    async fn seeded_rls_state(
+        tmp: &std::path::Path,
+        user_collection: &str,
+    ) -> (AppState, crate::tenant::TenantId, uuid::Uuid, uuid::Uuid) {
+        let state = AppState::new(tmp);
+        let tenant = crate::tenant::TenantId::default_tenant();
+        let scoped = crate::tenant::scope(&tenant, user_collection);
+        let schema = rls_schema(&scoped);
+        let col_dir = tmp.join(&scoped);
+        std::fs::create_dir_all(&col_dir).unwrap();
+        crate::rest::collections::materialize_collection_locally(&state, &schema, &col_dir)
+            .await
+            .expect("materialize");
+
+        let mut ids = Vec::new();
+        for owner in ["alice", "bob"] {
+            let mut rec = Record::new();
+            rec.set("embedding", FieldValue::Vector(DenseVector::new(vec![1.0, 0.0, 0.0, 0.0])));
+            rec.set("owner", FieldValue::String(owner.to_owned()));
+            let id = rec.id();
+            ids.push(id);
+            let mut managers = state.inner.segment_managers.write().await;
+            let shard_map = managers.get_mut(&scoped).unwrap();
+            let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
+                &id,
+                schema.shard_count(),
+            );
+            shard_map.get_mut(&shard_id).unwrap().insert(rec).unwrap();
+        }
+        (state, tenant, ids[0], ids[1])
+    }
+
+    #[tokio::test]
+    async fn get_record_enforces_rls_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant, alice_id, bob_id) = seeded_rls_state(tmp.path(), "secrets").await;
+        let cat = ToolCatalog::new();
+
+        // Scoped user "alice" sees her own record...
+        let alice_ctx = ToolContext::new(&state, &tenant).with_user(Some("alice"));
+        let out = cat
+            .dispatch(
+                &alice_ctx,
+                "get_record",
+                serde_json::json!({ "collection": "secrets", "id": alice_id.to_string() }),
+            )
+            .await;
+        assert!(!out.is_error, "alice own record: {:?}", out.content);
+        assert_eq!(out.content["fields"]["owner"], "alice");
+
+        // ...but bob's record is hidden as not_found (no existence leak).
+        let out = cat
+            .dispatch(
+                &alice_ctx,
+                "get_record",
+                serde_json::json!({ "collection": "secrets", "id": bob_id.to_string() }),
+            )
+            .await;
+        assert!(out.is_error);
+        assert_eq!(out.error_kind, Some(ToolErrorKind::NotFound));
+
+        // user=None (admin/system) bypasses RLS and can read either record.
+        let admin_ctx = ToolContext::new(&state, &tenant);
+        let out = cat
+            .dispatch(
+                &admin_ctx,
+                "get_record",
+                serde_json::json!({ "collection": "secrets", "id": bob_id.to_string() }),
+            )
+            .await;
+        assert!(!out.is_error, "admin bob record: {:?}", out.content);
+        assert_eq!(out.content["fields"]["owner"], "bob");
     }
 
     #[tokio::test]
