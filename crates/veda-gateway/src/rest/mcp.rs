@@ -23,19 +23,26 @@
 //! - Auth: when JWT auth is enabled, the MCP endpoint requires the same
 //!   `Authorization: Bearer ...` header as other protected routes; auth is
 //!   handled by the gateway-wide middleware.
-//! - Errors follow JSON-RPC 2.0: `{ "jsonrpc": "2.0", "id": ..., "error":
-//!   { "code": -32600|-32601|-32602|-32603, "message": ... } }`.
+//! - *Protocol* errors (bad JSON-RPC, unknown method, unknown tool name)
+//!   follow JSON-RPC 2.0: `{ "jsonrpc": "2.0", "id": ..., "error": { "code":
+//!   -32600|-32601|-32602|-32700, "message": ... } }`.
+//! - *Tool-execution* errors are NOT JSON-RPC errors: per MCP they are a
+//!   successful `result` carrying a `CallToolResult` with `isError: true`,
+//!   so the calling model can read the message and self-correct.
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::catalog::{ToolContext, ToolErrorKind};
+use crate::agent::catalog::ToolContext;
 
 use super::state::AppState;
 
-const PROTOCOL_VERSION: &str = "2025-03-26";
+const PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// Protocol versions this server can speak. The first entry is preferred.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26"];
 
 // ---------------------------------------------------------------------------
 // JSON-RPC envelope
@@ -98,7 +105,7 @@ pub async fn handle_mcp(
 ) -> (StatusCode, Json<JsonRpcResponse>) {
     let id = req.id.unwrap_or(serde_json::Value::Null);
     let resp = match req.method.as_str() {
-        "initialize" => handle_initialize(),
+        "initialize" => handle_initialize(req.params),
         "tools/list" => handle_tools_list(&state),
         "tools/call" => handle_tools_call(&state, &tenant, req.params).await,
         "ping" => Ok(serde_json::json!({})),
@@ -116,9 +123,18 @@ pub async fn handle_mcp(
 // initialize
 // ---------------------------------------------------------------------------
 
-fn handle_initialize() -> Result<serde_json::Value, (i32, String)> {
+fn handle_initialize(params: Option<serde_json::Value>) -> Result<serde_json::Value, (i32, String)> {
+    // Negotiate the protocol version: echo the client's requested version
+    // if we support it, otherwise fall back to our preferred version.
+    let requested = params
+        .as_ref()
+        .and_then(|p| p["protocolVersion"].as_str());
+    let negotiated = match requested {
+        Some(v) if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) => v,
+        _ => PROTOCOL_VERSION,
+    };
     Ok(serde_json::json!({
-        "protocolVersion": PROTOCOL_VERSION,
+        "protocolVersion": negotiated,
         "serverInfo": {
             "name": "veda",
             "version": env!("CARGO_PKG_VERSION"),
@@ -163,8 +179,9 @@ async fn handle_tools_call(
         .unwrap_or_else(|| serde_json::json!({}));
 
     // Any builtin the catalog knows is callable. An unknown id is
-    // dispatched too and surfaces as an `Internal` error outcome
-    // (`"unknown tool: ..."`), which we map to JSON-RPC -32601 below.
+    // dispatched too and surfaces as an error outcome
+    // (`"unknown tool: ..."`), which we map to the JSON-RPC -32601
+    // protocol error below.
     let ctx = ToolContext::new(state, tenant);
     let outcome = state.inner.tool_catalog.dispatch(&ctx, tool_name, args).await;
     if outcome.is_error {
@@ -172,22 +189,26 @@ async fn handle_tools_call(
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| outcome.content.to_string());
-        // Unknown tool ids -> "Method not found" (-32601); argument
-        // validation failures -> "Invalid params" (-32602); not-found and
-        // other internal failures -> "Internal error" (-32603).
-        let code = if msg.starts_with("unknown tool") {
-            -32601
-        } else {
-            match outcome.error_kind {
-                Some(ToolErrorKind::InvalidArgs) => -32602,
-                Some(ToolErrorKind::NotFound) | Some(ToolErrorKind::Internal) | None => -32603,
-            }
-        };
-        return Err((code, msg));
+        // An *unknown tool* is a protocol error ("Method not found",
+        // -32601) — the tool genuinely doesn't exist. Every other error
+        // is a *tool-execution* failure: per MCP, return a successful
+        // JSON-RPC result with `isError: true` (a `CallToolResult`) so the
+        // calling LLM can read the message and self-correct.
+        if msg.starts_with("unknown tool") {
+            return Err((-32601, msg));
+        }
+        // `error_kind` (InvalidArgs | NotFound | Internal) is carried by
+        // the outcome but does not change the wire shape — all become an
+        // `isError` result.
+        return Ok(serde_json::json!({
+            "content": [{ "type": "text", "text": msg }],
+            "isError": true
+        }));
     }
 
     Ok(serde_json::json!({
         "content": [{ "type": "text", "text": serde_json::to_string_pretty(&outcome.content).unwrap_or_default() }],
+        "structuredContent": outcome.content,
         "isError": false
     }))
 }
