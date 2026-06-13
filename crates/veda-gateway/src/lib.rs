@@ -1,3 +1,4 @@
+pub mod advisor;
 pub mod agent;
 pub mod auth;
 pub mod auth_oidc;

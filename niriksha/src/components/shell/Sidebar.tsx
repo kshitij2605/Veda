@@ -14,17 +14,21 @@ import {
   PanelLeftOpen,
   Search,
   Settings,
+  ShieldAlert,
   TerminalSquare,
 } from 'lucide-react'
-import { type ComponentType } from 'react'
+import { type ComponentType, useEffect } from 'react'
 import { cn } from '../../lib/cn'
 import { KBD, modKey } from '../primitives/KBD'
+import { useInsightsStore } from '../../stores/insightsStore'
 
 interface NavItem {
   to: string
   label: string
   icon: ComponentType<{ size?: number; strokeWidth?: number }>
   hint?: string
+  /** Render the open-insights count badge on this item. */
+  insightsBadge?: boolean
 }
 
 interface NavGroup {
@@ -64,6 +68,7 @@ const GROUPS: NavGroup[] = [
   {
     label: 'Observe',
     items: [
+      { to: '/insights', label: 'Insights', icon: ShieldAlert, insightsBadge: true },
       { to: '/observability', label: 'Observability', icon: BarChart3 },
       { to: '/health', label: 'Health', icon: Activity },
       { to: '/indexes', label: 'Indexes', icon: Layers },
@@ -87,6 +92,15 @@ export function Sidebar({
   collapsed?: boolean
   onToggle?: () => void
 }) {
+  // Poll the open-insights count for the sidebar badge, independent of
+  // whether the Insights page is mounted.
+  const refreshInsights = useInsightsStore((s) => s.refresh)
+  useEffect(() => {
+    refreshInsights()
+    const id = setInterval(refreshInsights, 30_000)
+    return () => clearInterval(id)
+  }, [refreshInsights])
+
   return (
     <aside
       className={cn(
@@ -224,6 +238,15 @@ function Item({ item, collapsed }: { item: NavItem; collapsed: boolean }) {
   const active =
     location.pathname === item.to || location.pathname.startsWith(item.to + '/')
   const Icon = item.icon
+  const openCount = useInsightsStore((s) => s.openCount)
+  const maxSeverity = useInsightsStore((s) => s.maxSeverity)
+  const showBadge = !!item.insightsBadge && openCount > 0
+  const badgeColor =
+    maxSeverity === 'high'
+      ? 'var(--color-error)'
+      : maxSeverity === 'medium'
+        ? 'var(--color-warning)'
+        : 'var(--color-accent)'
   return (
     <li>
       <NavLink
@@ -239,9 +262,27 @@ function Item({ item, collapsed }: { item: NavItem; collapsed: boolean }) {
           )
         }
       >
-        <Icon size={collapsed ? 15 : 13.5} strokeWidth={2} />
+        <span className="relative flex-none">
+          <Icon size={collapsed ? 15 : 13.5} strokeWidth={2} />
+          {collapsed && showBadge && (
+            <span
+              aria-hidden
+              className="absolute -right-1 -top-1 h-2 w-2 rounded-full ring-2 ring-[var(--color-bg-elevated)]"
+              style={{ background: badgeColor }}
+            />
+          )}
+        </span>
         {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
-        {!collapsed && item.hint && (
+        {!collapsed && showBadge && (
+          <span
+            className="inline-flex h-[16px] min-w-[16px] items-center justify-center rounded-full px-1 text-[10px] font-semibold tabular-nums text-white"
+            style={{ background: badgeColor }}
+            title={`${openCount} open insight${openCount === 1 ? '' : 's'}`}
+          >
+            {openCount > 99 ? '99+' : openCount}
+          </span>
+        )}
+        {!collapsed && !showBadge && item.hint && (
           <span className="text-[10px] font-mono text-[var(--color-text-subtle)] opacity-0 group-hover:opacity-100">
             G {item.hint}
           </span>
