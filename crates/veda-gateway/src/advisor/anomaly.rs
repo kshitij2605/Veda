@@ -23,7 +23,7 @@
 use crate::advisor::config::AdvisorConfig;
 use crate::advisor::event::{RemediationAction, Scope, Severity};
 use crate::advisor::rules::RuleHit;
-use crate::advisor::snapshot::{OpsSnapshot, SnapshotHistory};
+use crate::advisor::snapshot::SnapshotHistory;
 
 /// Default upper-tail threshold in standard deviations.
 const DEFAULT_SIGMA: f64 = 3.0;

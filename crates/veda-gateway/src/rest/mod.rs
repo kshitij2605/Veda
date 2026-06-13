@@ -5,6 +5,7 @@ use axum::Router;
 use tower_http::trace::TraceLayer;
 
 use crate::auth;
+use crate::rbac;
 use crate::tenant;
 
 pub mod a2a;
@@ -17,6 +18,7 @@ pub mod document;
 pub mod embed;
 pub mod embed_insert;
 pub mod evaluate;
+pub mod insights;
 pub mod jobs;
 pub mod llm;
 pub mod mcp;
@@ -30,6 +32,31 @@ pub mod search;
 pub mod state;
 pub mod time_parse;
 pub mod txn;
+
+/// Ops-advisor admin routes, gated by an extra `require_admin` route
+/// layer (the shared auth middleware in `build_router` still runs first,
+/// populating the `Claims` that `require_admin` reads). State is bound by
+/// the caller's `.with_state` at the end of `build_router`.
+fn insights_router() -> Router<state::AppState> {
+    Router::new()
+        .route("/v1/admin/insights", get(insights::list_insights))
+        .route("/v1/admin/insights/history", get(insights::list_history))
+        .route("/v1/admin/insights/rules", get(insights::list_rules))
+        .route(
+            "/v1/admin/insights/rules/{id}",
+            axum::routing::put(insights::put_rule),
+        )
+        .route(
+            "/v1/admin/insights/channels",
+            get(insights::get_channels).put(insights::put_channels),
+        )
+        .route("/v1/admin/insights/run", post(insights::run_now))
+        .route(
+            "/v1/admin/insights/{event_id}/ack",
+            post(insights::ack_event),
+        )
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
 
 /// Build the complete REST API router.
 pub fn build_router(app_state: state::AppState) -> Router {
@@ -228,6 +255,9 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/collections/{name}/process-documents",
             post(document::process_documents_batch),
         )
+        // Ops advisor ("Insights") — admin-only (extra require_admin
+        // route layer on top of the shared auth middleware below).
+        .merge(insights_router())
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             auth::auth_middleware,

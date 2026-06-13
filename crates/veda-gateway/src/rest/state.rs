@@ -232,6 +232,12 @@ pub struct AppStateInner {
     /// agent executor so both surfaces share one set of tool specs and
     /// implementations.
     pub tool_catalog: Arc<crate::agent::catalog::ToolCatalog>,
+    /// Ops-advisor runtime state (snapshot history, event store, editable
+    /// config, remediation rate limiter, shared HTTP client). Driven by
+    /// the background advisor tick spawned in [`crate::server`] and read /
+    /// mutated by the `/v1/admin/insights/*` REST surface. Loaded from
+    /// `{data_dir}/_advisor_config.json` + `{data_dir}/_ops_events.json`.
+    pub advisor: Arc<crate::advisor::AdvisorState>,
 }
 
 /// Build a swappable TSO + the matching `dyn Tso` handle that
@@ -300,6 +306,7 @@ impl AppState {
                 applier_handles: std::sync::Mutex::new(HashMap::new()),
                 job_registry: Arc::new(JobRegistry::new(data_dir)),
                 tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
+                advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
             }),
         }
     }
@@ -365,6 +372,7 @@ impl AppState {
                 applier_handles: std::sync::Mutex::new(HashMap::new()),
                 job_registry: Arc::new(JobRegistry::new(data_dir)),
                 tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
+                advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
             }),
         }
     }
@@ -411,6 +419,7 @@ impl AppState {
                 applier_handles: std::sync::Mutex::new(HashMap::new()),
                 job_registry: Arc::new(JobRegistry::new(data_dir)),
                 tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
+                advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
             }),
         }
     }
@@ -442,6 +451,11 @@ impl AppState {
         &self,
     ) -> &RwLock<EmbeddingModelRegistry> {
         &self.inner.embedding_registry
+    }
+
+    /// Shared ops-advisor runtime state.
+    pub fn advisor(&self) -> &Arc<crate::advisor::AdvisorState> {
+        &self.inner.advisor
     }
 
     /// Load a SPLADE sparse-encoder client from `VEDA_SPLADE_*` env

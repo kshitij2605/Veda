@@ -44,6 +44,10 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let _scheduler = crate::scheduler::spawn_scheduler(app_state.clone());
     tracing::info!("scheduler: tick loop started (60s interval)");
 
+    // Ops-advisor tick loop (default 30s; VEDA_ADVISOR_INTERVAL_SECS).
+    let _advisor = crate::advisor::spawn_advisor(app_state.clone());
+    tracing::info!("advisor: tick loop started");
+
     // Optional NATS streaming ingestion worker.
     if let Ok(url) = std::env::var("VEDA_STREAMING_NATS")
         && !url.is_empty()

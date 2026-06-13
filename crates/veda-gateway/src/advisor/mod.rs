@@ -17,11 +17,14 @@
 
 pub mod anomaly;
 pub mod config;
+pub mod engine;
 pub mod event;
 pub mod notify;
 pub mod remediation;
 pub mod rules;
 pub mod snapshot;
+
+pub use engine::{run_tick, spawn_advisor, AdvisorState};
 
 pub use snapshot::{
     collect, parse_prom_counter, CollectionSnapshot, GlobalSnapshot, HealthSnapshot,
