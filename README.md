@@ -53,6 +53,14 @@
 - **Python SDK** -- `veda-client` package for idiomatic Python access
 - **`veda-admin` CLI** -- offline maintenance tool (currently scaffold)
 
+### Agents & MCP
+- **Agent framework** -- build conversational agents that ground answers in your data. An agent is `{ instructions, tool_ids, model? }`; a built-in `veda-agent` works out of the box. `POST /v1/agents/{id}/converse` runs a multi-step tool-calling (ReAct-style) loop over your configured LLM and returns the final answer plus a full `steps[]` trace (reasoning / tool_call / tool_result). CRUD at `/v1/agents`, history at `/v1/conversations`.
+- **Tool catalog** -- 8 built-in tools agents (and MCP clients) can call: `search` (multimodal — text **or** image query → cross-modal hits, with field projection), `aggregate`, `filter_query`, `get_record`, `describe_collection`, `list_collections`, `route`, `upsert_record`. Tools are also directly invocable via `POST /v1/agent-tools/{id}/execute`; auth + tenant + row-level security apply to every tool call.
+- **MCP server** -- full Model Context Protocol server (JSON-RPC 2.0, protocol `2025-06-18`) at `/v1/mcp`, exposing the whole tool catalog with `readOnlyHint`/`destructiveHint` annotations, `structuredContent` results, and correctable `isError` tool errors. Two standard transports: **stdio** (via the `veda-mcp` bridge) and **stateless Streamable HTTP** — so Claude Desktop, Cursor, VS Code, and `mcp-remote` connect directly. Veda's multimodal `search` tool gives MCP clients cross-modal retrieval no text-only vector DB can.
+- **A2A (Agent-to-Agent)** -- expose a Veda agent as a peer: `GET /v1/a2a/{id}/card` returns an A2A AgentCard (skills = the agent's tools) and `POST /v1/a2a/{id}` handles JSON-RPC `message/send`, so external orchestrators can drive a Veda agent with no custom API.
+
+See [documentation/2026-06-13-agents-and-mcp.md](documentation/2026-06-13-agents-and-mcp.md) for the full agentic + MCP guide.
+
 ## Quick Start
 
 ### Docker Compose (recommended)
@@ -154,6 +162,7 @@ The metadata Raft (`_meta`) carries only schemas, the shard plan, nodes, the TSO
 | `veda-log` | Per-shard `ShardLog`, BookKeeper-style replication, Tonic transport for follower + WAN, cutover primitive |
 | `veda-server` | Binary entry point, configuration, startup |
 | `veda-admin` | Offline maintenance CLI (scaffold) |
+| `veda-mcp` | Stdio↔HTTP bridge binary so desktop MCP clients (Claude Desktop, Cursor, VS Code) can use Veda's MCP server |
 
 See [documentation/rearchitecture-overview.md](documentation/rearchitecture-overview.md) for the layered design and current phase status.
 

@@ -281,6 +281,70 @@ components:
         avg: { type: number, nullable: true, description: "Numeric fields only." }
         min_length: { type: integer, nullable: true, description: "String fields only." }
         max_length: { type: integer, nullable: true, description: "String fields only." }
+    Agent:
+      type: object
+      required: [name]
+      properties:
+        id: { type: string, description: "Omit/empty on create to auto-generate." }
+        name: { type: string }
+        description: { type: string }
+        instructions: { type: string, description: "System prompt for the agent." }
+        tool_ids:
+          type: array
+          items: { type: string }
+          description: "Tool ids this agent may call; empty = all builtins."
+        model:
+          type: object
+          nullable: true
+          description: "Per-agent LLM override; null = global VEDA_LLM config."
+          properties:
+            endpoint: { type: string, nullable: true }
+            model: { type: string, nullable: true }
+    AgentTool:
+      type: object
+      required: [id, name, kind]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        kind: { type: string, description: "Interpreted by the tool catalog." }
+        config: { type: object, additionalProperties: true }
+    ConverseRequest:
+      type: object
+      required: [input]
+      properties:
+        input: { type: string }
+        conversation_id: { type: string, nullable: true, description: "Continue an existing conversation; omit to start a new one." }
+        attachments:
+          type: array
+          nullable: true
+          items:
+            type: object
+            properties:
+              kind: { type: string }
+              data_b64: { type: string, nullable: true }
+    AgentStep:
+      type: object
+      description: |
+        One trace step, discriminated by `kind`:
+        `reasoning` { text }, `tool_call` { tool_call_id, tool_id, args },
+        `tool_result` { tool_call_id, result, is_error }.
+      properties:
+        kind: { type: string, enum: [reasoning, tool_call, tool_result] }
+        text: { type: string }
+        tool_call_id: { type: string }
+        tool_id: { type: string }
+        args: { type: object, additionalProperties: true }
+        result: { type: object, additionalProperties: true }
+        is_error: { type: boolean }
+    ConverseResponse:
+      type: object
+      properties:
+        conversation_id: { type: string }
+        response: { type: string }
+        steps:
+          type: array
+          items: { $ref: '#/components/schemas/AgentStep' }
 
 paths:
   /v1/admin/health:
@@ -642,10 +706,228 @@ paths:
 
   /v1/mcp:
     post:
-      summary: Model Context Protocol entry point.
+      summary: Model Context Protocol endpoint (JSON-RPC 2.0, protocol 2025-06-18).
+      description: |
+        Stateless Streamable-HTTP MCP transport. Methods: `initialize`,
+        `tools/list`, `tools/call`, `ping`. `tools/list` returns the full
+        8-tool catalog with annotations; `tools/call` returns
+        `structuredContent` on success and `isError: true` for tool-level
+        errors. Honors the optional `MCP-Protocol-Version` header
+        (unsupported value → 400). Desktop stdio clients connect via the
+        `veda-mcp` bridge binary.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: header
+          name: MCP-Protocol-Version
+          required: false
+          schema: { type: string, enum: ["2025-06-18", "2025-03-26"] }
+      responses:
+        '200': { description: JSON-RPC response (application/json) }
+        '400': { description: unsupported MCP-Protocol-Version }
+    get:
+      summary: Not supported (no server-initiated stream).
+      description: Veda's MCP server has no server→client stream; GET returns 405.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '405': { description: "method not allowed (Allow: POST)" }
+
+  /v1/agents:
+    get:
+      summary: List agents.
       security: [ { bearerAuth: [] } ]
       responses:
         '200': { description: ok }
+    post:
+      summary: Create or upsert an agent (empty id → generated).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Agent' }
+      responses:
+        '200': { description: stored }
+
+  /v1/agents/{id}:
+    get:
+      summary: Fetch an agent.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: ok }
+        '404': { description: not found }
+    put:
+      summary: Upsert an agent.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Agent' }
+      responses:
+        '200': { description: stored }
+    delete:
+      summary: Delete an agent.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '204': { description: removed }
+
+  /v1/agents/{id}/converse:
+    post:
+      summary: Converse with an agent (sync multi-step tool-calling loop).
+      description: |
+        Runs the agent's ReAct-style loop over the configured LLM and
+        returns the final answer plus a full `steps[]` trace. Resolves the
+        built-in `veda-agent` when no agent with that id exists. Returns
+        503 when no LLM endpoint is configured.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConverseRequest' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConverseResponse' }
+        '404': { description: agent not found }
+        '503': { description: no LLM configured }
+
+  /v1/agent-tools:
+    get:
+      summary: List user-defined custom tools.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200': { description: ok }
+    post:
+      summary: Create or upsert a custom tool.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AgentTool' }
+      responses:
+        '200': { description: stored }
+
+  /v1/agent-tools/catalog:
+    get:
+      summary: List built-in tool specs (id, description, inputSchema, annotations).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200': { description: ok }
+
+  /v1/agent-tools/{id}:
+    get:
+      summary: Fetch a custom tool.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: ok }
+        '404': { description: not found }
+    put:
+      summary: Upsert a custom tool.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AgentTool' }
+      responses:
+        '200': { description: stored }
+    delete:
+      summary: Delete a custom tool.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '204': { description: removed }
+
+  /v1/agent-tools/{id}/execute:
+    post:
+      summary: Invoke one built-in tool directly.
+      description: |
+        Body is the tool arguments, either wrapped as `{ "args": {...} }`
+        or the args object directly. Tenant + RLS apply. Error mapping:
+        invalid args → 400, not found → 404, internal → 500.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: tool result content }
+        '400': { description: invalid args }
+        '404': { description: tool or target not found }
+
+  /v1/conversations:
+    get:
+      summary: List conversations.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200': { description: ok }
+
+  /v1/conversations/{id}:
+    get:
+      summary: Fetch a conversation (messages + step trace).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: ok }
+        '404': { description: not found }
+    delete:
+      summary: Delete a conversation.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '204': { description: removed }
+
+  /v1/a2a/{agent_id}/card:
+    get:
+      summary: A2A AgentCard for discovery (skills = the agent's tools).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: agent_id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: A2A AgentCard JSON }
+        '404': { description: agent not found }
+
+  /v1/a2a/{agent_id}:
+    post:
+      summary: A2A JSON-RPC endpoint (method message/send, sync).
+      description: |
+        Runs a one-shot agent turn over the user message's text parts and
+        returns the agent's reply as an A2A Message. Unknown method → JSON-RPC
+        -32601; no LLM → 503.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: agent_id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: "JSON-RPC 2.0 envelope with method message/send." }
+      responses:
+        '200': { description: JSON-RPC result (A2A Message) }
+        '404': { description: agent not found }
+        '503': { description: no LLM configured }
 
   /v1/saved_objects:
     get:

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-06-13
+
+Agentic layer and a real Model Context Protocol (MCP) surface, validated end-to-end against a live LLM (Qwen3.5-122B) + embedder (BGE-M3). See `documentation/2026-06-13-agents-and-mcp.md` for the full guide.
+
+### Added
+- **Agent framework** — conversational agents that ground answers in your collections. `Agent { id, name, instructions, tool_ids, model? }` persisted as saved objects; a built-in in-memory `veda-agent` (general-purpose, all tools) is always available. New `crates/veda-gateway/src/agent/` module: `model`, `store`, `catalog`, `tools/`, `executor`.
+  - `POST /v1/agents/{id}/converse` — runs a bounded multi-step tool-calling (ReAct-style) loop over the configured LLM (`AgentExecutor::run`, default max 8 steps, tool-result truncation), returning `{ conversation_id, response, steps[] }` where each step is `reasoning` / `tool_call` / `tool_result`.
+  - Agent CRUD (`GET/POST /v1/agents`, `GET/PUT/DELETE /v1/agents/{id}`), custom-tool CRUD (`/v1/agent-tools`), and conversation history (`GET/DELETE /v1/conversations`). All tenant-scoped; row-level security enforced through tool calls via the caller's identity.
+- **Shared tool catalog** — `ToolCatalog` with 8 built-in tools used by BOTH the agent executor and the MCP server: `search` (multimodal — text or base64-image query → cross-modal hits, with `fields` projection), `aggregate`, `filter_query`, `get_record`, `describe_collection`, `list_collections`, `route`, `upsert_record`. `GET /v1/agent-tools/catalog` lists their specs; `POST /v1/agent-tools/{id}/execute` invokes one directly.
+- **LLM tool-calling** — `veda-core::llm_client` gained `complete_with_tools` + a `ChatModel` trait (OpenAI-compatible `tools`/`tool_calls`); the existing `complete()` is unchanged.
+- **MCP transports (the standalone server is now actually connectable by real clients)**:
+  - New `veda-mcp` crate — a stdio↔HTTP bridge binary so Claude Desktop / Cursor / VS Code (stdio MCP) can use Veda. Configure with `--url`/`VEDA_MCP_URL` + `--token`/`VEDA_MCP_TOKEN`.
+  - `/v1/mcp` is now a spec-compliant **stateless Streamable HTTP** endpoint (`MCP-Protocol-Version` header negotiation, `GET → 405`) for `mcp-remote` and HTTP MCP clients.
+- **A2A (Agent-to-Agent)** — `GET /v1/a2a/{agent_id}/card` returns an A2A AgentCard (skills derived from the agent's tools); `POST /v1/a2a/{agent_id}` handles JSON-RPC `message/send` (sync, one-shot), so external orchestrators can consume a Veda agent as a peer.
+
+### Changed
+- **MCP server upgraded** — `/v1/mcp` now exposes the **full 8-tool catalog** (was 4) with MCP tool **annotations** (`readOnlyHint`/`destructiveHint`/`title`); tool results carry **`structuredContent`** alongside the text block; tool-execution errors return a correctable **`isError: true`** result instead of a JSON-RPC error (protocol errors stay JSON-RPC); protocol version bumped to **`2025-06-18`** with version negotiation on `initialize`.
+- **Agent/MCP `search` now returns record content** — previously the search tool returned only `{id, distance}` (no fields); it now hydrates each hit's non-vector fields (tenant-scoped, TTL-excluded, RLS-filtered) and supports an optional `fields` projection to bound LLM context.
+
+### Fixed
+- **Embedding client panicked against a real endpoint** — `veda-core::embedding_client` built a `reqwest::blocking::Client` inside async handlers, which panics (*"Cannot drop a runtime in a context where blocking is not allowed"*), breaking `embed-insert`, `/v1/embed`, the document pipeline, and agent/MCP query embedding against any live embedder. Converted `embed_text`/`embed_bytes` to async `reqwest::Client`. (The mock test path hid this; it was caught by the first real-data end-to-end test.) Note: `chunking.rs` and `splade_client.rs` still use `reqwest::blocking` and must be migrated before their live paths are exercised.
+
 ## [0.2.3] - 2026-06-12
 
 Postgres-extension-parity features, built Rust-native on Veda's existing primitives (filter DSL, columnar store, tokio background tasks, RBAC/JWT) — no Postgres extension code was forked. See `documentation/2026-06-12-postgres-parity-features.md` for the full feasibility assessment and design notes.
