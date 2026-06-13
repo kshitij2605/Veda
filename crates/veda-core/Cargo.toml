@@ -22,6 +22,9 @@ simsimd = { version = "6", optional = true }
 # pass. Apache-2.0 / MIT.
 matrixmultiply = "0.3"
 
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
 [features]
 default = ["simsimd"]
 # Use SimSIMD for distance computation when available. Adds a build-time

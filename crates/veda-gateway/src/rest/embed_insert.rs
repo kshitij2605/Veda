@@ -272,7 +272,7 @@ pub async fn embed_insert(
             let vector = match modality {
                 Modality::Text => {
                     let text = source_value.as_str().unwrap_or("");
-                    match client.embed_text(text) {
+                    match client.embed_text(text).await {
                         Ok(v) => v,
                         Err(e) => {
                             errors.push(RecordError {
@@ -295,7 +295,7 @@ pub async fn embed_insert(
                             }),
                         )
                     })?;
-                    match client.embed_bytes(&bytes, modality) {
+                    match client.embed_bytes(&bytes, modality).await {
                         Ok(v) => v,
                         Err(e) => {
                             errors.push(RecordError {
