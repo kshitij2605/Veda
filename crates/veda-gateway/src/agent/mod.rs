@@ -5,8 +5,10 @@
 //! `SavedObjectStore`. The tool catalog, executor, and REST surface are
 //! added in later tasks.
 
+pub mod catalog;
 pub mod model;
 pub mod store;
+pub mod tools;
 
 #[cfg(test)]
 mod tests {
