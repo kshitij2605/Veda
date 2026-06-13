@@ -12,6 +12,7 @@ use veda_core::embedding_client::EmbeddingClient;
 use veda_core::record::Record;
 use veda_core::types::{DistanceMetric, FieldType};
 use veda_query::adaptive::route_query;
+use veda_query::filter::ast::FilterExpr;
 use veda_query::filter::parser::FilterParser;
 use veda_query::filter::record_eval::evaluate_record;
 use veda_query::search::VectorSearchRequest;
@@ -319,6 +320,34 @@ pub fn select_query_model(
         .ok_or_else(|| format!("no embedding model configured for modality '{modality}'"))
 }
 
+/// Build the AST-level filter for an agent `search`, enforcing RLS.
+///
+/// Parses the optional user-supplied `filter` string, then — for a scoped
+/// (`Some`) caller on an RLS collection (`owner_field` is `Some`) — ANDs a
+/// trusted `owner_field == user` predicate via [`crate::rls::inject_owner_filter`]
+/// (`is_admin = false`). A `None` user (admin/system) or a collection without
+/// an owner field bypasses injection and yields just the parsed user filter.
+///
+/// The owner predicate is injected at the AST level (never via a filter
+/// string) so a quote in a username cannot break out and bypass RLS — the
+/// same security-correct path as REST `/search`.
+fn search_rls_filter_expr(
+    user_filter: Option<&str>,
+    owner_field: Option<&str>,
+    user: Option<&str>,
+) -> Result<Option<FilterExpr>, String> {
+    let parsed = match user_filter {
+        Some(s) => Some(FilterParser::parse(s).map_err(|e| format!("invalid filter: {e}"))?),
+        None => None,
+    };
+    match (owner_field, user) {
+        (Some(field), Some(u)) => {
+            Ok(crate::rls::inject_owner_filter(parsed, field, u, false))
+        }
+        _ => Ok(parsed),
+    }
+}
+
 pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
     let Some(user_collection) = args["collection"].as_str() else {
         return ToolOutcome::invalid_args("collection is required");
@@ -357,6 +386,19 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
             Some(s) => s,
             None => return ToolOutcome::not_found(format!("collection '{collection}' not found")),
         }
+    };
+
+    // RLS: inject an owner-equality predicate at the AST level for a scoped
+    // (`Some`) caller on an RLS collection; `None` (admin/system) bypasses.
+    // Mirrors REST `/search` — the executor prefers `filter_expr` over the
+    // raw string `filter`, so this is the security-correct path.
+    let filter_expr = match search_rls_filter_expr(
+        filter.as_deref(),
+        schema.rls_owner_field(),
+        ctx.user,
+    ) {
+        Ok(e) => e,
+        Err(e) => return ToolOutcome::invalid_args(e),
     };
 
     // Resolve target vector field.
@@ -424,7 +466,7 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
         k: limit,
         metric,
         filter,
-        filter_expr: None,
+        filter_expr,
         truncate_to: None,
         read_ts: None,
     };
@@ -707,4 +749,75 @@ fn record_json(rec: &Record) -> serde_json::Value {
         fields.insert(key.clone(), field_value_to_json(value));
     }
     serde_json::json!({ "id": rec.id().to_string(), "fields": fields })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use veda_query::filter::ast::{FilterExpr, FilterValue};
+
+    fn owner_eq(user: &str) -> FilterExpr {
+        FilterExpr::Eq {
+            field: "owner".to_owned(),
+            value: FilterValue::String(user.to_owned()),
+        }
+    }
+
+    #[test]
+    fn rls_injects_owner_when_no_user_filter() {
+        let f = search_rls_filter_expr(None, Some("owner"), Some("alice")).unwrap();
+        assert_eq!(f, Some(owner_eq("alice")));
+    }
+
+    #[test]
+    fn rls_ands_owner_onto_user_filter() {
+        let f = search_rls_filter_expr(Some("status = \"active\""), Some("owner"), Some("alice"))
+            .unwrap();
+        let user_f = FilterExpr::Eq {
+            field: "status".to_owned(),
+            value: FilterValue::String("active".to_owned()),
+        };
+        assert_eq!(
+            f,
+            Some(FilterExpr::And(
+                Box::new(user_f),
+                Box::new(owner_eq("alice")),
+            ))
+        );
+    }
+
+    #[test]
+    fn rls_none_user_bypasses_injection() {
+        // Admin/system caller: parsed user filter passes through unchanged.
+        let f = search_rls_filter_expr(Some("status = \"active\""), Some("owner"), None).unwrap();
+        assert_eq!(
+            f,
+            Some(FilterExpr::Eq {
+                field: "status".to_owned(),
+                value: FilterValue::String("active".to_owned()),
+            })
+        );
+        let f2 = search_rls_filter_expr(None, Some("owner"), None).unwrap();
+        assert_eq!(f2, None);
+    }
+
+    #[test]
+    fn rls_no_owner_field_no_injection() {
+        let f = search_rls_filter_expr(None, None, Some("alice")).unwrap();
+        assert_eq!(f, None);
+        let f2 = search_rls_filter_expr(Some("status = \"active\""), None, Some("alice")).unwrap();
+        assert_eq!(
+            f2,
+            Some(FilterExpr::Eq {
+                field: "status".to_owned(),
+                value: FilterValue::String("active".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn rls_invalid_user_filter_errors() {
+        let r = search_rls_filter_expr(Some("= = ="), Some("owner"), Some("alice"));
+        assert!(r.is_err());
+    }
 }
