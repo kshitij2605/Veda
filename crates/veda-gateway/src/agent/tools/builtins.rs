@@ -30,6 +30,9 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             description: "List all Veda collections by name.".to_owned(),
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
             kind: "builtin".to_owned(),
+            read_only: true,
+            destructive: false,
+            title: Some("List collections".to_owned()),
         },
         ToolSpec {
             id: "describe_collection".to_owned(),
@@ -44,6 +47,9 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                 "required": ["name"]
             }),
             kind: "builtin".to_owned(),
+            read_only: true,
+            destructive: false,
+            title: Some("Describe collection".to_owned()),
         },
         ToolSpec {
             id: "search".to_owned(),
@@ -63,6 +69,9 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                 "required": ["collection"]
             }),
             kind: "builtin".to_owned(),
+            read_only: true,
+            destructive: false,
+            title: Some("Multimodal search".to_owned()),
         },
         ToolSpec {
             id: "upsert_record".to_owned(),
@@ -77,6 +86,9 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                 "required": ["collection", "record"]
             }),
             kind: "builtin".to_owned(),
+            read_only: false,
+            destructive: true,
+            title: Some("Insert record".to_owned()),
         },
         ToolSpec {
             id: "get_record".to_owned(),
@@ -91,6 +103,9 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                 "required": ["collection", "id"]
             }),
             kind: "builtin".to_owned(),
+            read_only: true,
+            destructive: false,
+            title: Some("Get record".to_owned()),
         },
         ToolSpec {
             id: "route".to_owned(),
@@ -104,6 +119,9 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                 "required": ["query"]
             }),
             kind: "builtin".to_owned(),
+            read_only: true,
+            destructive: false,
+            title: Some("Route query".to_owned()),
         },
         ToolSpec {
             id: "aggregate".to_owned(),
@@ -121,6 +139,9 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                 "required": ["collection", "field", "metric"]
             }),
             kind: "builtin".to_owned(),
+            read_only: true,
+            destructive: false,
+            title: Some("Aggregate".to_owned()),
         },
         ToolSpec {
             id: "filter_query".to_owned(),
@@ -136,6 +157,9 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                 "required": ["collection", "filter"]
             }),
             kind: "builtin".to_owned(),
+            read_only: true,
+            destructive: false,
+            title: Some("Filter query".to_owned()),
         },
     ]
 }

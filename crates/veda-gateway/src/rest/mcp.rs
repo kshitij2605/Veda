@@ -8,11 +8,15 @@
 //!
 //! ## Tools exposed
 //!
-//! - `list_collections` — list all collections by name.
-//! - `describe_collection` — get schema + record count for a named collection.
-//! - `search` — text query auto-embedded via configured text model, returns
-//!   top-k hits with id + distance.
-//! - `upsert_record` — insert one record (caller supplies fields as JSON).
+//! The full built-in catalog ([`crate::agent::catalog::ToolCatalog::builtin_specs`])
+//! is surfaced — `tools/list` renders every builtin (including its MCP
+//! `annotations`) and `tools/call` dispatches any builtin id:
+//!
+//! - `list_collections`, `describe_collection`, `get_record`, `route`,
+//!   `aggregate`, `filter_query` — read-only tools.
+//! - `search` — cross-modal (text/image) query auto-embedded into Veda's
+//!   unified vector space, returns top-k hits with id + distance.
+//! - `upsert_record` — insert one record (mutating).
 //!
 //! ## Notes
 //!
@@ -32,17 +36,6 @@ use crate::agent::catalog::{ToolContext, ToolErrorKind};
 use super::state::AppState;
 
 const PROTOCOL_VERSION: &str = "2025-03-26";
-
-/// Tool ids exposed over the MCP transport. The catalog holds more
-/// builtins (e.g. `get_record`, `route`); MCP intentionally surfaces
-/// only this original set so external clients see an unchanged tool
-/// list.
-const MCP_EXPOSED_TOOLS: [&str; 4] = [
-    "list_collections",
-    "describe_collection",
-    "search",
-    "upsert_record",
-];
 
 // ---------------------------------------------------------------------------
 // JSON-RPC envelope
@@ -141,12 +134,12 @@ fn handle_initialize() -> Result<serde_json::Value, (i32, String)> {
 // ---------------------------------------------------------------------------
 
 fn handle_tools_list(state: &AppState) -> Result<serde_json::Value, (i32, String)> {
-    let catalog = &state.inner.tool_catalog;
-    let exposed: Vec<String> = MCP_EXPOSED_TOOLS.iter().map(|s| (*s).to_owned()).collect();
-    // `specs_for` preserves builtin order, which matches the original
-    // hard-coded ordering of the four MCP tools.
-    let tools: Vec<serde_json::Value> = catalog
-        .specs_for(&exposed)
+    // Expose the full builtin catalog over MCP — each spec renders its
+    // own `{name, description, inputSchema, annotations}` entry.
+    let tools: Vec<serde_json::Value> = state
+        .inner
+        .tool_catalog
+        .builtin_specs()
         .iter()
         .map(|s| s.to_mcp_entry())
         .collect();
@@ -169,12 +162,9 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
 
-    // Only the original four tools are reachable over MCP, even though
-    // the catalog holds more builtins.
-    if !MCP_EXPOSED_TOOLS.contains(&tool_name) {
-        return Err((-32601, format!("unknown tool: {tool_name}")));
-    }
-
+    // Any builtin the catalog knows is callable. An unknown id is
+    // dispatched too and surfaces as an `Internal` error outcome
+    // (`"unknown tool: ..."`), which we map to JSON-RPC -32601 below.
     let ctx = ToolContext::new(state, tenant);
     let outcome = state.inner.tool_catalog.dispatch(&ctx, tool_name, args).await;
     if outcome.is_error {
@@ -182,12 +172,16 @@ async fn handle_tools_call(
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| outcome.content.to_string());
-        // Argument-validation failures map to JSON-RPC "Invalid params"
-        // (-32602); not-found and internal failures both surface as
-        // "Internal error" (-32603), matching the pre-refactor behavior.
-        let code = match outcome.error_kind {
-            Some(ToolErrorKind::InvalidArgs) => -32602,
-            Some(ToolErrorKind::NotFound) | Some(ToolErrorKind::Internal) | None => -32603,
+        // Unknown tool ids -> "Method not found" (-32601); argument
+        // validation failures -> "Invalid params" (-32602); not-found and
+        // other internal failures -> "Internal error" (-32603).
+        let code = if msg.starts_with("unknown tool") {
+            -32601
+        } else {
+            match outcome.error_kind {
+                Some(ToolErrorKind::InvalidArgs) => -32602,
+                Some(ToolErrorKind::NotFound) | Some(ToolErrorKind::Internal) | None => -32603,
+            }
         };
         return Err((code, msg));
     }
