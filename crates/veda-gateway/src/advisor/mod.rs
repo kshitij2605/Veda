@@ -18,6 +18,7 @@
 pub mod anomaly;
 pub mod config;
 pub mod event;
+pub mod notify;
 pub mod rules;
 pub mod snapshot;
 
