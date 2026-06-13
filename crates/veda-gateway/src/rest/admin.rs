@@ -363,7 +363,7 @@ fn compute_status(checks: &HashMap<String, String>) -> String {
     }
 }
 
-async fn run_health_checks() -> HashMap<String, String> {
+pub(crate) async fn run_health_checks() -> HashMap<String, String> {
     let mut checks = HashMap::new();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))

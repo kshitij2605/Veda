@@ -145,7 +145,7 @@ pub struct CoverageResponse {
     pub orphan_sample: Vec<String>,
 }
 
-fn read_window_entries(
+pub(crate) fn read_window_entries(
     data_dir: &std::path::Path,
     collection: &str,
     window_secs: u64,
