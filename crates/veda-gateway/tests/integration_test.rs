@@ -1643,10 +1643,96 @@ async fn test_mcp_initialize_and_list_tools() {
     let body: Value = resp.json().await.unwrap();
     let tools = body["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"list_collections"));
-    assert!(names.contains(&"describe_collection"));
-    assert!(names.contains(&"search"));
-    assert!(names.contains(&"upsert_record"));
+    // The full builtin catalog (8 tools) is now exposed over MCP.
+    for expected in [
+        "list_collections",
+        "describe_collection",
+        "search",
+        "upsert_record",
+        "get_record",
+        "route",
+        "aggregate",
+        "filter_query",
+    ] {
+        assert!(names.contains(&expected), "missing MCP tool {expected}");
+    }
+    assert_eq!(tools.len(), 8, "expected the full 8-tool catalog");
+
+    // Every entry has an inputSchema and an annotations object.
+    for t in tools {
+        assert!(t["inputSchema"].is_object(), "{} inputSchema", t["name"]);
+        let ann = &t["annotations"];
+        assert!(ann.is_object(), "{} annotations", t["name"]);
+        assert!(ann["readOnlyHint"].is_boolean());
+        assert!(ann["destructiveHint"].is_boolean());
+        assert!(ann["title"].as_str().is_some());
+    }
+
+    // Read tools are read-only/non-destructive; upsert_record is the
+    // sole mutating/destructive tool.
+    let find = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap();
+    assert_eq!(find("search")["annotations"]["readOnlyHint"], true);
+    assert_eq!(find("search")["annotations"]["destructiveHint"], false);
+    assert_eq!(find("aggregate")["annotations"]["readOnlyHint"], true);
+    assert_eq!(find("upsert_record")["annotations"]["readOnlyHint"], false);
+    assert_eq!(find("upsert_record")["annotations"]["destructiveHint"], true);
+
+    // The multimodal search schema flows through unchanged.
+    let search_props = &find("search")["inputSchema"]["properties"];
+    assert!(search_props["query_image_b64"].is_object());
+    assert!(search_props["mode"].is_object());
+}
+
+#[tokio::test]
+async fn test_mcp_aggregate_tool_call() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    // Collection with a numeric, filterable field.
+    c.post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "mcp_agg",
+            "fields": [
+                { "name": "embedding", "type": "vector", "dimension": 4, "metric": "cosine" },
+                { "name": "price", "type": "float64", "filterable": true }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let records: Vec<Value> = [10.0, 20.0, 30.0]
+        .iter()
+        .map(|p| json!({ "embedding": [1.0, 0.0, 0.0, 0.0], "price": p }))
+        .collect();
+    let resp = c
+        .post(format!("{base}/v1/collections/mcp_agg/insert"))
+        .json(&json!({ "records": records }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // `aggregate` is a newly-exposed builtin — call it over MCP.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "aggregate",
+                "arguments": { "collection": "mcp_agg", "field": "price", "metric": "sum" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert!(body.get("error").is_none(), "body: {body}");
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["groups"][0]["value"], 60.0);
 }
 
 #[tokio::test]
