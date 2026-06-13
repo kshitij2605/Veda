@@ -15,6 +15,7 @@
 //! surface land in follow-up tasks; nothing here sends, executes, or
 //! exposes anything.
 
+pub mod anomaly;
 pub mod config;
 pub mod event;
 pub mod rules;
