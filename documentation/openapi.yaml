@@ -345,6 +345,76 @@ components:
         steps:
           type: array
           items: { $ref: '#/components/schemas/AgentStep' }
+    OpsEvent:
+      type: object
+      description: An ops-advisor event (open or closed).
+      properties:
+        id: { type: string, description: "stable id = rule_id:scope-key" }
+        rule_id: { type: string }
+        scope:
+          type: object
+          description: "adjacently-tagged: { kind: global|collection|shard|node, target: ... }"
+          properties:
+            kind: { type: string, enum: [global, collection, shard, node] }
+            target: {}
+        severity: { type: string, enum: [high, medium, low] }
+        status: { type: string, enum: [open, closed] }
+        title: { type: string }
+        detail: { type: string, description: "root cause" }
+        recommendation: { type: string }
+        runbook: { type: string, nullable: true }
+        remediation:
+          type: object
+          description: "adjacently-tagged: { action: none|compact|reindex, params? }"
+          properties:
+            action: { type: string, enum: [none, compact, reindex] }
+            params: { type: object, nullable: true }
+        opened_at_ms: { type: integer }
+        closed_at_ms: { type: integer, nullable: true }
+        acknowledged: { type: boolean }
+        remediation_note: { type: string, nullable: true }
+    RuleConfigUpdate:
+      type: object
+      description: Partial rule config; any field may be omitted.
+      properties:
+        enabled: { type: boolean }
+        muted: { type: boolean }
+        severity_override: { type: string, enum: [high, medium, low], nullable: true }
+        thresholds: { type: object, additionalProperties: true }
+        auto_remediate: { type: boolean }
+    ChannelsConfig:
+      type: object
+      description: Alert-channel config (write-only secrets). Omit a channel to leave it unset.
+      properties:
+        webhook:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            url: { type: string }
+            min_severity: { type: string, enum: [high, medium, low] }
+        slack:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            webhook_url: { type: string }
+            min_severity: { type: string, enum: [high, medium, low] }
+        pagerduty:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            routing_key: { type: string }
+            min_severity: { type: string, enum: [high, medium, low] }
+        email:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            smtp_host: { type: string }
+            smtp_port: { type: integer }
+            username: { type: string }
+            password: { type: string }
+            from: { type: string }
+            to: { type: array, items: { type: string } }
+            min_severity: { type: string, enum: [high, medium, low] }
 
 paths:
   /v1/admin/health:
@@ -935,6 +1005,120 @@ paths:
       security: [ { bearerAuth: [] } ]
       responses:
         '200': { description: ok }
+
+  /v1/admin/insights:
+    get:
+      summary: List open ops-advisor events (admin-only).
+      description: |
+        Open events from the advisor, sorted by severity. Optional
+        `?severity=` and `?scope=` filters. Each event has a severity
+        (high/medium/low), root-cause detail, and a recommendation.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: severity
+          required: false
+          schema: { type: string, enum: [high, medium, low] }
+        - in: query
+          name: scope
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items: { $ref: '#/components/schemas/OpsEvent' }
+
+  /v1/admin/insights/history:
+    get:
+      summary: List closed ops-advisor events (admin-only, bounded).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items: { $ref: '#/components/schemas/OpsEvent' }
+
+  /v1/admin/insights/rules:
+    get:
+      summary: List the rule catalog with effective config (admin-only).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: "each item: { id, default_severity?, anomaly, effective_config }"
+
+  /v1/admin/insights/rules/{id}:
+    put:
+      summary: Tune a rule (admin-only).
+      description: |
+        Partial update: any of `enabled`, `muted`, `severity_override`,
+        `thresholds` (object), `auto_remediate`. Persisted; returns the
+        effective config.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RuleConfigUpdate' }
+      responses:
+        '200': { description: effective config }
+
+  /v1/admin/insights/channels:
+    get:
+      summary: Alert-channel config, secrets redacted (admin-only).
+      description: "Returns per-channel { configured, enabled, min_severity } (+ non-secret email bits). Secrets (urls/keys/passwords) are never returned."
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200': { description: redacted channel config }
+    put:
+      summary: Set alert-channel config (admin-only; secrets write-only).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelsConfig' }
+      responses:
+        '200': { description: stored }
+
+  /v1/admin/insights/run:
+    post:
+      summary: Force one advisor evaluation tick (admin-only).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  opened: { type: integer }
+                  closed: { type: integer }
+
+  /v1/admin/insights/{event_id}/ack:
+    post:
+      summary: Acknowledge an open event (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: event_id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: acknowledged }
+        '404': { description: no such open event }
 
   /v1/admin/jobs:
     get:
