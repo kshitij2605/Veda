@@ -7,18 +7,22 @@
 //! [`AdvisorConfig`], and the per-scope remediation [`RateLimiter`].
 //!
 //! Each [`run_tick`] collects a fresh [`OpsSnapshot`], pushes it onto the
-//! history, then runs the pure-ish [`process`] pipeline:
+//! history, then runs the synchronous [`reconcile_hits`] core under the
+//! advisor locks and finally notifies + remediates *after* releasing
+//! those locks:
 //!
 //! 1. `run_rules` + `detect_anomalies` → combined hits,
-//! 2. `EventStore::reconcile` → open/close transitions,
+//! 2. `EventStore::reconcile` → open/close transitions, persist,
 //! 3. notify on the transitions (failures logged, never fatal),
-//! 4. opt-in auto-remediation on the opened events, annotating outcomes,
-//! 5. persist the event store.
+//! 4. opt-in auto-remediation on the opened events, annotating outcomes.
 //!
 //! The tick never blocks the runtime: collection + notify + remediation
 //! are all async and isolated, and a per-tick panic/failure cannot take
 //! down the loop (each step swallows its own errors via the underlying
-//! modules' `tracing::warn!` paths).
+//! modules' `tracing::warn!` paths). Crucially, **no advisor lock is held
+//! across the notify/remediation network awaits** — steps 3–4 run with
+//! the `history`/`events` guards already dropped, so a slow notification
+//! endpoint cannot freeze `GET /v1/admin/insights` or the next tick.
 
 use std::path::Path;
 
@@ -28,7 +32,7 @@ use tokio::task::JoinHandle;
 use crate::advisor::config::AdvisorConfig;
 use crate::advisor::event::{EventStore, ReconcileResult};
 use crate::advisor::notify::Notifier;
-use crate::advisor::remediation::{run_remediation, LiveDispatcher, RateLimiter, RemediationDispatcher};
+use crate::advisor::remediation::{run_remediation, LiveDispatcher, RateLimiter};
 use crate::advisor::rules::{catalog, run_rules, Rule};
 use crate::advisor::snapshot::{collect, OpsSnapshot, SnapshotHistory, DEFAULT_HISTORY_CAP};
 use crate::advisor::anomaly::detect_anomalies;
@@ -94,51 +98,35 @@ pub fn save_config(data_dir: &Path, cfg: &AdvisorConfig) {
     }
 }
 
-/// The core advisor pipeline over a single (already-collected) snapshot.
+/// The *synchronous* core of the advisor pipeline over a single
+/// (already-collected) snapshot.
 ///
 /// The caller pushes the snapshot onto the history *before* calling this
 /// (so the history's `latest()` is the just-collected snapshot, matching
 /// how the rate-based rules expect to read it). This runs the threshold
 /// rules + anomaly detectors against `snap` and the rest of the history,
-/// reconciles the combined hits into open/close transitions, fans those
-/// out to `notifier`, runs opt-in auto-remediation on the opened events
-/// (annotating each outcome), and finally persists the event store.
+/// reconciles the combined hits into open/close transitions, and persists
+/// the event store. It performs **no network I/O** — notification and
+/// auto-remediation are orchestrated by [`run_tick`] *after* the advisor
+/// locks have been released, so a slow endpoint can never stall a held
+/// lock.
 ///
 /// Returns the [`ReconcileResult`] (opened/closed) for this round.
-/// Notify / remediation failures are isolated inside their modules and
-/// never propagate here.
-pub async fn process<D: RemediationDispatcher>(
+pub fn reconcile_hits(
     snap: &OpsSnapshot,
     history: &SnapshotHistory,
     events: &mut EventStore,
     cfg: &AdvisorConfig,
     catalog: &[Box<dyn Rule>],
-    limiter: &mut RateLimiter,
-    dispatcher: &D,
-    notifier: &Notifier,
     now_ms: i64,
 ) -> ReconcileResult {
     // 1. Combine threshold-rule hits with anomaly hits.
     let mut hits = run_rules(catalog, snap, history, cfg);
     hits.extend(detect_anomalies(history, cfg));
 
-    // 2. Reconcile into open/close transitions.
+    // 2. Reconcile into open/close transitions, then persist.
     let result = events.reconcile(hits, now_ms);
-
-    // 3. Notify on the edges (per-channel failures are logged inside).
-    notifier
-        .notify_transitions(&result.opened, &result.closed)
-        .await;
-
-    // 4. Opt-in auto-remediation over the newly-opened events.
-    let outcomes = run_remediation(&result.opened, cfg, dispatcher, limiter, now_ms).await;
-    for o in &outcomes {
-        events.annotate_remediation(&o.event_id, &o.note, o.ok, o.at_ms);
-    }
-
-    // 5. Persist.
     events.save();
-
     result
 }
 
@@ -151,15 +139,25 @@ pub fn now_ms() -> i64 {
 }
 
 /// Run exactly one advisor tick against `state`: collect a snapshot,
-/// push it onto the history, then run [`process`]. Returns the
-/// [`ReconcileResult`] so callers (e.g. the force-run REST endpoint) can
-/// report how many events opened/closed.
+/// push it onto the history, reconcile, then notify + remediate. Returns
+/// the [`ReconcileResult`] so callers (e.g. the force-run REST endpoint)
+/// can report how many events opened/closed.
 ///
-/// Lock discipline: the history / events / config / limiter locks are
-/// each acquired once and held only across the synchronous + awaited
-/// work of this tick; they are never acquired in a nested order that
-/// could deadlock (history → config → events → limiter, always the same
-/// order, and `collect` borrows only `AppState`, not the advisor locks).
+/// **Lock discipline — no advisor lock is ever held across a network
+/// `.await`.** The tick runs in three phases, the network awaits living
+/// strictly in phase 2 where neither `history` nor `events` is locked:
+///
+/// - **Phase 1 (locked, synchronous):** lock `history`, push the
+///   snapshot; lock `events`; [`reconcile_hits`] (run rules + anomalies,
+///   reconcile, save). The opened/closed edges are cloned out, then both
+///   guards are dropped at the end of the explicit scope block — before
+///   any network I/O. `collect` above touches `AppState` only.
+/// - **Phase 2 (no `events`/`history` lock):** build the [`Notifier`] +
+///   [`LiveDispatcher`], `notify_transitions(...).await`, then
+///   `run_remediation(...).await`. The `limiter` lock may be held here
+///   (no REST handler takes it), but `events`/`history` are not.
+/// - **Phase 3 (re-lock `events` briefly):** if remediation produced
+///   outcomes, re-lock `events`, annotate each, save, drop the guard.
 pub async fn run_tick(state: &AppState) -> ReconcileResult {
     let now = now_ms();
     let advisor = state.advisor();
@@ -167,31 +165,41 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
     // Collect a fresh snapshot (touches AppState, not advisor locks).
     let snap = collect(state, now).await;
 
-    // Build per-tick collaborators. The notifier reuses the shared HTTP
-    // client; the dispatcher holds a clone of AppState for live actions.
+    // Per-tick config snapshot (released immediately).
     let cfg = advisor.config.read().await.clone();
-    let notifier = Notifier::new(cfg.channels.clone());
-    let dispatcher = LiveDispatcher::new(state.clone());
     let rule_catalog = catalog();
 
-    let mut history = advisor.history.lock().await;
-    history.push(snap.clone());
+    // --- Phase 1: reconcile under the history+events locks (NO network).
+    // The guards live only inside this block and are dropped before any
+    // notify/remediation await below.
+    let result = {
+        let mut history = advisor.history.lock().await;
+        history.push(snap.clone());
+        let mut events = advisor.events.lock().await;
+        reconcile_hits(&snap, &history, &mut events, &cfg, &rule_catalog, now)
+    };
 
-    let mut events = advisor.events.lock().await;
-    let mut limiter = advisor.limiter.lock().await;
+    // --- Phase 2: notify + remediate with NO events/history lock held.
+    let notifier = Notifier::new(cfg.channels.clone());
+    let dispatcher = LiveDispatcher::new(state.clone());
+    notifier
+        .notify_transitions(&result.opened, &result.closed)
+        .await;
+    let outcomes = {
+        let mut limiter = advisor.limiter.lock().await;
+        run_remediation(&result.opened, &cfg, &dispatcher, &mut limiter, now).await
+    };
 
-    process(
-        &snap,
-        &history,
-        &mut events,
-        &cfg,
-        &rule_catalog,
-        &mut limiter,
-        &dispatcher,
-        &notifier,
-        now,
-    )
-    .await
+    // --- Phase 3: persist remediation annotations under a brief events lock.
+    if !outcomes.is_empty() {
+        let mut events = advisor.events.lock().await;
+        for o in &outcomes {
+            events.annotate_remediation(&o.event_id, &o.note, o.ok, o.at_ms);
+        }
+        events.save();
+    }
+
+    result
 }
 
 /// Spawn the background advisor tick loop. Ticks every
@@ -225,24 +233,12 @@ pub fn spawn_advisor(state: AppState) -> JoinHandle<()> {
 mod tests {
     use super::*;
     use crate::advisor::config::RuleConfig;
-    use crate::advisor::event::{EventStatus, RemediationAction};
+    use crate::advisor::event::EventStatus;
     use crate::advisor::snapshot::{
         CollectionSnapshot, GlobalSnapshot, HealthSnapshot, NodeSnapshot, OpsSnapshot,
         QuerySnapshot,
     };
     use std::collections::HashMap;
-
-    /// A dispatcher that never actually remediates (records nothing).
-    struct NoopDispatcher;
-    impl RemediationDispatcher for NoopDispatcher {
-        async fn dispatch(
-            &self,
-            _action: &RemediationAction,
-            _now_ms: i64,
-        ) -> Result<String, String> {
-            Ok("noop".to_owned())
-        }
-    }
 
     fn healthy_health() -> HealthSnapshot {
         HealthSnapshot {
@@ -295,16 +291,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn process_opens_then_closes_event() {
+    #[test]
+    fn reconcile_opens_then_closes_event() {
         let tmp = tempfile::tempdir().unwrap();
         let mut events = EventStore::new(tmp.path());
         let cfg = AdvisorConfig::default();
         let cat = catalog();
-        let mut limiter = RateLimiter::default();
-        let dispatcher = NoopDispatcher;
-        // No channels configured → notifier sends nothing (no network).
-        let notifier = Notifier::new(cfg.channels.clone());
 
         // --- round 1: a tripping snapshot opens compaction_backlog ---
         let mut tripping = base_snapshot(1000);
@@ -312,18 +304,7 @@ mod tests {
         let mut history = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
         history.push(tripping.clone());
 
-        let r1 = process(
-            &tripping,
-            &history,
-            &mut events,
-            &cfg,
-            &cat,
-            &mut limiter,
-            &dispatcher,
-            &notifier,
-            1000,
-        )
-        .await;
+        let r1 = reconcile_hits(&tripping, &history, &mut events, &cfg, &cat, 1000);
         assert_eq!(r1.opened.len(), 1, "expected one opened event");
         assert_eq!(r1.opened[0].rule_id, "compaction_backlog");
         assert_eq!(events.open_events().len(), 1);
@@ -332,18 +313,7 @@ mod tests {
         // --- round 2: a clean snapshot closes it ---
         let clean = base_snapshot(2000);
         history.push(clean.clone());
-        let r2 = process(
-            &clean,
-            &history,
-            &mut events,
-            &cfg,
-            &cat,
-            &mut limiter,
-            &dispatcher,
-            &notifier,
-            2000,
-        )
-        .await;
+        let r2 = reconcile_hits(&clean, &history, &mut events, &cfg, &cat, 2000);
         assert!(r2.opened.is_empty());
         assert_eq!(r2.closed.len(), 1, "expected one closed event");
         assert_eq!(r2.closed[0].rule_id, "compaction_backlog");
@@ -351,8 +321,8 @@ mod tests {
         assert_eq!(events.history().len(), 1);
     }
 
-    #[tokio::test]
-    async fn process_respects_muted_rule() {
+    #[test]
+    fn reconcile_respects_muted_rule() {
         let tmp = tempfile::tempdir().unwrap();
         let mut events = EventStore::new(tmp.path());
         let mut cfg = AdvisorConfig::default();
@@ -364,27 +334,13 @@ mod tests {
             },
         );
         let cat = catalog();
-        let mut limiter = RateLimiter::default();
-        let dispatcher = NoopDispatcher;
-        let notifier = Notifier::new(cfg.channels.clone());
 
         let mut tripping = base_snapshot(1000);
         tripping.collections.push(tripping_collection());
         let mut history = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
         history.push(tripping.clone());
 
-        let r = process(
-            &tripping,
-            &history,
-            &mut events,
-            &cfg,
-            &cat,
-            &mut limiter,
-            &dispatcher,
-            &notifier,
-            1000,
-        )
-        .await;
+        let r = reconcile_hits(&tripping, &history, &mut events, &cfg, &cat, 1000);
         assert!(r.opened.is_empty(), "muted rule must not open an event");
         assert!(events.open_events().is_empty());
     }
