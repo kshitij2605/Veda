@@ -176,7 +176,7 @@ impl ToolCatalog {
         }
     }
 
-    /// All built-in tool specs (currently 6).
+    /// All built-in tool specs (currently 8).
     pub fn builtin_specs(&self) -> &[ToolSpec] {
         &self.builtins
     }
@@ -210,6 +210,8 @@ impl ToolCatalog {
             "upsert_record" => builtins::upsert_record(ctx, args).await,
             "get_record" => builtins::get_record(ctx, args).await,
             "route" => builtins::route(ctx, args).await,
+            "aggregate" => builtins::aggregate(ctx, args).await,
+            "filter_query" => builtins::filter_query(ctx, args).await,
             other => ToolOutcome::error(format!("unknown tool: {other}")),
         }
     }
@@ -268,9 +270,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_specs_count_is_six() {
+    fn builtin_specs_count_is_eight() {
         let cat = ToolCatalog::new();
-        assert_eq!(cat.builtin_specs().len(), 6);
+        assert_eq!(cat.builtin_specs().len(), 8);
         let ids: Vec<&str> = cat.builtin_specs().iter().map(|s| s.id.as_str()).collect();
         for expected in [
             "list_collections",
@@ -279,6 +281,8 @@ mod tests {
             "upsert_record",
             "get_record",
             "route",
+            "aggregate",
+            "filter_query",
         ] {
             assert!(ids.contains(&expected), "missing builtin {expected}");
         }
@@ -287,7 +291,7 @@ mod tests {
     #[test]
     fn specs_for_empty_whitelist_returns_all() {
         let cat = ToolCatalog::new();
-        assert_eq!(cat.specs_for(&[]).len(), 6);
+        assert_eq!(cat.specs_for(&[]).len(), 8);
     }
 
     #[test]
@@ -500,5 +504,311 @@ mod tests {
         assert!(out.content["strategy"].is_string());
         assert!(out.content["suggested_k"].is_number());
         assert!(out.content["reasoning"].is_string());
+    }
+
+    // ── aggregate tool ──────────────────────────────────────────────────────
+
+    fn agg_schema(name: &str) -> CollectionSchema {
+        CollectionSchema::builder(name)
+            .add_field(FieldDefinition::new("category", FieldType::String).with_filterable(true))
+            .add_field(FieldDefinition::new("price", FieldType::Float64).with_filterable(true))
+            .shard_count(1)
+            .build()
+            .unwrap()
+    }
+
+    /// Seed: electronics(100,200), books(10,20,30) — mirrors the REST
+    /// aggregate integration test fixture.
+    async fn seeded_agg_state(
+        tmp: &std::path::Path,
+    ) -> (AppState, crate::tenant::TenantId) {
+        let state = AppState::new(tmp);
+        let tenant = crate::tenant::TenantId::default_tenant();
+        let scoped = crate::tenant::scope(&tenant, "agg");
+        let schema = agg_schema(&scoped);
+        let col_dir = tmp.join(&scoped);
+        std::fs::create_dir_all(&col_dir).unwrap();
+        crate::rest::collections::materialize_collection_locally(&state, &schema, &col_dir)
+            .await
+            .expect("materialize");
+
+        let rows = [
+            ("electronics", 100.0),
+            ("electronics", 200.0),
+            ("books", 10.0),
+            ("books", 20.0),
+            ("books", 30.0),
+        ];
+        let mut managers = state.inner.segment_managers.write().await;
+        let shard_map = managers.get_mut(&scoped).unwrap();
+        for (cat, price) in rows {
+            let mut rec = Record::new();
+            rec.set("category", FieldValue::String(cat.to_owned()));
+            rec.set("price", FieldValue::Float64(price));
+            let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
+                &rec.id(),
+                schema.shard_count(),
+            );
+            shard_map.get_mut(&shard_id).unwrap().insert(rec).unwrap();
+        }
+        drop(managers);
+        (state, tenant)
+    }
+
+    #[tokio::test]
+    async fn dispatch_aggregate_count_and_sum() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+
+        // count, no group -> single bucket of 5.
+        let out = cat
+            .dispatch(&ctx, "aggregate", serde_json::json!({
+                "collection": "agg", "field": "price", "metric": "count"
+            }))
+            .await;
+        assert!(!out.is_error, "count: {:?}", out.content);
+        let groups = out.content["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["value"], 5.0);
+
+        // sum, no group -> 360.
+        let out = cat
+            .dispatch(&ctx, "aggregate", serde_json::json!({
+                "collection": "agg", "field": "price", "metric": "sum"
+            }))
+            .await;
+        assert!(!out.is_error, "sum: {:?}", out.content);
+        assert_eq!(out.content["groups"][0]["value"], 360.0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_aggregate_avg_group_by() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+
+        let out = cat
+            .dispatch(&ctx, "aggregate", serde_json::json!({
+                "collection": "agg", "field": "price", "metric": "avg", "group_by": "category"
+            }))
+            .await;
+        assert!(!out.is_error, "avg group_by: {:?}", out.content);
+        let groups = out.content["groups"].as_array().unwrap();
+        // Sorted by key: books then electronics.
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["key"], "books");
+        assert_eq!(groups[0]["value"], 20.0);
+        assert_eq!(groups[1]["key"], "electronics");
+        assert_eq!(groups[1]["value"], 150.0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_aggregate_bad_metric_is_invalid_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat
+            .dispatch(&ctx, "aggregate", serde_json::json!({
+                "collection": "agg", "field": "price", "metric": "median"
+            }))
+            .await;
+        assert!(out.is_error);
+        assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
+    }
+
+    // ── filter_query tool ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_filter_query_returns_subset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat
+            .dispatch(&ctx, "filter_query", serde_json::json!({
+                "collection": "agg", "filter": "category = 'books'"
+            }))
+            .await;
+        assert!(!out.is_error, "filter: {:?}", out.content);
+        assert_eq!(out.content["count"], 3);
+        let recs = out.content["records"].as_array().unwrap();
+        assert!(recs.iter().all(|r| r["fields"]["category"] == "books"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_filter_query_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat
+            .dispatch(&ctx, "filter_query", serde_json::json!({
+                "collection": "agg", "filter": "price >= 0", "limit": 2
+            }))
+            .await;
+        assert!(!out.is_error, "{:?}", out.content);
+        assert_eq!(out.content["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn filter_query_enforces_rls_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant, _alice_id, _bob_id) = seeded_rls_state(tmp.path(), "secrets").await;
+        let cat = ToolCatalog::new();
+
+        // alice sees only her own row.
+        let alice_ctx = ToolContext::new(&state, &tenant).with_user(Some("alice"));
+        let out = cat
+            .dispatch(&alice_ctx, "filter_query", serde_json::json!({
+                "collection": "secrets", "filter": "owner != ''"
+            }))
+            .await;
+        assert!(!out.is_error, "alice: {:?}", out.content);
+        assert_eq!(out.content["count"], 1);
+        assert_eq!(out.content["records"][0]["fields"]["owner"], "alice");
+
+        // admin (user=None) sees both.
+        let admin_ctx = ToolContext::new(&state, &tenant);
+        let out = cat
+            .dispatch(&admin_ctx, "filter_query", serde_json::json!({
+                "collection": "secrets", "filter": "owner != ''"
+            }))
+            .await;
+        assert!(!out.is_error, "admin: {:?}", out.content);
+        assert_eq!(out.content["count"], 2);
+    }
+
+    // ── multimodal search helpers ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn search_requires_exactly_one_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant, _id) = seeded_state(tmp.path(), "docs").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+
+        // Neither.
+        let out = cat
+            .dispatch(&ctx, "search", serde_json::json!({ "collection": "docs" }))
+            .await;
+        assert!(out.is_error);
+        assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
+
+        // Both.
+        let out = cat
+            .dispatch(&ctx, "search", serde_json::json!({
+                "collection": "docs", "query": "hi", "query_image_b64": "AAAA"
+            }))
+            .await;
+        assert!(out.is_error);
+        assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
+    }
+
+    #[test]
+    fn search_spec_is_multimodal() {
+        let cat = ToolCatalog::new();
+        let spec = cat.builtin_specs().iter().find(|s| s.id == "search").unwrap();
+        let props = &spec.input_schema["properties"];
+        assert!(props["query"].is_object());
+        assert!(props["query_image_b64"].is_object());
+        assert!(props["mode"].is_object());
+        // collection is the only hard requirement now (query XOR image is
+        // enforced in the impl, not the schema).
+        let required = spec.input_schema["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "collection");
+    }
+
+    #[test]
+    fn build_query_body_maps_dense_modes() {
+        use crate::agent::tools::builtins::{build_query_body, SearchMode};
+        for mode in [SearchMode::Auto, SearchMode::Dense] {
+            let qb = build_query_body(mode, "embedding", vec![1.0, 0.0], false).unwrap();
+            let v = qb.vector.expect("dense leg set");
+            assert_eq!(v.field, "embedding");
+            assert_eq!(v.values, vec![1.0, 0.0]);
+            assert!(qb.sparse_vector.is_none());
+            assert!(qb.hybrid.is_none());
+            assert!(qb.colpali.is_none());
+        }
+    }
+
+    #[test]
+    fn build_query_body_sparse_unsupported_message() {
+        use crate::agent::tools::builtins::{build_query_body, SearchMode};
+        // No sparse field on the collection -> clear "requires" error.
+        let err = build_query_body(SearchMode::Sparse, "embedding", vec![1.0], false).unwrap_err();
+        assert!(err.contains("sparse"), "msg: {err}");
+        // Other non-dense modes also error (not executable in MVP).
+        assert!(build_query_body(SearchMode::Hybrid, "embedding", vec![1.0], true).is_err());
+        assert!(build_query_body(SearchMode::Colpali, "embedding", vec![1.0], true).is_err());
+    }
+
+    #[test]
+    fn search_mode_parse_rejects_unknown() {
+        use crate::agent::tools::builtins::SearchMode;
+        assert_eq!(SearchMode::parse("dense").unwrap(), SearchMode::Dense);
+        assert_eq!(SearchMode::parse("auto").unwrap(), SearchMode::Auto);
+        assert!(SearchMode::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn select_query_model_picks_by_modality() {
+        use crate::agent::tools::builtins::select_query_model;
+        use veda_core::embedding::{EmbeddingModelConfig, EmbeddingModelRegistry, Modality};
+
+        let mut reg = EmbeddingModelRegistry::new();
+        // text-only model
+        reg.register(EmbeddingModelConfig {
+            name: "txt".to_owned(),
+            endpoint: String::new(),
+            api_key: String::new(),
+            supported_modalities: vec![Modality::Text],
+            output_dimension: 4,
+            max_input_size_bytes: 1024,
+            timeout_seconds: 30,
+            batch_size: 8,
+        });
+        // multimodal model (text + image)
+        reg.register(EmbeddingModelConfig {
+            name: "mm".to_owned(),
+            endpoint: String::new(),
+            api_key: String::new(),
+            supported_modalities: vec![Modality::Text, Modality::Image],
+            output_dimension: 4,
+            max_input_size_bytes: 1024,
+            timeout_seconds: 30,
+            batch_size: 8,
+        });
+
+        // Image query -> first image-capable model (the multimodal one).
+        let m = select_query_model(&reg, None, Modality::Image).unwrap();
+        assert_eq!(m.name, "mm");
+
+        // Text query with a field-bound model -> that model.
+        let m = select_query_model(&reg, Some("txt"), Modality::Text).unwrap();
+        assert_eq!(m.name, "txt");
+
+        // Text query, no binding -> first text-capable model.
+        let m = select_query_model(&reg, None, Modality::Text).unwrap();
+        assert_eq!(m.name, "txt");
+
+        // No image model -> error.
+        let mut text_only = EmbeddingModelRegistry::new();
+        text_only.register(EmbeddingModelConfig {
+            name: "txt".to_owned(),
+            endpoint: String::new(),
+            api_key: String::new(),
+            supported_modalities: vec![Modality::Text],
+            output_dimension: 4,
+            max_input_size_bytes: 1024,
+            timeout_seconds: 30,
+            batch_size: 8,
+        });
+        assert!(select_query_model(&text_only, None, Modality::Image).is_err());
     }
 }
