@@ -1982,6 +1982,92 @@ async fn test_mcp_initialize_protocol_negotiation() {
     assert_eq!(body["result"]["protocolVersion"], "2025-06-18", "body: {body}");
 }
 
+// ── MCP Streamable HTTP transport ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_mcp_post_with_supported_protocol_version_header() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    // A supported MCP-Protocol-Version header is accepted; response is the
+    // unchanged JSON-RPC result with Content-Type: application/json.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .header("MCP-Protocol-Version", "2025-06-18")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 30,
+            "method": "tools/list"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(ct.starts_with("application/json"), "content-type: {ct}");
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["result"]["tools"].as_array().unwrap().len() == 8);
+}
+
+#[tokio::test]
+async fn test_mcp_post_without_protocol_version_header_is_lenient() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    // No MCP-Protocol-Version header -> still 200 (lenient).
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/list"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_mcp_post_with_unsupported_protocol_version_header_400() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    // An unsupported MCP-Protocol-Version header -> HTTP 400.
+    let resp = c
+        .post(format!("{base}/v1/mcp"))
+        .header("MCP-Protocol-Version", "1999-01-01")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 32,
+            "method": "tools/list"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn test_mcp_get_returns_405() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+    // GET /v1/mcp (server->client SSE) is unsupported -> 405 with Allow: POST.
+    let resp = c.get(format!("{base}/v1/mcp")).send().await.unwrap();
+    assert_eq!(resp.status(), 405);
+    let allow = resp
+        .headers()
+        .get("allow")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(allow.contains("POST"), "allow: {allow}");
+}
+
 // ── Array fields ───────────────────────────────────────────────────────────
 
 #[tokio::test]

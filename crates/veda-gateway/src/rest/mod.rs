@@ -174,8 +174,10 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/collections/{name}/rerank",
             post(rerank::rerank),
         )
-        // Model Context Protocol (MCP) for AI agents
-        .route("/v1/mcp", post(mcp::handle_mcp))
+        // Model Context Protocol (MCP) for AI agents — Streamable HTTP
+        // transport: POST carries a JSON-RPC message; GET (server->client
+        // SSE) is unsupported (stateless) and returns 405.
+        .route("/v1/mcp", get(mcp::handle_mcp_get).post(mcp::handle_mcp))
         // Adaptive query router (recommends retrieval strategy for a query)
         .route("/v1/route", post(route::route))
         // Veda Agents — CRUD + tool catalog/execute + converse + conversations
