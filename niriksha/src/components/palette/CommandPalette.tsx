@@ -14,6 +14,7 @@ import {
   Layers,
   Search,
   Settings,
+  ShieldAlert,
   Sparkles,
   TerminalSquare,
   type LucideIcon,
@@ -167,6 +168,14 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         icon: BarChart3,
         group: 'Navigate',
         onSelect: () => navigate('/observability'),
+      },
+      {
+        id: 'nav-insights',
+        label: 'Insights',
+        icon: ShieldAlert,
+        group: 'Navigate',
+        keywords: ['advisor', 'ops', 'events', 'alerts', 'remediation'],
+        onSelect: () => navigate('/insights'),
       },
       {
         id: 'nav-console',
