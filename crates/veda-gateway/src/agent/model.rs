@@ -34,6 +34,24 @@ pub struct Agent {
     pub model: Option<ModelOverride>,
 }
 
+/// The default, always-available agent used when a converse request
+/// targets `veda-agent` and no such agent has been explicitly created.
+/// Held in memory only (never persisted unless a user saves one with
+/// the same id). An empty `tool_ids` whitelist means "all builtins".
+pub fn default_agent() -> Agent {
+    Agent {
+        id: "veda-agent".to_owned(),
+        name: "Veda Agent".to_owned(),
+        description: "General-purpose assistant over your Veda collections.".to_owned(),
+        instructions: "You are Veda Agent, a helpful assistant that answers questions by \
+searching and analyzing the user's multimodal vector collections. Prefer using the \
+provided tools to ground your answers in real data; be concise and cite what you found."
+            .to_owned(),
+        tool_ids: Vec::new(),
+        model: None,
+    }
+}
+
 /// A user-defined custom tool. `kind` + opaque `config` are interpreted
 /// by the tool catalog in a later task; this is just the stored shape.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

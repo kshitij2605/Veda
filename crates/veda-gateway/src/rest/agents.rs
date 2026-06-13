@@ -1,0 +1,450 @@
+//! REST surface for Veda Agents.
+//!
+//! Wires the agent data model ([`crate::agent::model`]), persistence
+//! ([`crate::agent::store`]), tool catalog ([`crate::agent::catalog`]),
+//! and executor ([`crate::agent::executor`]) into the protected REST
+//! router. Auth + tenant middleware apply to every route here.
+//!
+//! All agent / tool / conversation ids are tenant-scoped on the way in
+//! (via [`crate::tenant::scope`]) and the prefix is stripped on the way
+//! out, mirroring how collections are isolated, so tenants never see
+//! one another's objects.
+//!
+//! Endpoints:
+//!   GET    /v1/agents                         list
+//!   POST   /v1/agents                         create/upsert (id optional)
+//!   GET    /v1/agents/{id}                     fetch
+//!   PUT    /v1/agents/{id}                     upsert
+//!   DELETE /v1/agents/{id}                     delete
+//!   GET    /v1/agent-tools                     list custom tools
+//!   POST   /v1/agent-tools                     create/upsert
+//!   GET    /v1/agent-tools/catalog             built-in tool specs
+//!   GET    /v1/agent-tools/{id}                fetch
+//!   PUT    /v1/agent-tools/{id}                upsert
+//!   DELETE /v1/agent-tools/{id}                delete
+//!   POST   /v1/agent-tools/{id}/execute        run a single built-in tool
+//!   POST   /v1/agents/{id}/converse            chat with an agent
+//!   GET    /v1/conversations                   list
+//!   GET    /v1/conversations/{id}              fetch
+//!   DELETE /v1/conversations/{id}              delete
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::Json;
+use serde::Serialize;
+
+use veda_core::llm_client::LlmClient;
+
+use super::collections::ErrorResponse;
+use super::state::AppState;
+use crate::agent::catalog::{ToolContext, ToolErrorKind, ToolSpec};
+use crate::agent::executor::{self, DEFAULT_MAX_STEPS};
+use crate::agent::model::{
+    default_agent, Agent, AgentTool, Conversation, ConversationMessage, ConverseRequest,
+    ConverseResponse,
+};
+use crate::agent::store;
+use crate::auth::Claims;
+use crate::tenant::{self, Tenant, TenantId};
+
+type GatewayError = (StatusCode, Json<ErrorResponse>);
+
+fn not_found(msg: impl Into<String>) -> GatewayError {
+    (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg.into() }))
+}
+fn service_unavailable(msg: impl Into<String>) -> GatewayError {
+    (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error: msg.into() }))
+}
+
+/// Extract the optional authenticated subject for RLS: `None` when the
+/// caller is an admin (or auth is disabled / no claims), else `Some(sub)`
+/// so the tools enforce owner scoping.
+fn rls_user(claims: &Option<Claims>) -> Option<String> {
+    match claims {
+        Some(c) if !crate::rls::is_admin(c) => Some(c.sub.clone()),
+        _ => None,
+    }
+}
+
+// ── Agents CRUD ──────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct ListAgentsResponse {
+    pub agents: Vec<Agent>,
+}
+
+pub async fn list_agents(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+) -> Json<ListAgentsResponse> {
+    let mut agents = store::list_agents(&state.inner.saved_objects).await;
+    agents.retain(|a| tenant::strip_prefix(&tenant, &a.id).is_some());
+    for a in &mut agents {
+        if let Some(name) = tenant::strip_prefix(&tenant, &a.id) {
+            a.id = name.to_owned();
+        }
+    }
+    Json(ListAgentsResponse { agents })
+}
+
+/// Create or upsert an agent. If the body carries an empty id one is
+/// generated. The user-facing id is returned (tenant prefix stripped).
+pub async fn create_agent(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Json(mut agent): Json<Agent>,
+) -> Result<Json<Agent>, GatewayError> {
+    if agent.id.trim().is_empty() {
+        agent.id = uuid::Uuid::new_v4().to_string();
+    }
+    save_and_return_agent(&state, &tenant, agent).await
+}
+
+pub async fn get_agent(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+) -> Result<Json<Agent>, GatewayError> {
+    let scoped = tenant::scope(&tenant, &id);
+    let mut agent = store::get_agent(&state.inner.saved_objects, &scoped)
+        .await
+        .ok_or_else(|| not_found(format!("agent '{id}' not found")))?;
+    agent.id = id;
+    Ok(Json(agent))
+}
+
+pub async fn put_agent(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+    Json(mut agent): Json<Agent>,
+) -> Result<Json<Agent>, GatewayError> {
+    agent.id = id;
+    save_and_return_agent(&state, &tenant, agent).await
+}
+
+pub async fn delete_agent(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+) -> StatusCode {
+    let scoped = tenant::scope(&tenant, &id);
+    store::delete_agent(&state.inner.saved_objects, &scoped).await;
+    StatusCode::NO_CONTENT
+}
+
+/// Persist `agent` under the tenant-scoped id and return it with the
+/// user-facing (unscoped) id.
+async fn save_and_return_agent(
+    state: &AppState,
+    tenant: &TenantId,
+    mut agent: Agent,
+) -> Result<Json<Agent>, GatewayError> {
+    let user_id = agent.id.clone();
+    agent.id = tenant::scope(tenant, &user_id);
+    store::save_agent(&state.inner.saved_objects, &agent).await;
+    agent.id = user_id;
+    Ok(Json(agent))
+}
+
+// ── AgentTool CRUD ───────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct ListToolsResponse {
+    pub tools: Vec<AgentTool>,
+}
+
+pub async fn list_tools(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+) -> Json<ListToolsResponse> {
+    let mut tools = store::list_tools(&state.inner.saved_objects).await;
+    tools.retain(|t| tenant::strip_prefix(&tenant, &t.id).is_some());
+    for t in &mut tools {
+        if let Some(name) = tenant::strip_prefix(&tenant, &t.id) {
+            t.id = name.to_owned();
+        }
+    }
+    Json(ListToolsResponse { tools })
+}
+
+pub async fn create_tool(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Json(mut tool): Json<AgentTool>,
+) -> Result<Json<AgentTool>, GatewayError> {
+    if tool.id.trim().is_empty() {
+        tool.id = uuid::Uuid::new_v4().to_string();
+    }
+    save_and_return_tool(&state, &tenant, tool).await
+}
+
+pub async fn get_tool(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+) -> Result<Json<AgentTool>, GatewayError> {
+    let scoped = tenant::scope(&tenant, &id);
+    let mut tool = store::get_tool(&state.inner.saved_objects, &scoped)
+        .await
+        .ok_or_else(|| not_found(format!("agent tool '{id}' not found")))?;
+    tool.id = id;
+    Ok(Json(tool))
+}
+
+pub async fn put_tool(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+    Json(mut tool): Json<AgentTool>,
+) -> Result<Json<AgentTool>, GatewayError> {
+    tool.id = id;
+    save_and_return_tool(&state, &tenant, tool).await
+}
+
+pub async fn delete_tool(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+) -> StatusCode {
+    let scoped = tenant::scope(&tenant, &id);
+    store::delete_tool(&state.inner.saved_objects, &scoped).await;
+    StatusCode::NO_CONTENT
+}
+
+async fn save_and_return_tool(
+    state: &AppState,
+    tenant: &TenantId,
+    mut tool: AgentTool,
+) -> Result<Json<AgentTool>, GatewayError> {
+    let user_id = tool.id.clone();
+    tool.id = tenant::scope(tenant, &user_id);
+    store::save_tool(&state.inner.saved_objects, &tool).await;
+    tool.id = user_id;
+    Ok(Json(tool))
+}
+
+// ── Built-in tool catalog + direct execute ───────────────────────────────
+
+#[derive(Serialize)]
+pub struct CatalogResponse {
+    pub tools: Vec<ToolSpec>,
+}
+
+pub async fn catalog(State(state): State<AppState>) -> Json<CatalogResponse> {
+    Json(CatalogResponse {
+        tools: state.inner.tool_catalog.builtin_specs().to_vec(),
+    })
+}
+
+/// Execute a single built-in tool directly. `{id}` is the catalog tool
+/// id (e.g. `list_collections`). The body is either `{ "args": {...} }`
+/// or the args object itself. Maps the tool's [`ToolErrorKind`] to an
+/// HTTP status; success returns 200 with the tool content.
+pub async fn execute_tool(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+    claims: Option<axum::Extension<Claims>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    // Accept `{ "args": {...} }` or the args object directly.
+    let args = match body {
+        serde_json::Value::Object(ref m) if m.contains_key("args") => {
+            body.get("args").cloned().unwrap_or(serde_json::Value::Null)
+        }
+        other => other,
+    };
+
+    let claims = claims.map(|axum::Extension(c)| c);
+    let user = rls_user(&claims);
+    let ctx = ToolContext::new(&state, &tenant).with_user(user.as_deref());
+
+    let outcome = state.inner.tool_catalog.dispatch(&ctx, &id, args).await;
+    if outcome.is_error {
+        let status = match outcome.error_kind {
+            Some(ToolErrorKind::InvalidArgs) => StatusCode::BAD_REQUEST,
+            Some(ToolErrorKind::NotFound) => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        let msg = outcome
+            .content
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("tool execution failed")
+            .to_owned();
+        return Err((status, Json(ErrorResponse { error: msg })));
+    }
+    Ok(Json(outcome.content))
+}
+
+// ── Converse ─────────────────────────────────────────────────────────────
+
+/// Build an [`LlmClient`] from the gateway's global config, applying the
+/// agent's optional [`ModelOverride`] (endpoint / model).
+fn build_client(
+    base: veda_core::llm_client::LlmConfig,
+    agent: &Agent,
+) -> LlmClient {
+    let mut cfg = base;
+    if let Some(ov) = &agent.model {
+        if let Some(ep) = &ov.endpoint {
+            cfg.endpoint = ep.clone();
+        }
+        if let Some(m) = &ov.model {
+            cfg.model = m.clone();
+        }
+    }
+    LlmClient::new(cfg)
+}
+
+pub async fn converse(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+    claims: Option<axum::Extension<Claims>>,
+    Json(req): Json<ConverseRequest>,
+) -> Result<Json<ConverseResponse>, GatewayError> {
+    // 1. LLM must be configured.
+    let llm_cfg = state.inner.llm_config.read().await.clone().ok_or_else(|| {
+        service_unavailable(
+            "VEDA_LLM_ENDPOINT not configured. Set the env var to enable agent converse.",
+        )
+    })?;
+
+    // 2. Resolve the agent (tenant-scoped), falling back to the in-memory
+    //    default agent only for the well-known `veda-agent` id.
+    let scoped_agent_id = tenant::scope(&tenant, &id);
+    let agent = match store::get_agent(&state.inner.saved_objects, &scoped_agent_id).await {
+        Some(a) => a,
+        None if id == "veda-agent" => default_agent(),
+        None => return Err(not_found(format!("agent '{id}' not found"))),
+    };
+
+    // 3. Load or create the conversation.
+    let mut conversation = match &req.conversation_id {
+        Some(cid) => {
+            let scoped_cid = tenant::scope(&tenant, cid);
+            store::get_conversation(&state.inner.saved_objects, &scoped_cid)
+                .await
+                .ok_or_else(|| not_found(format!("conversation '{cid}' not found")))?
+        }
+        None => Conversation {
+            id: tenant::scope(&tenant, &uuid::Uuid::new_v4().to_string()),
+            agent_id: scoped_agent_id.clone(),
+            title: None,
+            messages: Vec::new(),
+            steps: Vec::new(),
+        },
+    };
+    let history = conversation.messages.clone();
+
+    // 4. Build the model honoring any per-agent override.
+    let client = build_client(llm_cfg, &agent);
+
+    // 5. System prompt with the modality-awareness block.
+    let summary = executor::collections_modality_summary(&state, &tenant).await;
+    let sys = executor::build_system_prompt(&agent, &summary);
+
+    // 6. Tool context with RLS user.
+    let claims = claims.map(|axum::Extension(c)| c);
+    let user = rls_user(&claims);
+    let ctx = ToolContext::new(&state, &tenant).with_user(user.as_deref());
+
+    // Attachments: image-as-auto-retrieval is deferred (phase 3). For now
+    // we only note their presence in the user input so the model is aware.
+    // TODO (phase 3): pass image attachments to the search tool as query_image_b64
+    let user_input = match &req.attachments {
+        Some(atts) if !atts.is_empty() => {
+            format!("{}\n\n[the user attached {} image(s)]", req.input, atts.len())
+        }
+        _ => req.input.clone(),
+    };
+
+    // 7. Run the tool-calling loop.
+    let result = executor::run(
+        &client,
+        &state.inner.tool_catalog,
+        &ctx,
+        &agent,
+        &sys,
+        &history,
+        &user_input,
+        DEFAULT_MAX_STEPS,
+    )
+    .await;
+
+    // 8. Persist: user turn + new assistant/tool messages + steps.
+    conversation.messages.push(ConversationMessage {
+        role: "user".to_owned(),
+        content: Some(user_input),
+    });
+    for m in &result.new_messages {
+        conversation.messages.push(ConversationMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        });
+    }
+    conversation.steps.extend(result.steps.iter().cloned());
+    store::save_conversation(&state.inner.saved_objects, &conversation).await;
+
+    let user_facing_cid = tenant::strip_prefix(&tenant, &conversation.id)
+        .unwrap_or(&conversation.id)
+        .to_owned();
+
+    Ok(Json(ConverseResponse {
+        conversation_id: user_facing_cid,
+        response: result.response,
+        steps: result.steps,
+    }))
+}
+
+// ── Conversations ────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct ListConversationsResponse {
+    pub conversations: Vec<Conversation>,
+}
+
+pub async fn list_conversations(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+) -> Json<ListConversationsResponse> {
+    let mut conversations = store::list_conversations(&state.inner.saved_objects).await;
+    conversations.retain(|c| tenant::strip_prefix(&tenant, &c.id).is_some());
+    for c in &mut conversations {
+        if let Some(name) = tenant::strip_prefix(&tenant, &c.id) {
+            c.id = name.to_owned();
+        }
+        if let Some(name) = tenant::strip_prefix(&tenant, &c.agent_id) {
+            c.agent_id = name.to_owned();
+        }
+    }
+    Json(ListConversationsResponse { conversations })
+}
+
+pub async fn get_conversation(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+) -> Result<Json<Conversation>, GatewayError> {
+    let scoped = tenant::scope(&tenant, &id);
+    let mut conv = store::get_conversation(&state.inner.saved_objects, &scoped)
+        .await
+        .ok_or_else(|| not_found(format!("conversation '{id}' not found")))?;
+    conv.id = id;
+    if let Some(name) = tenant::strip_prefix(&tenant, &conv.agent_id) {
+        conv.agent_id = name.to_owned();
+    }
+    Ok(Json(conv))
+}
+
+pub async fn delete_conversation(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+) -> StatusCode {
+    let scoped = tenant::scope(&tenant, &id);
+    store::delete_conversation(&state.inner.saved_objects, &scoped).await;
+    StatusCode::NO_CONTENT
+}
