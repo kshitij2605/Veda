@@ -4762,6 +4762,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "veda-mcp"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "veda-query"
 version = "0.1.0"
 dependencies = [
