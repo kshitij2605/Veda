@@ -469,11 +469,11 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
     // Embed the query: text via embed_text, image bytes via embed_bytes.
     let client = EmbeddingClient::new(model);
     let vector = match (query_text, query_bytes) {
-        (Some(q), _) => match client.embed_text(q) {
+        (Some(q), _) => match client.embed_text(q).await {
             Ok(v) => v,
             Err(e) => return ToolOutcome::internal(format!("embedding failed: {e}")),
         },
-        (None, Some(bytes)) => match client.embed_bytes(&bytes, modality) {
+        (None, Some(bytes)) => match client.embed_bytes(&bytes, modality).await {
             Ok(v) => v,
             Err(e) => return ToolOutcome::internal(format!("embedding failed: {e}")),
         },

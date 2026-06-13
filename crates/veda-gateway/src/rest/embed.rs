@@ -105,7 +105,7 @@ pub async fn embed(
 
     // 3) Embed.
     let values = match input {
-        EmbedInput::Text(t) => client.embed_text(&t).map_err(|e| {
+        EmbedInput::Text(t) => client.embed_text(&t).await.map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -113,7 +113,7 @@ pub async fn embed(
                 }),
             )
         })?,
-        EmbedInput::Bytes(b) => client.embed_bytes(&b, modality).map_err(|e| {
+        EmbedInput::Bytes(b) => client.embed_bytes(&b, modality).await.map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
