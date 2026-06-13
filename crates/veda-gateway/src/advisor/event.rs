@@ -103,6 +103,11 @@ pub struct OpsEvent {
     pub closed_at_ms: Option<i64>,
     #[serde(default)]
     pub acknowledged: bool,
+    /// Concise note recording the last auto-remediation outcome for this
+    /// event (set by [`EventStore::annotate_remediation`]). Preserved
+    /// across reconcile refreshes of an already-open event.
+    #[serde(default)]
+    pub remediation_note: Option<String>,
 }
 
 impl OpsEvent {
@@ -128,6 +133,7 @@ impl OpsEvent {
             opened_at_ms: now_ms,
             closed_at_ms: None,
             acknowledged: false,
+            remediation_note: None,
         }
     }
 }
@@ -196,6 +202,10 @@ impl EventStore {
                     existing.recommendation = hit.recommendation;
                     existing.runbook = hit.runbook;
                     existing.remediation = hit.remediation;
+                    // NOTE: `remediation_note` and `acknowledged` are
+                    // deliberately NOT reset here — a refresh of an
+                    // already-open event must preserve the last
+                    // auto-remediation outcome annotation.
                 }
                 None => {
                     let ev = OpsEvent::from_hit(hit, now_ms);
@@ -252,6 +262,27 @@ impl EventStore {
         match self.open.get_mut(id) {
             Some(ev) => {
                 ev.acknowledged = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Annotate an OPEN event with a concise auto-remediation outcome
+    /// note (e.g. `"[auto] compacted 3 shards @1700000000000"`). The
+    /// `ok` flag tags the note `[auto]` on success or `[auto-fail]` on
+    /// failure. No-op (returns `false`) if no open event matches.
+    pub fn annotate_remediation(
+        &mut self,
+        event_id: &str,
+        note: &str,
+        ok: bool,
+        at_ms: i64,
+    ) -> bool {
+        match self.open.get_mut(event_id) {
+            Some(ev) => {
+                let tag = if ok { "[auto]" } else { "[auto-fail]" };
+                ev.remediation_note = Some(format!("{tag} {note} @{at_ms}"));
                 true
             }
             None => false,
@@ -423,6 +454,51 @@ mod tests {
         assert_eq!(loaded.history().len(), 1);
         assert_eq!(loaded.history()[0].rule_id, "close_rule");
         assert_eq!(loaded.history()[0].status, EventStatus::Closed);
+    }
+
+    #[test]
+    fn annotate_remediation_sets_note_and_reconcile_preserves_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = EventStore::new(tmp.path());
+        let scope = Scope::Collection("docs".into());
+        store.reconcile(vec![hit("compaction_backlog", scope.clone(), Severity::Medium)], 1000);
+        let id = "compaction_backlog:collection:docs";
+
+        // Annotate the open event with a remediation outcome.
+        assert!(store.annotate_remediation(id, "compacted 3 shards", true, 1500));
+        let note = store.open_events()[0].remediation_note.clone().unwrap();
+        assert!(note.contains("compacted 3 shards"));
+        assert!(note.starts_with("[auto]"));
+        assert!(note.contains("@1500"));
+
+        // A subsequent reconcile refresh of the SAME open event must
+        // PRESERVE the note (regression against clobbering).
+        let r = store.reconcile(
+            vec![hit("compaction_backlog", scope, Severity::High)],
+            2000,
+        );
+        assert!(r.opened.is_empty(), "refresh, not re-open");
+        let after = store.open_events()[0].clone();
+        assert_eq!(after.severity, Severity::High, "severity still refreshed");
+        assert_eq!(
+            after.remediation_note,
+            Some("[auto] compacted 3 shards @1500".to_owned()),
+            "reconcile refresh must preserve remediation_note"
+        );
+
+        // Annotating a non-open event is a no-op.
+        assert!(!store.annotate_remediation("nope:global", "x", true, 3000));
+    }
+
+    #[test]
+    fn annotate_remediation_failure_tags_auto_fail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = EventStore::new(tmp.path());
+        store.reconcile(vec![hit("r", Scope::Global, Severity::High)], 1000);
+        assert!(store.annotate_remediation("r:global", "boom", false, 2000));
+        let note = store.open_events()[0].remediation_note.clone().unwrap();
+        assert!(note.starts_with("[auto-fail]"), "got: {note}");
+        assert!(note.contains("boom"));
     }
 
     #[test]
