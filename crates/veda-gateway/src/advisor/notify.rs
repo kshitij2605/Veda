@@ -316,6 +316,7 @@ mod tests {
             opened_at_ms: 1000,
             closed_at_ms: None,
             acknowledged: false,
+            remediation_note: None,
         }
     }
 
