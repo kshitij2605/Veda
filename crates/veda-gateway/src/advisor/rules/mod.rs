@@ -237,6 +237,36 @@ impl Rule for HighErrorRate {
     }
 }
 
+/// Too many ERROR-level log records in the recent window.
+struct LogErrorRate;
+impl Rule for LogErrorRate {
+    fn id(&self) -> &'static str {
+        "log_error_rate"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::High
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let limit = threshold_u64(cfg, "error_logs", 20);
+        if snap.error_log_count > limit {
+            return vec![RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Global,
+                severity: self.default_severity(),
+                title: "High error-log volume".into(),
+                detail: format!(
+                    "{} ERROR logs in last 5m (threshold {}).",
+                    snap.error_log_count, limit
+                ),
+                recommendation: "Inspect recent errors (/v1/admin/logs?level=ERROR) and categories (/v1/admin/logs/categories) to find the dominant failure.".into(),
+                runbook: Some("GET /v1/admin/logs?level=ERROR".into()),
+                remediation: RemediationAction::None,
+            }];
+        }
+        Vec::new()
+    }
+}
+
 /// Text embedding service is unavailable.
 struct EmbeddingUnhealthy;
 impl Rule for EmbeddingUnhealthy {
@@ -458,6 +488,7 @@ pub fn catalog() -> Vec<Box<dyn Rule>> {
         Box::new(HighSearchLatency),
         Box::new(SlowQuerySurge),
         Box::new(HighErrorRate),
+        Box::new(LogErrorRate),
         Box::new(EmbeddingUnhealthy),
         Box::new(DependencyDown),
         Box::new(MemoryPressure),
@@ -539,6 +570,8 @@ mod tests {
             query: empty_query(),
             rss_bytes: None,
             counters: HashMap::new(),
+            error_log_count: 0,
+            warn_log_count: 0,
         }
     }
 
@@ -654,6 +687,33 @@ mod tests {
         now.counters.insert("veda_requests_total".into(), 200.0);
         now.counters.insert("veda_errors_total".into(), 50.0);
         let hits = HighErrorRate.check(&now, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn log_error_rate_fires_over_threshold() {
+        let mut snap = base_snapshot();
+        snap.error_log_count = 25; // > default 20
+        let hits = LogErrorRate.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "log_error_rate");
+        assert_eq!(hits[0].scope, Scope::Global);
+        assert_eq!(hits[0].severity, Severity::High);
+        assert!(!hits[0].recommendation.is_empty());
+    }
+
+    #[test]
+    fn log_error_rate_silent_under_threshold() {
+        let mut snap = base_snapshot();
+        snap.error_log_count = 5; // <= default 20
+        let hits = LogErrorRate.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn log_error_rate_healthy_zero_no_fire() {
+        let snap = base_snapshot(); // error_log_count == 0
+        let hits = LogErrorRate.check(&snap, &empty_history(), &RuleConfig::default());
         assert!(hits.is_empty());
     }
 

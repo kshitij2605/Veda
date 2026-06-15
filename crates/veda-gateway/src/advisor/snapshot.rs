@@ -15,6 +15,10 @@ use crate::tenant;
 
 /// How far back the query window looks, in seconds (5 minutes).
 const QUERY_WINDOW_SECS: u64 = 300;
+/// How far back the log-count window looks, in seconds (5 minutes).
+const LOG_WINDOW_SECS: u64 = 300;
+/// Cap on records pulled from the log buffer when counting by level.
+const LOG_SCAN_CAP: usize = 5000;
 /// A query slower than this many milliseconds is counted as "slow".
 const SLOW_QUERY_MS: u64 = 1000;
 /// Prometheus counters/gauges captured into every snapshot.
@@ -95,6 +99,12 @@ pub struct OpsSnapshot {
     /// Totals for a small set of named Prometheus counters/gauges,
     /// summed across all label sets.
     pub counters: HashMap<String, f64>,
+    /// Number of ERROR log records in the in-process buffer within the
+    /// last `LOG_WINDOW_SECS`.
+    pub error_log_count: u64,
+    /// Number of WARN+ (WARN or ERROR) log records within the last
+    /// `LOG_WINDOW_SECS`.
+    pub warn_log_count: u64,
 }
 
 /// Collect a live snapshot from `state`. `now_ms` is injected so
@@ -198,6 +208,10 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
         }
     }
 
+    // --- log-content counts (cheap; in-process buffer, no I/O) --------
+    let (error_log_count, warn_log_count) =
+        count_recent_logs(state.log_buffer(), now_ms, LOG_WINDOW_SECS);
+
     OpsSnapshot {
         taken_at_ms: now_ms,
         global: GlobalSnapshot {
@@ -211,7 +225,36 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
         query,
         rss_bytes,
         counters,
+        error_log_count,
+        warn_log_count,
     }
+}
+
+/// Count ERROR and WARN+ log records in `buffer` whose `ts_ms` falls
+/// within the last `window_secs` of `now_ms`. Returns
+/// `(error_count, warn_plus_count)` where the WARN+ count includes
+/// ERRORs (it's WARN-or-higher). Cheap: scans at most [`LOG_SCAN_CAP`]
+/// recent WARN+ records under a brief buffer lock, no I/O.
+pub fn count_recent_logs(
+    buffer: &crate::logs::LogBuffer,
+    now_ms: i64,
+    window_secs: u64,
+) -> (u64, u64) {
+    let cutoff = now_ms - (window_secs as i64) * 1000;
+    // A single WARN+ scan yields both counts (ERROR is a subset of WARN+).
+    let recs = buffer.recent(LOG_SCAN_CAP, Some("WARN"), None);
+    let mut errors = 0u64;
+    let mut warn_plus = 0u64;
+    for r in &recs {
+        if r.ts_ms < cutoff {
+            continue;
+        }
+        warn_plus += 1;
+        if r.level.eq_ignore_ascii_case("ERROR") {
+            errors += 1;
+        }
+    }
+    (errors, warn_plus)
 }
 
 /// Gather the node list. In Raft mode, read the membership snapshot
@@ -581,7 +624,38 @@ veda_records_total 7
             },
             rss_bytes: None,
             counters,
+            error_log_count: 0,
+            warn_log_count: 0,
         }
+    }
+
+    #[test]
+    fn count_recent_logs_windows_by_level() {
+        use crate::logs::{LogBuffer, LogRecord};
+        let buf = LogBuffer::new(100);
+        let push = |level: &str, ts: i64| {
+            buf.push(LogRecord {
+                ts_ms: ts,
+                level: level.to_string(),
+                target: "t".into(),
+                message: "m".into(),
+                fields: serde_json::Map::new(),
+                trace_id: None,
+                span_id: None,
+            });
+        };
+        let now = 1_000_000i64;
+        // window = 10s → cutoff = now - 10000.
+        push("ERROR", now - 1_000); // in window
+        push("ERROR", now - 9_000); // in window
+        push("ERROR", now - 20_000); // OUT of window
+        push("WARN", now - 2_000); // in window
+        push("WARN", now - 50_000); // OUT of window
+        push("INFO", now - 100); // excluded by level entirely
+        let (errors, warn_plus) = count_recent_logs(&buf, now, 10);
+        // 2 errors in window; WARN+ in window = 2 errors + 1 warn = 3.
+        assert_eq!(errors, 2, "error count");
+        assert_eq!(warn_plus, 3, "warn+ count (includes errors)");
     }
 
     #[test]
