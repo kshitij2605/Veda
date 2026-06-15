@@ -41,6 +41,8 @@ const ANOMALY_RULE_IDS: &[&str] = &[
     "anomaly_insert_rate",
     "anomaly_rss",
     "anomaly_error_logs",
+    "anomaly_cpu",
+    "anomaly_disk_used",
 ];
 
 /// The anomaly-detector rule ids (stable, unique).
@@ -130,7 +132,66 @@ pub fn detect_anomalies(history: &SnapshotHistory, cfg: &AdvisorConfig) -> Vec<R
         hits.push(hit);
     }
 
+    // CPU utilisation (%) — derived from the jiffy counters via pairwise
+    // deltas, mirroring the rate detectors; points where a delta can't
+    // be computed (missing counters / non-advancing total) are skipped.
+    if let Some(hit) = detect_signal(
+        cfg,
+        "anomaly_cpu",
+        "CPU utilisation",
+        "%",
+        cpu_series(history),
+    ) {
+        hits.push(hit);
+    }
+
+    // Data-dir disk utilisation (%) — direct field, skipping snapshots
+    // where it is unknown (None). A rapid fill beyond baseline fires.
+    if let Some(hit) = detect_signal(
+        cfg,
+        "anomaly_disk_used",
+        "disk utilisation",
+        "%",
+        disk_used_series(history),
+    ) {
+        hits.push(hit);
+    }
+
     hits
+}
+
+/// CPU-utilisation (%) series from consecutive `(cpu_busy, cpu_total)`
+/// jiffy pairs across the history, oldest-first. A point needs two
+/// consecutive snapshots; intervals with a missing counter, a
+/// non-advancing total, or a backwards busy counter (reset) are
+/// dropped — the series is therefore at most one shorter than the
+/// snapshot count.
+fn cpu_series(history: &SnapshotHistory) -> Vec<f64> {
+    let busy = history.series(|s| s.cpu_busy_jiffies.map(|v| v as f64).unwrap_or(f64::NAN));
+    let total = history.series(|s| s.cpu_total_jiffies.map(|v| v as f64).unwrap_or(f64::NAN));
+    let mut out = Vec::new();
+    for i in 1..total.len() {
+        let (bp, bn, tp, tn) = (busy[i - 1], busy[i], total[i - 1], total[i]);
+        if bp.is_nan() || bn.is_nan() || tp.is_nan() || tn.is_nan() {
+            continue;
+        }
+        let total_delta = tn - tp;
+        let busy_delta = bn - bp;
+        if total_delta <= 0.0 || busy_delta < 0.0 {
+            continue;
+        }
+        out.push(busy_delta / total_delta * 100.0);
+    }
+    out
+}
+
+/// Disk-utilisation (%) series, skipping snapshots where it is unknown.
+fn disk_used_series(history: &SnapshotHistory) -> Vec<f64> {
+    history
+        .series(|s| s.disk_used_pct.unwrap_or(f64::NAN))
+        .into_iter()
+        .filter(|v| !v.is_nan())
+        .collect()
 }
 
 /// Build a per-snapshot rate (per-second delta) series for `metric`
@@ -317,6 +378,37 @@ mod tests {
         h
     }
 
+    /// History of `n` snapshots whose `disk_used_pct` is `pct(i)`.
+    fn disk_history(n: usize, pct: impl Fn(usize) -> f64) -> SnapshotHistory {
+        let mut h = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+        for i in 0..n {
+            let mut s = snap(1000 + i as i64 * 1000, 0.0, None, &[]);
+            s.disk_used_pct = Some(pct(i));
+            h.push(s);
+        }
+        h
+    }
+
+    /// History of `n` snapshots carrying monotonically-advancing CPU
+    /// jiffy counters; each interval adds `busy(i)` busy jiffies out of
+    /// a fixed 1000 total jiffies → `busy(i)/10` percent for that step.
+    fn cpu_history(n: usize, busy: impl Fn(usize) -> u64) -> SnapshotHistory {
+        let mut h = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+        let mut total = 0u64;
+        let mut busy_acc = 0u64;
+        for i in 0..n {
+            if i > 0 {
+                total += 1000;
+                busy_acc += busy(i);
+            }
+            let mut s = snap(1000 + i as i64 * 1000, 0.0, None, &[]);
+            s.cpu_total_jiffies = Some(total);
+            s.cpu_busy_jiffies = Some(busy_acc);
+            h.push(s);
+        }
+        h
+    }
+
     fn find<'a>(hits: &'a [RuleHit], id: &str) -> Option<&'a RuleHit> {
         hits.iter().find(|h| h.rule_id == id)
     }
@@ -466,10 +558,49 @@ mod tests {
         assert!(ids.contains(&"anomaly_insert_rate"));
         assert!(ids.contains(&"anomaly_rss"));
         assert!(ids.contains(&"anomaly_error_logs"));
+        assert!(ids.contains(&"anomaly_cpu"));
+        assert!(ids.contains(&"anomaly_disk_used"));
         let mut sorted = ids.to_vec();
         sorted.sort_unstable();
         let n = sorted.len();
         sorted.dedup();
         assert_eq!(sorted.len(), n, "duplicate anomaly rule id");
+    }
+
+    #[test]
+    fn disk_used_spike_fires() {
+        // Steady ~50% baseline, current spike to 95%.
+        let h = disk_history(30, |i| if i == 29 { 95.0 } else { 50.0 + (i % 2) as f64 });
+        let hits = detect_anomalies(&h, &AdvisorConfig::default());
+        let hit = find(&hits, "anomaly_disk_used").expect("disk anomaly fired");
+        assert_eq!(hit.scope, Scope::Global);
+        assert!(!hit.detail.is_empty());
+    }
+
+    #[test]
+    fn disk_used_warmup_suppresses() {
+        // Only 10 samples (< default 20) even with a blatant spike → no fire.
+        let h = disk_history(10, |i| if i == 9 { 95.0 } else { 50.0 + (i % 2) as f64 });
+        let hits = detect_anomalies(&h, &AdvisorConfig::default());
+        assert!(find(&hits, "anomaly_disk_used").is_none());
+    }
+
+    #[test]
+    fn cpu_spike_fires() {
+        // 31 snapshots → 30 CPU% rate points (>= min_samples 20).
+        // Steady ~10% per interval, busy spike on the final step → ~99%.
+        let h = cpu_history(31, |i| if i == 30 { 990 } else { 100 + (i % 2) as u64 });
+        let hits = detect_anomalies(&h, &AdvisorConfig::default());
+        let hit = find(&hits, "anomaly_cpu").expect("cpu anomaly fired");
+        assert_eq!(hit.scope, Scope::Global);
+        assert!(!hit.detail.is_empty());
+    }
+
+    #[test]
+    fn cpu_warmup_suppresses() {
+        // 11 snapshots → 10 rate points (< default 20) → no fire.
+        let h = cpu_history(11, |i| if i == 10 { 990 } else { 100 + (i % 2) as u64 });
+        let hits = detect_anomalies(&h, &AdvisorConfig::default());
+        assert!(find(&hits, "anomaly_cpu").is_none());
     }
 }
