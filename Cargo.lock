@@ -4757,6 +4757,7 @@ dependencies = [
  "futures",
  "jsonwebtoken",
  "lettre",
+ "libc",
  "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",
