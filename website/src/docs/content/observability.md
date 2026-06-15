@@ -77,6 +77,10 @@ curl -X POST http://localhost:6340/v1/collections/products/search \
 
 The response includes an `explain` object with `filter_ms`, `ann_search_ms`, `scoring_ms`, `fusion_ms`, and `total_ms`.
 
+## Captured logs
+
+Beyond exporting to Loki, Veda captures its own logs in-process into a queryable buffer — with trace correlation, semantic categorization, log-content alerting, and the option to store external logs as a searchable collection. See [Log Insights](/docs/log-insights).
+
 ## Niriksha dashboard
 
 **Niriksha** is Veda's built-in visualization and exploration dashboard: collection overviews with real-time statistics, interactive vector-space projections, point-and-click search with a filter builder, embedding inspection for any modality, cluster health, query performance analytics, and user/role management. Access it at `http://localhost:5173` when running via Docker Compose.

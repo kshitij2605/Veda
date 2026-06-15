@@ -18,7 +18,7 @@ The reconcile phase runs under a lock, which is released before any network call
 
 ## The rule catalog
 
-Fifteen rules ship today — threshold/correlation rules plus four anomaly detectors. Thresholds and severities are tunable per rule via the API; defaults are shown.
+Eighteen rules ship today — threshold/correlation rules, anomaly detectors, and three log-content rules powered by [Log Insights](/docs/log-insights). Thresholds and severities are tunable per rule via the API; defaults are shown.
 
 | Rule | Severity | Fires when | Recommendation |
 |---|---|---|---|
@@ -37,6 +37,9 @@ Fifteen rules ship today — threshold/correlation rules plus four anomaly detec
 | `anomaly_error_rate` | Med/High | error-rate > baseline + Nσ | investigate the deviation |
 | `anomaly_insert_rate` | Med/High | insert-rate spike > baseline + Nσ | investigate the load spike |
 | `anomaly_rss` | Med/High | RSS > baseline + Nσ | investigate memory growth |
+| `log_error_rate` | High | ERROR-log count over the window exceeds a threshold | investigate the error source |
+| `anomaly_error_logs` | Med/High | error-log rate > baseline + Nσ | investigate the deviation |
+| `new_error_category` | Medium | a new WARN/ERROR [semantic log category](/docs/log-insights#semantic-categorization) appears | inspect the new failure mode |
 
 Anomaly detectors use EWMA / rolling mean+stddev baselines. They warm up over `min_samples` (default 20) and fire above the configured `sigma` (default 3σ → Medium, ≥5σ → High).
 
