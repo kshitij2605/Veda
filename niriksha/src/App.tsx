@@ -70,6 +70,9 @@ const Observability = lazy(() =>
 const Insights = lazy(() =>
   import('./pages/Insights').then((m) => ({ default: m.Insights })),
 )
+const Logs = lazy(() =>
+  import('./pages/Logs').then((m) => ({ default: m.Logs })),
+)
 const Settings = lazy(() =>
   import('./pages/Settings').then((m) => ({ default: m.Settings })),
 )
@@ -119,6 +122,7 @@ export default function App() {
             <Route path="/dashboards/:id" element={<DashboardPage />} />
             <Route path="/observability" element={<Observability />} />
             <Route path="/insights" element={<Insights />} />
+            <Route path="/logs" element={<Logs />} />
             <Route path="/console" element={<Console />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/home" replace />} />

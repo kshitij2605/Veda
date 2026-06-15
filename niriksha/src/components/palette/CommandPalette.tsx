@@ -12,6 +12,7 @@ import {
   FlaskConical,
   GitBranch,
   Layers,
+  ScrollText,
   Search,
   Settings,
   ShieldAlert,
@@ -176,6 +177,14 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         group: 'Navigate',
         keywords: ['advisor', 'ops', 'events', 'alerts', 'remediation'],
         onSelect: () => navigate('/insights'),
+      },
+      {
+        id: 'nav-logs',
+        label: 'Logs',
+        icon: ScrollText,
+        group: 'Navigate',
+        keywords: ['logs', 'log', 'tail', 'trace', 'slow queries', 'errors', 'warnings'],
+        onSelect: () => navigate('/logs'),
       },
       {
         id: 'nav-console',
