@@ -28,6 +28,7 @@ pub mod metrics_middleware;
 pub mod query_log;
 pub mod records;
 pub mod rerank;
+pub mod resources;
 pub mod route;
 pub mod saved_objects;
 pub mod search;
@@ -68,6 +69,14 @@ fn logs_router() -> Router<state::AppState> {
         .route("/v1/admin/logs", get(logs::list_logs))
         .route("/v1/admin/logs/categories", get(logs::list_categories))
         .route("/v1/admin/slow-queries", get(logs::list_slow_queries))
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// Node-resources admin route, gated by an extra `require_admin` route
+/// layer (same pattern as [`insights_router`]).
+fn resources_router() -> Router<state::AppState> {
+    Router::new()
+        .route("/v1/admin/resources", get(resources::get_resources))
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
@@ -280,6 +289,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .merge(insights_router())
         // Log Insights — admin-only (extra require_admin route layer).
         .merge(logs_router())
+        // Node resources — admin-only (extra require_admin route layer).
+        .merge(resources_router())
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             auth::auth_middleware,

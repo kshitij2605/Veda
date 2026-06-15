@@ -6,6 +6,7 @@ import { LoadingSpinner } from '../components/LoadingSpinner'
 import { Badge } from '../components/Badge'
 import api from '../api/client'
 import { listNodes, type ListNodesResponse } from '../api/collections'
+import { getResources, type ResourcesView } from '../api/resources'
 
 interface MetricEntry {
   name: string
@@ -34,6 +35,18 @@ export function SystemHealth() {
   const [metricsError, setMetricsError] = useState<string | null>(null)
   const [nodes, setNodes] = useState<ListNodesResponse | null>(null)
   const [nodesError, setNodesError] = useState<string | null>(null)
+  const [resources, setResources] = useState<ResourcesView | null>(null)
+  const [resourcesError, setResourcesError] = useState<string | null>(null)
+
+  const loadResources = useCallback(async () => {
+    setResourcesError(null)
+    try {
+      const { data } = await getResources()
+      setResources(data)
+    } catch (err) {
+      setResourcesError(err instanceof Error ? err.message : 'Failed to fetch resources')
+    }
+  }, [])
 
   const loadNodes = useCallback(async () => {
     setNodesError(null)
@@ -63,7 +76,8 @@ export function SystemHealth() {
     fetchCollections()
     loadMetrics()
     loadNodes()
-  }, [fetchHealth, fetchCollections, loadMetrics, loadNodes])
+    loadResources()
+  }, [fetchHealth, fetchCollections, loadMetrics, loadNodes, loadResources])
 
   const statusVariant = health?.status === 'healthy' ? 'success' as const : 'error' as const
   const statusLabel = health?.status === 'healthy' ? 'Healthy' : health ? 'Unhealthy' : 'Unknown'
@@ -194,6 +208,64 @@ export function SystemHealth() {
           Nodes lookup failed: {nodesError}
         </div>
       )}
+
+      {/* Node resources — disk / CPU / load / fds / memory / RSS, from
+          the ops-advisor's latest snapshot (GET /admin/resources).
+          Signal fields are null on non-Linux hosts → rendered as "—". */}
+      <div className="mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider">
+            Resources
+          </h2>
+          <button
+            onClick={loadResources}
+            className="text-xs text-accent hover:text-accent-hover transition-colors"
+          >
+            Refresh
+          </button>
+        </div>
+        {resourcesError ? (
+          <div className="rounded-lg bg-error/10 border border-error/20 px-4 py-3 text-sm text-error">
+            Resources lookup failed: {resourcesError}
+          </div>
+        ) : resources ? (
+          <div className="rounded-lg border border-border bg-bg-secondary p-5">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-5 text-sm">
+              <ResourceCell
+                label="Disk used"
+                value={fmtPct(resources.disk.used_pct)}
+                sub={`${fmtGiB(resources.disk.free_bytes)} free`}
+                warn={(resources.disk.used_pct ?? 0) >= 85}
+                danger={(resources.disk.used_pct ?? 0) >= 90}
+              />
+              <ResourceCell label="CPU" value={fmtPct(resources.cpu_pct)} />
+              <ResourceCell
+                label="Load (1/5/15m)"
+                value={`${fmtNum(resources.load.load1)} / ${fmtNum(resources.load.load5)} / ${fmtNum(resources.load.load15)}`}
+                sub={`${resources.num_cpus} CPU${resources.num_cpus === 1 ? '' : 's'}`}
+              />
+              <ResourceCell
+                label="Open FDs"
+                value={
+                  resources.fds.open != null
+                    ? `${resources.fds.open}${resources.fds.limit != null ? ` / ${resources.fds.limit}` : ''}`
+                    : '—'
+                }
+              />
+              <ResourceCell
+                label="System memory"
+                value={`${fmtGiB(resources.memory.available_bytes)} avail`}
+                sub={`of ${fmtGiB(resources.memory.total_bytes)}`}
+              />
+              <ResourceCell label="Process RSS" value={fmtGiB(resources.rss_bytes)} />
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-lg border border-border bg-bg-secondary p-5 text-sm text-text-muted">
+            Loading resources...
+          </div>
+        )}
+      </div>
 
       {/* Subsystem checks from /admin/health */}
       {health?.checks && Object.keys(health.checks).length > 0 && (
@@ -330,6 +402,51 @@ function InfoCell({ label, value }: { label: string; value: string }) {
       <div className="text-text-primary font-medium">{value}</div>
     </div>
   )
+}
+
+function ResourceCell({
+  label,
+  value,
+  sub,
+  warn = false,
+  danger = false,
+}: {
+  label: string
+  value: string
+  sub?: string
+  warn?: boolean
+  danger?: boolean
+}) {
+  const valueColor = danger
+    ? 'text-error'
+    : warn
+      ? 'text-warning'
+      : 'text-text-primary'
+  return (
+    <div>
+      <div className="text-xs text-text-muted mb-0.5">{label}</div>
+      <div className={`font-medium tabular-nums ${valueColor}`}>{value}</div>
+      {sub && <div className="text-xs text-text-muted mt-0.5">{sub}</div>}
+    </div>
+  )
+}
+
+/** Bytes → "X.X GiB"; null/undefined → "—". */
+function fmtGiB(bytes: number | null): string {
+  if (bytes == null) return '—'
+  return `${(bytes / 1024 ** 3).toFixed(1)} GiB`
+}
+
+/** Percentage → "X.X%"; null → "—". */
+function fmtPct(pct: number | null): string {
+  if (pct == null) return '—'
+  return `${pct.toFixed(1)}%`
+}
+
+/** Float → 2-decimal string; null → "—". */
+function fmtNum(n: number | null): string {
+  if (n == null) return '—'
+  return n.toFixed(2)
 }
 
 function formatUptime(secs: number): string {
