@@ -21,6 +21,7 @@ pub mod evaluate;
 pub mod insights;
 pub mod jobs;
 pub mod llm;
+pub mod logs;
 pub mod mcp;
 pub mod metrics_middleware;
 pub mod query_log;
@@ -55,6 +56,15 @@ fn insights_router() -> Router<state::AppState> {
             "/v1/admin/insights/{event_id}/ack",
             post(insights::ack_event),
         )
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// Log Insights admin routes, gated by an extra `require_admin` route
+/// layer (same pattern as [`insights_router`]). Task 3 extends this with
+/// a raw log-listing endpoint.
+fn logs_router() -> Router<state::AppState> {
+    Router::new()
+        .route("/v1/admin/logs/categories", get(logs::list_categories))
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
@@ -258,6 +268,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         // Ops advisor ("Insights") — admin-only (extra require_admin
         // route layer on top of the shared auth middleware below).
         .merge(insights_router())
+        // Log Insights — admin-only (extra require_admin route layer).
+        .merge(logs_router())
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             auth::auth_middleware,

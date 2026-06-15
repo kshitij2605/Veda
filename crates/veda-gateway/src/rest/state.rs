@@ -15,7 +15,7 @@ use veda_storage::segment_manager::SegmentManager;
 
 use crate::auth::Role;
 use crate::auth_oidc::AuthMode;
-use crate::logs::LogBuffer;
+use crate::logs::{LogBuffer, LogCategorizer};
 use crate::rest::saved_objects::SavedObjectStore;
 use crate::scheduler::JobRegistry;
 use veda_coordinator::raft_coordinator::RaftCoordinator;
@@ -246,6 +246,12 @@ pub struct AppStateInner {
     /// are visible here. Default constructors create a standalone
     /// buffer (no layer attached) for tests.
     pub log_buffer: Arc<LogBuffer>,
+    /// Semantic log categorizer for the Log Insights feature. Holds an
+    /// embedding cache + first-seen timestamps across calls. Default
+    /// constructors create an empty categorizer; it reads from
+    /// `log_buffer` + `embedding_registry` on demand via
+    /// `GET /v1/admin/logs/categories`.
+    pub log_categorizer: Arc<LogCategorizer>,
 }
 
 /// Build a swappable TSO + the matching `dyn Tso` handle that
@@ -316,6 +322,7 @@ impl AppState {
                 tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
                 advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
                 log_buffer: Arc::new(LogBuffer::with_default_capacity()),
+                log_categorizer: Arc::new(LogCategorizer::new()),
             }),
         }
     }
@@ -383,6 +390,7 @@ impl AppState {
                 tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
                 advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
                 log_buffer: Arc::new(LogBuffer::with_default_capacity()),
+                log_categorizer: Arc::new(LogCategorizer::new()),
             }),
         }
     }
@@ -431,6 +439,7 @@ impl AppState {
                 tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
                 advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
                 log_buffer: Arc::new(LogBuffer::with_default_capacity()),
+                log_categorizer: Arc::new(LogCategorizer::new()),
             }),
         }
     }
@@ -486,6 +495,16 @@ impl AppState {
     /// Shared ops-advisor runtime state.
     pub fn advisor(&self) -> &Arc<crate::advisor::AdvisorState> {
         &self.inner.advisor
+    }
+
+    /// In-process Log Insights capture buffer.
+    pub fn log_buffer(&self) -> &Arc<LogBuffer> {
+        &self.inner.log_buffer
+    }
+
+    /// Semantic log categorizer (Log Insights).
+    pub fn log_categorizer(&self) -> &Arc<LogCategorizer> {
+        &self.inner.log_categorizer
     }
 
     /// Load a SPLADE sparse-encoder client from `VEDA_SPLADE_*` env

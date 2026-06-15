@@ -7,9 +7,11 @@
 //! ingest on top of this buffer.
 
 pub mod buffer;
+pub mod categorize;
 pub mod layer;
 
 pub use buffer::{LogBuffer, LogRecord, DEFAULT_CAPACITY};
+pub use categorize::{LogCategorizer, LogCategory};
 pub use layer::CaptureLayer;
 
 /// Best-effort read of the current OpenTelemetry trace/span ids from
