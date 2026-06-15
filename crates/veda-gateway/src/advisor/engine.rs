@@ -33,15 +33,27 @@ use crate::advisor::config::AdvisorConfig;
 use crate::advisor::event::{EventStore, ReconcileResult};
 use crate::advisor::notify::Notifier;
 use crate::advisor::remediation::{run_remediation, LiveDispatcher, RateLimiter};
-use crate::advisor::rules::{catalog, run_rules, Rule};
+use crate::advisor::rules::{catalog, run_rules, Rule, RuleHit};
+use crate::advisor::event::{RemediationAction, Scope, Severity};
 use crate::advisor::snapshot::{collect, OpsSnapshot, SnapshotHistory, DEFAULT_HISTORY_CAP};
 use crate::advisor::anomaly::detect_anomalies;
+use crate::logs::{LogCategory, categorize::CategorizeOptions};
 use crate::rest::state::AppState;
 
 /// Config file name under `data_dir`.
 const CONFIG_FILE: &str = "_advisor_config.json";
 /// Default tick interval (seconds) when the env override is unset.
 const DEFAULT_INTERVAL_SECS: u64 = 30;
+
+/// Engine-level rule ids — findings produced directly by [`run_tick`]
+/// (not by a snapshot [`Rule`] or an anomaly detector), exposed so the
+/// rules-listing REST surface can show + tune them via config.
+const ENGINE_RULE_IDS: &[&str] = &["new_error_category"];
+
+/// The engine-level rule ids (stable, unique).
+pub fn engine_rule_ids() -> &'static [&'static str] {
+    ENGINE_RULE_IDS
+}
 
 /// Mutable runtime state for the ops advisor, shared via `AppState`.
 pub struct AdvisorState {
@@ -118,16 +130,80 @@ pub fn reconcile_hits(
     events: &mut EventStore,
     cfg: &AdvisorConfig,
     catalog: &[Box<dyn Rule>],
+    extra_hits: Vec<RuleHit>,
     now_ms: i64,
 ) -> ReconcileResult {
-    // 1. Combine threshold-rule hits with anomaly hits.
+    // 1. Combine threshold-rule hits with anomaly hits and any
+    //    engine-level hits computed by the caller outside the locks
+    //    (e.g. `new_error_category`, which needs an async categorize).
     let mut hits = run_rules(catalog, snap, history, cfg);
     hits.extend(detect_anomalies(history, cfg));
+    hits.extend(extra_hits);
 
     // 2. Reconcile into open/close transitions, then persist.
     let result = events.reconcile(hits, now_ms);
     events.save();
     result
+}
+
+/// Detect *newly-appeared* error/warn log categories.
+///
+/// Emits a `new_error_category` [`RuleHit`] (Medium, `Scope::Global`)
+/// for each category whose `max_severity` is WARN/ERROR **and** whose
+/// `first_seen_ms` falls within the last `window_ms` of `now_ms` — i.e.
+/// a category that first showed up during this tick window. Respects the
+/// rule's `enabled`/`muted` config (returns empty when disabled/muted).
+pub fn detect_new_error_categories(
+    categories: &[LogCategory],
+    cfg: &AdvisorConfig,
+    now_ms: i64,
+    window_ms: i64,
+) -> Vec<RuleHit> {
+    let rc = cfg.for_rule("new_error_category");
+    if !rc.enabled || rc.muted {
+        return Vec::new();
+    }
+    let cutoff = now_ms - window_ms;
+    let mut hits = Vec::new();
+    for cat in categories {
+        let sev = cat.max_severity.to_ascii_uppercase();
+        if sev != "WARN" && sev != "ERROR" {
+            continue; // only error-ish categories are alert-worthy.
+        }
+        if cat.first_seen_ms < cutoff {
+            continue; // pre-existing category — not new.
+        }
+        let mut severity = Severity::Medium;
+        if let Some(over) = rc.severity_override {
+            severity = over;
+        }
+        let example = cat.examples.first().cloned().unwrap_or_default();
+        hits.push(RuleHit {
+            rule_id: "new_error_category".into(),
+            scope: Scope::Global,
+            severity,
+            title: format!("New {sev} log category"),
+            detail: format!(
+                "A new {sev} log category appeared: \"{}\" ({} occurrence(s); e.g. \"{}\").",
+                cat.representative, cat.count, example
+            ),
+            recommendation: "Inspect this newly-appeared error category (/v1/admin/logs/categories) — it may be a fresh failure mode introduced by a recent change.".into(),
+            runbook: Some("GET /v1/admin/logs/categories".into()),
+            remediation: RemediationAction::None,
+        });
+    }
+    hits
+}
+
+/// The configured advisor tick interval in seconds (env override,
+/// default [`DEFAULT_INTERVAL_SECS`]). Used both by the loop and as the
+/// "new category" detection window for `new_error_category`.
+fn interval_secs() -> u64 {
+    std::env::var("VEDA_ADVISOR_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(DEFAULT_INTERVAL_SECS)
 }
 
 /// Current wall-clock time in epoch milliseconds.
@@ -147,6 +223,10 @@ pub fn now_ms() -> i64 {
 /// `.await`.** The tick runs in three phases, the network awaits living
 /// strictly in phase 2 where neither `history` nor `events` is locked:
 ///
+/// - **Phase 0 (no advisor lock):** `log_categorizer().categorize(...)`
+///   — async, may embed over the network — runs first and produces the
+///   `new_error_category` hits, exactly like the notify phase keeps
+///   network awaits out of any held advisor lock.
 /// - **Phase 1 (locked, synchronous):** lock `history`, push the
 ///   snapshot; lock `events`; [`reconcile_hits`] (run rules + anomalies,
 ///   reconcile, save). The opened/closed edges are cloned out, then both
@@ -169,6 +249,24 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
     let cfg = advisor.config.read().await.clone();
     let rule_catalog = catalog();
 
+    // --- Phase 0: semantic log categorization (NO advisor lock held).
+    // `categorize` is async and may embed over the network, so it must
+    // run before we take the history/events locks (mirroring how the
+    // notify/remediation phase keeps network awaits lock-free). It only
+    // touches `AppState` (the embedding-registry RwLock + log buffer),
+    // never an advisor lock. Any failure / missing embedder simply
+    // yields no categories → no `new_error_category` hits; never panics.
+    let new_category_hits = {
+        let window_ms = (interval_secs() as i64) * 1000;
+        let registry = state.embedding_registry().read().await;
+        let categories = state
+            .log_categorizer()
+            .categorize(state.log_buffer(), &registry, CategorizeOptions::default())
+            .await;
+        drop(registry);
+        detect_new_error_categories(&categories, &cfg, now, window_ms)
+    };
+
     // --- Phase 1: reconcile under the history+events locks (NO network).
     // The guards live only inside this block and are dropped before any
     // notify/remediation await below.
@@ -176,7 +274,15 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
         let mut history = advisor.history.lock().await;
         history.push(snap.clone());
         let mut events = advisor.events.lock().await;
-        reconcile_hits(&snap, &history, &mut events, &cfg, &rule_catalog, now)
+        reconcile_hits(
+            &snap,
+            &history,
+            &mut events,
+            &cfg,
+            &rule_catalog,
+            new_category_hits,
+            now,
+        )
     };
 
     // --- Phase 2: notify + remediate with NO events/history lock held.
@@ -207,13 +313,9 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
 /// [`MissedTickBehavior::Delay`] so a slow tick never piles up backlog.
 /// A failing/slow `run_tick` cannot crash the loop.
 pub fn spawn_advisor(state: AppState) -> JoinHandle<()> {
-    let interval_secs = std::env::var("VEDA_ADVISOR_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|&s| s > 0)
-        .unwrap_or(DEFAULT_INTERVAL_SECS);
+    let secs = interval_secs();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(secs));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
@@ -274,6 +376,20 @@ mod tests {
             },
             rss_bytes: None,
             counters: HashMap::new(),
+            error_log_count: 0,
+            warn_log_count: 0,
+        }
+    }
+
+    fn category(id: &str, sev: &str, first_seen_ms: i64) -> LogCategory {
+        LogCategory {
+            id: id.into(),
+            representative: format!("template {id}"),
+            count: 3,
+            max_severity: sev.into(),
+            examples: vec![format!("example for {id}")],
+            first_seen_ms,
+            last_seen_ms: first_seen_ms + 10,
         }
     }
 
@@ -304,7 +420,7 @@ mod tests {
         let mut history = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
         history.push(tripping.clone());
 
-        let r1 = reconcile_hits(&tripping, &history, &mut events, &cfg, &cat, 1000);
+        let r1 = reconcile_hits(&tripping, &history, &mut events, &cfg, &cat, Vec::new(), 1000);
         assert_eq!(r1.opened.len(), 1, "expected one opened event");
         assert_eq!(r1.opened[0].rule_id, "compaction_backlog");
         assert_eq!(events.open_events().len(), 1);
@@ -313,7 +429,7 @@ mod tests {
         // --- round 2: a clean snapshot closes it ---
         let clean = base_snapshot(2000);
         history.push(clean.clone());
-        let r2 = reconcile_hits(&clean, &history, &mut events, &cfg, &cat, 2000);
+        let r2 = reconcile_hits(&clean, &history, &mut events, &cfg, &cat, Vec::new(), 2000);
         assert!(r2.opened.is_empty());
         assert_eq!(r2.closed.len(), 1, "expected one closed event");
         assert_eq!(r2.closed[0].rule_id, "compaction_backlog");
@@ -340,9 +456,74 @@ mod tests {
         let mut history = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
         history.push(tripping.clone());
 
-        let r = reconcile_hits(&tripping, &history, &mut events, &cfg, &cat, 1000);
+        let r = reconcile_hits(&tripping, &history, &mut events, &cfg, &cat, Vec::new(), 1000);
         assert!(r.opened.is_empty(), "muted rule must not open an event");
         assert!(events.open_events().is_empty());
+    }
+
+    #[test]
+    fn new_error_category_fires_for_recent_error_category() {
+        let now = 100_000i64;
+        let window = 30_000i64; // 30s tick window.
+        let cats = vec![
+            category("err1", "ERROR", now - 5_000), // within window → fire
+            category("warn1", "WARN", now - 1_000),  // within window → fire
+        ];
+        let hits =
+            detect_new_error_categories(&cats, &AdvisorConfig::default(), now, window);
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|h| h.rule_id == "new_error_category"));
+        assert!(hits.iter().all(|h| h.scope == Scope::Global));
+        assert!(hits.iter().all(|h| h.severity == Severity::Medium));
+        assert!(hits.iter().all(|h| !h.recommendation.is_empty()));
+    }
+
+    #[test]
+    fn new_error_category_ignores_old_category() {
+        let now = 100_000i64;
+        let window = 30_000i64;
+        // first_seen well before the window → not new.
+        let cats = vec![category("err_old", "ERROR", now - 90_000)];
+        let hits =
+            detect_new_error_categories(&cats, &AdvisorConfig::default(), now, window);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn new_error_category_ignores_info_category() {
+        let now = 100_000i64;
+        let window = 30_000i64;
+        // recent, but INFO severity → not alert-worthy.
+        let cats = vec![category("info1", "INFO", now - 1_000)];
+        let hits =
+            detect_new_error_categories(&cats, &AdvisorConfig::default(), now, window);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn new_error_category_respects_disabled_and_muted() {
+        let now = 100_000i64;
+        let window = 30_000i64;
+        let cats = vec![category("err1", "ERROR", now - 1_000)];
+
+        let mut disabled = AdvisorConfig::default();
+        disabled.rules.insert(
+            "new_error_category".into(),
+            RuleConfig { enabled: false, ..Default::default() },
+        );
+        assert!(detect_new_error_categories(&cats, &disabled, now, window).is_empty());
+
+        let mut muted = AdvisorConfig::default();
+        muted.rules.insert(
+            "new_error_category".into(),
+            RuleConfig { muted: true, ..Default::default() },
+        );
+        assert!(detect_new_error_categories(&cats, &muted, now, window).is_empty());
+    }
+
+    #[test]
+    fn engine_rule_ids_contains_new_error_category() {
+        assert!(engine_rule_ids().contains(&"new_error_category"));
     }
 
     #[test]

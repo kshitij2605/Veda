@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::advisor::anomaly::anomaly_rule_ids;
 use crate::advisor::config::{ChannelsConfig, RuleConfig};
-use crate::advisor::engine::{run_tick, save_config};
+use crate::advisor::engine::{engine_rule_ids, run_tick, save_config};
 use crate::advisor::event::{OpsEvent, Severity};
 use crate::advisor::rules::catalog;
 use crate::rest::collections::ErrorResponse;
@@ -150,6 +150,16 @@ pub async fn list_rules(State(state): State<AppState>) -> Json<RulesResponse> {
             id: (*id).to_owned(),
             default_severity: None,
             anomaly: true,
+            effective_config: cfg.for_rule(id),
+        });
+    }
+    // Engine-level findings (e.g. `new_error_category`) — fixed Medium
+    // severity, tunable/mutable via the same per-rule config.
+    for id in engine_rule_ids() {
+        rules.push(RuleInfo {
+            id: (*id).to_owned(),
+            default_severity: Some(Severity::Medium),
+            anomaly: false,
             effective_config: cfg.for_rule(id),
         });
     }

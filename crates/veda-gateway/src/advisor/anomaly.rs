@@ -40,6 +40,7 @@ const ANOMALY_RULE_IDS: &[&str] = &[
     "anomaly_error_rate",
     "anomaly_insert_rate",
     "anomaly_rss",
+    "anomaly_error_logs",
 ];
 
 /// The anomaly-detector rule ids (stable, unique).
@@ -114,6 +115,17 @@ pub fn detect_anomalies(history: &SnapshotHistory, cfg: &AdvisorConfig) -> Vec<R
         "process RSS",
         "MiB",
         rss_series(history),
+    ) {
+        hits.push(hit);
+    }
+
+    // ERROR-log volume in the recent window — present on every snapshot.
+    if let Some(hit) = detect_signal(
+        cfg,
+        "anomaly_error_logs",
+        "error-log volume",
+        "logs/5m",
+        history.series(|s| s.error_log_count as f64),
     ) {
         hits.push(hit);
     }
@@ -267,7 +279,20 @@ mod tests {
             },
             rss_bytes,
             counters: c,
+            error_log_count: 0,
+            warn_log_count: 0,
         }
+    }
+
+    /// History of `n` snapshots whose `error_log_count` is `errs(i)`.
+    fn error_log_history(n: usize, errs: impl Fn(usize) -> u64) -> SnapshotHistory {
+        let mut h = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+        for i in 0..n {
+            let mut s = snap(1000 + i as i64 * 1000, 0.0, None, &[]);
+            s.error_log_count = errs(i);
+            h.push(s);
+        }
+        h
     }
 
     /// History of `n` snapshots whose p95 latency is `latency(i)`.
@@ -403,12 +428,31 @@ mod tests {
     }
 
     #[test]
+    fn error_logs_spike_fires() {
+        // Steady ~4 errors/window baseline, then a spike to 100.
+        let h = error_log_history(30, |i| if i == 29 { 100 } else { 4 + (i % 2) as u64 });
+        let hits = detect_anomalies(&h, &AdvisorConfig::default());
+        let hit = find(&hits, "anomaly_error_logs").expect("error-log anomaly fired");
+        assert_eq!(hit.scope, Scope::Global);
+        assert!(!hit.detail.is_empty());
+    }
+
+    #[test]
+    fn error_logs_warmup_suppresses() {
+        // Only 10 samples (< default 20) even with a spike → no fire.
+        let h = error_log_history(10, |i| if i == 9 { 100 } else { 4 + (i % 2) as u64 });
+        let hits = detect_anomalies(&h, &AdvisorConfig::default());
+        assert!(find(&hits, "anomaly_error_logs").is_none());
+    }
+
+    #[test]
     fn rule_ids_exposed_and_unique() {
         let ids = anomaly_rule_ids();
         assert!(ids.contains(&"anomaly_search_latency"));
         assert!(ids.contains(&"anomaly_error_rate"));
         assert!(ids.contains(&"anomaly_insert_rate"));
         assert!(ids.contains(&"anomaly_rss"));
+        assert!(ids.contains(&"anomaly_error_logs"));
         let mut sorted = ids.to_vec();
         sorted.sort_unstable();
         let n = sorted.len();
