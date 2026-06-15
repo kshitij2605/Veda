@@ -176,3 +176,14 @@ Admin-only automated-operations surface. See [Ops Advisor](/docs/ops-advisor) fo
 | `GET/PUT` | `/v1/admin/insights/channels` | Alert-channel config (secrets write-only on `GET`) |
 | `POST` | `/v1/admin/insights/run` | Force one evaluation tick → `{ opened, closed }` |
 | `POST` | `/v1/admin/insights/{event_id}/ack` | Acknowledge an open event |
+
+## Logs (Log Insights)
+
+Captured-log and log-ingest surface. See [Log Insights](/docs/log-insights) for the full guide.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/admin/logs` | Recent captured logs (`?level=`, `?q=`, `?limit=`) — admin-only |
+| `GET` | `/v1/admin/logs/categories` | Semantic log categories — admin-only |
+| `GET` | `/v1/admin/slow-queries` | Slowest recent queries (`?collection=`, `?limit=`) — admin-only |
+| `POST` | `/v1/collections/{name}/ingest-logs` | Parse raw log lines into records (`{ lines, default_level?, ttl_secs? }`); same auth as `/insert` |

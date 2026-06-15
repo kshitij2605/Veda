@@ -18,13 +18,13 @@ Most vector databases just store vectors: you bring your own embedding services,
 
 ## Beyond the basics
 
-Veda also ships a distributed data plane (per-shard append-only logs with quorum replication, MVCC snapshot reads at `?at=<ts>`, Percolator-style snapshot-isolation transactions, atomic reindex with alias cutover, cross-region WAN log shipping), JWT authentication with role-based access control and per-record [row-level security](/docs/collections#row-level-security), [JSON-path filtering](/docs/search#json-path-filtering), [record TTL](/docs/collections#record-ttl) with a [cron scheduler](/docs/rest-api#scheduled-jobs), [analytics aggregations](/docs/rest-api#analytics), an OpenTelemetry-first observability stack with an automated [Ops Advisor](/docs/ops-advisor) (detect → root-cause → recommend → alert → auto-remediate), the **Niriksha** visualization dashboard, and a Python SDK.
+Veda also ships a distributed data plane (per-shard append-only logs with quorum replication, MVCC snapshot reads at `?at=<ts>`, Percolator-style snapshot-isolation transactions, atomic reindex with alias cutover, cross-region WAN log shipping), JWT authentication with role-based access control and per-record [row-level security](/docs/collections#row-level-security), [JSON-path filtering](/docs/search#json-path-filtering), [record TTL](/docs/collections#record-ttl) with a [cron scheduler](/docs/rest-api#scheduled-jobs), [analytics aggregations](/docs/rest-api#analytics), an OpenTelemetry-first observability stack with an automated [Ops Advisor](/docs/ops-advisor) (detect → root-cause → recommend → alert → auto-remediate) and [Log Insights](/docs/log-insights) (capture, trace correlation, semantic categorization, log-content alerting), the **Niriksha** visualization dashboard, and a Python SDK.
 
 ## How these docs are organized
 
 - **Getting started** — [Quick start](/docs/quickstart) gets a cluster running and serving queries in minutes; [Installation & config](/docs/installation) covers building from source, cluster modes, and configuration.
 - **Core concepts** — [Collections & fields](/docs/collections), [Indexes](/docs/indexes), [Search & fusion](/docs/search), the [Document pipeline](/docs/document-pipeline), and [Agents & MCP](/docs/agents-mcp).
-- **Reference** — the [REST API](/docs/rest-api), the [Python SDK](/docs/python-sdk), [Observability](/docs/observability), and the [Ops Advisor](/docs/ops-advisor).
+- **Reference** — the [REST API](/docs/rest-api), the [Python SDK](/docs/python-sdk), [Observability](/docs/observability), the [Ops Advisor](/docs/ops-advisor), and [Log Insights](/docs/log-insights).
 
 ## License
 

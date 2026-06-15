@@ -10,6 +10,7 @@ import restApi from './content/rest-api.md?raw'
 import pythonSdk from './content/python-sdk.md?raw'
 import observability from './content/observability.md?raw'
 import opsAdvisor from './content/ops-advisor.md?raw'
+import logInsights from './content/log-insights.md?raw'
 
 export interface DocPageEntry {
   slug: string
@@ -48,6 +49,7 @@ export const DOCS: DocGroup[] = [
       { slug: 'python-sdk', title: 'Python SDK', md: pythonSdk },
       { slug: 'observability', title: 'Observability', md: observability },
       { slug: 'ops-advisor', title: 'Ops Advisor', md: opsAdvisor },
+      { slug: 'log-insights', title: 'Log Insights', md: logInsights },
     ],
   },
 ]

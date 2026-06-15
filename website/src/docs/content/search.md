@@ -55,6 +55,8 @@ The `query` object accepts other retrieval modes over appropriately-typed fields
 - `sparse_vector` — sparse embeddings (e.g. learned term weights).
 - `hybrid` — combine dense and lexical signals in one query; robust for rare names, acronyms, and precise technical vocabulary.
 
+The lexical paths (`bm25`, match-phrase, and the BM25 leg of `hybrid`) apply the request `filter` and row-level security just like the dense path — so `{ "query": { "bm25": … }, "filter": "level = 'ERROR'" }` returns only matching records, and RLS-scoped users see only their own rows on lexical and hybrid queries.
+
 ## Multi-vector fusion
 
 Search several embedding spaces at once — text, image, and more — and fuse the ranked lists server-side:
