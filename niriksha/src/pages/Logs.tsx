@@ -17,6 +17,7 @@ import {
   type LogRecord,
   type SlowQuery,
 } from '../api/logs'
+import { searchCollection, type SearchHit } from '../api/collections'
 import {
   Badge,
   Button,
@@ -197,6 +198,9 @@ export function Logs() {
             <LogTable logs={logs} onSelect={setSelected} />
           )}
         </section>
+
+        {/* ── Search a logs collection ──────────────────────────────── */}
+        <LogsCollectionSearch />
 
         {/* ── Categories ────────────────────────────────────────────── */}
         <CategoriesPanel />
@@ -577,6 +581,136 @@ function LogDrawer({
 /* ────────────────────────────────────────────────────────────────────────
    Shared bits
    ──────────────────────────────────────────────────────────────────── */
+
+/* ────────────────────────────────────────────────────────────────────────
+   Search a logs collection — BM25 full-text query against a logs-as-a-
+   collection ingested via POST /v1/collections/{name}/ingest-logs. The
+   recommended schema has a `message` (String, bm25=true) field; this box
+   runs the existing `searchCollection` client against it.
+   ──────────────────────────────────────────────────────────────────── */
+
+function LogsCollectionSearch() {
+  const [collection, setCollection] = useState('')
+  const [query, setQuery] = useState('')
+  const [hits, setHits] = useState<SearchHit[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const runSearch = useCallback(async () => {
+    const col = collection.trim()
+    const q = query.trim()
+    if (!col || !q) return
+    setLoading(true)
+    setError(null)
+    try {
+      const { data } = await searchCollection(col, {
+        query: { bm25: { field: 'message', query: q } },
+        limit: 25,
+      })
+      setHits(data.results)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Search failed')
+      setHits(null)
+    } finally {
+      setLoading(false)
+    }
+  }, [collection, query])
+
+  return (
+    <section>
+      <div className="flex items-center gap-2 mb-2 flex-wrap">
+        <SectionHeading icon={<SearchIcon size={12} strokeWidth={2.25} />}>
+          Search a logs collection
+        </SectionHeading>
+      </div>
+      <form
+        className="flex items-end gap-2 flex-wrap mb-2"
+        onSubmit={(e) => {
+          e.preventDefault()
+          runSearch()
+        }}
+      >
+        <div>
+          <DetailLabel>Collection</DetailLabel>
+          <Input
+            value={collection}
+            placeholder="app_logs"
+            onChange={(e) => setCollection(e.target.value)}
+            className="w-[180px] font-mono text-[12px]"
+          />
+        </div>
+        <div className="flex-1 min-w-[200px]">
+          <DetailLabel>Message contains (BM25)</DetailLabel>
+          <Input
+            value={query}
+            placeholder="disk full"
+            onChange={(e) => setQuery(e.target.value)}
+            className="w-full"
+          />
+        </div>
+        <Button
+          size="sm"
+          type="submit"
+          disabled={loading || !collection.trim() || !query.trim()}
+          leading={<SearchIcon size={11} strokeWidth={2.25} />}
+        >
+          Search
+        </Button>
+      </form>
+
+      {error && (
+        <div className="rounded-[var(--radius-sm)] border border-[color-mix(in_oklch,var(--color-error)_30%,transparent)] bg-[color-mix(in_oklch,var(--color-error)_8%,transparent)] px-3 py-2 text-[12px] text-[var(--color-error)] flex items-center gap-2">
+          <AlertCircle size={12} strokeWidth={2.25} />
+          {error}
+        </div>
+      )}
+
+      {hits !== null &&
+        (hits.length === 0 ? (
+          <EmptyState
+            icon={<SearchIcon size={20} strokeWidth={2} />}
+            title="No matches"
+            description="No log records in that collection matched the query."
+          />
+        ) : (
+          <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] overflow-hidden">
+            <table className="w-full text-[12px] tabular-nums">
+              <thead className="bg-[var(--color-bg-elevated)] text-[10.5px] uppercase tracking-[0.06em] text-[var(--color-text-subtle)]">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium w-[72px]">
+                    Level
+                  </th>
+                  <th className="px-3 py-2 text-left font-medium">Message</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--color-border)]">
+                {hits.map((h) => {
+                  const level = String(h.fields['level'] ?? '')
+                  const message = String(h.fields['message'] ?? '')
+                  return (
+                    <tr key={h.id}>
+                      <td className="px-3 py-1.5">
+                        {level ? (
+                          <LevelBadge level={level} />
+                        ) : (
+                          <span className="text-[var(--color-text-disabled)]">
+                            —
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-1.5 text-[var(--color-text)] truncate max-w-[640px]">
+                        {message}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        ))}
+    </section>
+  )
+}
 
 function SectionHeading({
   icon,
