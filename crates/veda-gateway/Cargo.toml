@@ -39,6 +39,9 @@ cron = "0.16"
 chrono = "0.4"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 jsonwebtoken = "9"
 tempfile = "3"
