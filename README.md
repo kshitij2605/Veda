@@ -26,7 +26,7 @@
 - **SIMD-optimized distances** -- SimSIMD-backed AVX-512 / ARM NEON / SVE selected at runtime (AVX2/scalar fallback via `--no-default-features`); 6 metrics (Cosine, Euclidean, DotProduct, Hamming, Manhattan, Jaccard)
 - **SQL-like filter expressions** -- combine vector search with structured metadata filters, including dotted-path queries into nested JSON fields (e.g. `meta.user.tier = "gold"`)
 - **Multi-vector fusion** -- RRF, WeightedSum, and Intersection strategies for cross-modal retrieval
-- **Full-text BM25 + analyzer** -- Lucene-style BM25 scoring with a configurable analyzer pipeline (char filters, tokenizer, **stemming** + **stopword** removal) applied identically at index and query time
+- **Full-text BM25 + analyzer** -- Lucene-style BM25 scoring with a configurable analyzer pipeline (char filters, tokenizer, **stemming** + **stopword** removal) applied identically at index and query time. The scalar filter DSL and row-level security apply to BM25, `match_phrase`, and hybrid queries (not just the dense path)
 - **Phrase / proximity queries** -- positional postings power `match_phrase` (exact-adjacency and slop-N proximity), BM25-ranked
 - **Hybrid search** -- fuse dense vectors, sparse SPLADE vectors, and BM25 full-text in one query (RRF / weighted)
 - **Segment compression** -- sealed stored-field columns are `zstd`-compressed at seal time (the mmap'd vector `.vec` fast path is deliberately left uncompressed)
@@ -74,6 +74,15 @@ See [documentation/2026-06-13-agents-and-mcp.md](documentation/2026-06-13-agents
 - **REST + UI** -- admin API at `/v1/admin/insights` (open events), `/insights/history`, `/insights/rules` (+ `PUT` to tune thresholds/severity/mute/auto-remediate), `/insights/channels`, `POST /insights/run`, `POST /insights/{id}/ack`; plus a Niriksha **Insights** page (event list + detail drawer + rule settings + channel config) with a sidebar open-event badge.
 
 See [documentation/2026-06-14-autoops-ops-advisor.md](documentation/2026-06-14-autoops-ops-advisor.md) for the full Ops Advisor guide.
+
+### Log Insights
+- **In-process log capture** -- a `tracing` layer captures Veda's own logs (≥ `VEDA_LOG_CAPTURE_LEVEL`, default WARN) into a bounded in-memory buffer with structured fields and best-effort `trace_id`/`span_id` correlation (when an OTLP endpoint is configured); query logs also carry `trace_id`.
+- **Semantic log categorization** -- recent WARN/ERROR messages are embedded and clustered by cosine similarity into categories (the vector-DB differentiator over template-only grouping), with a normalized-template fallback when no embedder is configured. `GET /v1/admin/logs/categories`.
+- **Log REST API + Niriksha Logs page** -- `GET /v1/admin/logs` (live tail, level + text filters), `GET /v1/admin/slow-queries` (server-backed, from the per-collection query log), `GET /v1/admin/logs/categories`; plus a Niriksha **Logs** page (tail + level filter + text search + trace_id + categories + slow queries).
+- **Log-content alerting** -- the Ops Advisor gained log rules: `log_error_rate` (ERROR-log rate), `anomaly_error_logs` (baseline/σ spike), and `new_error_category` (a newly-appeared error category) — flowing through the same events + alert channels.
+- **Logs-as-a-collection** -- `POST /v1/collections/{name}/ingest-logs` parses raw log lines (JSON + plain-text) into records (message + level + ts + optional `_expires_at` TTL, auto-embedded when the collection has a vector field), turning Veda into a **searchable log archive** (BM25 + semantic + filter + retention).
+
+See [documentation/2026-06-15-log-insights.md](documentation/2026-06-15-log-insights.md) for the full Log Insights guide.
 
 ## Quick Start
 
