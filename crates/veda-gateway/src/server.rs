@@ -1,13 +1,20 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
 
+use crate::logs::LogBuffer;
 use crate::rest::{build_router, state::AppState};
 
 /// Configuration for the Veda API server.
 pub struct ServerConfig {
     pub listen_addr: String,
     pub data_dir: PathBuf,
+    /// Shared Log Insights capture buffer. The binary builds this and
+    /// installs a [`crate::logs::CaptureLayer`] over the same `Arc`
+    /// before calling [`start_server`], so captured events land on
+    /// `AppState.log_buffer`.
+    pub log_buffer: Arc<LogBuffer>,
 }
 
 /// Start the HTTP server and block until shutdown.
@@ -17,7 +24,11 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         .install_recorder()
         .expect("failed to install Prometheus recorder");
 
-    let app_state = AppState::with_prometheus(&config.data_dir, prometheus_handle);
+    let app_state = AppState::with_prometheus_and_log_buffer(
+        &config.data_dir,
+        prometheus_handle,
+        config.log_buffer.clone(),
+    );
     app_state.load_embedding_from_env().await;
     app_state.load_splade_from_env().await;
     app_state.load_llm_from_env().await;

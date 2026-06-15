@@ -22,6 +22,25 @@ async fn main() {
 
     let otel_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().filter(|s| !s.is_empty());
 
+    // Log Insights capture buffer. The same `Arc` feeds both the
+    // tracing CaptureLayer (below) and `AppState.log_buffer` (via
+    // ServerConfig) so events the layer captures are queryable. The
+    // capture threshold defaults to WARN; override with
+    // `VEDA_LOG_CAPTURE_LEVEL` (ERROR|WARN|INFO|DEBUG|TRACE).
+    let log_buffer = std::sync::Arc::new(veda_gateway::logs::LogBuffer::with_default_capacity());
+    let capture_level = match std::env::var("VEDA_LOG_CAPTURE_LEVEL")
+        .ok()
+        .map(|s| s.trim().to_ascii_uppercase())
+        .as_deref()
+    {
+        Some("ERROR") => tracing::Level::ERROR,
+        Some("WARN") => tracing::Level::WARN,
+        Some("INFO") => tracing::Level::INFO,
+        Some("DEBUG") => tracing::Level::DEBUG,
+        Some("TRACE") => tracing::Level::TRACE,
+        _ => tracing::Level::WARN,
+    };
+
     if let Some(ref endpoint) = otel_endpoint {
         use opentelemetry::trace::TracerProvider as _;
         use tracing_subscriber::layer::SubscriberExt;
@@ -67,6 +86,7 @@ async fn main() {
             .with(fmt_layer)
             .with(otel_trace_layer)
             .with(otel_log_layer)
+            .with(veda_gateway::logs::CaptureLayer::new(log_buffer.clone(), capture_level))
             .init();
 
         // Enable W3C Trace Context propagation for incoming traceparent headers.
@@ -84,6 +104,7 @@ async fn main() {
         tracing_subscriber::registry()
             .with(env_filter)
             .with(fmt_layer)
+            .with(veda_gateway::logs::CaptureLayer::new(log_buffer.clone(), capture_level))
             .init();
     }
 
@@ -118,6 +139,7 @@ async fn main() {
     let config = ServerConfig {
         listen_addr,
         data_dir,
+        log_buffer,
     };
 
     if let Err(e) = start_server(config).await {
