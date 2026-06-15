@@ -64,7 +64,9 @@ fn insights_router() -> Router<state::AppState> {
 /// a raw log-listing endpoint.
 fn logs_router() -> Router<state::AppState> {
     Router::new()
+        .route("/v1/admin/logs", get(logs::list_logs))
         .route("/v1/admin/logs/categories", get(logs::list_categories))
+        .route("/v1/admin/slow-queries", get(logs::list_slow_queries))
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 

@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   PanelLeftClose,
   PanelLeftOpen,
+  ScrollText,
   Search,
   Settings,
   ShieldAlert,
@@ -70,6 +71,7 @@ const GROUPS: NavGroup[] = [
     items: [
       { to: '/insights', label: 'Insights', icon: ShieldAlert, insightsBadge: true },
       { to: '/observability', label: 'Observability', icon: BarChart3 },
+      { to: '/logs', label: 'Logs', icon: ScrollText },
       { to: '/health', label: 'Health', icon: Activity },
       { to: '/indexes', label: 'Indexes', icon: Layers },
     ],

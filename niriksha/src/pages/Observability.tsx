@@ -9,7 +9,8 @@ import {
   TrendingUp,
 } from 'lucide-react'
 import api from '../api/client'
-import { Button, Skeleton } from '../components/primitives'
+import { fetchSlowQueries, type SlowQuery } from '../api/logs'
+import { Button, CopyButton, Skeleton } from '../components/primitives'
 import {
   useSavedObjects,
   type SavedObject,
@@ -29,8 +30,9 @@ interface MetricEntry {
  * and renders a table-with-sparklines + slow-query log + eval-drift
  * trail. Frontend-only for v1: no in-process time-series store, so
  * sparklines come from successive polls (every 5 s while the page is
- * open). When the Phase 5.7 query log lands the slow-query log moves
- * to a server-backed view.
+ * open). The slow-query section is server-backed via
+ * `GET /v1/admin/slow-queries`; the full log live-tail lives on the
+ * dedicated Logs page.
  */
 export function Observability() {
   const [snapshots, setSnapshots] = useState<MetricEntry[][]>([])
@@ -117,7 +119,7 @@ export function Observability() {
             <CollectionTable snapshots={snapshots} />
             <RawMetricsTable latest={latest} />
             <EvalDriftPanel />
-            <ConsoleSlowQueries />
+            <ServerSlowQueries />
           </>
         )}
       </div>
@@ -449,43 +451,34 @@ function EvalDriftPanel() {
 }
 
 /* ────────────────────────────────────────────────────────────────────────
-   Slow queries — from local console history (until Phase 5.7 server log)
+   Slow queries — server-backed from the per-collection query log
+   (GET /v1/admin/slow-queries). Replaces the old browser-local view.
+   The full live-tail + categories live on the dedicated Logs page.
    ──────────────────────────────────────────────────────────────────── */
 
-function ConsoleSlowQueries() {
-  const [items, setItems] = useState<
-    {
-      method: string
-      path: string
-      durationMs: number
-      ts: number
-      status?: number
-      ok: boolean
-    }[]
-  >([])
+function ServerSlowQueries() {
+  const [items, setItems] = useState<SlowQuery[] | null>(null)
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('niriksha.console.history.v1')
-      if (!raw) return
-      const arr = JSON.parse(raw) as typeof items
-      setItems(
-        arr
-          .filter((x) => x.path?.includes('/search') || x.path?.includes('/embed'))
-          .sort((a, b) => b.durationMs - a.durationMs)
-          .slice(0, 20),
-      )
-    } catch {
-      /* ignore */
+    let alive = true
+    fetchSlowQueries({ limit: 20 })
+      .then(({ data }) => {
+        if (alive) setItems(data.slow_queries)
+      })
+      .catch(() => {
+        if (alive) setItems([])
+      })
+    return () => {
+      alive = false
     }
   }, [])
-  if (items.length === 0) return null
+  if (items === null || items.length === 0) return null
   return (
     <section>
       <header className="mb-2">
         <h2 className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)]">
-          Slowest local requests
+          Slowest queries
           <span className="ml-2 font-mono normal-case tracking-normal text-[var(--color-text-muted)]">
-            (browser-local until server query log ships)
+            (server query log · last 24h)
           </span>
         </h2>
       </header>
@@ -493,36 +486,39 @@ function ConsoleSlowQueries() {
         <table className="w-full text-[11.5px] tabular-nums">
           <thead className="bg-[var(--color-bg-elevated)] text-[10px] uppercase tracking-[0.06em] text-[var(--color-text-subtle)]">
             <tr>
-              <th className="px-3 py-1.5 text-left font-medium">Method</th>
-              <th className="px-3 py-1.5 text-left font-medium">Path</th>
+              <th className="px-3 py-1.5 text-left font-medium">Collection</th>
               <th className="px-3 py-1.5 text-right font-medium">Duration</th>
-              <th className="px-3 py-1.5 text-right font-medium">Status</th>
+              <th className="px-3 py-1.5 text-right font-medium">top_k</th>
+              <th className="px-3 py-1.5 text-left font-medium w-[150px]">Trace</th>
               <th className="px-3 py-1.5 text-right font-medium">When</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--color-border)]">
-            {items.map((it, i) => (
+            {items.map((q, i) => (
               <tr key={i} className="hover:bg-[var(--color-bg-hover)]">
-                <td className="px-3 py-1 font-mono text-[var(--color-text-muted)]">
-                  {it.method}
-                </td>
-                <td className="px-3 py-1 font-mono text-[var(--color-text)] truncate max-w-[400px]">
-                  {it.path}
+                <td className="px-3 py-1 font-mono text-[var(--color-text)] truncate max-w-[280px]">
+                  {q.collection}
                 </td>
                 <td className="px-3 py-1 text-right text-[var(--color-text)] font-mono">
-                  {it.durationMs.toFixed(0)}ms
+                  {q.took_ms}ms
                 </td>
-                <td className="px-3 py-1 text-right font-mono">
-                  <span
-                    className={cn(
-                      it.ok ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]',
-                    )}
-                  >
-                    {it.status ?? '—'}
-                  </span>
+                <td className="px-3 py-1 text-right font-mono text-[var(--color-text-muted)]">
+                  {q.top_k}
+                </td>
+                <td className="px-3 py-1">
+                  {q.trace_id ? (
+                    <span className="inline-flex items-center gap-1">
+                      <code className="font-mono text-[10.5px] text-[var(--color-text-subtle)]">
+                        {q.trace_id.slice(0, 12)}…
+                      </code>
+                      <CopyButton value={q.trace_id} />
+                    </span>
+                  ) : (
+                    <span className="text-[var(--color-text-disabled)]">—</span>
+                  )}
                 </td>
                 <td className="px-3 py-1 text-right text-[var(--color-text-subtle)]">
-                  {formatRelative(it.ts)}
+                  {formatRelative(q.ts_ms)}
                 </td>
               </tr>
             ))}
