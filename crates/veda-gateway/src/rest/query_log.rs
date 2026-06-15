@@ -32,6 +32,11 @@ pub struct QueryLogEntry {
     pub top_k: usize,
     pub doc_ids: Vec<String>,
     pub took_ms: u64,
+    /// OTel trace id (32-hex) of the search request, when a valid
+    /// trace context was active. `#[serde(default)]` keeps older
+    /// log files (written before this field existed) loadable.
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }
 
 fn now_ms() -> u64 {
@@ -88,11 +93,13 @@ pub fn record_search(
     doc_ids: Vec<String>,
     took_ms: u64,
 ) {
+    let (trace_id, _span_id) = crate::logs::current_trace_ids();
     let entry = QueryLogEntry {
         ts_ms: now_ms(),
         top_k,
         doc_ids,
         took_ms,
+        trace_id,
     };
     let data_dir = state.inner.data_dir.clone();
     let collection = collection.to_owned();
@@ -279,4 +286,33 @@ pub async fn coverage(
         top_hits,
         orphan_sample,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_log_entry_roundtrips_with_trace_id() {
+        let entry = QueryLogEntry {
+            ts_ms: 123,
+            top_k: 5,
+            doc_ids: vec!["a".into(), "b".into()],
+            took_ms: 7,
+            trace_id: Some("0123456789abcdef0123456789abcdef".into()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: QueryLogEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.trace_id, entry.trace_id);
+        assert_eq!(back.doc_ids, entry.doc_ids);
+    }
+
+    #[test]
+    fn old_entry_without_trace_id_still_deserializes() {
+        // A line written before the `trace_id` field existed.
+        let old = r#"{"ts_ms":1,"top_k":3,"doc_ids":["x"],"took_ms":2}"#;
+        let parsed: QueryLogEntry = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.trace_id, None);
+        assert_eq!(parsed.top_k, 3);
+    }
 }

@@ -15,6 +15,7 @@ use veda_storage::segment_manager::SegmentManager;
 
 use crate::auth::Role;
 use crate::auth_oidc::AuthMode;
+use crate::logs::LogBuffer;
 use crate::rest::saved_objects::SavedObjectStore;
 use crate::scheduler::JobRegistry;
 use veda_coordinator::raft_coordinator::RaftCoordinator;
@@ -238,6 +239,13 @@ pub struct AppStateInner {
     /// mutated by the `/v1/admin/insights/*` REST surface. Loaded from
     /// `{data_dir}/_advisor_config.json` + `{data_dir}/_ops_events.json`.
     pub advisor: Arc<crate::advisor::AdvisorState>,
+    /// In-process Log Insights capture buffer. The same `Arc` is wired
+    /// into the `tracing_subscriber` registry via
+    /// [`crate::logs::CaptureLayer`] at startup (see
+    /// [`crate::server::start_server`]), so events the layer captures
+    /// are visible here. Default constructors create a standalone
+    /// buffer (no layer attached) for tests.
+    pub log_buffer: Arc<LogBuffer>,
 }
 
 /// Build a swappable TSO + the matching `dyn Tso` handle that
@@ -307,6 +315,7 @@ impl AppState {
                 job_registry: Arc::new(JobRegistry::new(data_dir)),
                 tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
                 advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
+                log_buffer: Arc::new(LogBuffer::with_default_capacity()),
             }),
         }
     }
@@ -373,6 +382,7 @@ impl AppState {
                 job_registry: Arc::new(JobRegistry::new(data_dir)),
                 tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
                 advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
+                log_buffer: Arc::new(LogBuffer::with_default_capacity()),
             }),
         }
     }
@@ -420,6 +430,7 @@ impl AppState {
                 job_registry: Arc::new(JobRegistry::new(data_dir)),
                 tool_catalog: Arc::new(crate::agent::catalog::ToolCatalog::new()),
                 advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
+                log_buffer: Arc::new(LogBuffer::with_default_capacity()),
             }),
         }
     }
@@ -443,6 +454,25 @@ impl AppState {
         Arc::get_mut(&mut state.inner)
             .expect("no other references to AppStateInner")
             .prometheus_handle = Some(prometheus_handle);
+        state
+    }
+
+    /// Like [`Self::with_prometheus`] but reuses an externally-built
+    /// [`LogBuffer`] instead of creating a standalone one. The server
+    /// binary constructs the buffer first, installs a
+    /// [`crate::logs::CaptureLayer`] over it in the tracing registry,
+    /// then passes the same `Arc` here so captured events land on
+    /// `AppState`.
+    pub fn with_prometheus_and_log_buffer(
+        data_dir: &Path,
+        prometheus_handle: PrometheusHandle,
+        log_buffer: Arc<LogBuffer>,
+    ) -> Self {
+        let mut state = Self::new(data_dir);
+        let inner = Arc::get_mut(&mut state.inner)
+            .expect("no other references to AppStateInner");
+        inner.prometheus_handle = Some(prometheus_handle);
+        inner.log_buffer = log_buffer;
         state
     }
 
