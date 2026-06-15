@@ -165,7 +165,7 @@ impl LogCategorizer {
     ) -> Option<Vec<LogCategory>> {
         let client = EmbeddingClient::new(model);
 
-        // Embed each distinct message once, populating the cache.
+        // Compute the distinct messages (in buffer order).
         let mut distinct: Vec<&str> = Vec::new();
         let mut seen: HashMap<u64, ()> = HashMap::new();
         for r in records {
@@ -175,31 +175,47 @@ impl LogCategorizer {
             }
         }
 
-        {
-            let mut inner = self.inner.lock().await;
-            for msg in &distinct {
-                let h = hash_msg(msg);
-                if inner.cache.contains_key(&h) {
-                    continue;
-                }
-                match client.embed_text(msg).await {
-                    Ok(emb) => {
-                        inner.cache.insert(h, emb);
-                    }
-                    Err(_) => return None,
-                }
+        // Phase B (brief lock): partition distinct messages into those
+        // already cached vs cache misses. We collect the misses by value
+        // and drop the lock before any network embedding await.
+        let misses: Vec<String> = {
+            let inner = self.inner.lock().await;
+            distinct
+                .iter()
+                .filter(|msg| !inner.cache.contains_key(&hash_msg(msg)))
+                .map(|msg| (*msg).to_string())
+                .collect()
+        };
+
+        // Phase C (NO lock held): embed each miss via the network. On any
+        // embedding error, abort the embedding path so the caller falls
+        // back to normalized grouping.
+        let mut embedded: Vec<(String, Vec<f32>)> = Vec::with_capacity(misses.len());
+        for msg in &misses {
+            match client.embed_text(msg).await {
+                Ok(emb) => embedded.push((msg.clone(), emb)),
+                Err(_) => return None,
             }
         }
 
-        // Build the (msg, emb, ts, level) item list in buffer order.
-        let inner = self.inner.lock().await;
-        let mut items: Vec<(String, Vec<f32>, i64, String)> =
-            Vec::with_capacity(records.len());
-        for r in records {
-            let h = hash_msg(&r.message);
-            let emb = inner.cache.get(&h)?.clone();
-            items.push((r.message.clone(), emb, r.ts_ms, r.level.clone()));
-        }
+        // Phase D (brief lock): insert the newly-embedded misses into the
+        // cache, then build the (msg, emb, ts, level) item list in buffer
+        // order from the combined cache. Lock dropped at end of scope.
+        let items: Vec<(String, Vec<f32>, i64, String)> = {
+            let mut inner = self.inner.lock().await;
+            for (msg, emb) in embedded {
+                inner.cache.insert(hash_msg(&msg), emb);
+            }
+            let mut items = Vec::with_capacity(records.len());
+            for r in records {
+                let h = hash_msg(&r.message);
+                let emb = inner.cache.get(&h)?.clone();
+                items.push((r.message.clone(), emb, r.ts_ms, r.level.clone()));
+            }
+            items
+        };
+
+        // Phase E (no lock): pure clustering.
         Some(cluster_embedded(&items, threshold))
     }
 }
@@ -623,6 +639,38 @@ mod tests {
         assert!(cats[0].representative.contains("<num>"));
         assert_eq!(cats[1].count, 1);
         assert_eq!(cats[1].representative, "disk full");
+    }
+
+    #[tokio::test]
+    async fn categorize_persists_first_seen_across_calls() {
+        let buf = LogBuffer::new(100);
+        buf.push(rec("WARN", "request 1 failed", 100));
+        buf.push(rec("WARN", "disk full", 200));
+
+        let categorizer = LogCategorizer::new();
+        let registry = EmbeddingModelRegistry::new(); // no embedder → fallback, no network
+
+        let first = categorizer
+            .categorize(&buf, &registry, CategorizeOptions::default())
+            .await;
+        assert_eq!(first.len(), 2);
+
+        // Second call sees the same templates at later timestamps; the
+        // persisted first_seen must win (min) across the two calls.
+        let buf2 = LogBuffer::new(100);
+        buf2.push(rec("WARN", "request 9 failed", 500));
+        buf2.push(rec("WARN", "disk full", 600));
+        let second = categorizer
+            .categorize(&buf2, &registry, CategorizeOptions::default())
+            .await;
+
+        for cat in &second {
+            let prev = first.iter().find(|c| c.id == cat.id).unwrap();
+            assert_eq!(
+                cat.first_seen_ms, prev.first_seen_ms,
+                "first_seen_ms should persist across calls"
+            );
+        }
     }
 
     #[tokio::test]
