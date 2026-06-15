@@ -480,6 +480,193 @@ impl Rule for NoCompactionProgress {
     }
 }
 
+/// Data-dir disk utilisation over the configured ceiling. Headline
+/// resource rule. Linux-only signal; skips cleanly when unknown.
+struct DiskSpaceLow;
+impl Rule for DiskSpaceLow {
+    fn id(&self) -> &'static str {
+        "disk_space_low"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::High
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let limit = threshold_f64(cfg, "disk_used_pct", 90.0);
+        let Some(pct) = snap.disk_used_pct else {
+            return Vec::new();
+        };
+        if pct > limit {
+            let free_gib = snap
+                .disk_free_bytes
+                .map(|b| b as f64 / 1.073_741_824e9)
+                .unwrap_or(0.0);
+            return vec![RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Global,
+                severity: self.default_severity(),
+                title: "Disk space low".into(),
+                detail: format!(
+                    "data-dir disk {pct:.0}% used (free {free_gib:.1} GiB; threshold {limit:.0}%). Writes, seals, and compaction will fail when the disk fills."
+                ),
+                recommendation: "Free disk space (delete old data / logs), run compaction to reclaim space, or scale out / add storage.".into(),
+                runbook: Some("GET /v1/admin/metrics".into()),
+                remediation: RemediationAction::None,
+            }];
+        }
+        Vec::new()
+    }
+}
+
+/// CPU utilisation over the configured ceiling, computed from the
+/// jiffy counters across the previous→current snapshot pair.
+struct HighCpu;
+impl Rule for HighCpu {
+    fn id(&self) -> &'static str {
+        "high_cpu"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn check(&self, snap: &OpsSnapshot, history: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let limit = threshold_f64(cfg, "cpu_pct", 85.0);
+        // Needs a previous snapshot to diff the jiffy counters.
+        let Some(prev) = history.previous() else {
+            return Vec::new();
+        };
+        let Some(pct) = crate::advisor::snapshot::cpu_pct(prev, snap) else {
+            return Vec::new();
+        };
+        if pct > limit {
+            return vec![RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Global,
+                severity: self.default_severity(),
+                title: "High CPU utilisation".into(),
+                detail: format!(
+                    "CPU utilisation is {pct:.0}% across {} core(s) (threshold {limit:.0}%). Sustained high CPU degrades query/ingest throughput.",
+                    snap.num_cpus
+                ),
+                recommendation: "Identify the hot path (heavy search/ingest, compaction, embedding); reduce load or scale out.".into(),
+                runbook: Some("GET /v1/admin/metrics".into()),
+                remediation: RemediationAction::None,
+            }];
+        }
+        Vec::new()
+    }
+}
+
+/// 1-minute load average per core over the configured ceiling.
+struct HighLoad;
+impl Rule for HighLoad {
+    fn id(&self) -> &'static str {
+        "high_load"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let limit = threshold_f64(cfg, "load_per_core", 2.0);
+        let Some(load1) = snap.load1 else {
+            return Vec::new();
+        };
+        let cores = snap.num_cpus.max(1) as f64;
+        let per_core = load1 / cores;
+        if per_core > limit {
+            return vec![RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Global,
+                severity: self.default_severity(),
+                title: "High system load".into(),
+                detail: format!(
+                    "1-minute load average is {load1:.2} across {} core(s) = {per_core:.2}/core (threshold {limit:.1}/core). Runnable work exceeds CPU capacity; latency suffers.",
+                    snap.num_cpus
+                ),
+                recommendation: "Check for CPU/IO contention from other processes; reduce concurrent load or scale out.".into(),
+                runbook: Some("GET /v1/admin/metrics".into()),
+                remediation: RemediationAction::None,
+            }];
+        }
+        Vec::new()
+    }
+}
+
+/// Open file descriptors approaching the process limit.
+struct FdExhaustion;
+impl Rule for FdExhaustion {
+    fn id(&self) -> &'static str {
+        "fd_exhaustion"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::High
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let limit = threshold_f64(cfg, "fd_used_ratio", 0.8);
+        let (Some(open), Some(max)) = (snap.open_fds, snap.fd_limit) else {
+            return Vec::new();
+        };
+        if max == 0 {
+            return Vec::new();
+        }
+        let ratio = open as f64 / max as f64;
+        if ratio > limit {
+            return vec![RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Global,
+                severity: self.default_severity(),
+                title: "File descriptor exhaustion".into(),
+                detail: format!(
+                    "{open} of {max} file descriptors in use ({:.0}%, threshold {:.0}%). Exhausting FDs causes accept/open failures across the server.",
+                    ratio * 100.0, limit * 100.0
+                ),
+                recommendation: "Raise the FD limit (ulimit -n / LimitNOFILE) or investigate an FD leak (sockets, segment files).".into(),
+                runbook: Some("GET /v1/admin/metrics".into()),
+                remediation: RemediationAction::None,
+            }];
+        }
+        Vec::new()
+    }
+}
+
+/// System-wide available memory has fallen to a small fraction of total.
+struct SystemMemoryLow;
+impl Rule for SystemMemoryLow {
+    fn id(&self) -> &'static str {
+        "system_memory_low"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let limit = threshold_f64(cfg, "mem_available_ratio", 0.1);
+        let (Some(total), Some(avail)) = (snap.mem_total_bytes, snap.mem_available_bytes) else {
+            return Vec::new();
+        };
+        if total == 0 {
+            return Vec::new();
+        }
+        let ratio = avail as f64 / total as f64;
+        if ratio < limit {
+            return vec![RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Global,
+                severity: self.default_severity(),
+                title: "System memory low".into(),
+                detail: format!(
+                    "Only {:.1} GiB of {:.1} GiB system memory available ({:.0}%, threshold {:.0}%). The OOM killer may terminate the process.",
+                    avail as f64 / 1.073_741_824e9,
+                    total as f64 / 1.073_741_824e9,
+                    ratio * 100.0,
+                    limit * 100.0
+                ),
+                recommendation: "Reduce in-memory footprint (quantization, use_log_primary), stop competing processes, or add RAM / scale out.".into(),
+                runbook: Some("GET /v1/admin/metrics".into()),
+                remediation: RemediationAction::None,
+            }];
+        }
+        Vec::new()
+    }
+}
+
 /// The built-in rule catalog.
 pub fn catalog() -> Vec<Box<dyn Rule>> {
     vec![
@@ -495,6 +682,11 @@ pub fn catalog() -> Vec<Box<dyn Rule>> {
         Box::new(ReplicaLag),
         Box::new(NodeUnhealthy),
         Box::new(NoCompactionProgress),
+        Box::new(DiskSpaceLow),
+        Box::new(HighCpu),
+        Box::new(HighLoad),
+        Box::new(FdExhaustion),
+        Box::new(SystemMemoryLow),
     ]
 }
 
@@ -819,5 +1011,162 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), n, "duplicate rule id in catalog");
         assert!(n >= 10, "expected at least 10 rules, got {n}");
+    }
+
+    // --- resource rules ------------------------------------------------
+
+    #[test]
+    fn disk_space_low_fires_high() {
+        let mut snap = base_snapshot();
+        snap.disk_used_pct = Some(95.0);
+        snap.disk_free_bytes = Some(5 * 1024 * 1024 * 1024);
+        let hits = DiskSpaceLow.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "disk_space_low");
+        assert_eq!(hits[0].scope, Scope::Global);
+        assert_eq!(hits[0].severity, Severity::High);
+        assert!(!hits[0].recommendation.is_empty());
+    }
+
+    #[test]
+    fn disk_space_low_silent_under_threshold() {
+        let mut snap = base_snapshot();
+        snap.disk_used_pct = Some(50.0);
+        let hits = DiskSpaceLow.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn disk_space_low_skips_on_none() {
+        let snap = base_snapshot(); // disk_used_pct == None
+        let hits = DiskSpaceLow.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn high_cpu_fires_over_threshold() {
+        // prev busy 100/total 1000, now busy 1050/total 2000:
+        // busy_delta 950 / total_delta 1000 = 95%.
+        let mut prev = base_snapshot();
+        prev.cpu_busy_jiffies = Some(100);
+        prev.cpu_total_jiffies = Some(1000);
+        let mut now = base_snapshot();
+        now.cpu_busy_jiffies = Some(1050);
+        now.cpu_total_jiffies = Some(2000);
+
+        let mut hist = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+        hist.push(prev);
+        hist.push(now.clone());
+
+        let hits = HighCpu.check(&now, &hist, &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "high_cpu");
+        assert_eq!(hits[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn high_cpu_silent_when_low() {
+        // busy_delta 100 / total_delta 1000 = 10%.
+        let mut prev = base_snapshot();
+        prev.cpu_busy_jiffies = Some(100);
+        prev.cpu_total_jiffies = Some(1000);
+        let mut now = base_snapshot();
+        now.cpu_busy_jiffies = Some(200);
+        now.cpu_total_jiffies = Some(2000);
+
+        let mut hist = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+        hist.push(prev);
+        hist.push(now.clone());
+
+        let hits = HighCpu.check(&now, &hist, &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn high_cpu_skips_without_previous() {
+        let mut now = base_snapshot();
+        now.cpu_busy_jiffies = Some(1050);
+        now.cpu_total_jiffies = Some(2000);
+        let hits = HighCpu.check(&now, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn high_load_fires_per_core() {
+        let mut snap = base_snapshot();
+        snap.load1 = Some(8.0);
+        snap.num_cpus = 2; // 4.0/core > 2.0
+        let hits = HighLoad.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "high_load");
+        assert_eq!(hits[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn high_load_silent_when_low() {
+        let mut snap = base_snapshot();
+        snap.load1 = Some(1.0);
+        snap.num_cpus = 2; // 0.5/core
+        let hits = HighLoad.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn high_load_skips_on_none() {
+        let snap = base_snapshot(); // load1 == None
+        let hits = HighLoad.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn fd_exhaustion_fires() {
+        let mut snap = base_snapshot();
+        snap.open_fds = Some(900);
+        snap.fd_limit = Some(1000); // 0.9 > 0.8
+        let hits = FdExhaustion.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "fd_exhaustion");
+        assert_eq!(hits[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn fd_exhaustion_silent_when_low() {
+        let mut snap = base_snapshot();
+        snap.open_fds = Some(100);
+        snap.fd_limit = Some(1000); // 0.1
+        let hits = FdExhaustion.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn fd_exhaustion_skips_on_none() {
+        let mut snap = base_snapshot();
+        snap.open_fds = Some(900);
+        snap.fd_limit = None;
+        assert!(FdExhaustion
+            .check(&snap, &empty_history(), &RuleConfig::default())
+            .is_empty());
+        let mut snap2 = base_snapshot();
+        snap2.open_fds = None;
+        snap2.fd_limit = Some(1000);
+        assert!(FdExhaustion
+            .check(&snap2, &empty_history(), &RuleConfig::default())
+            .is_empty());
+    }
+
+    #[test]
+    fn resource_rules_skip_on_resourceless_snapshot() {
+        // A snapshot with no resource signals must trip none of them.
+        let snap = base_snapshot();
+        let hits = run_rules(&catalog(), &snap, &empty_history(), &AdvisorConfig::default());
+        for id in [
+            "disk_space_low",
+            "high_cpu",
+            "high_load",
+            "fd_exhaustion",
+            "system_memory_low",
+        ] {
+            assert!(find(&hits, id).is_none(), "{id} fired on resourceless snapshot");
+        }
     }
 }
