@@ -9,6 +9,7 @@
 pub mod buffer;
 pub mod categorize;
 pub mod layer;
+pub mod parse;
 
 pub use buffer::{LogBuffer, LogRecord, DEFAULT_CAPACITY};
 pub use categorize::{LogCategorizer, LogCategory};

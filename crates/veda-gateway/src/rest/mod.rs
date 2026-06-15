@@ -18,6 +18,7 @@ pub mod document;
 pub mod embed;
 pub mod embed_insert;
 pub mod evaluate;
+pub mod ingest_logs;
 pub mod insights;
 pub mod jobs;
 pub mod llm;
@@ -182,6 +183,13 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/collections/{name}/embed-insert",
             post(embed_insert::embed_insert),
+        )
+        // Logs-as-a-collection ingest — same auth/tenant as /insert
+        // (a WRITE, not admin-only). Parses raw log lines and inserts
+        // them through the insert / embed-insert path.
+        .route(
+            "/v1/collections/{name}/ingest-logs",
+            post(ingest_logs::ingest_logs),
         )
         .route(
             "/v1/collections/{name}/records/{id}",
