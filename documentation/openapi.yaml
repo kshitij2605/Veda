@@ -415,6 +415,42 @@ components:
             from: { type: string }
             to: { type: array, items: { type: string } }
             min_severity: { type: string, enum: [high, medium, low] }
+    LogRecord:
+      type: object
+      properties:
+        ts_ms: { type: integer }
+        level: { type: string, enum: [ERROR, WARN, INFO, DEBUG, TRACE] }
+        target: { type: string }
+        message: { type: string }
+        fields: { type: object, additionalProperties: true }
+        trace_id: { type: string, nullable: true, description: "best-effort, from the OTel span context (null when no OTLP endpoint)" }
+        span_id: { type: string, nullable: true }
+    LogCategory:
+      type: object
+      description: A semantic cluster of similar WARN/ERROR log messages.
+      properties:
+        id: { type: string }
+        representative: { type: string }
+        count: { type: integer }
+        max_severity: { type: string }
+        examples: { type: array, items: { type: string } }
+        first_seen_ms: { type: integer }
+        last_seen_ms: { type: integer }
+    SlowQuery:
+      type: object
+      properties:
+        collection: { type: string }
+        ts_ms: { type: integer }
+        took_ms: { type: integer }
+        top_k: { type: integer }
+        trace_id: { type: string, nullable: true }
+    IngestLogsRequest:
+      type: object
+      required: [lines]
+      properties:
+        lines: { type: array, items: { type: string }, description: "raw log lines (JSON objects or plain text)" }
+        default_level: { type: string, description: "level for lines with no detectable level (default INFO)" }
+        ttl_secs: { type: integer, description: "if set, each record gets _expires_at = now + ttl_secs" }
 
 paths:
   /v1/admin/health:
@@ -679,9 +715,40 @@ paths:
       responses:
         '200': { description: ok }
 
+  /v1/collections/{name}/ingest-logs:
+    post:
+      summary: Ingest raw log lines as records (searchable log archive).
+      description: |
+        Parses each line (JSON object or plain text) into a record with
+        `message`, `level`, `ts` (+ optional `_expires_at` from `ttl_secs`),
+        and inserts via the insert / embed-insert path (auto-embeds
+        `message` when the collection has an `auto_embed` vector field).
+        Recommended schema: `message` (string, bm25), `level` (string,
+        filterable), `ts` (int64, filterable), optional `embedding`
+        (vector, auto_embed source=message). Same auth/tenant as `/insert`.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: name, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IngestLogsRequest' }
+      responses:
+        '201':
+          description: ingested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ingested: { type: integer }
+        '404': { description: collection not found }
+
   /v1/collections/{name}/search:
     post:
       summary: Search a collection.
+      description: "Dense, sparse, BM25, match_phrase, hybrid, colpali, multi_vector. The scalar `filter` (and row-level security) applies to ALL paths including the lexical (BM25/match_phrase/hybrid) ones."
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -1005,6 +1072,55 @@ paths:
       security: [ { bearerAuth: [] } ]
       responses:
         '200': { description: ok }
+
+  /v1/admin/logs:
+    get:
+      summary: Recent captured logs from the in-process buffer (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: query, name: level, required: false, schema: { type: string, enum: [ERROR, WARN, INFO, DEBUG, TRACE] } }
+        - { in: query, name: q, required: false, schema: { type: string, description: "substring filter over message + target" } }
+        - { in: query, name: limit, required: false, schema: { type: integer, default: 200 } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs: { type: array, items: { $ref: '#/components/schemas/LogRecord' } }
+
+  /v1/admin/logs/categories:
+    get:
+      summary: Semantic categories of recent WARN/ERROR logs (admin-only).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  categories: { type: array, items: { $ref: '#/components/schemas/LogCategory' } }
+
+  /v1/admin/slow-queries:
+    get:
+      summary: Slowest recent queries, server-backed from the query log (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: query, name: collection, required: false, schema: { type: string, description: "omit to scan all tenant collections" } }
+        - { in: query, name: limit, required: false, schema: { type: integer, default: 20 } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slow_queries: { type: array, items: { $ref: '#/components/schemas/SlowQuery' } }
 
   /v1/admin/insights:
     get:

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-06-15
+
+Log Insights — capture, trace correlation, semantic categorization, log-content alerting, and a logs-as-a-collection ingest path — plus a BM25/lexical filter+RLS fix. Validated end-to-end against a live server. See `documentation/2026-06-15-log-insights.md`.
+
+### Added
+- **In-process log capture** — a `tracing` layer (`crates/veda-gateway/src/logs/`) captures Veda's own log events at/above `VEDA_LOG_CAPTURE_LEVEL` (default WARN) into a bounded ring buffer (`LogBuffer` on `AppState`); `LogRecord` carries level/target/message/fields + best-effort `trace_id`/`span_id` from the current OTel span. `QueryLogEntry` also gained `trace_id`. The `on_event` path is synchronous, non-blocking, and poison-safe.
+- **Semantic log categorization** — recent WARN/ERROR messages are embedded (async, cache-aware) and greedily clustered by cosine into `LogCategory` groups, with a normalized-template fallback when no embedder is configured. `GET /v1/admin/logs/categories`.
+- **Log REST API + Niriksha Logs page** — `GET /v1/admin/logs?level=&q=&limit=` (from the buffer) and `GET /v1/admin/slow-queries?collection=&limit=` (server-backed, from the per-collection `_query_log.jsonl`, replacing the old browser-local view), both admin-gated; plus a Niriksha **Logs** page (live tail, level filter, text search, trace_id, categories panel, slow-query table) + nav + command-palette entry.
+- **Log-content alerting** — the Ops Advisor snapshot gained `error_log_count`/`warn_log_count`; new rules `log_error_rate` (threshold), `anomaly_error_logs` (EWMA/σ), and `new_error_category` (a newly-appeared error category, detected in a lock-free Phase 0 of the tick) — all flow through the existing event store + alert channels and are tunable via `/v1/admin/insights/rules`.
+- **Logs-as-a-collection ingest** — `POST /v1/collections/{name}/ingest-logs { lines, default_level?, ttl_secs? }` parses raw log lines (JSON objects + plain-text RFC3339/level fallback) into records (`message`, `level`, `ts`, optional `_expires_at`), inserting via the existing insert / embed-insert path (auto-embeds `message` when the collection has an `auto_embed` vector field). Makes Veda a searchable log archive (BM25 + semantic + filter + TTL).
+
+### Fixed
+- **BM25 / lexical search now honors the scalar filter and RLS** — `execute_bm25`, `execute_match_phrase`, and the BM25 leg of hybrid previously ignored the request `filter`/`filter_expr`, so filtering and **row-level security were not applied to lexical queries**. They now resolve the effective filter (preferring the RLS-injected `filter_expr`, else parsing `filter`), oversample candidates, drop non-matches via `evaluate_record`, and intersect MVCC visibility — matching the dense path. (Follow-up: the fixed `k×10` oversample window could under-recall for an extremely common term + highly selective filter.)
+
 ## [0.2.5] - 2026-06-14
 
 Ops Advisor ("Insights") — an AutoOps-style automated operations layer (detection → root-cause → recommendation → alerting), validated end-to-end against a live server. See `documentation/2026-06-14-autoops-ops-advisor.md` for the full guide.
