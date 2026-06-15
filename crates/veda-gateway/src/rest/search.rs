@@ -452,16 +452,19 @@ pub async fn search(
         // Built-in BM25 full-text search against a string field with
         // `bm25 = true` in the schema. Runs the same tokenizer at ingest
         // and query time; no Lucene/Tantivy bundling required.
-        execute_bm25(&state, &name, bm25_query, req.limit).await?
+        let eff_filter = effective_filter(&req);
+        execute_bm25(&state, &name, bm25_query, req.limit, eff_filter.as_ref(), effective_read_ts).await?
     } else if let Some(ref phrase_query) = req.query.match_phrase {
         // Phrase / proximity search: requires the analyzed query terms to
         // appear in order with at most `slop` extra positions between them.
-        execute_match_phrase(&state, &name, phrase_query, req.limit).await?
+        let eff_filter = effective_filter(&req);
+        execute_match_phrase(&state, &name, phrase_query, req.limit, eff_filter.as_ref(), effective_read_ts).await?
     } else if let Some(ref hybrid_query) = req.query.hybrid {
         // Dense + BM25 hybrid via Reciprocal Rank Fusion. Each leg is
         // scored independently; RRF folds the rankings into one set.
         // dense_weight in [0, 1] biases the RRF weighting.
         let metric = resolve_metric(&schema, &hybrid_query.dense.field);
+        let eff_filter = effective_filter(&req);
         let (hits, legs) = execute_hybrid_dense_bm25(
             &state,
             &name,
@@ -471,6 +474,7 @@ pub async fn search(
             metric,
             req.limit,
             effective_read_ts,
+            eff_filter.as_ref(),
         )
         .await?;
         if req.explain {
@@ -733,16 +737,55 @@ fn execute_single_vector(
     Ok((hits, timings))
 }
 
+/// Resolve the *effective* scalar filter for a search request as an AST,
+/// mirroring the precedence the dense path relies on: a pre-parsed
+/// `filter_expr` (e.g. RLS owner-injection) wins; otherwise parse the raw
+/// `filter` string. The lexical (BM25 / match_phrase / hybrid) paths apply
+/// this predicate per-candidate via `evaluate_record`, since they bypass the
+/// scalar-index filtering the vector executor does.
+///
+/// Because `filter_expr` carries the RLS-injected owner predicate, honoring
+/// it here means BM25/hybrid searches now enforce row-level security exactly
+/// like the dense path.
+fn effective_filter(req: &SearchRequest) -> Option<FilterExpr> {
+    if let Some(ref fe) = req.filter_expr {
+        return Some(fe.clone());
+    }
+    req.filter
+        .as_deref()
+        .and_then(|s| veda_query::filter::parser::FilterParser::parse(s).ok())
+}
+
+/// How many candidate docs each posting-list scan should request when a
+/// scalar filter is in play. We oversample so that, after dropping
+/// candidates that fail `evaluate_record`, we still have a good chance of
+/// filling `k` survivors. With no filter we just request `k`.
+fn bm25_fetch_k(k: usize, has_filter: bool) -> usize {
+    if has_filter {
+        (k.max(1)).saturating_mul(10)
+    } else {
+        k.max(1)
+    }
+}
+
 /// Run a BM25 full-text search across all sealed segments of every shard
 /// in the collection. Each segment scores independently; we merge the
 /// per-segment top-k by raw BM25 score (no further normalization) and
 /// take the global top-k. Returns hits with `distance = -bm25_score`
 /// so that lower-is-better stays consistent across query types.
+///
+/// When `filter_expr` is set, each candidate's resolved `Record` is checked
+/// with `evaluate_record`; only survivors are kept. We oversample the
+/// posting-list scan (see `bm25_fetch_k`) so filtering doesn't under-fill
+/// `k`. When `read_ts` is set (MVCC), candidates not visible at that
+/// timestamp are dropped, matching the dense path's visibility semantics.
 async fn execute_bm25(
     state: &AppState,
     collection: &str,
     query: &Bm25Query,
     k: usize,
+    filter_expr: Option<&FilterExpr>,
+    read_ts: Option<u128>,
 ) -> Result<Vec<SearchHit>, (StatusCode, Json<ErrorResponse>)> {
     let managers = state.inner.segment_managers.read().await;
     let Some(shard_map) = managers.get(collection) else {
@@ -754,6 +797,8 @@ async fn execute_bm25(
         ));
     };
 
+    let fetch_k = bm25_fetch_k(k, filter_expr.is_some());
+
     // (record_uuid, bm25_score) merged across shards / growing+sealed
     // segments. Growing segments maintain an in-memory Bm25Index updated
     // on insert so freshly-ingested rows are immediately searchable —
@@ -764,12 +809,21 @@ async fn execute_bm25(
         // Growing segment
         let gs = sm.growing_segment();
         if let Some(idx) = gs.bm25_index(&query.field) {
-            let scored = idx.search(&query.query, k.max(1));
+            let visible = read_ts.and_then(|ts| gs.visible_doc_ids_at(ts));
+            let scored = idx.search(&query.query, fetch_k);
             for (doc_id, score) in scored {
                 if gs.is_deleted(doc_id) {
                     continue;
                 }
+                if let Some(ref vis) = visible
+                    && !vis.contains(doc_id)
+                {
+                    continue;
+                }
                 if let Some(rec) = gs.get_record(doc_id) {
+                    if filter_expr.is_some_and(|fe| !veda_query::filter::evaluate_record(fe, rec)) {
+                        continue;
+                    }
                     merged.push((rec.id(), score));
                 }
             }
@@ -779,12 +833,21 @@ async fn execute_bm25(
             let Some(idx) = handle.reader.bm25_index(&query.field) else {
                 continue;
             };
-            let scored = idx.search(&query.query, k.max(1));
+            let visible = read_ts.and_then(|ts| handle.reader.visible_doc_ids_at(ts));
+            let scored = idx.search(&query.query, fetch_k);
             for (doc_id, score) in scored {
                 if handle.reader.delete_bitmap().is_deleted(doc_id) {
                     continue;
                 }
+                if let Some(ref vis) = visible
+                    && !vis.contains(doc_id)
+                {
+                    continue;
+                }
                 if let Ok(rec) = handle.reader.get_record(doc_id) {
+                    if filter_expr.is_some_and(|fe| !veda_query::filter::evaluate_record(fe, &rec)) {
+                        continue;
+                    }
                     merged.push((rec.id(), score));
                 }
             }
@@ -815,6 +878,8 @@ async fn execute_match_phrase(
     collection: &str,
     query: &MatchPhraseQuery,
     k: usize,
+    filter_expr: Option<&FilterExpr>,
+    read_ts: Option<u128>,
 ) -> Result<Vec<SearchHit>, (StatusCode, Json<ErrorResponse>)> {
     let managers = state.inner.segment_managers.read().await;
     let Some(shard_map) = managers.get(collection) else {
@@ -826,17 +891,28 @@ async fn execute_match_phrase(
         ));
     };
 
+    let fetch_k = bm25_fetch_k(k, filter_expr.is_some());
+
     let mut merged: Vec<(uuid::Uuid, f32)> = Vec::new();
     for sm in shard_map.values() {
         // Growing segment
         let gs = sm.growing_segment();
         if let Some(idx) = gs.bm25_index(&query.field) {
-            let scored = idx.search_phrase(&query.query, query.slop, k.max(1));
+            let visible = read_ts.and_then(|ts| gs.visible_doc_ids_at(ts));
+            let scored = idx.search_phrase(&query.query, query.slop, fetch_k);
             for (doc_id, score) in scored {
                 if gs.is_deleted(doc_id) {
                     continue;
                 }
+                if let Some(ref vis) = visible
+                    && !vis.contains(doc_id)
+                {
+                    continue;
+                }
                 if let Some(rec) = gs.get_record(doc_id) {
+                    if filter_expr.is_some_and(|fe| !veda_query::filter::evaluate_record(fe, rec)) {
+                        continue;
+                    }
                     merged.push((rec.id(), score));
                 }
             }
@@ -846,12 +922,21 @@ async fn execute_match_phrase(
             let Some(idx) = handle.reader.bm25_index(&query.field) else {
                 continue;
             };
-            let scored = idx.search_phrase(&query.query, query.slop, k.max(1));
+            let visible = read_ts.and_then(|ts| handle.reader.visible_doc_ids_at(ts));
+            let scored = idx.search_phrase(&query.query, query.slop, fetch_k);
             for (doc_id, score) in scored {
                 if handle.reader.delete_bitmap().is_deleted(doc_id) {
                     continue;
                 }
+                if let Some(ref vis) = visible
+                    && !vis.contains(doc_id)
+                {
+                    continue;
+                }
                 if let Ok(rec) = handle.reader.get_record(doc_id) {
+                    if filter_expr.is_some_and(|fe| !veda_query::filter::evaluate_record(fe, &rec)) {
+                        continue;
+                    }
                     merged.push((rec.id(), score));
                 }
             }
@@ -897,12 +982,17 @@ async fn execute_hybrid_dense_bm25(
     metric: DistanceMetric,
     k: usize,
     read_ts: Option<u128>,
+    filter_expr: Option<&FilterExpr>,
 ) -> Result<(Vec<SearchHit>, HybridLegs), (StatusCode, Json<ErrorResponse>)> {
     let dense_w = hybrid.dense_weight.clamp(0.0, 1.0);
     let bm25_w = 1.0 - dense_w;
 
+    // Dense leg already applies the effective filter via the executor
+    // request (req.filter / req.filter_expr). Pass the same effective
+    // filter into the BM25 leg so both legs are scoped identically.
     let (dense_hits, _t) = execute_single_vector(executor, &hybrid.dense, req, metric, read_ts)?;
-    let bm25_hits = execute_bm25(state, collection, &hybrid.bm25, k.max(req.limit)).await?;
+    let bm25_hits =
+        execute_bm25(state, collection, &hybrid.bm25, k.max(req.limit), filter_expr, read_ts).await?;
 
     let dense_top: Vec<String> = dense_hits.iter().map(|h| h.id.clone()).collect();
     let bm25_top: Vec<String> = bm25_hits.iter().map(|h| h.id.clone()).collect();

@@ -115,8 +115,7 @@ async fn ingest_logs_filter_by_level() {
 
     // A `level = "ERROR"` scalar filter must select only the two error
     // lines. We assert this via the aggregate `count` endpoint, which
-    // applies the filter to the stored records (the built-in BM25 leg
-    // does not honor scalar filters — see search.rs `execute_bm25`).
+    // applies the filter to the stored records.
     let r = client()
         .get(format!("{base}/v1/collections/logs_filter/aggregate"))
         .query(&[
