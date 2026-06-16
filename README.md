@@ -91,6 +91,14 @@ See [documentation/2026-06-15-log-insights.md](documentation/2026-06-15-log-insi
 
 See [documentation/2026-06-16-node-resource-signals.md](documentation/2026-06-16-node-resource-signals.md) for the full Node Resource Signals guide.
 
+### Service Reliability (SLOs)
+- **SLOs with error budgets** -- define service-level objectives (`{ kind, target_pct, window_secs, fast_burn, slow_burn }`) for **latency** (% of queries under a threshold), **availability**, **error rate**, or a **synthetic** probe. Each advisor tick records good/total into a persisted 60s-bucketed rolling counter (up to 30 days) and computes `sli_pct`, `error_budget_remaining_pct` (can go negative = over budget), and **Google-SRE multi-window burn rate** (`burn_rate = (bad/total)/allowed_bad`; 1.0 = exactly on budget) over the fast and slow windows. Three rules — `slo_burn_rate_fast` (High), `slo_burn_rate_slow` (Medium), `slo_budget_exhausted` (High) — open events through the same events + alert channels.
+- **Synthetic self-checks** -- in-process probes that run at the start of each advisor tick: `health` (the readiness dependency checks), `search` (the internal query executor, top-1), and `embed` (the async embedding client). Results feed a per-probe uptime/consecutive-failure summary, the `synthetic` SLO SLI, and a `synthetic_failing` rule (High, fires after K consecutive failures, default 3). No external load generator or browser — Veda checks its own critical paths.
+- **AI ops triage** -- `POST /v1/admin/insights/{event_id}/triage` runs a built-in read-only **`veda-ops`** agent over the event: it autonomously calls 4 ops tools (`get_insights`, `get_logs`, `get_resources`, `get_slo_status`) and returns `{ explanation, steps[] }` (a root cause + next steps with a full reasoning/tool trace). Returns **503** when no LLM is configured (`VEDA_LLM_ENDPOINT` unset).
+- **REST + UI** -- admin API at `/v1/admin/slos` (+ `/slos/{id}`, `/slos/{id}/status`), `/v1/admin/synthetics` (+ `/synthetics/{id}`, `/synthetics/{id}/results`), and `POST /v1/admin/insights/{event_id}/triage`; plus a Niriksha **SLOs** page (SLI %, error-budget gauge, fast/slow burn) in the Observe nav, a **Synthetics** panel on System Health, and a **"Triage with AI"** button on the Insights event drawer.
+
+See [documentation/2026-06-16-service-reliability-slo.md](documentation/2026-06-16-service-reliability-slo.md) for the full Service Reliability guide.
+
 ## Quick Start
 
 ### Docker Compose (recommended)
@@ -208,6 +216,9 @@ Veda runs in two modes; the admin REST surface differs depending on which one is
 | `GET /v1/admin/health` / `readiness` | ✓ | ✓ | Always reachable |
 | `GET /v1/admin/metrics` | ✓ | ✓ | Prometheus text format |
 | `GET /v1/admin/resources` | ✓ | ✓ | Latest node-resource snapshot (disk/CPU/load/fds/memory/RSS); fields `null` off-Linux |
+| `GET /v1/admin/slos` | ✓ | ✓ | SLO defs + per-SLO SLI/error-budget/burn-rate (`/slos/{id}/status`); CRUD admin-only |
+| `GET /v1/admin/synthetics` | ✓ | ✓ | Synthetic-probe defs + results (`/synthetics/{id}/results`); probes run in-process each tick |
+| `POST /v1/admin/insights/{event_id}/triage` | ✓ | ✓ | AI triage of an event via the `veda-ops` agent; 404 unknown event, 503 when no LLM |
 | `GET /v1/admin/nodes` | ✓ (1 node) | ✓ (N nodes) | `mode` field reports which path is active |
 | `GET /v1/admin/region_topology` | ✓ (returns `{topology:null}`) | ✓ | Read works even without `_meta` |
 | `PUT /v1/admin/region_topology` | ✗ 503 | ✓ | Mutates `_meta::shard_ensembles` |

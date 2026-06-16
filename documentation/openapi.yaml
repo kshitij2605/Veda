@@ -373,6 +373,80 @@ components:
         closed_at_ms: { type: integer, nullable: true }
         acknowledged: { type: boolean }
         remediation_note: { type: string, nullable: true }
+    SloDef:
+      type: object
+      description: A service-level objective. `id` is required on create/update.
+      required: [id, name, kind, target_pct, window_secs, fast_burn, slow_burn]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        kind:
+          type: object
+          description: |
+            Internally-tagged on `kind` (snake_case): `latency` { threshold_ms },
+            `availability`, `error_rate`, `synthetic` { probe_id }.
+          properties:
+            kind: { type: string, enum: [latency, availability, error_rate, synthetic] }
+            threshold_ms: { type: integer, description: "latency only" }
+            probe_id: { type: string, description: "synthetic only" }
+        target_pct: { type: number, description: "objective, e.g. 99.9" }
+        window_secs: { type: integer, description: "SLI compliance window" }
+        fast_burn: { $ref: '#/components/schemas/BurnWindow' }
+        slow_burn: { $ref: '#/components/schemas/BurnWindow' }
+    BurnWindow:
+      type: object
+      properties:
+        window_secs: { type: integer }
+        threshold: { type: number, description: "burn-rate alert threshold" }
+    SloStatus:
+      type: object
+      description: |
+        Computed SLI / error-budget / burn-rate status for one SLO.
+        `error_budget_remaining_pct` can go negative (over budget,
+        clamped floor -1000); burn_rate 1.0 = exactly on budget, >1 = too fast.
+      properties:
+        sli_pct: { type: number }
+        error_budget_remaining_pct: { type: number }
+        burn_rate_fast: { type: number }
+        burn_rate_slow: { type: number }
+        breaching_fast: { type: boolean }
+        breaching_slow: { type: boolean }
+        budget_exhausted: { type: boolean }
+        compliant: { type: boolean }
+    SyntheticProbe:
+      type: object
+      description: An in-process synthetic self-check. `id` is required on create/update.
+      required: [id, name, kind, interval_secs, timeout_ms]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        kind:
+          type: object
+          description: |
+            Internally-tagged on `kind`: `health`, `search` { collection, query? },
+            `embed` { text }.
+          properties:
+            kind: { type: string, enum: [health, search, embed] }
+            collection: { type: string, description: "search only" }
+            query: { type: string, description: "search only, optional" }
+            text: { type: string, description: "embed only" }
+        interval_secs: { type: integer }
+        timeout_ms: { type: integer }
+    ProbeResult:
+      type: object
+      properties:
+        ts_ms: { type: integer }
+        ok: { type: boolean }
+        latency_ms: { type: integer }
+        error: { type: string, nullable: true }
+    SyntheticSummary:
+      type: object
+      properties:
+        consecutive_failures: { type: integer }
+        last_ok: { type: boolean }
+        last_latency_ms: { type: integer, nullable: true }
+        uptime_pct: { type: number }
+        last_ts_ms: { type: integer, nullable: true }
     RuleConfigUpdate:
       type: object
       description: Partial rule config; any field may be omitted.
@@ -573,6 +647,170 @@ paths:
                       total_bytes: { type: integer, nullable: true }
                       available_bytes: { type: integer, nullable: true }
                   rss_bytes: { type: integer, nullable: true }
+
+  /v1/admin/slos:
+    get:
+      summary: List SLO definitions (admin-only).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slos:
+                    type: array
+                    items: { $ref: '#/components/schemas/SloDef' }
+    post:
+      summary: Create or overwrite an SLO (admin-only).
+      description: "The body must include an explicit `id`. Persisted; returns the stored definition."
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SloDef' }
+      responses:
+        '200': { description: stored }
+
+  /v1/admin/slos/{id}:
+    get:
+      summary: Get one SLO definition (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SloDef' }
+        '404': { description: no such SLO }
+    put:
+      summary: Update an SLO (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SloDef' }
+      responses:
+        '200': { description: stored }
+        '404': { description: no such SLO }
+    delete:
+      summary: Delete an SLO (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: deleted }
+        '404': { description: no such SLO }
+
+  /v1/admin/slos/{id}/status:
+    get:
+      summary: Current SLI / error-budget / burn-rate status for one SLO (admin-only).
+      description: |
+        Computed from the persisted bucketed rolling counter over the SLO's
+        window and the fast/slow burn windows. `error_budget_remaining_pct`
+        can go negative (over budget, clamped floor -1000); a burn_rate of
+        1.0 means exactly on budget, >1 means burning too fast.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SloStatus' }
+        '404': { description: no such SLO }
+
+  /v1/admin/synthetics:
+    get:
+      summary: List synthetic-probe definitions (admin-only).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  probes:
+                    type: array
+                    items: { $ref: '#/components/schemas/SyntheticProbe' }
+    post:
+      summary: Create or overwrite a synthetic probe (admin-only).
+      description: "The body must include an explicit `id`. Probes run in-process at the start of each advisor tick."
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SyntheticProbe' }
+      responses:
+        '200': { description: stored }
+
+  /v1/admin/synthetics/{id}:
+    get:
+      summary: Get one synthetic-probe definition (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyntheticProbe' }
+        '404': { description: no such probe }
+    put:
+      summary: Update a synthetic probe (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SyntheticProbe' }
+      responses:
+        '200': { description: stored }
+        '404': { description: no such probe }
+    delete:
+      summary: Delete a synthetic probe (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: deleted }
+        '404': { description: no such probe }
+
+  /v1/admin/synthetics/{id}/results:
+    get:
+      summary: Recent results for one synthetic probe (admin-only).
+      description: "The bounded per-probe ring of recent results plus the rolled-up summary."
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/ProbeResult' }
+                  summary: { $ref: '#/components/schemas/SyntheticSummary' }
+        '404': { description: no such probe }
 
   /v1/admin/cluster/join:
     post:
@@ -1278,6 +1516,34 @@ paths:
       responses:
         '200': { description: acknowledged }
         '404': { description: no such open event }
+
+  /v1/admin/insights/{event_id}/triage:
+    post:
+      summary: AI triage of an ops-advisor event (admin-only).
+      description: |
+        Runs the built-in read-only `veda-ops` agent over the event. The
+        agent autonomously calls the 4 ops tools (get_insights, get_logs,
+        get_resources, get_slo_status) and returns a grounded explanation
+        plus next steps. Returns 503 when no LLM is configured
+        (VEDA_LLM_ENDPOINT unset), 404 when the event is unknown.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: event_id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event_id: { type: string }
+                  explanation: { type: string }
+                  steps:
+                    type: array
+                    items: { $ref: '#/components/schemas/AgentStep' }
+        '404': { description: no such event }
+        '503': { description: no LLM configured }
 
   /v1/admin/jobs:
     get:
