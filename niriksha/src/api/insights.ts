@@ -192,6 +192,41 @@ export const ackInsight = (eventId: string) =>
     `/admin/insights/${encodeURIComponent(eventId)}/ack`,
   )
 
+/**
+ * One step in the triage agent's reasoning/acting trace — internally
+ * tagged by `kind` (`AgentStep` in `agent/model.rs`):
+ *   reasoning    → { text }
+ *   tool_call    → { tool_call_id, tool_id, args }
+ *   tool_result  → { tool_call_id, result, is_error }
+ */
+export type AgentStep =
+  | { kind: 'reasoning'; text: string }
+  | {
+      kind: 'tool_call'
+      tool_call_id: string
+      tool_id: string
+      args: unknown
+    }
+  | {
+      kind: 'tool_result'
+      tool_call_id: string
+      result: unknown
+      is_error: boolean
+    }
+
+/** Result of `POST /insights/{id}/triage` — the agent's explanation plus
+ * the step trace it produced. 503 when no LLM is configured. */
+export interface TriageResponse {
+  event_id: string
+  explanation: string
+  steps: AgentStep[]
+}
+
+export const triageEvent = (eventId: string) =>
+  api.post<TriageResponse>(
+    `/admin/insights/${encodeURIComponent(eventId)}/triage`,
+  )
+
 /** Human-readable label for a scope. */
 export function scopeLabel(scope: Scope): string {
   switch (scope.kind) {

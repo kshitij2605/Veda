@@ -7,6 +7,7 @@ import { Badge } from '../components/Badge'
 import api from '../api/client'
 import { listNodes, type ListNodesResponse } from '../api/collections'
 import { getResources, type ResourcesView } from '../api/resources'
+import { SyntheticsPanel } from './SyntheticsPanel'
 
 interface MetricEntry {
   name: string
@@ -266,6 +267,10 @@ export function SystemHealth() {
           </div>
         )}
       </div>
+
+      {/* Synthetic self-check probes — uptime / last result / failures,
+          from the ops-advisor's probe rings (GET /admin/synthetics). */}
+      <SyntheticsPanel />
 
       {/* Subsystem checks from /admin/health */}
       {health?.checks && Object.keys(health.checks).length > 0 && (
