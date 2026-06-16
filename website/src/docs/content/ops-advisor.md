@@ -8,7 +8,7 @@ Where [Observability](/docs/observability) gives you the raw signals (metrics, t
 
 A background tick (every `VEDA_ADVISOR_INTERVAL_SECS`, default 30s) runs an evaluation loop:
 
-1. **Snapshot** — collect an `OpsSnapshot`: per-collection segment/record counts and compaction state, node/raft status, replica `safe_ts` lag, dependency health (MinIO, NATS, embedder), query-log latency (p50/p95 + slow-query count), process RSS, and request/error counters. A bounded history ring buffer backs the rate and anomaly math.
+1. **Snapshot** — collect an `OpsSnapshot`: per-collection segment/record counts and compaction state, node/raft status, replica `safe_ts` lag, dependency health (MinIO, NATS, embedder), query-log latency (p50/p95 + slow-query count), [node resource signals](/docs/resource-signals) (disk, CPU, load, file descriptors, memory), process RSS, and request/error counters. A bounded history ring buffer backs the rate and anomaly math.
 2. **Evaluate** — run the rule catalog and the anomaly detectors against the snapshot to produce hits.
 3. **Reconcile** — an event store opens new events, refreshes ongoing ones in place, and **auto-closes** events whose condition has cleared.
 4. **Alert** — on open/close transitions only, dispatch to the configured channels.
@@ -18,7 +18,7 @@ The reconcile phase runs under a lock, which is released before any network call
 
 ## The rule catalog
 
-Eighteen rules ship today — threshold/correlation rules, anomaly detectors, and three log-content rules powered by [Log Insights](/docs/log-insights). Thresholds and severities are tunable per rule via the API; defaults are shown.
+Twenty-five rules ship today — threshold/correlation rules, anomaly detectors, three log-content rules powered by [Log Insights](/docs/log-insights), and seven [node resource signals](/docs/resource-signals). Thresholds and severities are tunable per rule via the API; defaults are shown.
 
 | Rule | Severity | Fires when | Recommendation |
 |---|---|---|---|
@@ -40,8 +40,15 @@ Eighteen rules ship today — threshold/correlation rules, anomaly detectors, an
 | `log_error_rate` | High | ERROR-log count over the window exceeds a threshold | investigate the error source |
 | `anomaly_error_logs` | Med/High | error-log rate > baseline + Nσ | investigate the deviation |
 | `new_error_category` | Medium | a new WARN/ERROR [semantic log category](/docs/log-insights#semantic-categorization) appears | inspect the new failure mode |
+| `disk_space_low` | High | data-dir disk used > 90% | free space / run compaction / scale out |
+| `high_cpu` | Medium | derived CPU% > 85% | check load / heavy queries |
+| `high_load` | Medium | `load1 / num_cpus` > 2.0 | check CPU saturation |
+| `fd_exhaustion` | High | `open_fds / fd_limit` > 0.8 | raise the fd limit / investigate leaks |
+| `system_memory_low` | Medium | available system memory < 10% | scale out / reduce pressure |
+| `anomaly_cpu` | Med/High | CPU% spikes above baseline | investigate the deviation |
+| `anomaly_disk_used` | Med/High | disk-used trend rises above baseline | check the rapid fill |
 
-Anomaly detectors use EWMA / rolling mean+stddev baselines. They warm up over `min_samples` (default 20) and fire above the configured `sigma` (default 3σ → Medium, ≥5σ → High).
+The last seven are [node resource signals](/docs/resource-signals) (Linux `/proc` + `statvfs`); each skips cleanly when its signal is unavailable. Anomaly detectors use EWMA / rolling mean+stddev baselines. They warm up over `min_samples` (default 20) and fire above the configured `sigma` (default 3σ → Medium, ≥5σ → High).
 
 ## Events & lifecycle
 

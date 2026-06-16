@@ -57,9 +57,9 @@ export const FEATURES: Feature[] = [
   {
     icon: Activity,
     accent: 'var(--color-node-2)',
-    title: 'OpenTelemetry-first observability',
+    title: 'Observability + built-in AutoOps',
     blurb:
-      'Metrics, traces, and logs out of the box — Prometheus, Tempo, Loki, Grafana — with per-phase search timing and a pre-built dashboard.',
+      'Metrics, traces, and logs out of the box — Prometheus, Tempo, Loki, Grafana — plus an Ops Advisor that detects issues across 25 rules (latency, disk, CPU, error & log anomalies), explains the root cause, alerts Slack/PagerDuty, and can auto-remediate.',
   },
   {
     icon: Shield,
