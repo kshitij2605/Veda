@@ -531,6 +531,49 @@ paths:
           content:
             text/plain: { schema: { type: string } }
 
+  /v1/admin/resources:
+    get:
+      summary: Latest node-resource snapshot (admin-only).
+      description: |
+        Best-effort host/process resource signals for the local node,
+        from the Ops Advisor's latest snapshot (or a fresh collect when
+        history is empty). Read dependency-free from /proc + statvfs on
+        Linux; every field is null off-Linux/on error. Always 200.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  disk:
+                    type: object
+                    properties:
+                      total_bytes: { type: integer, nullable: true }
+                      free_bytes: { type: integer, nullable: true }
+                      used_pct: { type: number, nullable: true }
+                  cpu_pct: { type: number, nullable: true, description: "null until two snapshots exist" }
+                  load:
+                    type: object
+                    properties:
+                      load1: { type: number, nullable: true }
+                      load5: { type: number, nullable: true }
+                      load15: { type: number, nullable: true }
+                  num_cpus: { type: integer }
+                  fds:
+                    type: object
+                    properties:
+                      open: { type: integer, nullable: true }
+                      limit: { type: integer, nullable: true }
+                  memory:
+                    type: object
+                    properties:
+                      total_bytes: { type: integer, nullable: true }
+                      available_bytes: { type: integer, nullable: true }
+                  rss_bytes: { type: integer, nullable: true }
+
   /v1/admin/cluster/join:
     post:
       summary: Add a voter to the Raft cluster.

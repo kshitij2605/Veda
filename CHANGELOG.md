@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-06-16
+
+Node Resource Signals — host/process resource monitoring (disk, CPU, load, file descriptors, system memory) in the Ops Advisor, closing the in-lane gap from the Elastic infrastructure-monitoring analysis. Validated end-to-end against a live server (real signals; `disk_space_low` tripped and a webhook fired). See `documentation/2026-06-16-node-resource-signals.md`.
+
+### Added
+- **Resource signals in the advisor snapshot** — `OpsSnapshot` (`crates/veda-gateway/src/advisor/snapshot.rs`) gained best-effort node-resource fields read dependency-free from `/proc` (Linux) + a single `statvfs`: data-dir disk (`disk_total_bytes`/`disk_free_bytes`/`disk_used_pct`), CPU jiffy counters (`cpu_total_jiffies`/`cpu_busy_jiffies`) with a `cpu_pct(prev, now)` helper + `num_cpus`, load average (`load1`/`load5`/`load15`), file descriptors (`open_fds`/`fd_limit`), and system memory (`mem_total_bytes`/`mem_available_bytes`). Collection is panic-free and non-blocking; every signal is `Option` and degrades to `None` off-Linux/on error (mirrors the existing RSS read), so non-Linux builds raise no false alerts. `libc` is added only under `cfg(target_os = "linux")`.
+- **Resource rules + anomaly detectors** — five threshold rules: `disk_space_low` (High, `disk_used_pct` > 90 — the headline disk-full warning), `high_cpu` (Medium, `cpu_pct` > 85, computed via the advisor history), `high_load` (Medium, `load1` / cores > 2.0), `fd_exhaustion` (High, `open_fds`/`fd_limit` > 0.8), and `system_memory_low` (Medium, available/total < 0.1); plus anomaly detectors `anomaly_cpu` (CPU% reconstructed from pairwise jiffy deltas) and `anomaly_disk_used` (disk-used % trend) using the existing EWMA/σ machinery. Each rule skips cleanly when its signal is `None`; all flow through the existing event store + alert channels and are tunable via `/v1/admin/insights/rules`.
+- **Resources REST + Niriksha panel** — `GET /v1/admin/resources` (admin-only) returns the local node's latest resource snapshot (`disk`, `cpu_pct`, `load`, `num_cpus`, `fds`, `memory`, `rss_bytes`) from the advisor history (`cpu_pct` from the previous→latest pair; falls back to a fresh `collect()` with `cpu_pct: null` when history is empty); always 200 with `null` fields off-Linux. Plus a **Resources** panel on the Niriksha System Health page (disk used %/free, CPU, load, fds, system memory, RSS — warning-colored past threshold).
+
 ## [0.2.6] - 2026-06-15
 
 Log Insights — capture, trace correlation, semantic categorization, log-content alerting, and a logs-as-a-collection ingest path — plus a BM25/lexical filter+RLS fix. Validated end-to-end against a live server. See `documentation/2026-06-15-log-insights.md`.
