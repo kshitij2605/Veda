@@ -55,6 +55,9 @@ pub enum Scope {
     Collection(String),
     Shard { collection: String, shard: u32 },
     Node(String),
+    /// A service-level objective, keyed by its id (so SLO rule events
+    /// dedup per-SLO).
+    Slo(String),
 }
 
 impl Scope {
@@ -65,6 +68,7 @@ impl Scope {
             Scope::Collection(c) => format!("collection:{c}"),
             Scope::Shard { collection, shard } => format!("shard:{collection}/{shard}"),
             Scope::Node(n) => format!("node:{n}"),
+            Scope::Slo(s) => format!("slo:{s}"),
         }
     }
 }

@@ -31,7 +31,7 @@ pub use engine::{run_tick, spawn_advisor, AdvisorState};
 
 pub use slo::{
     catalog_default_slos, default_fast_burn, default_slow_burn, BurnConfig, SloDef, SloKind,
-    SloState, SloStatus,
+    SloRegistry, SloState, SloStatus,
 };
 
 pub use snapshot::{

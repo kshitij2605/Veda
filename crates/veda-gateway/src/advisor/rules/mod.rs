@@ -667,6 +667,136 @@ impl Rule for SystemMemoryLow {
     }
 }
 
+// ---------------------------------------------------------------------
+// SLO rules — alert on burn-rate / error-budget over the per-SLO status
+// the engine records onto `snap.slo_statuses`. Each emits one hit per
+// matching SLO, scoped `Scope::Slo(slo_id)` so the EventStore dedups one
+// event per (rule_id, slo). All skip cleanly when `slo_statuses` is empty.
+// ---------------------------------------------------------------------
+
+/// Fast burn-rate window over its alert threshold for an SLO.
+struct SloBurnRateFast;
+impl Rule for SloBurnRateFast {
+    fn id(&self) -> &'static str {
+        "slo_burn_rate_fast"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::High
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, _cfg: &RuleConfig) -> Vec<RuleHit> {
+        let mut hits = Vec::new();
+        for s in &snap.slo_statuses {
+            if !s.breaching_fast {
+                continue;
+            }
+            let burn = s.burn_rate_fast.unwrap_or(0.0);
+            let budget = s
+                .error_budget_remaining_pct
+                .map(|p| format!("{p:.1}%"))
+                .unwrap_or_else(|| "n/a".into());
+            hits.push(RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Slo(s.slo_id.clone()),
+                severity: self.default_severity(),
+                title: format!("SLO '{}' fast burn", s.slo_id),
+                detail: format!(
+                    "SLO '{}' is burning error budget at {:.1}x over the fast window (threshold {:.1}x); error budget remaining {}.",
+                    s.slo_id, burn, s.fast_burn_threshold, budget
+                ),
+                recommendation: format!(
+                    "Investigate the failing SLI for '{}' now (latency/errors) — at this rate the {}-window budget is exhausted imminently.",
+                    s.slo_id, s.slo_id
+                ),
+                runbook: Some(format!("GET /v1/admin/slos/{}/status", s.slo_id)),
+                remediation: RemediationAction::None,
+            });
+        }
+        hits
+    }
+}
+
+/// Slow burn-rate window over its alert threshold for an SLO.
+struct SloBurnRateSlow;
+impl Rule for SloBurnRateSlow {
+    fn id(&self) -> &'static str {
+        "slo_burn_rate_slow"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, _cfg: &RuleConfig) -> Vec<RuleHit> {
+        let mut hits = Vec::new();
+        for s in &snap.slo_statuses {
+            if !s.breaching_slow {
+                continue;
+            }
+            let burn = s.burn_rate_slow.unwrap_or(0.0);
+            let budget = s
+                .error_budget_remaining_pct
+                .map(|p| format!("{p:.1}%"))
+                .unwrap_or_else(|| "n/a".into());
+            hits.push(RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Slo(s.slo_id.clone()),
+                severity: self.default_severity(),
+                title: format!("SLO '{}' slow burn", s.slo_id),
+                detail: format!(
+                    "SLO '{}' is burning error budget at {:.1}x over the slow window (threshold {:.1}x); error budget remaining {}.",
+                    s.slo_id, burn, s.slow_burn_threshold, budget
+                ),
+                recommendation: format!(
+                    "Investigate the failing SLI for '{}' (latency/errors); a sustained slow burn erodes the compliance-window budget.",
+                    s.slo_id
+                ),
+                runbook: Some(format!("GET /v1/admin/slos/{}/status", s.slo_id)),
+                remediation: RemediationAction::None,
+            });
+        }
+        hits
+    }
+}
+
+/// SLO error budget exhausted over the compliance window.
+struct SloBudgetExhausted;
+impl Rule for SloBudgetExhausted {
+    fn id(&self) -> &'static str {
+        "slo_budget_exhausted"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::High
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, _cfg: &RuleConfig) -> Vec<RuleHit> {
+        let mut hits = Vec::new();
+        for s in &snap.slo_statuses {
+            if !s.budget_exhausted {
+                continue;
+            }
+            let remaining = s.error_budget_remaining_pct.unwrap_or(0.0);
+            let sli = s
+                .sli_pct
+                .map(|p| format!("{p:.3}%"))
+                .unwrap_or_else(|| "n/a".into());
+            hits.push(RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Slo(s.slo_id.clone()),
+                severity: self.default_severity(),
+                title: format!("SLO '{}' budget exhausted", s.slo_id),
+                detail: format!(
+                    "SLO '{}' has exhausted its error budget over the compliance window (remaining {:.1}%; SLI {} vs target {:.3}%).",
+                    s.slo_id, remaining, sli, s.target_pct
+                ),
+                recommendation: format!(
+                    "'{}' is out of error budget — freeze risky changes and prioritise reliability work on the failing SLI until the budget recovers.",
+                    s.slo_id
+                ),
+                runbook: Some(format!("GET /v1/admin/slos/{}/status", s.slo_id)),
+                remediation: RemediationAction::None,
+            });
+        }
+        hits
+    }
+}
+
 /// The built-in rule catalog.
 pub fn catalog() -> Vec<Box<dyn Rule>> {
     vec![
@@ -687,6 +817,9 @@ pub fn catalog() -> Vec<Box<dyn Rule>> {
         Box::new(HighLoad),
         Box::new(FdExhaustion),
         Box::new(SystemMemoryLow),
+        Box::new(SloBurnRateFast),
+        Box::new(SloBurnRateSlow),
+        Box::new(SloBudgetExhausted),
     ]
 }
 
@@ -740,6 +873,7 @@ mod tests {
             p50_ms: 0.0,
             p95_ms: 0.0,
             slow_count: 0,
+            recent_latencies_ms: Vec::new(),
         }
     }
 
@@ -777,6 +911,7 @@ mod tests {
             counters: HashMap::new(),
             error_log_count: 0,
             warn_log_count: 0,
+            slo_statuses: Vec::new(),
         }
     }
 
@@ -837,6 +972,7 @@ mod tests {
             p50_ms: 120.0,
             p95_ms: 800.0,
             slow_count: 0,
+            recent_latencies_ms: Vec::new(),
         };
         let hits = HighSearchLatency.check(&snap, &empty_history(), &RuleConfig::default());
         assert_eq!(hits.len(), 1);

@@ -32,6 +32,7 @@ pub mod resources;
 pub mod route;
 pub mod saved_objects;
 pub mod search;
+pub mod slos;
 pub mod state;
 pub mod time_parse;
 pub mod txn;
@@ -58,6 +59,24 @@ fn insights_router() -> Router<state::AppState> {
             "/v1/admin/insights/{event_id}/ack",
             post(insights::ack_event),
         )
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// SLO admin routes, gated by an extra `require_admin` route layer (same
+/// pattern as [`insights_router`]).
+fn slos_router() -> Router<state::AppState> {
+    Router::new()
+        .route(
+            "/v1/admin/slos",
+            get(slos::list_slos).post(slos::create_slo),
+        )
+        .route(
+            "/v1/admin/slos/{id}",
+            get(slos::get_slo)
+                .put(slos::put_slo)
+                .delete(slos::delete_slo),
+        )
+        .route("/v1/admin/slos/{id}/status", get(slos::get_slo_status))
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
@@ -287,6 +306,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         // Ops advisor ("Insights") — admin-only (extra require_admin
         // route layer on top of the shared auth middleware below).
         .merge(insights_router())
+        // SLOs — admin-only (extra require_admin route layer).
+        .merge(slos_router())
         // Log Insights — admin-only (extra require_admin route layer).
         .merge(logs_router())
         // Node resources — admin-only (extra require_admin route layer).

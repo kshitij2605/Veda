@@ -65,6 +65,7 @@ fn scope_kind(ev: &OpsEvent) -> &'static str {
         Scope::Collection(_) => "collection",
         Scope::Shard { .. } => "shard",
         Scope::Node(_) => "node",
+        Scope::Slo(_) => "slo",
     }
 }
 
