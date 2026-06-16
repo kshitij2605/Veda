@@ -176,6 +176,7 @@ Admin-only automated-operations surface. See [Ops Advisor](/docs/ops-advisor) fo
 | `GET/PUT` | `/v1/admin/insights/channels` | Alert-channel config (secrets write-only on `GET`) |
 | `POST` | `/v1/admin/insights/run` | Force one evaluation tick → `{ opened, closed }` |
 | `POST` | `/v1/admin/insights/{event_id}/ack` | Acknowledge an open event |
+| `GET` | `/v1/admin/resources` | Local node's latest resource snapshot — disk, CPU, load, fds, memory, RSS (see [Node Resource Signals](/docs/resource-signals)); always `200`, fields nullable |
 
 ## Logs (Log Insights)
 
