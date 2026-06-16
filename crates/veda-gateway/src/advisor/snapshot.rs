@@ -21,6 +21,9 @@ const LOG_WINDOW_SECS: u64 = 300;
 const LOG_SCAN_CAP: usize = 5000;
 /// A query slower than this many milliseconds is counted as "slow".
 const SLOW_QUERY_MS: u64 = 1000;
+/// Cap on per-request latencies retained in [`QuerySnapshot`] (the SLI
+/// window for latency SLOs). Bounds snapshot size / clone cost.
+const MAX_RECENT_LATENCIES: usize = 2000;
 /// Prometheus counters/gauges captured into every snapshot.
 const TRACKED_COUNTERS: &[&str] = &[
     "veda_requests_total",
@@ -82,6 +85,11 @@ pub struct QuerySnapshot {
     pub p50_ms: f64,
     pub p95_ms: f64,
     pub slow_count: u64,
+    /// Per-request `took_ms` over the window (capped at the most recent
+    /// [`MAX_RECENT_LATENCIES`]), the raw SLI input latency SLOs threshold
+    /// against. Default empty so existing constructors stay valid.
+    #[serde(default)]
+    pub recent_latencies_ms: Vec<f64>,
 }
 
 /// A full point-in-time snapshot of cluster ops state.
@@ -138,6 +146,12 @@ pub struct OpsSnapshot {
     /// Number of WARN+ (WARN or ERROR) log records within the last
     /// `LOG_WINDOW_SECS`.
     pub warn_log_count: u64,
+    /// Per-SLO status as of this snapshot. NOT populated by [`collect`];
+    /// the advisor engine fills it each tick (after recording the tick's
+    /// SLI observations) before pushing the snapshot to history. Default
+    /// empty so other constructors / callers stay valid.
+    #[serde(default)]
+    pub slo_statuses: Vec<crate::advisor::slo::SloStatus>,
 }
 
 /// Collect a live snapshot from `state`. `now_ms` is injected so
@@ -304,6 +318,7 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
         counters,
         error_log_count,
         warn_log_count,
+        slo_statuses: Vec::new(),
     }
 }
 
@@ -407,6 +422,17 @@ async fn collect_query(state: &AppState) -> QuerySnapshot {
         }
     }
 
+    // Per-request latencies (the SLI input for latency SLOs), capped at
+    // the most recent MAX_RECENT_LATENCIES, captured BEFORE we sort
+    // `took` for percentiles (order is irrelevant — SLOs only count how
+    // many are under threshold).
+    let recent_latencies_ms: Vec<f64> = took
+        .iter()
+        .rev()
+        .take(MAX_RECENT_LATENCIES)
+        .map(|&ms| ms as f64)
+        .collect();
+
     took.sort_unstable();
     let count = took.len() as u64;
     QuerySnapshot {
@@ -415,6 +441,7 @@ async fn collect_query(state: &AppState) -> QuerySnapshot {
         p50_ms: percentile(&took, 0.50),
         p95_ms: percentile(&took, 0.95),
         slow_count,
+        recent_latencies_ms,
     }
 }
 
@@ -838,6 +865,7 @@ veda_records_total 7
                 p50_ms: 0.0,
                 p95_ms: 0.0,
                 slow_count: 0,
+                recent_latencies_ms: Vec::new(),
             },
             rss_bytes: None,
             disk_total_bytes: None,
@@ -856,6 +884,7 @@ veda_records_total 7
             counters,
             error_log_count: 0,
             warn_log_count: 0,
+            slo_statuses: Vec::new(),
         }
     }
 

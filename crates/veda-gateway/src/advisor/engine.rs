@@ -35,6 +35,7 @@ use crate::advisor::notify::Notifier;
 use crate::advisor::remediation::{run_remediation, LiveDispatcher, RateLimiter};
 use crate::advisor::rules::{catalog, run_rules, Rule, RuleHit};
 use crate::advisor::event::{RemediationAction, Scope, Severity};
+use crate::advisor::slo::{SloKind, SloRegistry, SloState, SloStatus};
 use crate::advisor::snapshot::{collect, OpsSnapshot, SnapshotHistory, DEFAULT_HISTORY_CAP};
 use crate::advisor::anomaly::detect_anomalies;
 use crate::logs::{LogCategory, categorize::CategorizeOptions};
@@ -42,6 +43,10 @@ use crate::rest::state::AppState;
 
 /// Config file name under `data_dir`.
 const CONFIG_FILE: &str = "_advisor_config.json";
+/// SLO registry file name under `data_dir`.
+const SLOS_FILE: &str = "_slos.json";
+/// SLO rolling-counter state file name under `data_dir`.
+const SLO_STATE_FILE: &str = "_slo_state.json";
 /// Default tick interval (seconds) when the env override is unset.
 const DEFAULT_INTERVAL_SECS: u64 = 30;
 
@@ -61,19 +66,26 @@ pub struct AdvisorState {
     pub events: Mutex<EventStore>,
     pub config: RwLock<AdvisorConfig>,
     pub limiter: Mutex<RateLimiter>,
+    /// User-defined SLO definitions, persisted to `{data_dir}/_slos.json`.
+    pub slos: RwLock<SloRegistry>,
+    /// Bucketed rolling SLI counters, persisted to
+    /// `{data_dir}/_slo_state.json`.
+    pub slo_state: Mutex<SloState>,
     /// Shared async HTTP client, reused by the per-tick [`Notifier`].
     pub http: reqwest::Client,
 }
 
 impl AdvisorState {
     /// Construct from `data_dir`, loading the persisted config (default
-    /// if absent) and event store.
+    /// if absent), event store, SLO registry, and SLO state.
     pub fn load(data_dir: &Path) -> Self {
         Self {
             history: Mutex::new(SnapshotHistory::new(DEFAULT_HISTORY_CAP)),
             events: Mutex::new(EventStore::load(data_dir)),
             config: RwLock::new(load_config(data_dir)),
             limiter: Mutex::new(RateLimiter::default()),
+            slos: RwLock::new(SloRegistry::load(&data_dir.join(SLOS_FILE))),
+            slo_state: Mutex::new(SloState::load(&data_dir.join(SLO_STATE_FILE))),
             http: reqwest::Client::new(),
         }
     }
@@ -206,6 +218,42 @@ fn interval_secs() -> u64 {
         .unwrap_or(DEFAULT_INTERVAL_SECS)
 }
 
+/// Compute `(good, total)` SLI observations for one SLO over the tick
+/// interval, from the new snapshot `snap` and the `prev`ious snapshot.
+///
+/// * **Availability / ErrorRate**: counter deltas — `total =
+///   Δ veda_requests_total`, `good = total − Δ veda_errors_total`
+///   (floored at 0). Same SLI; both frame successes as "good".
+/// * **Latency{threshold_ms}**: over the new snapshot's bounded
+///   `recent_latencies_ms` — `total = len`, `good = count(≤ threshold)`.
+/// * **Synthetic**: `(0, 0)` (probe wiring lands in a follow-up).
+///
+/// Returns `(0, 0)` (a no-op the caller skips) when the counters are
+/// absent or went backwards, or the latency window is empty.
+fn slo_observation(kind: &SloKind, snap: &OpsSnapshot, prev: Option<&OpsSnapshot>) -> (u64, u64) {
+    match kind {
+        SloKind::Availability | SloKind::ErrorRate => {
+            let Some(prev) = prev else { return (0, 0) };
+            let counter = |s: &OpsSnapshot, k: &str| s.counters.get(k).copied().unwrap_or(0.0);
+            let d_req = counter(snap, "veda_requests_total") - counter(prev, "veda_requests_total");
+            let d_err = counter(snap, "veda_errors_total") - counter(prev, "veda_errors_total");
+            if d_req < 0.0 || d_err < 0.0 {
+                return (0, 0); // counter reset — can't interpret.
+            }
+            let total = d_req as u64;
+            let bad = (d_err as u64).min(total);
+            (total - bad, total)
+        }
+        SloKind::Latency { threshold_ms } => {
+            let lats = &snap.query.recent_latencies_ms;
+            let total = lats.len() as u64;
+            let good = lats.iter().filter(|&&ms| ms <= *threshold_ms).count() as u64;
+            (good, total)
+        }
+        SloKind::Synthetic { .. } => (0, 0),
+    }
+}
+
 /// Current wall-clock time in epoch milliseconds.
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -243,7 +291,7 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
     let advisor = state.advisor();
 
     // Collect a fresh snapshot (touches AppState, not advisor locks).
-    let snap = collect(state, now).await;
+    let mut snap = collect(state, now).await;
 
     // Per-tick config snapshot (released immediately).
     let cfg = advisor.config.read().await.clone();
@@ -267,10 +315,36 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
         detect_new_error_categories(&categories, &cfg, now, window_ms)
     };
 
-    // --- Phase 1: reconcile under the history+events locks (NO network).
-    // The guards live only inside this block and are dropped before any
-    // notify/remediation await below.
+    // --- Phase 1: record SLO observations + reconcile under the advisor
+    // locks (NO network). All guards live only inside this block and are
+    // dropped before any notify/remediation await below.
     let result = {
+        // SLO recording: brief slos/slo_state locks. Use the history's
+        // current latest() as the PREVIOUS snapshot (before pushing the
+        // new one) so counter deltas span exactly this tick interval.
+        {
+            let defs = advisor.slos.read().await;
+            let defs = defs.list();
+            if !defs.is_empty() {
+                let now_u = now.max(0) as u64;
+                let history = advisor.history.lock().await;
+                let prev = history.latest().cloned();
+                drop(history);
+                let mut slo_state = advisor.slo_state.lock().await;
+                for d in defs {
+                    let (good, total) = slo_observation(&d.kind, &snap, prev.as_ref());
+                    if total > 0 {
+                        slo_state.record(&d.id, good, total, now_u);
+                    }
+                }
+                let statuses: Vec<SloStatus> =
+                    defs.iter().map(|d| slo_state.status(d, now_u)).collect();
+                slo_state.save(&state.inner.data_dir.join(SLO_STATE_FILE));
+                drop(slo_state);
+                snap.slo_statuses = statuses;
+            }
+        }
+
         let mut history = advisor.history.lock().await;
         history.push(snap.clone());
         let mut events = advisor.events.lock().await;
@@ -373,6 +447,7 @@ mod tests {
                 p50_ms: 0.0,
                 p95_ms: 0.0,
                 slow_count: 0,
+                recent_latencies_ms: Vec::new(),
             },
             rss_bytes: None,
             disk_total_bytes: None,
@@ -391,6 +466,7 @@ mod tests {
             counters: HashMap::new(),
             error_log_count: 0,
             warn_log_count: 0,
+            slo_statuses: Vec::new(),
         }
     }
 
@@ -537,6 +613,105 @@ mod tests {
     #[test]
     fn engine_rule_ids_contains_new_error_category() {
         assert!(engine_rule_ids().contains(&"new_error_category"));
+    }
+
+    fn latency_slo(id: &str, threshold_ms: f64) -> crate::advisor::slo::SloDef {
+        crate::advisor::slo::SloDef {
+            id: id.into(),
+            name: format!("{id} latency"),
+            kind: SloKind::Latency { threshold_ms },
+            target_pct: 99.0,
+            // Tiny windows so a single tick of observations fills them.
+            window_secs: 300,
+            fast_burn: crate::advisor::slo::default_fast_burn(),
+            slow_burn: crate::advisor::slo::default_slow_burn(),
+        }
+    }
+
+    #[test]
+    fn slo_observation_latency_counts_under_threshold() {
+        let mut snap = base_snapshot(1000);
+        snap.query.recent_latencies_ms = vec![10.0, 20.0, 2000.0, 50.0]; // 1 over 100ms
+        let (good, total) = slo_observation(&SloKind::Latency { threshold_ms: 100.0 }, &snap, None);
+        assert_eq!((good, total), (3, 4));
+    }
+
+    #[test]
+    fn slo_observation_availability_uses_counter_deltas() {
+        let mut prev = base_snapshot(1000);
+        prev.counters.insert("veda_requests_total".into(), 100.0);
+        prev.counters.insert("veda_errors_total".into(), 0.0);
+        let mut now = base_snapshot(2000);
+        now.counters.insert("veda_requests_total".into(), 200.0);
+        now.counters.insert("veda_errors_total".into(), 30.0);
+        // Δreq=100, Δerr=30 → good 70 / total 100.
+        let (good, total) = slo_observation(&SloKind::Availability, &now, Some(&prev));
+        assert_eq!((good, total), (70, 100));
+        // No previous snapshot → no-op.
+        assert_eq!(slo_observation(&SloKind::Availability, &now, None), (0, 0));
+    }
+
+    #[test]
+    fn slo_fast_burn_rule_opens_event_for_breaching_latency_slo() {
+        use crate::advisor::slo::SloState;
+
+        let def = latency_slo("api", 100.0);
+        let mut slo_state = SloState::new(60);
+        let now_ms_u = 10_000_000u64;
+        // 900 over threshold / 1000 → 90% bad, far above the budget;
+        // burn = 0.9 / 0.01 = 90x ≥ fast threshold 14.4 → breaching_fast.
+        slo_state.record(&def.id, 100, 1000, now_ms_u);
+        let status = slo_state.status(&def, now_ms_u);
+        assert!(status.breaching_fast, "expected fast breach, got {status:?}");
+
+        let mut snap = base_snapshot(10_000_000);
+        snap.slo_statuses = vec![status];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut events = EventStore::new(tmp.path());
+        let cfg = AdvisorConfig::default();
+        let cat = catalog();
+        let mut history = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+        history.push(snap.clone());
+
+        let r = reconcile_hits(&snap, &history, &mut events, &cfg, &cat, Vec::new(), 10_000_000);
+        let fast = r
+            .opened
+            .iter()
+            .find(|e| e.rule_id == "slo_burn_rate_fast")
+            .expect("slo_burn_rate_fast must open an event");
+        assert_eq!(fast.scope, Scope::Slo("api".into()));
+        assert!(events.open_events().iter().any(|e| e.id == "slo_burn_rate_fast:slo:api"));
+    }
+
+    #[test]
+    fn slo_rules_silent_for_healthy_slo() {
+        use crate::advisor::slo::SloState;
+
+        let def = latency_slo("api", 100.0);
+        let mut slo_state = SloState::new(60);
+        let now_ms_u = 10_000_000u64;
+        // All under threshold → 100% good → no burn, no breach.
+        slo_state.record(&def.id, 1000, 1000, now_ms_u);
+        let status = slo_state.status(&def, now_ms_u);
+        assert!(!status.breaching_fast);
+        assert!(!status.breaching_slow);
+        assert!(!status.budget_exhausted);
+
+        let mut snap = base_snapshot(10_000_000);
+        snap.slo_statuses = vec![status];
+        let history = {
+            let mut h = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+            h.push(snap.clone());
+            h
+        };
+        let cfg = AdvisorConfig::default();
+        let cat = catalog();
+        let hits = run_rules(&cat, &snap, &history, &cfg);
+        assert!(
+            !hits.iter().any(|h| h.rule_id.starts_with("slo_")),
+            "healthy SLO must trip no slo_* rule: {hits:?}"
+        );
     }
 
     #[test]

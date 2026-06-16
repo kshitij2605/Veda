@@ -337,6 +337,7 @@ mod tests {
                 p50_ms: 0.0,
                 p95_ms,
                 slow_count: 0,
+                recent_latencies_ms: Vec::new(),
             },
             rss_bytes,
             disk_total_bytes: None,
@@ -355,6 +356,7 @@ mod tests {
             counters: c,
             error_log_count: 0,
             warn_log_count: 0,
+            slo_statuses: Vec::new(),
         }
     }
 

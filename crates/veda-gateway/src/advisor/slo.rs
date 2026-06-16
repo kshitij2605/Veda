@@ -127,6 +127,16 @@ pub struct SloStatus {
     pub burn_rate_slow: Option<f64>,
     /// `sli_pct.map_or(true, |s| s >= target_pct)`.
     pub compliant: bool,
+    /// The def's `fast_burn.threshold` (copied for rule convenience).
+    pub fast_burn_threshold: f64,
+    /// The def's `slow_burn.threshold`.
+    pub slow_burn_threshold: f64,
+    /// `burn_rate_fast >= fast_burn_threshold` (false when no data).
+    pub breaching_fast: bool,
+    /// `burn_rate_slow >= slow_burn_threshold` (false when no data).
+    pub breaching_slow: bool,
+    /// `error_budget_remaining_pct <= 0` (false when no data).
+    pub budget_exhausted: bool,
 }
 
 /// A fixed-width time bucket of observations.
@@ -247,6 +257,12 @@ impl SloState {
 
         let compliant = sli_pct.map_or(true, |s| s >= def.target_pct);
 
+        let fast_burn_threshold = def.fast_burn.threshold;
+        let slow_burn_threshold = def.slow_burn.threshold;
+        let breaching_fast = burn_rate_fast.map_or(false, |r| r >= fast_burn_threshold);
+        let breaching_slow = burn_rate_slow.map_or(false, |r| r >= slow_burn_threshold);
+        let budget_exhausted = error_budget_remaining_pct.map_or(false, |p| p <= 0.0);
+
         SloStatus {
             slo_id: def.id.clone(),
             sli_pct,
@@ -257,6 +273,11 @@ impl SloState {
             burn_rate_fast,
             burn_rate_slow,
             compliant,
+            fast_burn_threshold,
+            slow_burn_threshold,
+            breaching_fast,
+            breaching_slow,
+            budget_exhausted,
         }
     }
 
@@ -327,6 +348,84 @@ impl SloState {
 /// sensible burn-window defaults.
 pub fn catalog_default_slos() -> Vec<SloDef> {
     Vec::new()
+}
+
+/// A thin, persisted registry of user-defined [`SloDef`]s. Mirrors
+/// [`crate::advisor::event::EventStore`] persistence: a single JSON file
+/// at `{data_dir}/_slos.json`, write-through on mutation by the caller,
+/// missing/unparseable file → empty.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SloRegistry {
+    defs: Vec<SloDef>,
+}
+
+impl SloRegistry {
+    /// Empty registry.
+    pub fn new() -> Self {
+        Self { defs: Vec::new() }
+    }
+
+    /// All defs, in insertion order.
+    pub fn list(&self) -> &[SloDef] {
+        &self.defs
+    }
+
+    /// Find a def by id.
+    pub fn get(&self, id: &str) -> Option<&SloDef> {
+        self.defs.iter().find(|d| d.id == id)
+    }
+
+    /// Insert a new def or replace an existing one with the same id.
+    pub fn upsert(&mut self, def: SloDef) {
+        match self.defs.iter_mut().find(|d| d.id == def.id) {
+            Some(existing) => *existing = def,
+            None => self.defs.push(def),
+        }
+    }
+
+    /// Remove the def with `id`. Returns whether it existed.
+    pub fn remove(&mut self, id: &str) -> bool {
+        let before = self.defs.len();
+        self.defs.retain(|d| d.id != id);
+        self.defs.len() != before
+    }
+
+    /// Persist to `path` as pretty JSON. Failure is logged, not surfaced.
+    pub fn save(&self, path: &Path) {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        match serde_json::to_vec_pretty(self) {
+            Ok(bytes) => {
+                if let Err(e) = std::fs::write(path, bytes) {
+                    tracing::warn!(error = %e, path = %path.display(), "slos: write failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "slos: serialize failed"),
+        }
+    }
+
+    /// Load from `path`. A missing or unparseable file yields an empty
+    /// registry (logged on parse error).
+    pub fn load(path: &Path) -> Self {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => return Self::new(),
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "slos: parse failed, starting empty"
+                );
+                Self::new()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -540,5 +639,80 @@ mod tests {
     #[test]
     fn catalog_default_slos_is_empty() {
         assert!(catalog_default_slos().is_empty());
+    }
+
+    #[test]
+    fn status_breaching_flags_when_over_threshold() {
+        // target 99 → allowed_bad 0.01. 200 bad / 1000 = 20% bad → burn
+        // 0.2 / 0.01 = 20.0, comfortably above both the fast (14.4) and
+        // slow (6.0) thresholds; budget consumed 20x → over (≤0).
+        let mut st = SloState::new(60);
+        let now = 10_000_000u64;
+        st.record("s", 800, 1000, now); // 200 bad
+        let status = st.status(&avail_slo("s"), now);
+        assert!(status.breaching_fast, "burn {:?} >= {}", status.burn_rate_fast, status.fast_burn_threshold);
+        assert!(status.breaching_slow, "burn {:?} >= {}", status.burn_rate_slow, status.slow_burn_threshold);
+        assert!(status.budget_exhausted, "remaining {:?}", status.error_budget_remaining_pct);
+        assert!((status.fast_burn_threshold - 14.4).abs() < APPROX);
+        assert!((status.slow_burn_threshold - 6.0).abs() < APPROX);
+    }
+
+    #[test]
+    fn status_not_breaching_when_under_threshold() {
+        // 5 bad / 1000 = 0.5% → burn 0.5, well under both thresholds;
+        // budget remaining ~50% so not exhausted.
+        let mut st = SloState::new(60);
+        let now = 10_000_000u64;
+        st.record("s", 995, 1000, now);
+        let status = st.status(&avail_slo("s"), now);
+        assert!(!status.breaching_fast);
+        assert!(!status.breaching_slow);
+        assert!(!status.budget_exhausted);
+    }
+
+    #[test]
+    fn status_flags_false_when_no_data() {
+        let empty = SloState::new(60);
+        let status = empty.status(&avail_slo("s"), 2_000);
+        assert!(!status.breaching_fast);
+        assert!(!status.breaching_slow);
+        assert!(!status.budget_exhausted);
+    }
+
+    #[test]
+    fn slo_registry_upsert_get_remove_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("_slos.json");
+
+        let mut reg = SloRegistry::new();
+        assert!(reg.list().is_empty());
+        reg.upsert(avail_slo("a"));
+        reg.upsert(avail_slo("b"));
+        assert_eq!(reg.list().len(), 2);
+
+        // Upsert with same id replaces, not appends.
+        let mut a2 = avail_slo("a");
+        a2.target_pct = 95.0;
+        reg.upsert(a2);
+        assert_eq!(reg.list().len(), 2);
+        assert!((reg.get("a").unwrap().target_pct - 95.0).abs() < APPROX);
+
+        reg.save(&path);
+        let loaded = SloRegistry::load(&path);
+        assert_eq!(loaded.list().len(), 2);
+        assert!((loaded.get("a").unwrap().target_pct - 95.0).abs() < APPROX);
+
+        let mut reg = loaded;
+        assert!(reg.remove("a"));
+        assert!(!reg.remove("nope"));
+        assert!(reg.get("a").is_none());
+        assert_eq!(reg.list().len(), 1);
+    }
+
+    #[test]
+    fn slo_registry_load_missing_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does_not_exist.json");
+        assert!(SloRegistry::load(&path).list().is_empty());
     }
 }
