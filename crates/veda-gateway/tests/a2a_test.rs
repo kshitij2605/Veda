@@ -46,9 +46,9 @@ async fn test_a2a_agent_card_default_agent() {
     assert_eq!(card["capabilities"]["pushNotifications"], false);
     assert_eq!(card["url"], "/v1/a2a/veda-agent");
 
-    // Default agent has an empty tool whitelist → all 8 builtins as skills.
+    // Default agent has an empty tool whitelist → all 12 builtins as skills.
     let skills = card["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 8);
+    assert_eq!(skills.len(), 12);
     let ids: Vec<&str> = skills.iter().map(|s| s["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&"search"));
     assert!(ids.contains(&"aggregate"));

@@ -52,6 +52,36 @@ provided tools to ground your answers in real data; be concise and cite what you
     }
 }
 
+/// The built-in operations-analyst agent used by AI-assisted ops triage
+/// (`POST /v1/admin/insights/{id}/triage`) and reachable via the
+/// well-known `veda-ops` id. Always available; held in memory only
+/// (mirrors [`default_agent`]). Its whitelist is the read-only ops tools
+/// plus the read-only data tools that help an investigation — never the
+/// mutating `upsert_record`.
+pub fn default_ops_agent() -> Agent {
+    Agent {
+        id: "veda-ops".to_owned(),
+        name: "Veda Ops".to_owned(),
+        description: "Operations assistant that explains Veda alerts and ops state.".to_owned(),
+        instructions: "You are Veda's operations assistant. Given an alert/event, explain the \
+likely root cause and concrete next steps, grounded ONLY in the tools (insights, logs, \
+resources, SLO status, and read-only collection inspection). Investigate before concluding; \
+be specific and brief."
+            .to_owned(),
+        tool_ids: vec![
+            "get_insights".to_owned(),
+            "get_logs".to_owned(),
+            "get_resources".to_owned(),
+            "get_slo_status".to_owned(),
+            "list_collections".to_owned(),
+            "describe_collection".to_owned(),
+            "aggregate".to_owned(),
+            "route".to_owned(),
+        ],
+        model: None,
+    }
+}
+
 /// A user-defined custom tool. `kind` + opaque `config` are interpreted
 /// by the tool catalog in a later task; this is just the stored shape.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

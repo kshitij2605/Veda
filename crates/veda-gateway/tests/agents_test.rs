@@ -182,8 +182,8 @@ async fn test_tool_catalog_returns_builtins() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let body: Value = resp.json().await.unwrap();
     let tools = body["tools"].as_array().unwrap();
-    // Mirrors ToolCatalog's builtin count (currently 8).
-    assert_eq!(tools.len(), 8);
+    // Mirrors ToolCatalog's builtin count (currently 12).
+    assert_eq!(tools.len(), 12);
     let ids: Vec<&str> = tools.iter().map(|t| t["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&"search"));
     assert!(ids.contains(&"list_collections"));

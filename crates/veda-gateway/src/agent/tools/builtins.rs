@@ -22,8 +22,10 @@ use crate::rest::aggregate::{aggregate_core, AggErrorKind, AggregateQuery};
 use crate::rest::records::{field_value_to_json, parse_record_public, record_passes_rls_owner};
 
 /// The full set of built-in tool specs (id == MCP/OpenAI tool name).
+/// Includes the read-only ops/observability tools (see
+/// [`super::ops::ops_specs`]) that back the `veda-ops` agent.
 pub fn builtin_specs() -> Vec<ToolSpec> {
-    vec![
+    let mut specs = vec![
         ToolSpec {
             id: "list_collections".to_owned(),
             name: "list_collections".to_owned(),
@@ -162,7 +164,9 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             destructive: false,
             title: Some("Filter query".to_owned()),
         },
-    ]
+    ];
+    specs.extend(super::ops::ops_specs());
+    specs
 }
 
 // ── Implementations ─────────────────────────────────────────────────────────

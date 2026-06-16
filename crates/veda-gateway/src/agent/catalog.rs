@@ -195,7 +195,7 @@ impl ToolCatalog {
         }
     }
 
-    /// All built-in tool specs (currently 8).
+    /// All built-in tool specs (currently 12).
     pub fn builtin_specs(&self) -> &[ToolSpec] {
         &self.builtins
     }
@@ -231,6 +231,10 @@ impl ToolCatalog {
             "route" => builtins::route(ctx, args).await,
             "aggregate" => builtins::aggregate(ctx, args).await,
             "filter_query" => builtins::filter_query(ctx, args).await,
+            "get_insights" => super::tools::ops::get_insights(ctx, args).await,
+            "get_logs" => super::tools::ops::get_logs(ctx, args).await,
+            "get_resources" => super::tools::ops::get_resources(ctx, args).await,
+            "get_slo_status" => super::tools::ops::get_slo_status(ctx, args).await,
             other => ToolOutcome::error(format!("unknown tool: {other}")),
         }
     }
@@ -289,9 +293,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_specs_count_is_eight() {
+    fn builtin_specs_count_is_twelve() {
         let cat = ToolCatalog::new();
-        assert_eq!(cat.builtin_specs().len(), 8);
+        assert_eq!(cat.builtin_specs().len(), 12);
         let ids: Vec<&str> = cat.builtin_specs().iter().map(|s| s.id.as_str()).collect();
         for expected in [
             "list_collections",
@@ -302,6 +306,10 @@ mod tests {
             "route",
             "aggregate",
             "filter_query",
+            "get_insights",
+            "get_logs",
+            "get_resources",
+            "get_slo_status",
         ] {
             assert!(ids.contains(&expected), "missing builtin {expected}");
         }
@@ -310,7 +318,7 @@ mod tests {
     #[test]
     fn specs_for_empty_whitelist_returns_all() {
         let cat = ToolCatalog::new();
-        assert_eq!(cat.specs_for(&[]).len(), 8);
+        assert_eq!(cat.specs_for(&[]).len(), 12);
     }
 
     #[test]
@@ -376,6 +384,10 @@ mod tests {
             "route",
             "aggregate",
             "filter_query",
+            "get_insights",
+            "get_logs",
+            "get_resources",
+            "get_slo_status",
         ] {
             let spec = cat.builtin_specs().iter().find(|s| s.id == id).unwrap();
             assert!(spec.read_only, "{id} should be read_only");

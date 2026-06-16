@@ -322,6 +322,7 @@ pub(crate) async fn run_agent_turn(
     let agent = match store::get_agent(&state.inner.saved_objects, &scoped_agent_id).await {
         Some(a) => a,
         None if agent_id == "veda-agent" => default_agent(),
+        None if agent_id == "veda-ops" => crate::agent::model::default_ops_agent(),
         None => return Err(AgentTurnError::NotFound(agent_id.to_owned())),
     };
 

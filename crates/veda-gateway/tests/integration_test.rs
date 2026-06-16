@@ -1656,7 +1656,7 @@ async fn test_mcp_initialize_and_list_tools() {
     ] {
         assert!(names.contains(&expected), "missing MCP tool {expected}");
     }
-    assert_eq!(tools.len(), 8, "expected the full 8-tool catalog");
+    assert_eq!(tools.len(), 12, "expected the full 12-tool catalog");
 
     // Every entry has an inputSchema and an annotations object.
     for t in tools {
@@ -2011,7 +2011,7 @@ async fn test_mcp_post_with_supported_protocol_version_header() {
         .to_string();
     assert!(ct.starts_with("application/json"), "content-type: {ct}");
     let body: Value = resp.json().await.unwrap();
-    assert!(body["result"]["tools"].as_array().unwrap().len() == 8);
+    assert!(body["result"]["tools"].as_array().unwrap().len() == 12);
 }
 
 #[tokio::test]

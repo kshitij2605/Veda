@@ -27,8 +27,11 @@ use crate::advisor::config::{ChannelsConfig, RuleConfig};
 use crate::advisor::engine::{engine_rule_ids, run_tick, save_config};
 use crate::advisor::event::{OpsEvent, Severity};
 use crate::advisor::rules::catalog;
+use crate::agent::model::AgentStep;
+use crate::rest::agents::{run_agent_turn, AgentTurnError};
 use crate::rest::collections::ErrorResponse;
 use crate::rest::state::AppState;
+use crate::tenant::TenantId;
 
 // ---------------------------------------------------------------------
 // GET /v1/admin/insights  — open events
@@ -387,5 +390,314 @@ pub async fn ack_event(
                 error: format!("no open event with id '{event_id}'"),
             }),
         ))
+    }
+}
+
+// ---------------------------------------------------------------------
+// POST /v1/admin/insights/{event_id}/triage — AI-assisted triage
+// ---------------------------------------------------------------------
+
+/// Triage result: the agent's explanation plus the full reasoning/acting
+/// trace it produced (same step shape as `/v1/agents/{id}/converse`).
+#[derive(Debug, Serialize)]
+pub struct TriageResponse {
+    pub event_id: String,
+    pub explanation: String,
+    pub steps: Vec<AgentStep>,
+}
+
+/// Find an event by id: open events first, then closed history.
+async fn find_event(state: &AppState, event_id: &str) -> Option<OpsEvent> {
+    let store = state.advisor().events.lock().await;
+    if let Some(ev) = store.open_events().into_iter().find(|e| e.id == event_id) {
+        return Some(ev);
+    }
+    store.history().iter().rev().find(|e| e.id == event_id).cloned()
+}
+
+/// Build the triage prompt embedding the event context and asking the
+/// ops agent to investigate via tools and produce an explanation + next
+/// steps. Pure + testable (no `AppState`).
+pub fn build_triage_input(ev: &OpsEvent) -> String {
+    format!(
+        "An ops alert fired in Veda. Investigate it using your tools (insights, logs, \
+resources, SLO status) and explain the most likely ROOT CAUSE and the concrete NEXT STEPS \
+the operator should take. Be specific and brief.\n\n\
+Alert:\n\
+- rule_id: {rule}\n\
+- severity: {sev:?}\n\
+- scope: {scope}\n\
+- title: {title}\n\
+- detail: {detail}\n\
+- recommendation: {rec}\n\
+- opened_at_ms: {opened}",
+        rule = ev.rule_id,
+        sev = ev.severity,
+        scope = ev.scope.key(),
+        title = ev.title,
+        detail = ev.detail,
+        rec = ev.recommendation,
+        opened = ev.opened_at_ms,
+    )
+}
+
+/// `POST /v1/admin/insights/{event_id}/triage` — run the built-in
+/// `veda-ops` agent to explain why an alert fired.
+///
+/// 404 when no event (open or history) has that id; 503 when no LLM is
+/// configured (mirrors `/converse`). On success returns the agent's
+/// explanation plus its step trace.
+pub async fn triage_event(
+    State(state): State<AppState>,
+    Path(event_id): Path<String>,
+) -> Result<Json<TriageResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let ev = find_event(&state, &event_id).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("no event with id '{event_id}'"),
+            }),
+        )
+    })?;
+
+    let prompt = build_triage_input(&ev);
+
+    // Admin caller (no RLS user). Resolve the in-memory `veda-ops` agent
+    // and drive the executor via the shared agent-turn helper.
+    let tenant = TenantId::default_tenant();
+    let (_agent, result) = run_agent_turn(&state, &tenant, None, "veda-ops", &[], &prompt)
+        .await
+        .map_err(|e| match e {
+            AgentTurnError::NoLlm => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "VEDA_LLM_ENDPOINT not configured. Set the env var to enable triage."
+                        .to_owned(),
+                }),
+            ),
+            AgentTurnError::NotFound(aid) => (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("agent '{aid}' not found"),
+                }),
+            ),
+        })?;
+
+    Ok(Json(TriageResponse {
+        event_id,
+        explanation: result.response,
+        steps: result.steps,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    use veda_core::error::Result as LlmResult;
+    use veda_core::llm_client::{
+        ChatMessage, ChatModel, CompletionOptions, FunctionCall, ToolCall, ToolCompletion, ToolDef,
+    };
+
+    use crate::advisor::event::{RemediationAction, Scope};
+    use crate::agent::catalog::{ToolCatalog, ToolContext};
+    use crate::agent::executor::{self, DEFAULT_MAX_STEPS};
+    use crate::agent::model::default_ops_agent;
+
+    /// Scripted, network-free [`ChatModel`] (mirrors the executor's test
+    /// fake): pops queued completions, then a default final answer.
+    struct FakeModel {
+        queue: RefCell<VecDeque<ToolCompletion>>,
+    }
+    impl FakeModel {
+        fn scripted(items: Vec<ToolCompletion>) -> Self {
+            Self {
+                queue: RefCell::new(items.into_iter().collect()),
+            }
+        }
+    }
+    impl ChatModel for FakeModel {
+        async fn complete_with_tools(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolDef],
+            _tool_choice: Option<&str>,
+            _opts: &CompletionOptions,
+        ) -> LlmResult<ToolCompletion> {
+            Ok(self.queue.borrow_mut().pop_front().unwrap_or(ToolCompletion {
+                content: Some("done".to_owned()),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+            }))
+        }
+    }
+
+    fn ev(rule: &str) -> OpsEvent {
+        OpsEvent {
+            id: OpsEvent::make_id(rule, &Scope::Global),
+            rule_id: rule.to_owned(),
+            scope: Scope::Global,
+            severity: Severity::High,
+            status: crate::advisor::event::EventStatus::Open,
+            title: "errors spiking".to_owned(),
+            detail: "5xx ratio over threshold".to_owned(),
+            recommendation: "inspect logs".to_owned(),
+            runbook: None,
+            remediation: RemediationAction::None,
+            opened_at_ms: 1000,
+            closed_at_ms: None,
+            acknowledged: false,
+            remediation_note: None,
+        }
+    }
+
+    #[test]
+    fn build_triage_input_embeds_event_context() {
+        let prompt = build_triage_input(&ev("high_error_rate"));
+        assert!(prompt.contains("high_error_rate"));
+        assert!(prompt.contains("errors spiking"));
+        assert!(prompt.contains("5xx ratio over threshold"));
+        assert!(prompt.contains("ROOT CAUSE"));
+    }
+
+    /// The veda-ops agent, driven by a fake LLM that calls an ops tool
+    /// then answers, produces a non-empty explanation + step trace. This
+    /// exercises the prompt + the `veda-ops` whitelist + the ops tools +
+    /// the executor (the same chain the triage handler runs, minus the
+    /// LlmClient construction that the 503/converse paths cover).
+    #[tokio::test]
+    async fn triage_agent_runs_tool_then_explains() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = crate::tenant::TenantId::default_tenant();
+
+        // Seed one open advisor event so get_insights returns it.
+        {
+            let mut store = state.advisor().events.lock().await;
+            store.reconcile(
+                vec![crate::advisor::rules::RuleHit {
+                    rule_id: "high_error_rate".to_owned(),
+                    scope: Scope::Global,
+                    severity: Severity::High,
+                    title: "errors spiking".to_owned(),
+                    detail: "5xx ratio over threshold".to_owned(),
+                    recommendation: "inspect logs".to_owned(),
+                    runbook: None,
+                    remediation: RemediationAction::None,
+                }],
+                1000,
+            );
+        }
+
+        let agent = default_ops_agent();
+        let event = ev("high_error_rate");
+        let prompt = build_triage_input(&event);
+
+        let model = FakeModel::scripted(vec![
+            ToolCompletion {
+                content: Some("Let me check open alerts.".to_owned()),
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_owned(),
+                    kind: "function".to_owned(),
+                    function: FunctionCall {
+                        name: "get_insights".to_owned(),
+                        arguments: "{}".to_owned(),
+                    },
+                }],
+                finish_reason: Some("tool_calls".to_owned()),
+                prompt_tokens: 5,
+                completion_tokens: 5,
+                total_tokens: 10,
+            },
+            ToolCompletion {
+                content: Some("Root cause: error rate spiked; next: inspect logs.".to_owned()),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+                prompt_tokens: 3,
+                completion_tokens: 7,
+                total_tokens: 10,
+            },
+        ]);
+
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let sys = executor::build_system_prompt(&agent, "");
+        let result = executor::run(
+            &model,
+            &cat,
+            &ctx,
+            &agent,
+            &sys,
+            &[],
+            &prompt,
+            DEFAULT_MAX_STEPS,
+        )
+        .await;
+
+        assert!(!result.hit_limit_or_error);
+        assert_eq!(
+            result.response,
+            "Root cause: error rate spiked; next: inspect logs."
+        );
+        assert!(!result.steps.is_empty(), "expected a non-empty step trace");
+        // The get_insights tool was dispatched and returned our seeded event.
+        let saw_tool = result.steps.iter().any(|s| matches!(
+            s,
+            AgentStep::ToolResult { result, is_error: false, .. }
+                if result["events"][0]["rule_id"] == "high_error_rate"
+        ));
+        assert!(saw_tool, "expected get_insights to surface the seeded event: {:?}", result.steps);
+    }
+
+    /// The handler finds the seeded event, then — with no LLM configured —
+    /// returns 503 (deterministic, mirrors `/converse`'s no-LLM path).
+    #[tokio::test]
+    async fn triage_handler_no_llm_returns_503() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        // Seed one open event so lookup succeeds and we reach the LLM check.
+        let id = OpsEvent::make_id("high_error_rate", &Scope::Global);
+        {
+            let mut store = state.advisor().events.lock().await;
+            store.reconcile(
+                vec![crate::advisor::rules::RuleHit {
+                    rule_id: "high_error_rate".to_owned(),
+                    scope: Scope::Global,
+                    severity: Severity::High,
+                    title: "errors spiking".to_owned(),
+                    detail: "5xx ratio over threshold".to_owned(),
+                    recommendation: "inspect logs".to_owned(),
+                    runbook: None,
+                    remediation: RemediationAction::None,
+                }],
+                1000,
+            );
+        }
+        let res = triage_event(
+            axum::extract::State(state),
+            axum::extract::Path(id),
+        )
+        .await;
+        let err = res.err().expect("no LLM → error");
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Unknown event id → 404 (before the LLM check).
+    #[tokio::test]
+    async fn triage_handler_unknown_event_returns_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let res = triage_event(
+            axum::extract::State(state),
+            axum::extract::Path("nope:global".to_owned()),
+        )
+        .await;
+        let err = res.err().expect("missing event → error");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 }
