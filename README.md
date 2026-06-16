@@ -84,6 +84,13 @@ See [documentation/2026-06-14-autoops-ops-advisor.md](documentation/2026-06-14-a
 
 See [documentation/2026-06-15-log-insights.md](documentation/2026-06-15-log-insights.md) for the full Log Insights guide.
 
+### Node Resource Signals
+- **Host/process resources in the snapshot** -- the Ops Advisor snapshot gained best-effort node-resource signals, read dependency-free from `/proc` (Linux) + `statvfs`: data-dir **disk** total/free/used%, **CPU** utilization (from `/proc/stat` jiffy deltas), **load** average (1/5/15 + core count), open **file descriptors** vs the `RLIMIT_NOFILE` limit, and **system memory** total/available. Every signal is optional and degrades to `null` off-Linux (no false alerts).
+- **Resource rules** -- `disk_space_low` (High, data-dir used % > 90 — warns *before* writes/seals/compaction fail when the disk fills), `high_cpu` (> 85%), `high_load` (load1/core > 2.0), `fd_exhaustion` (open/limit > 0.8), and `system_memory_low` (available/total < 10%); plus anomaly detectors `anomaly_cpu` and `anomaly_disk_used` (EWMA/σ, catches a rapid fill). Each skips cleanly when its signal is absent, and all flow through the existing events + alert channels and are tunable via `/v1/admin/insights/rules`.
+- **REST + UI** -- `GET /v1/admin/resources` (admin-only) returns the local node's latest resource snapshot (`disk`, `cpu_pct`, `load`, `num_cpus`, `fds`, `memory`, `rss_bytes`); plus a **Resources** panel on the Niriksha System Health page (disk used %/free, CPU, load, fds, system memory, RSS — warning-colored past threshold).
+
+See [documentation/2026-06-16-node-resource-signals.md](documentation/2026-06-16-node-resource-signals.md) for the full Node Resource Signals guide.
+
 ## Quick Start
 
 ### Docker Compose (recommended)
@@ -200,6 +207,7 @@ Veda runs in two modes; the admin REST surface differs depending on which one is
 |---|---|---|---|
 | `GET /v1/admin/health` / `readiness` | ✓ | ✓ | Always reachable |
 | `GET /v1/admin/metrics` | ✓ | ✓ | Prometheus text format |
+| `GET /v1/admin/resources` | ✓ | ✓ | Latest node-resource snapshot (disk/CPU/load/fds/memory/RSS); fields `null` off-Linux |
 | `GET /v1/admin/nodes` | ✓ (1 node) | ✓ (N nodes) | `mode` field reports which path is active |
 | `GET /v1/admin/region_topology` | ✓ (returns `{topology:null}`) | ✓ | Read works even without `_meta` |
 | `PUT /v1/admin/region_topology` | ✗ 503 | ✓ | Mutates `_meta::shard_ensembles` |
