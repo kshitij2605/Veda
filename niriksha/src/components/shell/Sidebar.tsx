@@ -6,6 +6,7 @@ import {
   Beaker,
   Database,
   FlaskConical,
+  Gauge,
   GitBranch,
   Images,
   Layers,
@@ -70,6 +71,7 @@ const GROUPS: NavGroup[] = [
     label: 'Observe',
     items: [
       { to: '/insights', label: 'Insights', icon: ShieldAlert, insightsBadge: true },
+      { to: '/slos', label: 'SLOs', icon: Gauge },
       { to: '/observability', label: 'Observability', icon: BarChart3 },
       { to: '/logs', label: 'Logs', icon: ScrollText },
       { to: '/health', label: 'Health', icon: Activity },

@@ -20,6 +20,8 @@ import {
   putRule,
   runInsights,
   scopeLabel,
+  triageEvent,
+  type AgentStep,
   type ChannelsConfig,
   type ChannelsView,
   type OpsEvent,
@@ -472,10 +474,168 @@ function EventDrawer({
               Acknowledge
             </Button>
           )}
+
+          {/* AI triage — runs the built-in veda-ops agent to explain the
+              alert. `key` resets the section's local state per event. */}
+          <TriageSection key={ev.id} eventId={ev.id} />
         </div>
       )}
     </Drawer>
   )
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   AI triage — explanation + reasoning/acting step trace
+   ──────────────────────────────────────────────────────────────────── */
+
+function TriageSection({ eventId }: { eventId: string }) {
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<{ explanation: string; steps: AgentStep[] } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [noLlm, setNoLlm] = useState(false)
+
+  const run = async () => {
+    setLoading(true)
+    setError(null)
+    setNoLlm(false)
+    try {
+      const { data } = await triageEvent(eventId)
+      setResult({ explanation: data.explanation, steps: data.steps })
+    } catch (e) {
+      // 503 → LLM not configured; surface that gracefully (not a hard error).
+      const status =
+        typeof e === 'object' && e && 'response' in e
+          ? (e as { response?: { status?: number; data?: { error?: string } } }).response?.status
+          : undefined
+      if (status === 503) {
+        setNoLlm(true)
+      } else {
+        setError(e instanceof Error ? e.message : 'Triage failed')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="pt-1 border-t border-[var(--color-border)]">
+      <Button
+        variant="secondary"
+        size="sm"
+        block
+        className="mt-3"
+        disabled={loading}
+        leading={
+          <Sparkles
+            size={13}
+            strokeWidth={2.25}
+            className={loading ? 'animate-pulse' : ''}
+          />
+        }
+        onClick={run}
+      >
+        {loading ? 'Triaging…' : result ? 'Re-run triage' : 'Triage with AI'}
+      </Button>
+
+      {noLlm && (
+        <div className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-base-1)] px-3 py-2 text-[12px] text-[var(--color-text-muted)]">
+          LLM not configured. Set{' '}
+          <span className="font-mono text-[var(--color-text)]">VEDA_LLM_ENDPOINT</span>{' '}
+          to enable AI triage.
+        </div>
+      )}
+
+      {error && (
+        <div className="mt-3 rounded-[var(--radius-sm)] border border-[color-mix(in_oklch,var(--color-error)_30%,transparent)] bg-[color-mix(in_oklch,var(--color-error)_8%,transparent)] px-3 py-2 text-[12px] text-[var(--color-error)] flex items-center gap-2">
+          <AlertCircle size={12} strokeWidth={2.25} />
+          {error}
+        </div>
+      )}
+
+      {result && (
+        <div className="mt-3 space-y-3">
+          <div>
+            <SectionLabel>
+              <span className="inline-flex items-center gap-1">
+                <Sparkles size={12} strokeWidth={2.25} />
+                Explanation
+              </span>
+            </SectionLabel>
+            <p className="text-[12.5px] text-[var(--color-text)] leading-relaxed whitespace-pre-wrap break-words">
+              {result.explanation}
+            </p>
+          </div>
+
+          {result.steps.length > 0 && (
+            <div>
+              <SectionLabel>Step trace</SectionLabel>
+              <div className="space-y-1.5">
+                {result.steps.map((s, i) => (
+                  <TriageStep key={i} step={s} />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TriageStep({ step }: { step: AgentStep }) {
+  if (step.kind === 'reasoning') {
+    return (
+      <div className="rounded-[var(--radius-sm)] bg-[var(--color-base-1)] border border-[var(--color-border)] px-2.5 py-1.5">
+        <div className="flex items-center gap-1.5 mb-0.5">
+          <Badge label="reasoning" variant="ghost" mono />
+        </div>
+        <p className="text-[12px] text-[var(--color-text-muted)] leading-relaxed whitespace-pre-wrap break-words">
+          {step.text}
+        </p>
+      </div>
+    )
+  }
+  if (step.kind === 'tool_call') {
+    return (
+      <div className="rounded-[var(--radius-sm)] bg-[var(--color-base-1)] border border-[var(--color-border)] px-2.5 py-1.5">
+        <div className="flex items-center gap-1.5 mb-0.5">
+          <Badge label="tool call" variant="accent" mono />
+          <span className="text-[11.5px] font-mono text-[var(--color-text)]">
+            {step.tool_id}
+          </span>
+        </div>
+        <code className="block text-[11px] font-mono text-[var(--color-text-subtle)] whitespace-pre-wrap break-words">
+          {fmtJson(step.args)}
+        </code>
+      </div>
+    )
+  }
+  // tool_result
+  return (
+    <div className="rounded-[var(--radius-sm)] bg-[var(--color-base-1)] border border-[var(--color-border)] px-2.5 py-1.5">
+      <div className="flex items-center gap-1.5 mb-0.5">
+        <Badge
+          label={step.is_error ? 'tool error' : 'tool result'}
+          variant={step.is_error ? 'error' : 'default'}
+          mono
+        />
+      </div>
+      <code className="block text-[11px] font-mono text-[var(--color-text-subtle)] whitespace-pre-wrap break-words">
+        {fmtJson(step.result)}
+      </code>
+    </div>
+  )
+}
+
+/** Compact JSON for a trace value; strings pass through verbatim. */
+function fmtJson(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'string') return v
+  try {
+    return JSON.stringify(v, null, 2)
+  } catch {
+    return String(v)
+  }
 }
 
 function remediationLabel(ev: OpsEvent): string {

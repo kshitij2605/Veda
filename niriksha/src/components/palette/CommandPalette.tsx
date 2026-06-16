@@ -10,6 +10,7 @@ import {
   Database,
   FileText,
   FlaskConical,
+  Gauge,
   GitBranch,
   Layers,
   ScrollText,
@@ -177,6 +178,14 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         group: 'Navigate',
         keywords: ['advisor', 'ops', 'events', 'alerts', 'remediation'],
         onSelect: () => navigate('/insights'),
+      },
+      {
+        id: 'nav-slos',
+        label: 'SLOs',
+        icon: Gauge,
+        group: 'Navigate',
+        keywords: ['slo', 'objective', 'sli', 'error budget', 'burn rate', 'reliability'],
+        onSelect: () => navigate('/slos'),
       },
       {
         id: 'nav-logs',
