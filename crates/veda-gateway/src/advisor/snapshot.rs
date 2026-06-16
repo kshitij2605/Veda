@@ -152,6 +152,11 @@ pub struct OpsSnapshot {
     /// empty so other constructors / callers stay valid.
     #[serde(default)]
     pub slo_statuses: Vec<crate::advisor::slo::SloStatus>,
+    /// Per-probe synthetic self-check summaries as of this snapshot. Like
+    /// [`Self::slo_statuses`], NOT populated by [`collect`]; the engine
+    /// fills it each tick before pushing to history. Default empty.
+    #[serde(default)]
+    pub synthetic_summaries: Vec<crate::advisor::synthetic::SyntheticSummary>,
 }
 
 /// Collect a live snapshot from `state`. `now_ms` is injected so
@@ -319,6 +324,7 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
         error_log_count,
         warn_log_count,
         slo_statuses: Vec::new(),
+        synthetic_summaries: Vec::new(),
     }
 }
 
@@ -885,6 +891,7 @@ veda_records_total 7
             error_log_count: 0,
             warn_log_count: 0,
             slo_statuses: Vec::new(),
+            synthetic_summaries: Vec::new(),
         }
     }
 

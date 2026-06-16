@@ -34,6 +34,7 @@ pub mod saved_objects;
 pub mod search;
 pub mod slos;
 pub mod state;
+pub mod synthetics;
 pub mod time_parse;
 pub mod txn;
 
@@ -77,6 +78,27 @@ fn slos_router() -> Router<state::AppState> {
                 .delete(slos::delete_slo),
         )
         .route("/v1/admin/slos/{id}/status", get(slos::get_slo_status))
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// Synthetic self-check probe admin routes, gated by an extra
+/// `require_admin` route layer (same pattern as [`slos_router`]).
+fn synthetics_router() -> Router<state::AppState> {
+    Router::new()
+        .route(
+            "/v1/admin/synthetics",
+            get(synthetics::list_synthetics).post(synthetics::create_synthetic),
+        )
+        .route(
+            "/v1/admin/synthetics/{id}",
+            get(synthetics::get_synthetic)
+                .put(synthetics::put_synthetic)
+                .delete(synthetics::delete_synthetic),
+        )
+        .route(
+            "/v1/admin/synthetics/{id}/results",
+            get(synthetics::get_synthetic_results),
+        )
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
@@ -308,6 +330,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .merge(insights_router())
         // SLOs — admin-only (extra require_admin route layer).
         .merge(slos_router())
+        // Synthetic self-check probes — admin-only (extra require_admin).
+        .merge(synthetics_router())
         // Log Insights — admin-only (extra require_admin route layer).
         .merge(logs_router())
         // Node resources — admin-only (extra require_admin route layer).
