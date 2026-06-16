@@ -10,6 +10,8 @@
 //!   [`event::EventStore`] that reconciles hits into open/close
 //!   transitions.
 //! * [`config`] — per-rule [`config::RuleConfig`] knobs.
+//! * [`slo`] — the SLO engine: definitions, bucketed rolling counters,
+//!   and SLI / error-budget / burn-rate math with JSON persistence.
 //!
 //! Anomaly detection, notifications, auto-remediation, and the REST
 //! surface land in follow-up tasks; nothing here sends, executes, or
@@ -22,9 +24,15 @@ pub mod event;
 pub mod notify;
 pub mod remediation;
 pub mod rules;
+pub mod slo;
 pub mod snapshot;
 
 pub use engine::{run_tick, spawn_advisor, AdvisorState};
+
+pub use slo::{
+    catalog_default_slos, default_fast_burn, default_slow_burn, BurnConfig, SloDef, SloKind,
+    SloState, SloStatus,
+};
 
 pub use snapshot::{
     collect, parse_prom_counter, CollectionSnapshot, GlobalSnapshot, HealthSnapshot,
