@@ -60,6 +60,10 @@ fn insights_router() -> Router<state::AppState> {
             "/v1/admin/insights/{event_id}/ack",
             post(insights::ack_event),
         )
+        .route(
+            "/v1/admin/insights/{event_id}/triage",
+            post(insights::triage_event),
+        )
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
