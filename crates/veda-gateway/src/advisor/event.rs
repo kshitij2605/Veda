@@ -58,6 +58,9 @@ pub enum Scope {
     /// A service-level objective, keyed by its id (so SLO rule events
     /// dedup per-SLO).
     Slo(String),
+    /// A synthetic probe, keyed by its id (so synthetic rule events dedup
+    /// per-probe).
+    Synthetic(String),
 }
 
 impl Scope {
@@ -69,6 +72,7 @@ impl Scope {
             Scope::Shard { collection, shard } => format!("shard:{collection}/{shard}"),
             Scope::Node(n) => format!("node:{n}"),
             Scope::Slo(s) => format!("slo:{s}"),
+            Scope::Synthetic(s) => format!("synthetic:{s}"),
         }
     }
 }

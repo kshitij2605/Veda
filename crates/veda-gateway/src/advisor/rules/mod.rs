@@ -797,6 +797,55 @@ impl Rule for SloBudgetExhausted {
     }
 }
 
+// ---------------------------------------------------------------------
+// Synthetic rule — alerts when an in-process self-check probe has failed
+// `consecutive_failures` times in a row. Reads the per-probe summaries
+// the engine records onto `snap.synthetic_summaries`; emits one hit per
+// failing probe, scoped `Scope::Synthetic(probe_id)` so the EventStore
+// dedups one event per probe. Skips cleanly when there are no summaries.
+// ---------------------------------------------------------------------
+
+/// A synthetic self-check probe failing repeatedly.
+struct SyntheticFailing;
+impl Rule for SyntheticFailing {
+    fn id(&self) -> &'static str {
+        "synthetic_failing"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::High
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let k = threshold_u64(cfg, "consecutive_failures", 3).max(1) as u32;
+        let mut hits = Vec::new();
+        for s in &snap.synthetic_summaries {
+            if s.consecutive_failures < k {
+                continue;
+            }
+            let uptime = s
+                .uptime_pct
+                .map(|p| format!("{p:.0}%"))
+                .unwrap_or_else(|| "n/a".into());
+            hits.push(RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Synthetic(s.probe_id.clone()),
+                severity: self.default_severity(),
+                title: format!("Synthetic probe '{}' failing", s.name),
+                detail: format!(
+                    "Probe '{}' has failed {} time(s) in a row (threshold {}); uptime over the retained window {}.",
+                    s.name, s.consecutive_failures, k, uptime
+                ),
+                recommendation: format!(
+                    "Investigate the path probe '{}' exercises — the same in-process call is failing repeatedly.",
+                    s.name
+                ),
+                runbook: Some(format!("GET /v1/admin/synthetics/{}/results", s.probe_id)),
+                remediation: RemediationAction::None,
+            });
+        }
+        hits
+    }
+}
+
 /// The built-in rule catalog.
 pub fn catalog() -> Vec<Box<dyn Rule>> {
     vec![
@@ -820,6 +869,7 @@ pub fn catalog() -> Vec<Box<dyn Rule>> {
         Box::new(SloBurnRateFast),
         Box::new(SloBurnRateSlow),
         Box::new(SloBudgetExhausted),
+        Box::new(SyntheticFailing),
     ]
 }
 
@@ -912,6 +962,7 @@ mod tests {
             error_log_count: 0,
             warn_log_count: 0,
             slo_statuses: Vec::new(),
+            synthetic_summaries: Vec::new(),
         }
     }
 
@@ -1288,6 +1339,59 @@ mod tests {
         assert!(FdExhaustion
             .check(&snap2, &empty_history(), &RuleConfig::default())
             .is_empty());
+    }
+
+    // --- synthetic rule ------------------------------------------------
+
+    fn summary(probe_id: &str, consecutive_failures: u32) -> crate::advisor::synthetic::SyntheticSummary {
+        crate::advisor::synthetic::SyntheticSummary {
+            probe_id: probe_id.into(),
+            name: format!("{probe_id} probe"),
+            consecutive_failures,
+            last_ok: Some(consecutive_failures == 0),
+            last_latency_ms: Some(5.0),
+            uptime_pct: Some(50.0),
+            last_ts_ms: Some(1000),
+        }
+    }
+
+    #[test]
+    fn synthetic_failing_fires_at_or_above_threshold() {
+        let mut snap = base_snapshot();
+        snap.synthetic_summaries = vec![summary("health", 3)]; // == default K=3
+        let hits = SyntheticFailing.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "synthetic_failing");
+        assert_eq!(hits[0].scope, Scope::Synthetic("health".into()));
+        assert_eq!(hits[0].severity, Severity::High);
+        assert!(!hits[0].recommendation.is_empty());
+    }
+
+    #[test]
+    fn synthetic_failing_silent_below_threshold_and_when_healthy() {
+        let mut snap = base_snapshot();
+        snap.synthetic_summaries = vec![summary("health", 2), summary("search", 0)];
+        let hits = SyntheticFailing.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn synthetic_failing_silent_when_no_summaries() {
+        let snap = base_snapshot(); // synthetic_summaries empty
+        let hits = SyntheticFailing.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn synthetic_failing_honors_configured_threshold() {
+        let mut snap = base_snapshot();
+        snap.synthetic_summaries = vec![summary("health", 5)];
+        // Raise K to 10 → no hit.
+        let cfg = RuleConfig {
+            thresholds: serde_json::json!({ "consecutive_failures": 10 }),
+            ..Default::default()
+        };
+        assert!(SyntheticFailing.check(&snap, &empty_history(), &cfg).is_empty());
     }
 
     #[test]

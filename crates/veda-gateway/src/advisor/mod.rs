@@ -26,12 +26,18 @@ pub mod remediation;
 pub mod rules;
 pub mod slo;
 pub mod snapshot;
+pub mod synthetic;
 
 pub use engine::{run_tick, spawn_advisor, AdvisorState};
 
 pub use slo::{
     catalog_default_slos, default_fast_burn, default_slow_burn, BurnConfig, SloDef, SloKind,
     SloRegistry, SloState, SloStatus,
+};
+
+pub use synthetic::{
+    run_probe, ProbeKind, ProbeResult, SyntheticProbe, SyntheticRegistry, SyntheticResults,
+    SyntheticSummary,
 };
 
 pub use snapshot::{

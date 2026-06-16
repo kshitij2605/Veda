@@ -357,6 +357,7 @@ mod tests {
             error_log_count: 0,
             warn_log_count: 0,
             slo_statuses: Vec::new(),
+            synthetic_summaries: Vec::new(),
         }
     }
 

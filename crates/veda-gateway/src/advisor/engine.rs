@@ -36,6 +36,7 @@ use crate::advisor::remediation::{run_remediation, LiveDispatcher, RateLimiter};
 use crate::advisor::rules::{catalog, run_rules, Rule, RuleHit};
 use crate::advisor::event::{RemediationAction, Scope, Severity};
 use crate::advisor::slo::{SloKind, SloRegistry, SloState, SloStatus};
+use crate::advisor::synthetic::{run_probe, SyntheticRegistry, SyntheticResults};
 use crate::advisor::snapshot::{collect, OpsSnapshot, SnapshotHistory, DEFAULT_HISTORY_CAP};
 use crate::advisor::anomaly::detect_anomalies;
 use crate::logs::{LogCategory, categorize::CategorizeOptions};
@@ -47,6 +48,10 @@ const CONFIG_FILE: &str = "_advisor_config.json";
 const SLOS_FILE: &str = "_slos.json";
 /// SLO rolling-counter state file name under `data_dir`.
 const SLO_STATE_FILE: &str = "_slo_state.json";
+/// Synthetic probe registry file name under `data_dir`.
+const SYNTHETICS_FILE: &str = "_synthetics.json";
+/// Synthetic probe results file name under `data_dir`.
+const SYNTHETIC_RESULTS_FILE: &str = "_synthetic_results.json";
 /// Default tick interval (seconds) when the env override is unset.
 const DEFAULT_INTERVAL_SECS: u64 = 30;
 
@@ -71,6 +76,12 @@ pub struct AdvisorState {
     /// Bucketed rolling SLI counters, persisted to
     /// `{data_dir}/_slo_state.json`.
     pub slo_state: Mutex<SloState>,
+    /// User-defined synthetic probes, persisted to
+    /// `{data_dir}/_synthetics.json`.
+    pub synthetics: RwLock<SyntheticRegistry>,
+    /// Per-probe bounded result rings, persisted to
+    /// `{data_dir}/_synthetic_results.json`.
+    pub synthetic_results: Mutex<SyntheticResults>,
     /// Shared async HTTP client, reused by the per-tick [`Notifier`].
     pub http: reqwest::Client,
 }
@@ -86,6 +97,10 @@ impl AdvisorState {
             limiter: Mutex::new(RateLimiter::default()),
             slos: RwLock::new(SloRegistry::load(&data_dir.join(SLOS_FILE))),
             slo_state: Mutex::new(SloState::load(&data_dir.join(SLO_STATE_FILE))),
+            synthetics: RwLock::new(SyntheticRegistry::load(&data_dir.join(SYNTHETICS_FILE))),
+            synthetic_results: Mutex::new(SyntheticResults::load(
+                &data_dir.join(SYNTHETIC_RESULTS_FILE),
+            )),
             http: reqwest::Client::new(),
         }
     }
@@ -226,7 +241,10 @@ fn interval_secs() -> u64 {
 ///   (floored at 0). Same SLI; both frame successes as "good".
 /// * **Latency{threshold_ms}**: over the new snapshot's bounded
 ///   `recent_latencies_ms` — `total = len`, `good = count(≤ threshold)`.
-/// * **Synthetic**: `(0, 0)` (probe wiring lands in a follow-up).
+/// * **Synthetic**: `(0, 0)` here — synthetic observations come from the
+///   probe result ring, not the snapshot, so the caller handles them
+///   separately (see [`run_tick`], which counts results via
+///   [`SyntheticResults::since`]).
 ///
 /// Returns `(0, 0)` (a no-op the caller skips) when the counters are
 /// absent or went backwards, or the latency window is empty.
@@ -254,6 +272,67 @@ fn slo_observation(kind: &SloKind, snap: &OpsSnapshot, prev: Option<&OpsSnapshot
     }
 }
 
+/// Run every synthetic probe whose `interval_secs` has elapsed since its
+/// last result (or that has never run), record each [`ProbeResult`], and
+/// persist the result rings.
+///
+/// **Lock discipline:** the synthetics/results locks are held only
+/// *briefly* and never across a probe `.await`. We snapshot the due-probe
+/// list under a short read lock + a short results lock (to read each
+/// probe's last timestamp), drop both, await the probes, then re-lock the
+/// results mutex briefly to record + save. A slow probe therefore never
+/// freezes the synthetics registry or the next tick.
+///
+/// Cadence is bounded below by the advisor tick interval (the only
+/// in-process timer): a probe with a sub-tick interval simply runs every
+/// tick. See [`crate::advisor::synthetic`].
+pub async fn run_due_probes(state: &AppState, now_ms: u64) {
+    let advisor = state.advisor();
+
+    // Snapshot the full probe list under a short read lock, then drop it.
+    let probes = {
+        let reg = advisor.synthetics.read().await;
+        if reg.list().is_empty() {
+            return;
+        }
+        reg.list().to_vec()
+    };
+
+    // Read each probe's last timestamp under a short results lock, drop it.
+    let due: Vec<_> = {
+        let results = advisor.synthetic_results.lock().await;
+        probes
+            .into_iter()
+            .filter(|p| {
+                let last_ts = results
+                    .recent(&p.id)
+                    .last()
+                    .map(|r| r.ts_ms)
+                    .unwrap_or(0);
+                let interval_ms = p.interval_secs.saturating_mul(1_000);
+                last_ts == 0 || now_ms.saturating_sub(last_ts) >= interval_ms
+            })
+            .collect()
+    };
+    if due.is_empty() {
+        return;
+    }
+
+    // Await all due probes with NO advisor lock held.
+    let mut outcomes = Vec::with_capacity(due.len());
+    for probe in &due {
+        let result = run_probe(state, probe).await;
+        outcomes.push((probe.id.clone(), result));
+    }
+
+    // Re-lock briefly to record + persist.
+    let mut results = advisor.synthetic_results.lock().await;
+    for (id, result) in outcomes {
+        results.record(&id, result);
+    }
+    results.save(&state.inner.data_dir.join(SYNTHETIC_RESULTS_FILE));
+}
+
 /// Current wall-clock time in epoch milliseconds.
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -271,9 +350,11 @@ pub fn now_ms() -> i64 {
 /// `.await`.** The tick runs in three phases, the network awaits living
 /// strictly in phase 2 where neither `history` nor `events` is locked:
 ///
-/// - **Phase 0 (no advisor lock):** `log_categorizer().categorize(...)`
-///   — async, may embed over the network — runs first and produces the
-///   `new_error_category` hits, exactly like the notify phase keeps
+/// - **Phase 0 (no advisor lock held across awaits):**
+///   [`run_due_probes`] runs any due synthetic self-checks (its
+///   synthetics/results locks are taken only briefly, never across a probe
+///   await), then `log_categorizer().categorize(...)` — async, may embed
+///   over the network — produces the `new_error_category` hits, keeping
 ///   network awaits out of any held advisor lock.
 /// - **Phase 1 (locked, synchronous):** lock `history`, push the
 ///   snapshot; lock `events`; [`reconcile_hits`] (run rules + anomalies,
@@ -296,6 +377,11 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
     // Per-tick config snapshot (released immediately).
     let cfg = advisor.config.read().await.clone();
     let rule_catalog = catalog();
+
+    // --- Phase 0a: run any due synthetic self-check probes (locks held
+    // only briefly, never across a probe await). Records this tick's
+    // ProbeResults so the SLO/summary steps below see them.
+    run_due_probes(state, now.max(0) as u64).await;
 
     // --- Phase 0: semantic log categorization (NO advisor lock held).
     // `categorize` is async and may embed over the network, so it must
@@ -322,17 +408,66 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
         // SLO recording: brief slos/slo_state locks. Use the history's
         // current latest() as the PREVIOUS snapshot (before pushing the
         // new one) so counter deltas span exactly this tick interval.
+        let now_u = now.max(0) as u64;
+
+        // PREVIOUS snapshot (history's current latest, before we push the
+        // new one). Its `taken_at_ms` is the previous tick time, used to
+        // count synthetic results recorded since then for the Synthetic SLI.
+        let prev = {
+            let history = advisor.history.lock().await;
+            history.latest().cloned()
+        };
+        let prev_tick_ms = prev.as_ref().map(|p| p.taken_at_ms.max(0) as u64);
+
+        // Synthetic summaries: snapshot probe defs (brief read lock) +
+        // results (brief lock), derive one summary per probe. Recorded onto
+        // the snapshot before reconcile so `synthetic_failing` can read it.
+        {
+            let probes = {
+                let reg = advisor.synthetics.read().await;
+                reg.list().to_vec()
+            };
+            if !probes.is_empty() {
+                let results = advisor.synthetic_results.lock().await;
+                snap.synthetic_summaries = probes
+                    .iter()
+                    .map(|p| results.summary(&p.id, &p.name))
+                    .collect();
+            }
+        }
+
         {
             let defs = advisor.slos.read().await;
             let defs = defs.list();
             if !defs.is_empty() {
-                let now_u = now.max(0) as u64;
-                let history = advisor.history.lock().await;
-                let prev = history.latest().cloned();
-                drop(history);
+                // For Synthetic SLOs we count probe results recorded since
+                // the previous tick; gather those counts under a brief
+                // results lock (dropped before taking slo_state).
+                let synth_obs: Vec<(String, (u64, u64))> = {
+                    let results = advisor.synthetic_results.lock().await;
+                    defs.iter()
+                        .filter_map(|d| match &d.kind {
+                            SloKind::Synthetic { probe_id } => {
+                                let since = prev_tick_ms.unwrap_or(0);
+                                let rs = results.since(probe_id, since);
+                                let total = rs.len() as u64;
+                                let good = rs.iter().filter(|r| r.ok).count() as u64;
+                                Some((d.id.clone(), (good, total)))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                };
                 let mut slo_state = advisor.slo_state.lock().await;
                 for d in defs {
-                    let (good, total) = slo_observation(&d.kind, &snap, prev.as_ref());
+                    let (good, total) = match &d.kind {
+                        SloKind::Synthetic { .. } => synth_obs
+                            .iter()
+                            .find(|(id, _)| id == &d.id)
+                            .map(|(_, gt)| *gt)
+                            .unwrap_or((0, 0)),
+                        _ => slo_observation(&d.kind, &snap, prev.as_ref()),
+                    };
                     if total > 0 {
                         slo_state.record(&d.id, good, total, now_u);
                     }
@@ -467,6 +602,7 @@ mod tests {
             error_log_count: 0,
             warn_log_count: 0,
             slo_statuses: Vec::new(),
+            synthetic_summaries: Vec::new(),
         }
     }
 
@@ -711,6 +847,119 @@ mod tests {
         assert!(
             !hits.iter().any(|h| h.rule_id.starts_with("slo_")),
             "healthy SLO must trip no slo_* rule: {hits:?}"
+        );
+    }
+
+    fn synthetic_slo(id: &str, probe_id: &str) -> crate::advisor::slo::SloDef {
+        crate::advisor::slo::SloDef {
+            id: id.into(),
+            name: format!("{id} synthetic"),
+            kind: SloKind::Synthetic {
+                probe_id: probe_id.into(),
+            },
+            target_pct: 99.0,
+            window_secs: 300,
+            fast_burn: crate::advisor::slo::default_fast_burn(),
+            slow_burn: crate::advisor::slo::default_slow_burn(),
+        }
+    }
+
+    fn probe_result(ts_ms: u64, ok: bool) -> crate::advisor::synthetic::ProbeResult {
+        crate::advisor::synthetic::ProbeResult {
+            ts_ms,
+            ok,
+            latency_ms: 1.0,
+            error: if ok { None } else { Some("boom".into()) },
+        }
+    }
+
+    #[test]
+    fn synthetic_results_feed_the_synthetic_sli() {
+        use crate::advisor::synthetic::SyntheticResults;
+
+        // Inject mostly-failing probe results, count them since the prev
+        // tick, and record into the SLO counter exactly as run_tick does.
+        let mut results = SyntheticResults::new();
+        let now_u = 10_000_000u64;
+        for i in 0..10 {
+            // 8 of 10 fail.
+            results.record("p", probe_result(now_u - 1000 + i, i >= 8));
+        }
+        let def = synthetic_slo("s", "p");
+        let since = now_u - 2000; // before all results
+        let rs = results.since("p", since);
+        let total = rs.len() as u64;
+        let good = rs.iter().filter(|r| r.ok).count() as u64;
+        assert_eq!((good, total), (2, 10));
+
+        let mut slo_state = SloState::new(60);
+        slo_state.record(&def.id, good, total, now_u);
+        let status = slo_state.status(&def, now_u);
+        // SLI 20% vs target 99% → non-compliant + budget exhausted + burning.
+        assert!((status.sli_pct.unwrap() - 20.0).abs() < 1e-9);
+        assert!(!status.compliant);
+        assert!(status.budget_exhausted);
+        assert!(status.breaching_fast);
+    }
+
+    #[test]
+    fn synthetic_failing_rule_opens_event_for_failing_probe() {
+        use crate::advisor::synthetic::SyntheticResults;
+
+        // A probe with a trailing run of failures → consecutive_failures >= K.
+        let mut results = SyntheticResults::new();
+        results.record("health", probe_result(1, true));
+        for i in 0..4 {
+            results.record("health", probe_result(2 + i, false)); // 4 trailing fails
+        }
+        let summary = results.summary("health", "health probe");
+        assert_eq!(summary.consecutive_failures, 4);
+
+        let mut snap = base_snapshot(10_000_000);
+        snap.synthetic_summaries = vec![summary];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut events = EventStore::new(tmp.path());
+        let cfg = AdvisorConfig::default();
+        let cat = catalog();
+        let mut history = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+        history.push(snap.clone());
+
+        let r = reconcile_hits(&snap, &history, &mut events, &cfg, &cat, Vec::new(), 10_000_000);
+        let hit = r
+            .opened
+            .iter()
+            .find(|e| e.rule_id == "synthetic_failing")
+            .expect("synthetic_failing must open an event");
+        assert_eq!(hit.scope, Scope::Synthetic("health".into()));
+        assert!(events
+            .open_events()
+            .iter()
+            .any(|e| e.id == "synthetic_failing:synthetic:health"));
+    }
+
+    #[test]
+    fn synthetic_failing_rule_silent_for_healthy_probe() {
+        use crate::advisor::synthetic::SyntheticResults;
+
+        let mut results = SyntheticResults::new();
+        for i in 0..5 {
+            results.record("health", probe_result(i, true)); // all ok
+        }
+        let summary = results.summary("health", "health probe");
+        assert_eq!(summary.consecutive_failures, 0);
+
+        let mut snap = base_snapshot(10_000_000);
+        snap.synthetic_summaries = vec![summary];
+        let history = {
+            let mut h = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+            h.push(snap.clone());
+            h
+        };
+        let hits = run_rules(&catalog(), &snap, &history, &AdvisorConfig::default());
+        assert!(
+            !hits.iter().any(|h| h.rule_id == "synthetic_failing"),
+            "healthy probe must trip no synthetic_failing: {hits:?}"
         );
     }
 
