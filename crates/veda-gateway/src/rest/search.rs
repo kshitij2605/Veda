@@ -53,6 +53,54 @@ fn default_limit() -> usize {
     10
 }
 
+/// Classify the query body into a coarse `query_type` string for the
+/// query log / correlation analyzer, plus the primary vector field name
+/// (used to resolve the backing index type). Lexical-only queries
+/// (bm25 / match_phrase) have no vector field, so the field is `None`.
+fn classify_query(body: &QueryBody) -> (&'static str, Option<String>) {
+    if let Some(ref v) = body.vector {
+        ("dense", Some(v.field.clone()))
+    } else if let Some(ref s) = body.sparse_vector {
+        ("sparse", Some(s.field.clone()))
+    } else if let Some(ref cp) = body.colpali {
+        ("colpali", Some(cp.field.clone()))
+    } else if let Some(ref mv) = body.multi_vector {
+        ("multi_vector", mv.first().map(|f| f.field.clone()))
+    } else if let Some(ref h) = body.hybrid {
+        ("hybrid", Some(h.dense.field.clone()))
+    } else if body.bm25.is_some() {
+        ("bm25", None)
+    } else if body.match_phrase.is_some() {
+        ("match_phrase", None)
+    } else {
+        ("unknown", None)
+    }
+}
+
+/// Lowercase string form of a field's index type, for the query log.
+fn index_type_str(it: veda_core::types::IndexType) -> &'static str {
+    use veda_core::types::IndexType as I;
+    match it {
+        I::Hnsw => "hnsw",
+        I::DiskAnn => "diskann",
+        I::IvfPq => "ivf_pq",
+        I::Flat => "flat",
+        I::RaBitQ => "rabitq",
+        I::RaBitQRerank => "rabitq_rerank",
+        I::HnswRaBitQ => "hnsw_rabitq",
+        I::Cagra => "cagra",
+        I::RaBitQExtRerank => "rabitq_ext_rerank",
+        I::Sq4 => "sq4",
+        I::Sq8 => "sq8",
+        I::SuffixArray => "suffix_array",
+        I::Inverted => "inverted",
+        I::Range => "range",
+        I::Bitmap => "bitmap",
+        I::Hash => "hash",
+        I::None => "none",
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct QueryBody {
     /// Single dense-vector query.
@@ -222,6 +270,21 @@ pub async fn search(
     }
     let start = Instant::now();
 
+    // APM Phase 1: request-time query-log metadata. Classification and
+    // filter/rerank flags are known up front (from `req`); `index_type`
+    // is filled in once the schema is loaded. Threaded into the query
+    // log on BOTH the success and error paths (exactly one write each).
+    let display = crate::tenant::display_name(&name).to_owned();
+    let (query_type, query_field) = classify_query(&req.query);
+    let mut meta = super::query_log::QueryMeta {
+        query_type: query_type.to_owned(),
+        has_filter: req.filter.is_some() || req.filter_expr.is_some(),
+        reranked: rerank_cfg.is_some(),
+        top_k: final_limit,
+        index_type: None,
+        shard_ids: Vec::new(),
+    };
+
     // Look up the schema to get default metric
     let schema = {
         let schemas = state.inner.schemas.read().await;
@@ -234,6 +297,14 @@ pub async fn search(
             )
         })?
     };
+
+    // Resolve the backing index type of the queried vector field
+    // (best-effort; lexical-only queries have no vector field).
+    if let Some(field_name) = query_field.as_deref()
+        && let Some(field) = schema.get_field(field_name)
+    {
+        meta.index_type = Some(index_type_str(field.index_type()).to_owned());
+    }
 
     // RLS: if the collection has an owner field, inject an owner-equality
     // predicate so non-Admin callers only see their own records.
@@ -256,7 +327,74 @@ pub async fn search(
             req.filter_expr = rls::inject_owner_filter(user_filter, owner_field, &user, false);
         }
     }
+    // RLS may have injected a filter where none existed — reflect that.
+    meta.has_filter = req.filter.is_some() || req.filter_expr.is_some();
 
+    // Run the fallible search body. A single match below logs EXACTLY
+    // one query-log entry per request: `record_success` on Ok,
+    // `record_error` on Err — mutually exclusive, never both. Both
+    // writes are unconditional (not gated on trace sampling).
+    match run_search(&state, &name, &schema, &req, rerank_cfg, final_limit, start).await {
+        Ok((results, explain_timing, mut hybrid_explain, took_ms)) => {
+            let count = results.len();
+            let doc_ids: Vec<String> = results.iter().map(|h| h.id.clone()).collect();
+            super::query_log::record_success(&state, &name, &display, &meta, doc_ids, took_ms);
+            if let Some(ref mut hx) = hybrid_explain {
+                hx.final_top = results.iter().map(|h| h.id.clone()).collect();
+            }
+            Ok(Json(SearchResponse {
+                results,
+                count,
+                took_ms,
+                explain: explain_timing,
+                hybrid_explain,
+            }))
+        }
+        Err((status, body)) => {
+            let took_ms = start.elapsed().as_millis() as u64;
+            super::query_log::record_error(
+                &state,
+                &name,
+                &display,
+                &meta,
+                error_kind_for_status(status),
+                took_ms,
+            );
+            Err((status, body))
+        }
+    }
+}
+
+/// Coarse, low-cardinality error label derived from the HTTP status of a
+/// failed search. Keeps the query log's `error_kind` enumerable for the
+/// correlation analyzer (rather than free-form error strings).
+fn error_kind_for_status(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "bad_request",
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
+        StatusCode::INTERNAL_SERVER_ERROR => "internal",
+        _ => "other",
+    }
+}
+
+/// The fallible core of the search handler. Produces the response
+/// components (`hits`, explain timings, took_ms) or a gateway error. All
+/// `?` early-returns funnel here so the caller can log exactly one
+/// query-log entry. `req` is already RLS-resolved by the caller.
+#[allow(clippy::too_many_arguments)]
+async fn run_search(
+    state: &AppState,
+    name: &str,
+    schema: &veda_core::schema::CollectionSchema,
+    req: &SearchRequest,
+    rerank_cfg: Option<super::rerank::RerankConfig>,
+    final_limit: usize,
+    start: Instant,
+) -> Result<
+    (Vec<SearchHit>, Option<ExplainTiming>, Option<HybridExplain>, u64),
+    (StatusCode, Json<ErrorResponse>),
+> {
     // Phase F: resolve the snapshot timestamp once up front so
     // the executor request structs carry it and apply
     // visibility-at-read_ts filtering inside the search walk.
@@ -264,7 +402,7 @@ pub async fn search(
     let mvcc_active_for_collection = {
         let managers = state.inner.segment_managers.read().await;
         managers
-            .get(&name)
+            .get(name)
             .map(|m| m.values().any(|sm| sm.has_mvcc()))
             .unwrap_or(false)
     };
@@ -303,7 +441,7 @@ pub async fn search(
     }
 
     let executors = state.inner.query_executors.read().await;
-    let executor = executors.get(&name).ok_or_else(|| {
+    let executor = executors.get(name).ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -360,8 +498,8 @@ pub async fn search(
                 ));
             }
         }
-        let metric = resolve_metric(&schema, &vec_query.field);
-        let (hits, timings) = execute_single_vector(executor, vec_query, &req, metric, effective_read_ts)?;
+        let metric = resolve_metric(schema, &vec_query.field);
+        let (hits, timings) = execute_single_vector(executor, vec_query, req, metric, effective_read_ts)?;
         if req.explain {
             let total = timings.filter_ms + timings.ann_search_ms + timings.scoring_ms;
             explain_timing = Some(ExplainTiming {
@@ -375,7 +513,7 @@ pub async fn search(
         hits
     } else if let Some(ref cp) = req.query.colpali {
         // MaxSim multi-vector search.
-        let metric = resolve_colpali_metric(&schema, &cp.field);
+        let metric = resolve_colpali_metric(schema, &cp.field);
         let request = veda_query::search::MultiVectorSearchRequest {
             field: cp.field.clone(),
             query_rows: cp.rows.clone(),
@@ -416,8 +554,8 @@ pub async fn search(
             .collect()
     } else if let Some(ref sparse_query) = req.query.sparse_vector {
         // Sparse-vector search.
-        let metric = resolve_sparse_metric(&schema, &sparse_query.field);
-        let (hits, timings) = execute_sparse_vector(executor, sparse_query, &req, metric, effective_read_ts)?;
+        let metric = resolve_sparse_metric(schema, &sparse_query.field);
+        let (hits, timings) = execute_sparse_vector(executor, sparse_query, req, metric, effective_read_ts)?;
         if req.explain {
             let total = timings.filter_ms + timings.ann_search_ms + timings.scoring_ms;
             explain_timing = Some(ExplainTiming {
@@ -432,10 +570,10 @@ pub async fn search(
     } else if let Some(ref multi) = req.query.multi_vector {
         // Multi-vector fusion search
         let fusion_field = multi.first().map(|m| m.field.as_str()).unwrap_or("");
-        let metric = resolve_metric(&schema, fusion_field);
+        let metric = resolve_metric(schema, fusion_field);
         if req.explain {
             let phase_start = Instant::now();
-            let hits = execute_multi_vector(executor, multi, &req, metric)?;
+            let hits = execute_multi_vector(executor, multi, req, metric)?;
             let fusion_ms = phase_start.elapsed().as_secs_f64() * 1000.0;
             explain_timing = Some(ExplainTiming {
                 filter_ms: 0.0,
@@ -446,31 +584,31 @@ pub async fn search(
             });
             hits
         } else {
-            execute_multi_vector(executor, multi, &req, metric)?
+            execute_multi_vector(executor, multi, req, metric)?
         }
     } else if let Some(ref bm25_query) = req.query.bm25 {
         // Built-in BM25 full-text search against a string field with
         // `bm25 = true` in the schema. Runs the same tokenizer at ingest
         // and query time; no Lucene/Tantivy bundling required.
-        let eff_filter = effective_filter(&req);
-        execute_bm25(&state, &name, bm25_query, req.limit, eff_filter.as_ref(), effective_read_ts).await?
+        let eff_filter = effective_filter(req);
+        execute_bm25(state, name, bm25_query, req.limit, eff_filter.as_ref(), effective_read_ts).await?
     } else if let Some(ref phrase_query) = req.query.match_phrase {
         // Phrase / proximity search: requires the analyzed query terms to
         // appear in order with at most `slop` extra positions between them.
-        let eff_filter = effective_filter(&req);
-        execute_match_phrase(&state, &name, phrase_query, req.limit, eff_filter.as_ref(), effective_read_ts).await?
+        let eff_filter = effective_filter(req);
+        execute_match_phrase(state, name, phrase_query, req.limit, eff_filter.as_ref(), effective_read_ts).await?
     } else if let Some(ref hybrid_query) = req.query.hybrid {
         // Dense + BM25 hybrid via Reciprocal Rank Fusion. Each leg is
         // scored independently; RRF folds the rankings into one set.
         // dense_weight in [0, 1] biases the RRF weighting.
-        let metric = resolve_metric(&schema, &hybrid_query.dense.field);
-        let eff_filter = effective_filter(&req);
+        let metric = resolve_metric(schema, &hybrid_query.dense.field);
+        let eff_filter = effective_filter(req);
         let (hits, legs) = execute_hybrid_dense_bm25(
-            &state,
-            &name,
+            state,
+            name,
             executor,
             hybrid_query,
-            &req,
+            req,
             metric,
             req.limit,
             effective_read_ts,
@@ -499,8 +637,8 @@ pub async fn search(
     };
 
     // Optional rerank stage.
-    let mut results = if let Some(cfg) = rerank_cfg {
-        apply_rerank(&state, &name, &req, &cfg, results, final_limit).await?
+    let results = if let Some(cfg) = rerank_cfg {
+        apply_rerank(state, name, req, &cfg, results, final_limit).await?
     } else {
         results
     };
@@ -521,32 +659,13 @@ pub async fn search(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let results = populate_hit_fields(&state, &name, &schema, results, now_secs).await;
+    let results = populate_hit_fields(state, name, schema, results, now_secs).await;
 
     let took_ms = start.elapsed().as_millis() as u64;
-    metrics::histogram!(m::SEARCH_DURATION, "collection" => crate::tenant::display_name(&name).to_owned())
+    metrics::histogram!(m::SEARCH_DURATION, "collection" => crate::tenant::display_name(name).to_owned())
         .record(start.elapsed().as_secs_f64());
-    let count = results.len();
 
-    // Coverage telemetry — fire-and-forget JSONL append per /search.
-    // Powers GET /v1/collections/{name}/coverage (orphan + monoculture).
-    let doc_ids: Vec<String> = results.iter().map(|h| h.id.clone()).collect();
-    super::query_log::record_search(&state, &name, final_limit, doc_ids, took_ms);
-
-    // After rerank the final ranking may differ from the original fused
-    // list — keep the final_top in HybridExplain aligned with what the
-    // caller actually sees.
-    if let Some(ref mut hx) = hybrid_explain {
-        hx.final_top = results.iter().map(|h| h.id.clone()).collect();
-    }
-
-    Ok(Json(SearchResponse {
-        results,
-        count,
-        took_ms,
-        explain: explain_timing,
-        hybrid_explain,
-    }))
+    Ok((results, explain_timing, hybrid_explain, took_ms))
 }
 
 /// Apply a cross-encoder rerank pass to search results.

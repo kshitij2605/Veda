@@ -10,6 +10,10 @@ import {
 } from 'lucide-react'
 import api from '../api/client'
 import { fetchSlowQueries, type SlowQuery } from '../api/logs'
+import {
+  fetchCorrelations,
+  type CorrelationDimension,
+} from '../api/correlations'
 import { Button, CopyButton, Skeleton } from '../components/primitives'
 import {
   useSavedObjects,
@@ -119,6 +123,7 @@ export function Observability() {
             <CollectionTable snapshots={snapshots} />
             <RawMetricsTable latest={latest} />
             <EvalDriftPanel />
+            <CorrelationsPanel />
             <ServerSlowQueries />
           </>
         )}
@@ -447,6 +452,134 @@ function EvalDriftPanel() {
         </table>
       </div>
     </section>
+  )
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Correlations — slow-query / error drivers from GET /v1/admin/correlations.
+   Per-dimension table ranking the buckets (collection, query type, filter,
+   rerank, index type, result-count, top_k) that drive latency / errors.
+   ──────────────────────────────────────────────────────────────────── */
+
+/** A query slower than this (ms) is "slow" — matches the backend's
+ *  SLOW_QUERY_MS threshold; used to warning-color p95 cells. */
+const SLOW_QUERY_MS = 1000
+
+const DIMENSION_LABELS: Record<string, string> = {
+  collection: 'Collection',
+  query_type: 'Query type',
+  has_filter: 'Filter',
+  reranked: 'Rerank',
+  index_type: 'Index type',
+  result_count: 'Result count',
+  top_k: 'top_k',
+}
+
+function CorrelationsPanel() {
+  const [dimensions, setDimensions] = useState<CorrelationDimension[] | null>(
+    null,
+  )
+  useEffect(() => {
+    let alive = true
+    fetchCorrelations()
+      .then(({ data }) => {
+        if (alive) setDimensions(data?.dimensions ?? [])
+      })
+      .catch(() => {
+        if (alive) setDimensions([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // Only show dimensions that have data.
+  const withData = (dimensions ?? []).filter((d) => d.buckets.length > 0)
+  if (dimensions === null || withData.length === 0) return null
+
+  return (
+    <section>
+      <header className="mb-2">
+        <h2 className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)]">
+          Correlations
+          <span className="ml-2 font-mono normal-case tracking-normal text-[var(--color-text-muted)]">
+            (slow-query / error drivers · last 5m)
+          </span>
+        </h2>
+      </header>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        {withData.map((d) => (
+          <DimensionCard key={d.dimension} dim={d} />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function DimensionCard({ dim }: { dim: CorrelationDimension }) {
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] overflow-hidden">
+      <div className="bg-[var(--color-bg-elevated)] px-3 py-1.5 text-[10.5px] uppercase tracking-[0.06em] text-[var(--color-text-subtle)] border-b border-[var(--color-border)]">
+        {DIMENSION_LABELS[dim.dimension] ?? dim.dimension}
+      </div>
+      <table className="w-full text-[11.5px] tabular-nums">
+        <thead className="text-[10px] uppercase tracking-[0.06em] text-[var(--color-text-subtle)]">
+          <tr>
+            <th className="px-3 py-1.5 text-left font-medium">Bucket</th>
+            <th className="px-3 py-1.5 text-right font-medium">Count</th>
+            <th className="px-3 py-1.5 text-right font-medium">p95</th>
+            <th className="px-3 py-1.5 text-right font-medium">Slow%</th>
+            <th className="px-3 py-1.5 text-right font-medium">Err%</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-[var(--color-border)]">
+          {dim.buckets.map((b) => {
+            const slowPct = b.count > 0 ? (b.slow_count / b.count) * 100 : 0
+            const errPct = (b.error_rate ?? 0) * 100
+            return (
+              <tr key={b.key} className="hover:bg-[var(--color-bg-hover)]">
+                <td className="px-3 py-1 font-mono text-[var(--color-text)] truncate max-w-[180px]">
+                  {b.key}
+                </td>
+                <td className="px-3 py-1 text-right text-[var(--color-text-muted)]">
+                  {humanFormat(b.count)}
+                </td>
+                <td
+                  className={cn(
+                    'px-3 py-1 text-right font-mono',
+                    b.p95_ms >= SLOW_QUERY_MS
+                      ? 'text-[var(--color-warning)]'
+                      : 'text-[var(--color-text-muted)]',
+                  )}
+                >
+                  {b.p95_ms.toFixed(0)}ms
+                </td>
+                <td
+                  className={cn(
+                    'px-3 py-1 text-right',
+                    slowPct > 0
+                      ? 'text-[var(--color-warning)]'
+                      : 'text-[var(--color-text-muted)]',
+                  )}
+                >
+                  {slowPct > 0 ? `${slowPct.toFixed(0)}%` : '—'}
+                </td>
+                <td
+                  className={cn(
+                    'px-3 py-1 text-right',
+                    errPct > 0
+                      ? 'text-[var(--color-error)]'
+                      : 'text-[var(--color-text-muted)]',
+                  )}
+                >
+                  {errPct > 0 ? `${errPct.toFixed(0)}%` : '—'}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
   )
 }
 

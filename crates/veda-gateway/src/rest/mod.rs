@@ -14,6 +14,7 @@ pub mod agents;
 pub mod aggregate;
 pub mod chunk_preview;
 pub mod collections;
+pub mod correlations;
 pub mod document;
 pub mod embed;
 pub mod embed_insert;
@@ -122,6 +123,14 @@ fn logs_router() -> Router<state::AppState> {
 fn resources_router() -> Router<state::AppState> {
     Router::new()
         .route("/v1/admin/resources", get(resources::get_resources))
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// Slow-query / error correlation analyzer admin route, gated by an
+/// extra `require_admin` route layer (same pattern as [`logs_router`]).
+fn correlations_router() -> Router<state::AppState> {
+    Router::new()
+        .route("/v1/admin/correlations", get(correlations::correlations))
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
@@ -340,6 +349,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .merge(logs_router())
         // Node resources — admin-only (extra require_admin route layer).
         .merge(resources_router())
+        // Slow-query / error correlations — admin-only (extra require_admin).
+        .merge(correlations_router())
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             auth::auth_middleware,

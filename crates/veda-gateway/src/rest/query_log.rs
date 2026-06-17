@@ -37,6 +37,61 @@ pub struct QueryLogEntry {
     /// log files (written before this field existed) loadable.
     #[serde(default)]
     pub trace_id: Option<String>,
+    // ── APM Phase 1 enrichment ──────────────────────────────────────
+    // Every field below carries `#[serde(default)]` so log lines
+    // written before these existed (older `_query_log.jsonl` files)
+    // still deserialize, defaulting the missing attributes.
+    /// User-facing collection name (tenant prefix stripped).
+    #[serde(default)]
+    pub collection: String,
+    /// Query kind: dense | sparse | bm25 | match_phrase | hybrid |
+    /// colpali | multi_vector. Drives correlation grouping.
+    #[serde(default)]
+    pub query_type: String,
+    /// Whether a scalar filter (raw or RLS-injected) was applied.
+    #[serde(default)]
+    pub has_filter: bool,
+    /// Whether a cross-encoder rerank stage ran.
+    #[serde(default)]
+    pub reranked: bool,
+    /// Number of results actually returned to the caller.
+    #[serde(default)]
+    pub result_count: u32,
+    /// "ok" for a successful search, "error" for a failed one.
+    /// Defaults to "ok" so old entries (which were only ever written
+    /// on success) read back as successes.
+    #[serde(default = "default_status")]
+    pub status: String,
+    /// Coarse error variant name when `status == "error"`, else None.
+    #[serde(default)]
+    pub error_kind: Option<String>,
+    /// Index type backing the queried vector field (best-effort), e.g.
+    /// "hnsw" / "ivf_pq" / "flat". None for lexical-only queries or when
+    /// it can't be resolved from the schema.
+    #[serde(default)]
+    pub index_type: Option<String>,
+    /// Shard ids touched by the query (best-effort; may be empty).
+    #[serde(default)]
+    pub shard_ids: Vec<u32>,
+}
+
+fn default_status() -> String {
+    "ok".to_owned()
+}
+
+/// Request-time metadata captured by the search handler and threaded
+/// into the query log on both the success and error paths. Kept
+/// separate from [`QueryLogEntry`] so the handler can build it up front
+/// (before the search runs) and the logger stamps `ts_ms` / fills the
+/// outcome fields exactly once per request.
+#[derive(Clone, Debug, Default)]
+pub struct QueryMeta {
+    pub query_type: String,
+    pub has_filter: bool,
+    pub reranked: bool,
+    pub top_k: usize,
+    pub index_type: Option<String>,
+    pub shard_ids: Vec<u32>,
 }
 
 fn now_ms() -> u64 {
@@ -85,27 +140,81 @@ pub fn append_blocking(
     }
 }
 
-/// Spawn a non-blocking write so /search returns immediately.
-pub fn record_search(
-    state: &AppState,
-    collection: &str,
-    top_k: usize,
-    doc_ids: Vec<String>,
-    took_ms: u64,
-) {
-    let (trace_id, _span_id) = crate::logs::current_trace_ids();
-    let entry = QueryLogEntry {
-        ts_ms: now_ms(),
-        top_k,
-        doc_ids,
-        took_ms,
-        trace_id,
-    };
+/// Spawn a non-blocking write of an already-built entry so /search
+/// returns immediately. The query-log write is UNCONDITIONAL — it is
+/// never gated on trace sampling, because the correlation advisor and
+/// coverage rollups depend on a complete log.
+fn spawn_append(state: &AppState, collection: &str, entry: QueryLogEntry) {
     let data_dir = state.inner.data_dir.clone();
     let collection = collection.to_owned();
     tokio::task::spawn_blocking(move || {
         append_blocking(&data_dir, &collection, &entry);
     });
+}
+
+/// Log a SUCCESSFUL search. `scoped` is the tenant-scoped collection key
+/// (the on-disk log directory); `display` is the user-facing name stored
+/// in the entry (`collection` field) for the correlation analyzer.
+/// Exactly one of [`record_success`] / [`record_error`] is called per
+/// request, so success and error counts never double-count.
+pub fn record_success(
+    state: &AppState,
+    scoped: &str,
+    display: &str,
+    meta: &QueryMeta,
+    doc_ids: Vec<String>,
+    took_ms: u64,
+) {
+    let (trace_id, _span_id) = crate::logs::current_trace_ids();
+    let result_count = doc_ids.len() as u32;
+    let entry = QueryLogEntry {
+        ts_ms: now_ms(),
+        top_k: meta.top_k,
+        doc_ids,
+        took_ms,
+        trace_id,
+        collection: display.to_owned(),
+        query_type: meta.query_type.clone(),
+        has_filter: meta.has_filter,
+        reranked: meta.reranked,
+        result_count,
+        status: "ok".to_owned(),
+        error_kind: None,
+        index_type: meta.index_type.clone(),
+        shard_ids: meta.shard_ids.clone(),
+    };
+    spawn_append(state, scoped, entry);
+}
+
+/// Log a FAILED search. `error_kind` is a coarse variant name (e.g.
+/// the HTTP-status family). `took_ms` is measured to the point of
+/// failure. Mutually exclusive with [`record_success`].
+pub fn record_error(
+    state: &AppState,
+    scoped: &str,
+    display: &str,
+    meta: &QueryMeta,
+    error_kind: &str,
+    took_ms: u64,
+) {
+    let (trace_id, _span_id) = crate::logs::current_trace_ids();
+    let entry = QueryLogEntry {
+        ts_ms: now_ms(),
+        top_k: meta.top_k,
+        doc_ids: Vec::new(),
+        took_ms,
+        trace_id,
+        collection: display.to_owned(),
+        query_type: meta.query_type.clone(),
+        has_filter: meta.has_filter,
+        reranked: meta.reranked,
+        result_count: 0,
+        status: "error".to_owned(),
+        error_kind: Some(error_kind.to_owned()),
+        index_type: meta.index_type.clone(),
+        shard_ids: meta.shard_ids.clone(),
+    };
+    spawn_append(state, scoped, entry);
 }
 
 #[derive(Deserialize)]
@@ -300,11 +409,53 @@ mod tests {
             doc_ids: vec!["a".into(), "b".into()],
             took_ms: 7,
             trace_id: Some("0123456789abcdef0123456789abcdef".into()),
+            collection: "docs".into(),
+            query_type: "dense".into(),
+            has_filter: true,
+            reranked: true,
+            result_count: 2,
+            status: "ok".into(),
+            error_kind: None,
+            index_type: Some("hnsw".into()),
+            shard_ids: vec![0, 1],
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: QueryLogEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back.trace_id, entry.trace_id);
         assert_eq!(back.doc_ids, entry.doc_ids);
+        assert_eq!(back.collection, "docs");
+        assert_eq!(back.query_type, "dense");
+        assert!(back.has_filter);
+        assert!(back.reranked);
+        assert_eq!(back.result_count, 2);
+        assert_eq!(back.status, "ok");
+        assert_eq!(back.index_type.as_deref(), Some("hnsw"));
+        assert_eq!(back.shard_ids, vec![0, 1]);
+    }
+
+    #[test]
+    fn error_entry_roundtrips() {
+        let entry = QueryLogEntry {
+            ts_ms: 1,
+            top_k: 10,
+            doc_ids: Vec::new(),
+            took_ms: 3,
+            trace_id: None,
+            collection: "docs".into(),
+            query_type: "hybrid".into(),
+            has_filter: false,
+            reranked: false,
+            result_count: 0,
+            status: "error".into(),
+            error_kind: Some("internal".into()),
+            index_type: None,
+            shard_ids: Vec::new(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: QueryLogEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status, "error");
+        assert_eq!(back.error_kind.as_deref(), Some("internal"));
+        assert_eq!(back.result_count, 0);
     }
 
     #[test]
@@ -314,5 +465,28 @@ mod tests {
         let parsed: QueryLogEntry = serde_json::from_str(old).unwrap();
         assert_eq!(parsed.trace_id, None);
         assert_eq!(parsed.top_k, 3);
+    }
+
+    #[test]
+    fn old_entry_defaults_apm_fields() {
+        // A line written before ANY of the APM enrichment fields
+        // existed (only the original four). Must deserialize with sane
+        // defaults: status="ok", empty collection/query_type, no filter,
+        // not reranked, zero result_count, None index/error, no shards.
+        let old = r#"{"ts_ms":42,"top_k":7,"doc_ids":["a","b"],"took_ms":11}"#;
+        let parsed: QueryLogEntry = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.collection, "");
+        assert_eq!(parsed.query_type, "");
+        assert!(!parsed.has_filter);
+        assert!(!parsed.reranked);
+        assert_eq!(parsed.result_count, 0);
+        assert_eq!(parsed.status, "ok", "old entries default to a success");
+        assert_eq!(parsed.error_kind, None);
+        assert_eq!(parsed.index_type, None);
+        assert!(parsed.shard_ids.is_empty());
+        // original fields still parse.
+        assert_eq!(parsed.top_k, 7);
+        assert_eq!(parsed.doc_ids, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(parsed.took_ms, 11);
     }
 }
