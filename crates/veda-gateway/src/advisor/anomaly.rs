@@ -358,6 +358,7 @@ mod tests {
             warn_log_count: 0,
             slo_statuses: Vec::new(),
             synthetic_summaries: Vec::new(),
+            index_health: Vec::new(),
         }
     }
 

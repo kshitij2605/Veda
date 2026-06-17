@@ -92,6 +92,29 @@ pub struct QuerySnapshot {
     pub recent_latencies_ms: Vec<f64>,
 }
 
+/// Per-collection index health: the configured index type, the observed
+/// query p95 (from the query log, grouped by collection), and the latest
+/// proxy recall (from the off-tick recall probe). This is the
+/// recall-vs-latency pairing Phase 6b's index-advisor rules consume.
+///
+/// Both `p95_ms` and `recall` are `Option` because either signal may be
+/// absent independently: a collection with recent queries but no recall
+/// probe yet has `p95_ms = Some` / `recall = None`, and vice versa.
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexSnapshot {
+    /// User-facing collection name.
+    pub collection: String,
+    /// Lowercase index-type string (best-effort), e.g. "hnsw" / "flat".
+    pub index_type: String,
+    /// Observed query p95 (ms) over the query window; `None` when no
+    /// recent queries for the collection.
+    pub p95_ms: Option<f64>,
+    /// Latest proxy recall@k in [0,1]; `None` when no recall sample yet.
+    pub recall: Option<f64>,
+    /// Index params as reported by the latest recall sample (or empty).
+    pub params: crate::advisor::recall_probe::IndexParams,
+}
+
 /// A full point-in-time snapshot of cluster ops state.
 #[derive(Debug, Clone, Serialize)]
 pub struct OpsSnapshot {
@@ -157,6 +180,12 @@ pub struct OpsSnapshot {
     /// fills it each tick before pushing to history. Default empty.
     #[serde(default)]
     pub synthetic_summaries: Vec<crate::advisor::synthetic::SyntheticSummary>,
+    /// Per-collection index health (index type + observed p95 + latest
+    /// proxy recall). Assembled by [`collect`] from the query log
+    /// (grouped by collection) and a cheap READ of the advisor's latest
+    /// recall results. Default empty; `#[serde(default)]`.
+    #[serde(default)]
+    pub index_health: Vec<IndexSnapshot>,
 }
 
 /// Collect a live snapshot from `state`. `now_ms` is injected so
@@ -295,6 +324,9 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
     let (error_log_count, warn_log_count) =
         count_recent_logs(state.log_buffer(), now_ms, LOG_WINDOW_SECS);
 
+    // --- per-collection index health (query-log p95 + latest recall) --
+    let index_health = collect_index_health(state).await;
+
     OpsSnapshot {
         taken_at_ms: now_ms,
         global: GlobalSnapshot {
@@ -325,6 +357,109 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
         warn_log_count,
         slo_statuses: Vec::new(),
         synthetic_summaries: Vec::new(),
+        index_health,
+    }
+}
+
+/// Assemble per-collection [`IndexSnapshot`]s from (a) the query log p95
+/// grouped by collection over the query window, (b) the schema's
+/// configured index type, and (c) the advisor's latest proxy recall
+/// results (a cheap READ under a brief lock). The recall-probe task that
+/// *populates* those results runs entirely off this tick; here we only
+/// read them.
+///
+/// Collections without recent queries still appear (with `p95_ms = None`)
+/// when a recall sample exists, so Phase 6b can see recall even for idle
+/// collections. The result is sorted by collection name for stability.
+async fn collect_index_health(state: &AppState) -> Vec<IndexSnapshot> {
+    let inner = &state.inner;
+    let data_dir = inner.data_dir.clone();
+
+    // scoped_name → (display_name, index_type_str)
+    let coll_index: Vec<(String, String, String)> = {
+        let schemas = inner.schemas.read().await;
+        schemas
+            .iter()
+            .map(|(scoped, schema)| {
+                let it = schema
+                    .vector_fields()
+                    .into_iter()
+                    .next()
+                    .map(|f| index_type_str(f.index_type()))
+                    .unwrap_or("none")
+                    .to_owned();
+                (
+                    scoped.clone(),
+                    tenant::display_name(scoped).to_owned(),
+                    it,
+                )
+            })
+            .collect()
+    };
+    if coll_index.is_empty() {
+        return Vec::new();
+    }
+
+    // Latest recall sample per display-name (brief advisor read lock).
+    let recall_by_coll: HashMap<String, crate::advisor::recall_probe::RecallSample> = {
+        let results = state.advisor().recall_results.lock().await;
+        results
+            .latest_all()
+            .into_iter()
+            .map(|s| (s.collection.clone(), s))
+            .collect()
+    };
+
+    let mut out: Vec<IndexSnapshot> = Vec::with_capacity(coll_index.len());
+    for (scoped, display, index_type) in coll_index {
+        // p95 from this collection's query log over the window.
+        let entries =
+            crate::rest::query_log::read_window_entries(&data_dir, &scoped, QUERY_WINDOW_SECS);
+        let p95_ms = if entries.is_empty() {
+            None
+        } else {
+            let mut took: Vec<u64> = entries.iter().map(|e| e.took_ms).collect();
+            took.sort_unstable();
+            Some(percentile(&took, 0.95))
+        };
+
+        let recall_sample = recall_by_coll.get(&display);
+        out.push(IndexSnapshot {
+            collection: display,
+            index_type,
+            p95_ms,
+            recall: recall_sample.map(|s| s.recall_at_k),
+            params: recall_sample
+                .map(|s| s.params.clone())
+                .unwrap_or_default(),
+        });
+    }
+    out.sort_by(|a, b| a.collection.cmp(&b.collection));
+    out
+}
+
+/// Lowercase string form of a field's index type. Local copy mirroring
+/// the gateway search-path mapper (avoids a cross-module private dep).
+fn index_type_str(it: veda_core::types::IndexType) -> &'static str {
+    use veda_core::types::IndexType as I;
+    match it {
+        I::Hnsw => "hnsw",
+        I::DiskAnn => "diskann",
+        I::IvfPq => "ivf_pq",
+        I::Flat => "flat",
+        I::RaBitQ => "rabitq",
+        I::RaBitQRerank => "rabitq_rerank",
+        I::HnswRaBitQ => "hnsw_rabitq",
+        I::Cagra => "cagra",
+        I::RaBitQExtRerank => "rabitq_ext_rerank",
+        I::Sq4 => "sq4",
+        I::Sq8 => "sq8",
+        I::SuffixArray => "suffix_array",
+        I::Inverted => "inverted",
+        I::Range => "range",
+        I::Bitmap => "bitmap",
+        I::Hash => "hash",
+        I::None => "none",
     }
 }
 
@@ -824,6 +959,76 @@ mod tests {
         assert_eq!(snap.query.count, 0);
     }
 
+    #[tokio::test]
+    async fn collect_assembles_index_health_from_log_and_recall() {
+        use crate::advisor::recall_probe::{IndexParams, RecallSample};
+        use crate::rest::query_log::{append_blocking, QueryLogEntry};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        seed_collection(&state, "docs", 3).await;
+        let scoped = format!("{}__{}", tenant::DEFAULT_TENANT, "docs");
+
+        // Seed a few query-log entries so the collection has a p95.
+        for (i, took) in [10u64, 20, 30, 200].iter().enumerate() {
+            let entry = QueryLogEntry {
+                ts_ms: now_ms_u(),
+                top_k: 5,
+                doc_ids: vec![format!("d{i}")],
+                took_ms: *took,
+                trace_id: None,
+                collection: "docs".into(),
+                query_type: "dense".into(),
+                has_filter: false,
+                reranked: false,
+                result_count: 1,
+                status: "ok".into(),
+                error_kind: None,
+                index_type: Some("hnsw".into()),
+                shard_ids: vec![0],
+            };
+            append_blocking(&state.inner.data_dir, &scoped, &entry);
+        }
+
+        // Seed a latest recall sample for the display name "docs".
+        {
+            let mut results = state.advisor().recall_results.lock().await;
+            results.record(RecallSample {
+                collection: "docs".into(),
+                index_type: "hnsw".into(),
+                recall_at_k: 0.87,
+                k: 10,
+                sampled_queries: 20,
+                p95_ms: Some(30.0),
+                params: IndexParams::default(),
+                ts_ms: 1,
+                is_proxy: true,
+            });
+        }
+
+        let snap = collect(&state, 1_700_000_000_000).await;
+        let ih = snap
+            .index_health
+            .iter()
+            .find(|h| h.collection == "docs")
+            .expect("docs in index_health");
+        // index_type taken from the schema (test_schema uses default
+        // vector field index — Hnsw).
+        assert_eq!(ih.index_type, "hnsw");
+        // recall threaded from the seeded sample.
+        assert_eq!(ih.recall, Some(0.87));
+        // p95 from the query log present and within the logged range.
+        let p95 = ih.p95_ms.expect("p95 present");
+        assert!((10.0..=200.0).contains(&p95), "p95 was {p95}");
+    }
+
+    fn now_ms_u() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
     #[test]
     fn parse_counter_sums_multi_label_samples() {
         let text = "\
@@ -892,6 +1097,7 @@ veda_records_total 7
             warn_log_count: 0,
             slo_statuses: Vec::new(),
             synthetic_summaries: Vec::new(),
+            index_health: Vec::new(),
         }
     }
 
