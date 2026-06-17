@@ -1,5 +1,5 @@
 import { type ComponentType } from 'react'
-import { Boxes, Cpu, Layers, GitMerge, FileText, Server, Activity, Shield, Bot, Gauge } from 'lucide-react'
+import { Boxes, Cpu, Layers, GitMerge, FileText, Server, Activity, Shield, Bot, Gauge, Waypoints } from 'lucide-react'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
 
@@ -59,7 +59,7 @@ export const FEATURES: Feature[] = [
     accent: 'var(--color-node-2)',
     title: 'Observability + built-in AutoOps',
     blurb:
-      'Metrics, traces, and logs out of the box — Prometheus, Tempo, Loki, Grafana — plus an Ops Advisor that detects issues across 28 rules (latency, disk, CPU, error & log anomalies, SLO burn-rate), explains the root cause, alerts Slack/PagerDuty, and can auto-remediate.',
+      'Metrics, traces, and logs out of the box — Prometheus, Tempo, Loki, Grafana — plus an Ops Advisor that detects issues across 30 rules (latency, disk, CPU, error & log anomalies, SLO burn-rate, recall drift), explains the root cause, alerts Slack/PagerDuty, and can auto-remediate.',
   },
   {
     icon: Shield,
@@ -81,5 +81,12 @@ export const FEATURES: Feature[] = [
     title: 'SLOs & service reliability',
     blurb:
       'Define service-level objectives with error budgets and Google-SRE multi-window burn-rate alerting, run synthetic self-checks against Veda’s own search / embed / health paths, and triage any incident with an AI ops agent that reads your signals and explains the root cause.',
+  },
+  {
+    icon: Waypoints,
+    accent: 'var(--color-node-6)',
+    title: 'GenAI tracing + cost observability',
+    blurb:
+      'Agent and LLM calls emit OpenTelemetry GenAI-semantic-convention spans that drop natively into Datadog, Grafana Tempo, Phoenix, and Langfuse — with per-run token, latency, and USD cost metrics, and W3C context propagation that stitches Veda into your existing distributed trace.',
   },
 ]

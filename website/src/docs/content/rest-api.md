@@ -192,6 +192,19 @@ Admin-only SLO and synthetic-probe surface. See [Service Reliability](/docs/serv
 | `GET/PUT/DELETE` | `/v1/admin/synthetics/{id}` | Get / update / delete one probe |
 | `GET` | `/v1/admin/synthetics/{id}/results` | Recent per-probe results + summary |
 
+## APM & performance
+
+Admin-only application-performance surface. See [APM & Performance Observability](/docs/apm-observability) for the full guide.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/admin/correlations` | Slow-query / error correlation, bucketed and ranked worst-first |
+| `GET` | `/v1/admin/pprof` | On-demand CPU profile (`?seconds=`, `?frequency=`, `?format=flamegraph\|pprof`); `profiling` build; `409` if running |
+| `GET` | `/v1/admin/depmap` | Declarative service dependency graph (9 nodes / 8 edges) |
+| `GET` | `/v1/admin/index-advisor` | Per-collection index type / params / p95 / recall + recommendations + open events |
+
+`POST /v1/agents/{id}/converse` and `POST /v1/admin/insights/{event_id}/triage` also return `metrics` (`RunMetrics`: timings + token counts).
+
 ## Logs (Log Insights)
 
 Captured-log and log-ingest surface. See [Log Insights](/docs/log-insights) for the full guide.
