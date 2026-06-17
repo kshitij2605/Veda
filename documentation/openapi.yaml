@@ -337,6 +337,18 @@ components:
         args: { type: object, additionalProperties: true }
         result: { type: object, additionalProperties: true }
         is_error: { type: boolean }
+        duration_ms: { type: integer, description: "wall time of the tool call (on tool_result steps)" }
+    RunMetrics:
+      type: object
+      description: Per-run agent timing and token accounting.
+      properties:
+        total_ms: { type: integer }
+        llm_ms: { type: integer }
+        tool_ms: { type: integer }
+        steps: { type: integer }
+        prompt_tokens: { type: integer }
+        completion_tokens: { type: integer }
+        total_tokens: { type: integer }
     ConverseResponse:
       type: object
       properties:
@@ -345,6 +357,7 @@ components:
         steps:
           type: array
           items: { $ref: '#/components/schemas/AgentStep' }
+        metrics: { $ref: '#/components/schemas/RunMetrics' }
     OpsEvent:
       type: object
       description: An ops-advisor event (open or closed).
@@ -811,6 +824,138 @@ paths:
                     items: { $ref: '#/components/schemas/ProbeResult' }
                   summary: { $ref: '#/components/schemas/SyntheticSummary' }
         '404': { description: no such probe }
+
+  /v1/admin/correlations:
+    get:
+      summary: Slow-query / error correlation over the query-log window (admin-only).
+      description: |
+        Groups the recent query-log window by collection / query_type /
+        has_filter / reranked / index_type / result_count-bucket /
+        top_k-bucket and returns, per bucket, count + p50 + p95 +
+        slow_count + error_rate, ranked worst-first. Surfaces *which kind*
+        of query is slow or failing.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  buckets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        collection: { type: string }
+                        query_type: { type: string }
+                        has_filter: { type: boolean }
+                        reranked: { type: boolean }
+                        index_type: { type: string }
+                        result_count_bucket: { type: string }
+                        top_k_bucket: { type: string }
+                        count: { type: integer }
+                        p50_ms: { type: number }
+                        p95_ms: { type: number }
+                        slow_count: { type: integer }
+                        error_rate: { type: number }
+
+  /v1/admin/pprof:
+    get:
+      summary: On-demand CPU profile (admin-only).
+      description: |
+        Samples the running server for `seconds` at `frequency` Hz and
+        returns a flamegraph SVG (`format=flamegraph`, default) or a pprof
+        protobuf (`format=pprof`). 409 if a profile is already running; an
+        idle server yields an empty profile (no samples) by design. Only
+        present in builds compiled with the `profiling` cargo feature
+        (`cargo build -p veda-server --features profiling`); otherwise 404.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: query, name: seconds, required: false, schema: { type: integer, default: 5 } }
+        - { in: query, name: frequency, required: false, schema: { type: integer, default: 100 }, description: "sampling Hz" }
+        - { in: query, name: format, required: false, schema: { type: string, enum: [flamegraph, pprof], default: flamegraph } }
+      responses:
+        '200':
+          description: profile
+          content:
+            image/svg+xml:
+              schema: { type: string, format: binary }
+            application/octet-stream:
+              schema: { type: string, format: binary, description: "pprof protobuf" }
+        '409': { description: a profile is already running }
+        '404': { description: built without the profiling feature }
+
+  /v1/admin/depmap:
+    get:
+      summary: Declarative service dependency graph (admin-only).
+      description: |
+        A static topology of Veda's components: 9 nodes
+        (gateway, query, shards, index, embedding, llm, rerank, blob, nats)
+        and 8 directed edges. Drives the Niriksha Dependencies panel.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        label: { type: string }
+                        kind: { type: string }
+                  edges:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        from: { type: string }
+                        to: { type: string }
+
+  /v1/admin/index-advisor:
+    get:
+      summary: Per-collection ANN index advisor report (admin-only).
+      description: |
+        For each collection: the active index_type and params, the latest
+        p95 latency, the proxy recall (`is_proxy=true` — measured against an
+        exact brute-force scan over a sampled subset, not labeled ground
+        truth), any directional recommendations (raise/lower efSearch,
+        reindex, switch index type), and open advisor events. Recall and
+        p95 are populated by the low-cadence recall probe
+        (`VEDA_RECALL_PROBE_INTERVAL_SECS`).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  collections:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        collection: { type: string }
+                        index_type: { type: string }
+                        params: { type: object, additionalProperties: true }
+                        p95_ms: { type: number, nullable: true }
+                        recall: { type: number, nullable: true }
+                        is_proxy: { type: boolean }
+                        recommendations:
+                          type: array
+                          items: { type: string }
+                        open_events:
+                          type: array
+                          items: { $ref: '#/components/schemas/OpsEvent' }
 
   /v1/admin/cluster/join:
     post:
@@ -1542,6 +1687,7 @@ paths:
                   steps:
                     type: array
                     items: { $ref: '#/components/schemas/AgentStep' }
+                  metrics: { $ref: '#/components/schemas/RunMetrics' }
         '404': { description: no such event }
         '503': { description: no LLM configured }
 
