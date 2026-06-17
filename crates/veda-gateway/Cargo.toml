@@ -38,6 +38,15 @@ constant_time_eq = "0.3"
 cron = "0.16"
 chrono = "0.4"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
+# On-demand CPU profiling — optional, only pulled in under the
+# `profiling` feature (signal-based sampling profiler is not free).
+pprof = { version = "0.15", default-features = false, features = ["flamegraph", "protobuf-codec"], optional = true }
+protobuf = { version = "3", optional = true }
+
+[features]
+# Enables the `GET /v1/admin/pprof` on-demand CPU-profiling endpoint.
+# Off by default so `pprof`/`protobuf` are not compiled into normal builds.
+profiling = ["dep:pprof", "dep:protobuf"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
