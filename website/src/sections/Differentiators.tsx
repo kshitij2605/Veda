@@ -18,10 +18,15 @@ export function Differentiators() {
       >
         {FEATURES.map((f, i) => {
           const Icon = f.icon
+          // Keep the grid clean: if the count leaves one card alone on the last
+          // lg row, let it span the full width as a capstone.
+          const fullWidth = i === FEATURES.length - 1 && FEATURES.length % 3 === 1
           return (
             <div
               key={f.title}
-              className="group bg-[var(--color-bg)] p-7 transition-colors duration-[var(--duration-base)] hover:bg-[var(--color-surface)]"
+              className={`group bg-[var(--color-bg)] p-7 transition-colors duration-[var(--duration-base)] hover:bg-[var(--color-surface)] ${
+                fullWidth ? 'lg:col-span-3' : ''
+              }`}
             >
               <div className="flex items-center justify-between">
                 <span style={{ color: f.accent }}>
@@ -34,7 +39,11 @@ export function Differentiators() {
               <h3 className="mt-5 text-[18px] [font-family:var(--font-display)] font-bold tracking-tight text-[var(--color-text)] transition-colors group-hover:text-[var(--color-accent)]">
                 {f.title}
               </h3>
-              <p className="mt-2 text-[14px] leading-relaxed text-[var(--color-text-muted)]">
+              <p
+                className={`mt-2 text-[14px] leading-relaxed text-[var(--color-text-muted)] ${
+                  fullWidth ? 'max-w-3xl' : ''
+                }`}
+              >
                 {f.blurb}
               </p>
             </div>

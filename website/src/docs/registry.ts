@@ -12,6 +12,7 @@ import observability from './content/observability.md?raw'
 import opsAdvisor from './content/ops-advisor.md?raw'
 import logInsights from './content/log-insights.md?raw'
 import resourceSignals from './content/resource-signals.md?raw'
+import serviceReliability from './content/service-reliability.md?raw'
 
 export interface DocPageEntry {
   slug: string
@@ -52,6 +53,7 @@ export const DOCS: DocGroup[] = [
       { slug: 'ops-advisor', title: 'Ops Advisor', md: opsAdvisor },
       { slug: 'log-insights', title: 'Log Insights', md: logInsights },
       { slug: 'resource-signals', title: 'Node Resource Signals', md: resourceSignals },
+      { slug: 'service-reliability', title: 'Service Reliability', md: serviceReliability },
     ],
   },
 ]

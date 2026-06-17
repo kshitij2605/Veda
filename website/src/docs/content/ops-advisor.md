@@ -18,7 +18,7 @@ The reconcile phase runs under a lock, which is released before any network call
 
 ## The rule catalog
 
-Twenty-five rules ship today — threshold/correlation rules, anomaly detectors, three log-content rules powered by [Log Insights](/docs/log-insights), and seven [node resource signals](/docs/resource-signals). Thresholds and severities are tunable per rule via the API; defaults are shown.
+Twenty-eight rules ship today — 21 threshold/correlation rules and 7 anomaly detectors — including three log-content rules powered by [Log Insights](/docs/log-insights), seven [node resource signals](/docs/resource-signals), and four [Service Reliability](/docs/service-reliability) rules (`slo_burn_rate_fast`, `slo_burn_rate_slow`, `slo_budget_exhausted`, `synthetic_failing`). Thresholds and severities are tunable per rule via the API; defaults are shown.
 
 | Rule | Severity | Fires when | Recommendation |
 |---|---|---|---|
@@ -47,8 +47,12 @@ Twenty-five rules ship today — threshold/correlation rules, anomaly detectors,
 | `system_memory_low` | Medium | available system memory < 10% | scale out / reduce pressure |
 | `anomaly_cpu` | Med/High | CPU% spikes above baseline | investigate the deviation |
 | `anomaly_disk_used` | Med/High | disk-used trend rises above baseline | check the rapid fill |
+| `slo_burn_rate_fast` | High | an SLO's fast-burn window burn rate exceeds its threshold | the budget is burning fast — page |
+| `slo_burn_rate_slow` | Medium | an SLO's slow-burn window burn rate exceeds its threshold | sustained drift — open a ticket |
+| `slo_budget_exhausted` | High | an SLO's error budget remaining ≤ 0 | freeze risky changes / investigate |
+| `synthetic_failing` | High | a [synthetic probe](/docs/service-reliability#synthetic-self-checks) fails K times in a row (default 3) | the probed path is down |
 
-The last seven are [node resource signals](/docs/resource-signals) (Linux `/proc` + `statvfs`); each skips cleanly when its signal is unavailable. Anomaly detectors use EWMA / rolling mean+stddev baselines. They warm up over `min_samples` (default 20) and fire above the configured `sigma` (default 3σ → Medium, ≥5σ → High).
+The four [Service Reliability](/docs/service-reliability) rules are scoped per-SLO/per-probe. The seven [node resource signals](/docs/resource-signals) (Linux `/proc` + `statvfs`) each skip cleanly when their signal is unavailable. Anomaly detectors use EWMA / rolling mean+stddev baselines. They warm up over `min_samples` (default 20) and fire above the configured `sigma` (default 3σ → Medium, ≥5σ → High).
 
 ## Events & lifecycle
 
@@ -96,6 +100,7 @@ All endpoints are admin-only.
 | `PUT /v1/admin/insights/channels` | Set channel config (secrets write-only) |
 | `POST /v1/admin/insights/run` | Force one evaluation tick → `{ opened, closed }` |
 | `POST /v1/admin/insights/{event_id}/ack` | Acknowledge an open event |
+| `POST /v1/admin/insights/{event_id}/triage` | [AI triage](/docs/service-reliability#ai-ops-triage) of an event — grounded explanation + tool trace (`404` unknown, `503` no LLM) |
 
 ### Example: configure a webhook, tune a rule, evaluate now
 
