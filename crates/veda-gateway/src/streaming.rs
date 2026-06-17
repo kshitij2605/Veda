@@ -57,6 +57,11 @@ pub async fn spawn_ingestion_worker(state: AppState, nats_url: String) -> Result
     Ok(())
 }
 
+#[tracing::instrument(
+    name = "streaming_ingest_message",
+    skip(state, payload),
+    fields(collection = %collection, payload_size = payload.len())
+)]
 async fn handle_message(
     state: &AppState,
     collection: &str,

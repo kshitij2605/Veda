@@ -4732,6 +4732,8 @@ dependencies = [
  "base64",
  "matrixmultiply",
  "metrics",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "reqwest",
  "serde",
  "serde_json",
@@ -4739,6 +4741,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -4838,6 +4842,7 @@ name = "veda-query"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "opentelemetry",
  "prost",
  "rand 0.8.5",
  "roaring",
@@ -4850,6 +4855,7 @@ dependencies = [
  "tonic",
  "tonic-build",
  "tracing",
+ "tracing-opentelemetry",
  "uuid",
  "veda-core",
  "veda-index",

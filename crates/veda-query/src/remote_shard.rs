@@ -51,6 +51,31 @@ use tonic::{Request, Response, Status};
 /// Routing key: a shard belongs to a `(collection, shard_id)` pair.
 type ShardKey = (String, u32);
 
+/// Adapter letting the OTel propagator write W3C context into a tonic
+/// request's gRPC metadata (`traceparent` / `tracestate`).
+struct MetadataInjector<'a>(&'a mut tonic::metadata::MetadataMap);
+
+impl opentelemetry::propagation::Injector for MetadataInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        if let (Ok(name), Ok(val)) = (
+            tonic::metadata::MetadataKey::from_bytes(key.as_bytes()),
+            tonic::metadata::MetadataValue::try_from(&value),
+        ) {
+            self.0.insert(name, val);
+        }
+    }
+}
+
+/// Inject the current span's OTel context into an outbound tonic request's
+/// metadata. Safe no-op when no propagator / active context is configured.
+fn inject_trace_context<T>(req: &mut Request<T>) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    let cx = tracing::Span::current().context();
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&cx, &mut MetadataInjector(req.metadata_mut()));
+    });
+}
+
 fn uuid_to_bytes(id: &Uuid) -> Vec<u8> {
     id.as_bytes().to_vec()
 }
@@ -109,6 +134,7 @@ impl ShardSearchService {
 
 #[tonic::async_trait]
 impl ShardSearch for ShardSearchService {
+    #[tracing::instrument(name = "shard_search_serve", skip(self, req))]
     async fn search_shard(
         &self,
         req: Request<SearchShardRequest>,
@@ -236,6 +262,11 @@ impl RemoteShardSearcher {
         }
     }
 
+    #[tracing::instrument(
+        name = "remote_shard_search",
+        skip(self, request),
+        fields(collection = %self.collection, shard_id = self.shard_id, k = request.k)
+    )]
     async fn search_async(
         &self,
         request: &VectorSearchRequest,
@@ -248,9 +279,11 @@ impl RemoteShardSearcher {
             query,
             k: request.k as u32,
         };
+        let mut grpc_req = Request::new(rpc);
+        inject_trace_context(&mut grpc_req);
         let mut client = self.client.lock().await;
         let reply = client
-            .search_shard(Request::new(rpc))
+            .search_shard(grpc_req)
             .await
             .map_err(|e| VedaError::Query(format!("remote search_shard: {e}")))?
             .into_inner();
@@ -325,6 +358,11 @@ impl ShardSearcher for RemoteShardSearcher {
 /// hit's owning shard is remote. Returns the records that the remote node
 /// found (ids it could not resolve are silently skipped, matching the
 /// local `lookup_record` returning `None`).
+#[tracing::instrument(
+    name = "remote_fetch_records",
+    skip(channel, ids),
+    fields(collection = %collection, n_ids = ids.len())
+)]
 pub async fn fetch_records_remote(
     channel: tonic::transport::Channel,
     collection: &str,
@@ -335,8 +373,10 @@ pub async fn fetch_records_remote(
         collection: collection.to_owned(),
         ids: ids.iter().map(uuid_to_bytes).collect(),
     };
+    let mut grpc_req = Request::new(rpc);
+    inject_trace_context(&mut grpc_req);
     let reply: FetchRecordsReply = client
-        .fetch_records(Request::new(rpc))
+        .fetch_records(grpc_req)
         .await
         .map_err(|e| VedaError::Query(format!("remote fetch_records: {e}")))?
         .into_inner();

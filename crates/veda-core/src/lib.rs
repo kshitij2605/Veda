@@ -11,5 +11,6 @@ pub mod simd;
 pub mod simd_simsimd;
 pub mod sparse;
 pub mod splade_client;
+pub mod trace_propagation;
 pub mod types;
 pub mod vector;

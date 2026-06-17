@@ -1,5 +1,34 @@
 use veda_gateway::server::{ServerConfig, start_server};
 
+/// Map the standard OTel sampler env vars onto an `opentelemetry_sdk` `Sampler`.
+///
+/// `name` is `OTEL_TRACES_SAMPLER`, `arg` is `OTEL_TRACES_SAMPLER_ARG`.
+/// Unknown / unset names fall back to the OTel default
+/// (`parentbased_traceidratio`); a missing or unparseable ratio arg
+/// defaults to `1.0`, so the unset-env case samples everything — i.e. no
+/// change from the previous SDK-default behaviour.
+fn resolve_sampler(
+    name: Option<String>,
+    arg: Option<String>,
+) -> opentelemetry_sdk::trace::Sampler {
+    use opentelemetry_sdk::trace::Sampler;
+
+    let ratio = arg
+        .as_deref()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .unwrap_or(1.0);
+
+    match name.as_deref().map(str::trim) {
+        Some("always_on") => Sampler::AlwaysOn,
+        Some("always_off") => Sampler::AlwaysOff,
+        Some("traceidratio") => Sampler::TraceIdRatioBased(ratio),
+        Some("parentbased_always_on") => Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
+        Some("parentbased_always_off") => Sampler::ParentBased(Box::new(Sampler::AlwaysOff)),
+        // "parentbased_traceidratio" and any unknown/unset name → default.
+        _ => Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio))),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Load .env file if present.
@@ -54,7 +83,13 @@ async fn main() {
             .build()
             .expect("failed to create OTLP trace exporter");
 
+        let sampler = resolve_sampler(
+            std::env::var("OTEL_TRACES_SAMPLER").ok(),
+            std::env::var("OTEL_TRACES_SAMPLER_ARG").ok(),
+        );
+
         let tracer_provider = opentelemetry_sdk::trace::TracerProvider::builder()
+            .with_sampler(sampler)
             .with_batch_exporter(trace_exporter, opentelemetry_sdk::runtime::Tokio)
             .with_resource(opentelemetry_sdk::Resource::new(vec![
                 opentelemetry::KeyValue::new("service.name", service_name.clone()),
@@ -145,5 +180,61 @@ async fn main() {
     if let Err(e) = start_server(config).await {
         tracing::error!(error = %e, "Server failed");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod sampler_tests {
+    use super::resolve_sampler;
+
+    fn dbg(name: Option<&str>, arg: Option<&str>) -> String {
+        format!(
+            "{:?}",
+            resolve_sampler(name.map(str::to_owned), arg.map(str::to_owned))
+        )
+    }
+
+    #[test]
+    fn default_when_unset_is_parentbased_ratio_1() {
+        assert_eq!(dbg(None, None), "ParentBased(TraceIdRatioBased(1.0))");
+    }
+
+    #[test]
+    fn garbage_name_falls_back_to_default() {
+        assert_eq!(
+            dbg(Some("not-a-sampler"), None),
+            "ParentBased(TraceIdRatioBased(1.0))"
+        );
+    }
+
+    #[test]
+    fn always_on_and_off() {
+        assert_eq!(dbg(Some("always_on"), None), "AlwaysOn");
+        assert_eq!(dbg(Some("always_off"), None), "AlwaysOff");
+    }
+
+    #[test]
+    fn traceidratio_uses_arg() {
+        assert_eq!(dbg(Some("traceidratio"), Some("0.1")), "TraceIdRatioBased(0.1)");
+    }
+
+    #[test]
+    fn parentbased_traceidratio_uses_arg() {
+        assert_eq!(
+            dbg(Some("parentbased_traceidratio"), Some("0.1")),
+            "ParentBased(TraceIdRatioBased(0.1))"
+        );
+    }
+
+    #[test]
+    fn ratio_arg_defaults_to_one_when_missing_or_garbage() {
+        assert_eq!(
+            dbg(Some("traceidratio"), None),
+            "TraceIdRatioBased(1.0)"
+        );
+        assert_eq!(
+            dbg(Some("traceidratio"), Some("garbage")),
+            "TraceIdRatioBased(1.0)"
+        );
     }
 }
