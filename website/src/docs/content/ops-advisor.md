@@ -18,7 +18,7 @@ The reconcile phase runs under a lock, which is released before any network call
 
 ## The rule catalog
 
-Twenty-eight rules ship today — 21 threshold/correlation rules and 7 anomaly detectors — including three log-content rules powered by [Log Insights](/docs/log-insights), seven [node resource signals](/docs/resource-signals), and four [Service Reliability](/docs/service-reliability) rules (`slo_burn_rate_fast`, `slo_burn_rate_slow`, `slo_budget_exhausted`, `synthetic_failing`). Thresholds and severities are tunable per rule via the API; defaults are shown.
+Thirty rules ship today — 23 threshold/correlation rules and 7 anomaly detectors — including three log-content rules powered by [Log Insights](/docs/log-insights), seven [node resource signals](/docs/resource-signals), four [Service Reliability](/docs/service-reliability) rules (`slo_burn_rate_fast`, `slo_burn_rate_slow`, `slo_budget_exhausted`, `synthetic_failing`), and two [index advisor](/docs/apm-observability#ann-index-advisor) rules (`index_recall_degraded`, `index_latency_high_for_recall`). Thresholds and severities are tunable per rule via the API; defaults are shown.
 
 | Rule | Severity | Fires when | Recommendation |
 |---|---|---|---|
@@ -51,8 +51,10 @@ Twenty-eight rules ship today — 21 threshold/correlation rules and 7 anomaly d
 | `slo_burn_rate_slow` | Medium | an SLO's slow-burn window burn rate exceeds its threshold | sustained drift — open a ticket |
 | `slo_budget_exhausted` | High | an SLO's error budget remaining ≤ 0 | freeze risky changes / investigate |
 | `synthetic_failing` | High | a [synthetic probe](/docs/service-reliability#synthetic-self-checks) fails K times in a row (default 3) | the probed path is down |
+| `index_recall_degraded` | High | a collection's proxy `recall` < `recall_min` (default 0.90) | raise `efSearch`/`efConstruction`, or reindex |
+| `index_latency_high_for_recall` | Medium | `p95_ms` > 50 while `recall >= 0.95` | lower `efSearch`, or switch index type |
 
-The four [Service Reliability](/docs/service-reliability) rules are scoped per-SLO/per-probe. The seven [node resource signals](/docs/resource-signals) (Linux `/proc` + `statvfs`) each skip cleanly when their signal is unavailable. Anomaly detectors use EWMA / rolling mean+stddev baselines. They warm up over `min_samples` (default 20) and fire above the configured `sigma` (default 3σ → Medium, ≥5σ → High).
+The two [index advisor](/docs/apm-observability#ann-index-advisor) rules are per-collection, driven by an off-tick proxy recall probe. The four [Service Reliability](/docs/service-reliability) rules are scoped per-SLO/per-probe. The seven [node resource signals](/docs/resource-signals) (Linux `/proc` + `statvfs`) each skip cleanly when their signal is unavailable. Anomaly detectors use EWMA / rolling mean+stddev baselines. They warm up over `min_samples` (default 20) and fire above the configured `sigma` (default 3σ → Medium, ≥5σ → High).
 
 ## Events & lifecycle
 
