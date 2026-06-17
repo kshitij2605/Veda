@@ -280,7 +280,7 @@ pub async fn execute_tool(
 
 // ── Shared agent-turn helper ─────────────────────────────────────────────
 
-use crate::agent::executor::RunResult;
+use crate::agent::executor::{RunMetrics, RunResult};
 
 /// Failure modes of [`run_agent_turn`], mapped to HTTP/JSON-RPC by callers.
 pub(crate) enum AgentTurnError {
@@ -326,7 +326,13 @@ pub(crate) async fn run_agent_turn(
         None => return Err(AgentTurnError::NotFound(agent_id.to_owned())),
     };
 
-    // 3. Build the model honoring any per-agent override.
+    // 3. Build the model honoring any per-agent override. Capture the
+    //    resolved model name first for metric labelling.
+    let model_name = agent
+        .model
+        .as_ref()
+        .and_then(|ov| ov.model.clone())
+        .unwrap_or_else(|| llm_cfg.model.clone());
     let client = build_client(llm_cfg, &agent);
 
     // 4. System prompt with the modality-awareness block.
@@ -349,7 +355,37 @@ pub(crate) async fn run_agent_turn(
     )
     .await;
 
+    // 7. Emit APM metrics from this single shared point (covers /converse,
+    //    A2A message/send, and ops triage).
+    emit_run_metrics(&model_name, &result.metrics);
+
     Ok((agent, result))
+}
+
+/// Emit Prometheus token / duration / cost metrics for one agent run.
+/// Tokens and run duration are always emitted; cost is emitted only when
+/// the model has a known price (see [`veda_core::metrics::model_price`]) —
+/// an unpriced model logs once at debug and never fails.
+fn emit_run_metrics(model: &str, m: &RunMetrics) {
+    use veda_core::metrics as vm;
+
+    metrics::counter!(vm::LLM_TOKENS_TOTAL, "type" => "input", "model" => model.to_owned())
+        .increment(m.prompt_tokens as u64);
+    metrics::counter!(vm::LLM_TOKENS_TOTAL, "type" => "output", "model" => model.to_owned())
+        .increment(m.completion_tokens as u64);
+    metrics::histogram!(vm::AGENT_RUN_DURATION, "model" => model.to_owned())
+        .record(m.total_ms / 1000.0);
+
+    match vm::model_price(model) {
+        Some(price) => {
+            let micro = vm::cost_micro_usd(m.prompt_tokens, m.completion_tokens, price);
+            metrics::counter!(vm::LLM_COST_USD_TOTAL, "model" => model.to_owned())
+                .increment(micro);
+        }
+        None => {
+            tracing::debug!(model, "no price configured for LLM model; skipping cost metric");
+        }
+    }
 }
 
 // ── Converse ─────────────────────────────────────────────────────────────
@@ -452,6 +488,7 @@ pub async fn converse(
         conversation_id: user_facing_cid,
         response: result.response,
         steps: result.steps,
+        metrics: Some(result.metrics),
     }))
 }
 
@@ -503,4 +540,57 @@ pub async fn delete_conversation(
     let scoped = tenant::scope(&tenant, &id);
     store::delete_conversation(&state.inner.saved_objects, &scoped).await;
     StatusCode::NO_CONTENT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+
+    fn metrics(prompt: u32, completion: u32) -> RunMetrics {
+        RunMetrics {
+            total_ms: 12.0,
+            llm_ms: 8.0,
+            tool_ms: 3.0,
+            steps: 2,
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+        }
+    }
+
+    /// A priced model emits tokens + duration + cost series, rendered by
+    /// the Prometheus exporter exactly as `/v1/admin/metrics` would.
+    #[test]
+    fn priced_model_emits_tokens_duration_and_cost() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            emit_run_metrics("gpt-4o-mini", &metrics(2000, 1000));
+        });
+        let out = handle.render();
+        assert!(out.contains("veda_llm_tokens_total"), "missing tokens series:\n{out}");
+        assert!(out.contains("veda_agent_run_duration_seconds"), "missing duration series:\n{out}");
+        assert!(out.contains("veda_llm_cost_usd_total"), "missing cost series:\n{out}");
+        assert!(out.contains("gpt-4o-mini"), "missing model label:\n{out}");
+    }
+
+    /// An unpriced model still emits tokens + duration, but no cost series
+    /// and no error.
+    #[test]
+    fn unpriced_model_emits_tokens_but_no_cost() {
+        // Ensure no env override prices this model.
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            emit_run_metrics("local-llama-7b-unpriced", &metrics(100, 50));
+        });
+        let out = handle.render();
+        assert!(out.contains("veda_llm_tokens_total"), "missing tokens series:\n{out}");
+        assert!(out.contains("veda_agent_run_duration_seconds"), "missing duration series:\n{out}");
+        assert!(
+            !out.contains("veda_llm_cost_usd_total"),
+            "unpriced model must not emit a cost series:\n{out}"
+        );
+    }
 }

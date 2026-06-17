@@ -106,6 +106,7 @@ mod tests {
                     tool_call_id: "call-1".to_owned(),
                     result: serde_json::json!({ "hits": 3 }),
                     is_error: false,
+                    duration_ms: None,
                 },
             ],
         };

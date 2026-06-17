@@ -116,6 +116,10 @@ pub enum AgentStep {
         result: serde_json::Value,
         #[serde(default)]
         is_error: bool,
+        /// Wall-clock latency of the tool dispatch in milliseconds.
+        /// Additive + serde-back-compat: omitted when not captured.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<f64>,
     },
 }
 
@@ -169,4 +173,83 @@ pub struct ConverseResponse {
     pub response: String,
     #[serde(default)]
     pub steps: Vec<AgentStep>,
+    /// Run-level APM metrics (timing + token usage) for this turn.
+    /// Additive + serde-back-compat: omitted when unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<crate::agent::executor::RunMetrics>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_result_step_serde_omits_duration_when_none() {
+        let step = AgentStep::ToolResult {
+            tool_call_id: "c1".to_owned(),
+            result: serde_json::json!({"ok": true}),
+            is_error: false,
+            duration_ms: None,
+        };
+        let v = serde_json::to_value(&step).unwrap();
+        assert_eq!(v["kind"], "tool_result");
+        assert!(v.get("duration_ms").is_none(), "duration_ms should be skipped: {v}");
+        // Round-trips and back-compat: old payload without duration_ms parses.
+        let back: AgentStep = serde_json::from_value(v).unwrap();
+        assert_eq!(back, step);
+    }
+
+    #[test]
+    fn tool_result_step_serde_includes_duration_when_some() {
+        let step = AgentStep::ToolResult {
+            tool_call_id: "c1".to_owned(),
+            result: serde_json::Value::Null,
+            is_error: false,
+            duration_ms: Some(12.5),
+        };
+        let v = serde_json::to_value(&step).unwrap();
+        assert_eq!(v["duration_ms"], 12.5);
+        let back: AgentStep = serde_json::from_value(v).unwrap();
+        assert_eq!(back, step);
+    }
+
+    #[test]
+    fn tool_result_back_compat_missing_duration_field() {
+        // A serialized step from before the timing field existed.
+        let v = serde_json::json!({
+            "kind": "tool_result",
+            "tool_call_id": "c1",
+            "result": {"x": 1},
+            "is_error": false
+        });
+        let step: AgentStep = serde_json::from_value(v).unwrap();
+        match step {
+            AgentStep::ToolResult { duration_ms, .. } => assert!(duration_ms.is_none()),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn other_step_variants_unchanged() {
+        let reasoning = AgentStep::Reasoning { text: "hi".to_owned() };
+        assert_eq!(serde_json::to_value(&reasoning).unwrap()["kind"], "reasoning");
+        let call = AgentStep::ToolCall {
+            tool_call_id: "c1".to_owned(),
+            tool_id: "t".to_owned(),
+            args: serde_json::json!({}),
+        };
+        assert_eq!(serde_json::to_value(&call).unwrap()["kind"], "tool_call");
+    }
+
+    #[test]
+    fn converse_response_omits_metrics_when_none() {
+        let r = ConverseResponse {
+            conversation_id: "c".to_owned(),
+            response: "hi".to_owned(),
+            steps: Vec::new(),
+            metrics: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v.get("metrics").is_none(), "metrics should be skipped: {v}");
+    }
 }

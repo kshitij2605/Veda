@@ -404,6 +404,8 @@ pub struct TriageResponse {
     pub event_id: String,
     pub explanation: String,
     pub steps: Vec<AgentStep>,
+    /// Run-level APM metrics (timing + token usage) for the triage turn.
+    pub metrics: crate::agent::executor::RunMetrics,
 }
 
 /// Find an event by id: open events first, then closed history.
@@ -487,6 +489,7 @@ pub async fn triage_event(
         event_id,
         explanation: result.response,
         steps: result.steps,
+        metrics: result.metrics,
     }))
 }
 
