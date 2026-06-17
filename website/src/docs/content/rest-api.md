@@ -176,7 +176,21 @@ Admin-only automated-operations surface. See [Ops Advisor](/docs/ops-advisor) fo
 | `GET/PUT` | `/v1/admin/insights/channels` | Alert-channel config (secrets write-only on `GET`) |
 | `POST` | `/v1/admin/insights/run` | Force one evaluation tick → `{ opened, closed }` |
 | `POST` | `/v1/admin/insights/{event_id}/ack` | Acknowledge an open event |
+| `POST` | `/v1/admin/insights/{event_id}/triage` | AI triage of an event — grounded explanation + tool trace (`404` unknown, `503` no LLM) |
 | `GET` | `/v1/admin/resources` | Local node's latest resource snapshot — disk, CPU, load, fds, memory, RSS (see [Node Resource Signals](/docs/resource-signals)); always `200`, fields nullable |
+
+## Service Reliability (SLOs & synthetics)
+
+Admin-only SLO and synthetic-probe surface. See [Service Reliability](/docs/service-reliability) for the full guide.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET/POST` | `/v1/admin/slos` | List SLO defs / create-or-overwrite (POST needs an explicit `id`) |
+| `GET/PUT/DELETE` | `/v1/admin/slos/{id}` | Get / update / delete one SLO (`404` if missing) |
+| `GET` | `/v1/admin/slos/{id}/status` | Current SLI / error-budget / burn-rate status |
+| `GET/POST` | `/v1/admin/synthetics` | List probe defs / create-or-overwrite |
+| `GET/PUT/DELETE` | `/v1/admin/synthetics/{id}` | Get / update / delete one probe |
+| `GET` | `/v1/admin/synthetics/{id}/results` | Recent per-probe results + summary |
 
 ## Logs (Log Insights)
 
