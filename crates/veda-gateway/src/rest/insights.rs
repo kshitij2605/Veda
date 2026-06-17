@@ -70,6 +70,7 @@ fn scope_kind(ev: &OpsEvent) -> &'static str {
         Scope::Node(_) => "node",
         Scope::Slo(_) => "slo",
         Scope::Synthetic(_) => "synthetic",
+        Scope::Index(_) => "index",
     }
 }
 

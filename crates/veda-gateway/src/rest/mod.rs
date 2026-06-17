@@ -20,6 +20,7 @@ pub mod document;
 pub mod embed;
 pub mod embed_insert;
 pub mod evaluate;
+pub mod index_advisor;
 pub mod ingest_logs;
 pub mod insights;
 pub mod jobs;
@@ -142,6 +143,14 @@ fn correlations_router() -> Router<state::AppState> {
 fn depmap_router() -> Router<state::AppState> {
     Router::new()
         .route("/v1/admin/depmap", get(depmap::depmap))
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// ANN index-advisor admin route, gated by an extra `require_admin` route
+/// layer (same pattern as [`depmap_router`]).
+fn index_advisor_router() -> Router<state::AppState> {
+    Router::new()
+        .route("/v1/admin/index-advisor", get(index_advisor::index_advisor))
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
@@ -373,7 +382,9 @@ pub fn build_router(app_state: state::AppState) -> Router {
         // Slow-query / error correlations — admin-only (extra require_admin).
         .merge(correlations_router())
         // Self-service dependency map — admin-only (extra require_admin).
-        .merge(depmap_router());
+        .merge(depmap_router())
+        // ANN index advisor — admin-only (extra require_admin).
+        .merge(index_advisor_router());
 
     // On-demand CPU profiling — admin-only, only present under the
     // `profiling` cargo feature (no route, no `pprof` dep otherwise).

@@ -61,6 +61,9 @@ pub enum Scope {
     /// A synthetic probe, keyed by its id (so synthetic rule events dedup
     /// per-probe).
     Synthetic(String),
+    /// A collection's ANN index, keyed by collection name (so index-advisor
+    /// rule events dedup per-collection).
+    Index(String),
 }
 
 impl Scope {
@@ -73,6 +76,7 @@ impl Scope {
             Scope::Node(n) => format!("node:{n}"),
             Scope::Slo(s) => format!("slo:{s}"),
             Scope::Synthetic(s) => format!("synthetic:{s}"),
+            Scope::Index(c) => format!("index:{c}"),
         }
     }
 }
@@ -524,5 +528,6 @@ mod tests {
             "shard:c/2"
         );
         assert_eq!(Scope::Node("n".into()).key(), "node:n");
+        assert_eq!(Scope::Index("docs".into()).key(), "index:docs");
     }
 }

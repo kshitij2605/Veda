@@ -20,6 +20,11 @@ import {
   type DepEdge,
   type DepMapResponse,
 } from '../api/depmap'
+import {
+  fetchIndexAdvisor,
+  applyReindex,
+  type IndexAdvisorRow,
+} from '../api/indexAdvisor'
 import { Button, CopyButton, Skeleton } from '../components/primitives'
 import {
   useSavedObjects,
@@ -130,6 +135,7 @@ export function Observability() {
             <RawMetricsTable latest={latest} />
             <EvalDriftPanel />
             <CorrelationsPanel />
+            <IndexAdvisorPanel />
             <DependenciesPanel />
             <RagTraceLegend />
             <ServerSlowQueries />
@@ -588,6 +594,166 @@ function DimensionCard({ dim }: { dim: CorrelationDimension }) {
         </tbody>
       </table>
     </div>
+  )
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Index advisor — per-collection recall-vs-latency from
+   GET /v1/admin/index-advisor, with advisory recommendations. Recall is a
+   PROXY measurement (labelled as such); rows warn when recall is below the
+   target or p95 is high. An opt-in "Apply reindex" button POSTs the
+   suggested /reindex config (with a confirm).
+   ──────────────────────────────────────────────────────────────────── */
+
+/** Recall target floor + p95 ceiling for warning coloring (match the
+ *  advisor rule defaults: recall_min 0.90, p95_ms 50). */
+const RECALL_TARGET = 0.9
+const P95_WARN_MS = 50
+
+function IndexAdvisorPanel() {
+  const [rows, setRows] = useState<IndexAdvisorRow[] | null>(null)
+  const [applying, setApplying] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+
+  const load = () => {
+    let alive = true
+    fetchIndexAdvisor()
+      .then(({ data }) => {
+        if (alive) setRows(data?.rows ?? [])
+      })
+      .catch(() => {
+        if (alive) setRows([])
+      })
+    return () => {
+      alive = false
+    }
+  }
+  useEffect(load, [])
+
+  const onApply = async (row: IndexAdvisorRow) => {
+    const body = row.suggested_reindex
+    if (!body) return
+    const ok = window.confirm(
+      `Apply a reindex to "${row.collection}" with config ${JSON.stringify(
+        body,
+      )}? This rebuilds the collection's index and may take a while.`,
+    )
+    if (!ok) return
+    setApplying(row.collection)
+    setNote(null)
+    try {
+      await applyReindex(row.collection, body)
+      setNote(`Reindex submitted for "${row.collection}".`)
+    } catch {
+      setNote(`Reindex failed for "${row.collection}".`)
+    } finally {
+      setApplying(null)
+    }
+  }
+
+  if (rows === null || rows.length === 0) return null
+
+  return (
+    <section>
+      <header className="mb-2">
+        <h2 className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)]">
+          Index advisor
+          <span className="ml-2 font-mono normal-case tracking-normal text-[var(--color-text-muted)]">
+            (recall vs p95 per collection · recall is a proxy)
+          </span>
+        </h2>
+      </header>
+      {note && (
+        <div className="mb-2 text-[11.5px] text-[var(--color-text-muted)]">
+          {note}
+        </div>
+      )}
+      <div className="space-y-2">
+        {rows.map((row) => {
+          const recall = row.recall ?? null
+          const p95 = row.p95_ms ?? null
+          const recallLow = recall !== null && recall < RECALL_TARGET
+          const p95High = p95 !== null && p95 > P95_WARN_MS
+          const warn = recallLow || p95High
+          return (
+            <div
+              key={row.collection}
+              className={cn(
+                'rounded-[var(--radius-md)] border bg-[var(--color-bg-elevated)] p-3',
+                warn
+                  ? 'border-[var(--color-warning)]'
+                  : 'border-[var(--color-border)]',
+              )}
+            >
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 text-[12px]">
+                  <span className="text-[var(--color-text)] font-medium">
+                    {row.collection}
+                  </span>
+                  <span className="inline-flex items-center rounded-[var(--radius-xs)] border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--color-text-muted)]">
+                    {row.index_type}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3 text-[11.5px] tabular-nums font-mono">
+                  <span
+                    className={cn(
+                      recallLow
+                        ? 'text-[var(--color-warning)]'
+                        : 'text-[var(--color-text-muted)]',
+                    )}
+                  >
+                    recall{' '}
+                    {recall !== null ? recall.toFixed(2) : '—'}
+                    {row.is_proxy && (
+                      <span className="ml-1 text-[9.5px] uppercase tracking-[0.06em] text-[var(--color-text-subtle)]">
+                        proxy
+                      </span>
+                    )}
+                  </span>
+                  <span
+                    className={cn(
+                      p95High
+                        ? 'text-[var(--color-warning)]'
+                        : 'text-[var(--color-text-muted)]',
+                    )}
+                  >
+                    p95 {p95 !== null ? `${p95.toFixed(0)}ms` : '—'}
+                  </span>
+                </div>
+              </div>
+              {row.recommendations.length > 0 && (
+                <ul className="mt-2 space-y-1.5 border-t border-[var(--color-border)] pt-2">
+                  {row.recommendations.map((rec) => (
+                    <li key={rec.rule_id} className="text-[11.5px]">
+                      <span className="text-[var(--color-text)]">
+                        {rec.title}
+                      </span>
+                      <span className="text-[var(--color-text-muted)]">
+                        {' — '}
+                        {rec.recommendation}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {row.suggested_reindex && (
+                <div className="mt-2">
+                  <Button
+                    variant="secondary"
+                    onClick={() => onApply(row)}
+                    disabled={applying === row.collection}
+                  >
+                    {applying === row.collection
+                      ? 'Applying…'
+                      : 'Apply reindex'}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </section>
   )
 }
 
