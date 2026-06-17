@@ -14,7 +14,9 @@
 //! handler (a later task) calls [`run`] and persists the returned trace.
 
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
+use veda_core::genai_semconv as gen_ai;
 use veda_core::llm_client::{
     ChatMessage, ChatModel, CompletionOptions, ToolDef,
 };
@@ -205,6 +207,11 @@ fn truncate_for_model(s: &str, cap: usize) -> String {
 /// async-fn-in-trait) so tests can inject a fake model. Never panics on
 /// model/dispatch/parse failures — they become error tool-results or a
 /// graceful failure `RunResult`.
+///
+/// `provider` / `model_name` label the per-LLM-call `chat` spans with the
+/// GenAI semconv `gen_ai.system` / `gen_ai.request.model` attributes; they
+/// are emitted purely for tracing (the existing `RunMetrics` timing/tokens
+/// are unaffected).
 pub async fn run<M: ChatModel>(
     model: &M,
     catalog: &ToolCatalog,
@@ -214,6 +221,8 @@ pub async fn run<M: ChatModel>(
     history: &[ConversationMessage],
     user_input: &str,
     max_steps: usize,
+    provider: &str,
+    model_name: &str,
 ) -> RunResult {
     let max_steps = max_steps.max(1);
 
@@ -268,17 +277,51 @@ pub async fn run<M: ChatModel>(
 
     for _ in 0..max_steps {
         step_calls = step_calls.saturating_add(1);
+        // GenAI-semconv `chat` span wrapping the existing LLM-call timing
+        // point. Token counts + finish reason are recorded after the call
+        // returns (they are not known up-front). Cheap when no subscriber
+        // records — tracing skips field formatting in that case.
+        let chat_span = tracing::info_span!(
+            "chat",
+            otel.name = gen_ai::chat_span_name(model_name),
+            "gen_ai.operation.name" = gen_ai::OP_CHAT,
+            "gen_ai.system" = %provider,
+            "gen_ai.request.model" = %model_name,
+            "gen_ai.usage.input_tokens" = tracing::field::Empty,
+            "gen_ai.usage.output_tokens" = tracing::field::Empty,
+            "gen_ai.response.finish_reasons" = tracing::field::Empty,
+        );
         let llm_start = std::time::Instant::now();
         let completion = match model
             .complete_with_tools(&messages, &tools, Some("auto"), &opts)
+            .instrument(chat_span.clone())
             .await
         {
             Ok(c) => {
                 llm_ms += llm_start.elapsed().as_secs_f64() * 1000.0;
+                // Record the response attributes onto the chat span.
+                chat_span.record(
+                    gen_ai::GEN_AI_USAGE_INPUT_TOKENS,
+                    c.prompt_tokens as i64,
+                );
+                chat_span.record(
+                    gen_ai::GEN_AI_USAGE_OUTPUT_TOKENS,
+                    c.completion_tokens as i64,
+                );
+                if let Some(reason) = &c.finish_reason {
+                    // The semconv key is an array; tracing has no array
+                    // field type, so a single/comma-joined string is
+                    // recorded under the array key (acceptable for v1).
+                    chat_span.record(
+                        gen_ai::GEN_AI_RESPONSE_FINISH_REASONS,
+                        reason.as_str(),
+                    );
+                }
                 c
             }
             Err(e) => {
                 llm_ms += llm_start.elapsed().as_secs_f64() * 1000.0;
+                chat_span.record("error", true);
                 let msg = format!("The model call failed: {e}");
                 steps.push(AgentStep::Reasoning { text: msg.clone() });
                 return RunResult {
@@ -345,10 +388,27 @@ pub async fn run<M: ChatModel>(
                         tool_id: tool_id.clone(),
                         args: args.clone(),
                     });
+                    // GenAI-semconv `execute_tool` span wrapping the
+                    // existing dispatch timing point. The agent's `search`
+                    // tool's own retrieval span nests under this.
+                    let tool_span = tracing::info_span!(
+                        "execute_tool",
+                        otel.name = gen_ai::execute_tool_span_name(tool_id),
+                        "gen_ai.operation.name" = gen_ai::OP_EXECUTE_TOOL,
+                        "gen_ai.tool.name" = %tool_id,
+                        "gen_ai.tool.call.id" = %call.id,
+                        error = tracing::field::Empty,
+                    );
                     let dispatch_start = std::time::Instant::now();
-                    let outcome = catalog.dispatch(ctx, tool_id, args).await;
+                    let outcome = catalog
+                        .dispatch(ctx, tool_id, args)
+                        .instrument(tool_span.clone())
+                        .await;
                     let dispatch_ms = dispatch_start.elapsed().as_secs_f64() * 1000.0;
                     tool_ms += dispatch_ms;
+                    if outcome.is_error {
+                        tool_span.record("error", true);
+                    }
                     steps.push(AgentStep::ToolResult {
                         tool_call_id: call.id.clone(),
                         result: outcome.content.clone(),
@@ -587,6 +647,7 @@ mod tests {
 
         let result = run(
             &model, &cat, &ctx, &agent, "sys", &[], "what collections exist?", DEFAULT_MAX_STEPS,
+            "openai", "test-model",
         )
         .await;
 
@@ -646,6 +707,7 @@ mod tests {
 
         let result = run(
             &model, &cat, &ctx, &agent, "sys", &[], "what collections?", DEFAULT_MAX_STEPS,
+            "openai", "test-model",
         )
         .await;
 
@@ -702,6 +764,7 @@ mod tests {
         let max_steps = 3;
         let result = run(
             &model, &cat, &ctx, &agent, "sys", &[], "loop forever", max_steps,
+            "openai", "test-model",
         )
         .await;
 
@@ -737,6 +800,7 @@ mod tests {
 
         let result = run(
             &model, &cat, &ctx, &agent, "sys", &[], "describe something", DEFAULT_MAX_STEPS,
+            "openai", "test-model",
         )
         .await;
 
@@ -775,6 +839,7 @@ mod tests {
 
         let result = run(
             &ErrModel, &cat, &ctx, &agent, "sys", &[], "hello", DEFAULT_MAX_STEPS,
+            "openai", "test-model",
         )
         .await;
         assert!(result.hit_limit_or_error);
@@ -843,5 +908,212 @@ mod tests {
         assert!(summary.contains("media"), "summary: {summary}");
         assert!(summary.contains("Image"), "summary: {summary}");
         assert!(summary.contains("Text"), "summary: {summary}");
+    }
+
+    // ── GenAI-semconv span emission ──────────────────────────────────────
+    //
+    // We capture the spans the executor creates with a custom
+    // `tracing_subscriber::Layer` (the task's documented fallback to a full
+    // in-memory OTel exporter). It records each span's static name plus the
+    // string-rendered `gen_ai.*` fields set at creation AND via
+    // `span.record(...)` afterwards, so we can assert the GenAI attributes
+    // and their values without standing up an OTLP pipeline. The
+    // `tracing_opentelemetry` layer maps these same names+fields to OTel
+    // span attributes verbatim in production.
+
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt as _};
+
+    #[derive(Default, Clone)]
+    struct CapturedSpan {
+        name: String,
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct SpanCollector {
+        spans: Arc<Mutex<HashMap<u64, CapturedSpan>>>,
+    }
+
+    /// Stringifies every visited field so the test can assert on values
+    /// regardless of the original type (i64 token counts, &str provider…).
+    struct FieldStringifier<'a>(&'a mut HashMap<String, String>);
+    impl Visit for FieldStringifier<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.0.insert(field.name().to_owned(), value.to_string());
+        }
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_owned(), value.to_string());
+        }
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.0.insert(field.name().to_owned(), value.to_string());
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for SpanCollector {
+        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
+            let mut cap = CapturedSpan {
+                name: attrs.metadata().name().to_owned(),
+                fields: HashMap::new(),
+            };
+            attrs.record(&mut FieldStringifier(&mut cap.fields));
+            self.spans.lock().unwrap().insert(id.into_u64(), cap);
+        }
+        fn on_record(&self, id: &Id, values: &tracing::span::Record<'_>, _ctx: Context<'_, S>) {
+            if let Some(cap) = self.spans.lock().unwrap().get_mut(&id.into_u64()) {
+                values.record(&mut FieldStringifier(&mut cap.fields));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn emits_genai_semconv_spans_for_chat_and_tool_calls() {
+        let collector = SpanCollector::default();
+        let captured = collector.spans.clone();
+        let subscriber = tracing_subscriber::registry().with(collector);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_state(tmp.path(), "docs").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let agent = test_agent(vec!["list_collections".to_owned()]);
+
+        // tool_call → final: exercises both a `chat` and an `execute_tool`
+        // span. Token counts come from the fake completions.
+        let model = FakeModel::scripted(vec![
+            completion_with_call(
+                Some("Let me check."),
+                tool_call("call_1", "list_collections", "{}"),
+            ),
+            final_completion("There is one collection: docs."),
+        ]);
+
+        let result = tracing::subscriber::with_default(subscriber, || {
+            futures::executor::block_on(run(
+                &model,
+                &cat,
+                &ctx,
+                &agent,
+                "sys",
+                &[],
+                "what collections exist?",
+                DEFAULT_MAX_STEPS,
+                "openai",
+                "gpt-test",
+            ))
+        });
+
+        assert!(!result.hit_limit_or_error);
+
+        let spans = captured.lock().unwrap();
+        let all: Vec<&CapturedSpan> = spans.values().collect();
+
+        // Both `chat` spans carry the GenAI request attributes (operation /
+        // system / model). HashMap order is nondeterministic, so identify
+        // the two turns by their recorded `finish_reasons`.
+        let chat_spans: Vec<&&CapturedSpan> =
+            all.iter().filter(|s| s.name == "chat").collect();
+        for c in &chat_spans {
+            assert_eq!(
+                c.fields.get("gen_ai.operation.name").map(String::as_str),
+                Some("chat")
+            );
+            assert_eq!(
+                c.fields.get("gen_ai.system").map(String::as_str),
+                Some("openai")
+            );
+            assert_eq!(
+                c.fields.get("gen_ai.request.model").map(String::as_str),
+                Some("gpt-test")
+            );
+        }
+
+        // The tool-call turn: token usage matches that completion
+        // (prompt_tokens=5, completion_tokens=5) and finish_reasons is the
+        // (comma-joinable) string recorded after the call returned.
+        let tool_turn = chat_spans
+            .iter()
+            .find(|s| {
+                s.fields.get("gen_ai.response.finish_reasons").map(String::as_str)
+                    == Some("tool_calls")
+            })
+            .expect("a `chat` span for the tool-call turn should exist");
+        assert_eq!(
+            tool_turn
+                .fields
+                .get("gen_ai.usage.input_tokens")
+                .map(String::as_str),
+            Some("5"),
+            "input tokens should match the tool_call completion (prompt_tokens=5)"
+        );
+        assert_eq!(
+            tool_turn
+                .fields
+                .get("gen_ai.usage.output_tokens")
+                .map(String::as_str),
+            Some("5"),
+            "output tokens should match (completion_tokens=5)"
+        );
+
+        // The final-answer turn recorded its own (different) usage + reason.
+        let final_turn = chat_spans
+            .iter()
+            .find(|s| {
+                s.fields.get("gen_ai.response.finish_reasons").map(String::as_str)
+                    == Some("stop")
+            })
+            .expect("a `chat` span for the final-answer turn should exist");
+        assert_eq!(
+            final_turn
+                .fields
+                .get("gen_ai.usage.input_tokens")
+                .map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            final_turn
+                .fields
+                .get("gen_ai.usage.output_tokens")
+                .map(String::as_str),
+            Some("7")
+        );
+
+        // An `execute_tool` span carrying the tool name + call id.
+        let tool = all
+            .iter()
+            .find(|s| s.name == "execute_tool")
+            .expect("an `execute_tool` span should be emitted");
+        assert_eq!(
+            tool.fields.get("gen_ai.operation.name").map(String::as_str),
+            Some("execute_tool")
+        );
+        assert_eq!(
+            tool.fields.get("gen_ai.tool.name").map(String::as_str),
+            Some("list_collections")
+        );
+        assert_eq!(
+            tool.fields.get("gen_ai.tool.call.id").map(String::as_str),
+            Some("call_1")
+        );
+
+        // Two model turns → two `chat` spans; one dispatch → one tool span.
+        assert_eq!(
+            all.iter().filter(|s| s.name == "chat").count(),
+            2,
+            "expected one chat span per LLM turn"
+        );
+        assert_eq!(
+            all.iter().filter(|s| s.name == "execute_tool").count(),
+            1
+        );
     }
 }

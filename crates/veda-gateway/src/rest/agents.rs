@@ -32,6 +32,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
+use tracing::Instrument;
 
 use veda_core::llm_client::LlmClient;
 
@@ -333,6 +334,10 @@ pub(crate) async fn run_agent_turn(
         .as_ref()
         .and_then(|ov| ov.model.clone())
         .unwrap_or_else(|| llm_cfg.model.clone());
+    // GenAI-semconv `gen_ai.system` value. Veda talks to an
+    // OpenAI-compatible endpoint generically; infer a recognized provider
+    // from the model name where possible, else fall back to `openai`.
+    let provider = genai_system_for(&model_name);
     let client = build_client(llm_cfg, &agent);
 
     // 4. System prompt with the modality-awareness block.
@@ -342,7 +347,18 @@ pub(crate) async fn run_agent_turn(
     // 5. Tool context with RLS user.
     let ctx = ToolContext::new(state, tenant).with_user(user);
 
-    // 6. Run the tool-calling loop.
+    // 6. Run the tool-calling loop under a GenAI-semconv `invoke_agent`
+    //    root span. The executor's per-call `chat` / `execute_tool` spans
+    //    (and any tool retrieval spans) nest under this. Created here at the
+    //    single shared invocation point so /converse, A2A, and triage all
+    //    get the same span tree. Cheap when no subscriber records.
+    use veda_core::genai_semconv as gen_ai;
+    let root = tracing::info_span!(
+        "invoke_agent",
+        otel.name = gen_ai::invoke_agent_span_name(&agent.name),
+        "gen_ai.operation.name" = gen_ai::OP_INVOKE_AGENT,
+        "gen_ai.agent.name" = %agent.name,
+    );
     let result = executor::run(
         &client,
         &state.inner.tool_catalog,
@@ -352,7 +368,10 @@ pub(crate) async fn run_agent_turn(
         history,
         input,
         DEFAULT_MAX_STEPS,
+        &provider,
+        &model_name,
     )
+    .instrument(root)
     .await;
 
     // 7. Emit APM metrics from this single shared point (covers /converse,
@@ -360,6 +379,23 @@ pub(crate) async fn run_agent_turn(
     emit_run_metrics(&model_name, &result.metrics);
 
     Ok((agent, result))
+}
+
+/// Best-effort `gen_ai.system` (GenAI-semconv provider) value for a model
+/// name. Veda always uses an OpenAI-compatible endpoint, so the wire
+/// protocol is OpenAI's; we map well-known model-name prefixes to their
+/// recognized provider id and default to `openai` otherwise.
+fn genai_system_for(model: &str) -> String {
+    let m = model.to_ascii_lowercase();
+    if m.contains("claude") {
+        "anthropic".to_owned()
+    } else if m.contains("gemini") {
+        "gcp.gemini".to_owned()
+    } else if m.starts_with("qwen") || m.contains("/qwen") {
+        "qwen".to_owned()
+    } else {
+        "openai".to_owned()
+    }
 }
 
 /// Emit Prometheus token / duration / cost metrics for one agent run.
