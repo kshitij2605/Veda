@@ -229,6 +229,39 @@ class TestAuthToken:
         assert "Authorization" not in client.session.headers
 
 
+class TestTracePropagation:
+    def test_traceparent_injected_when_propagator_present(self):
+        client = VedaClient("http://localhost:6340")
+        mock_resp = _mock_response(200, {"status": "healthy"})
+        client.session.request = MagicMock(return_value=mock_resp)
+
+        tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+        with patch.object(
+            client, "_trace_headers", return_value={"traceparent": tp}
+        ):
+            client.health()
+
+        _, kwargs = client.session.request.call_args
+        assert kwargs["headers"]["traceparent"] == tp
+
+    def test_no_headers_kwarg_when_no_trace_context(self):
+        client = VedaClient("http://localhost:6340")
+        mock_resp = _mock_response(200, {"status": "healthy"})
+        client.session.request = MagicMock(return_value=mock_resp)
+
+        with patch.object(client, "_trace_headers", return_value={}):
+            client.health()
+
+        _, kwargs = client.session.request.call_args
+        assert "headers" not in kwargs
+
+    def test_trace_headers_is_noop_without_opentelemetry(self):
+        # With opentelemetry not installed (or no active context), the
+        # helper must return an empty dict and never raise.
+        client = VedaClient("http://localhost:6340")
+        assert client._trace_headers() == {}
+
+
 class TestLogin:
     def test_login_sets_token(self):
         client = VedaClient("http://localhost:6340")

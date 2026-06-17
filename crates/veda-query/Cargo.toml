@@ -14,6 +14,8 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 roaring = "0.10"
 tracing = { workspace = true }
+opentelemetry = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 tokio = { workspace = true }
 tonic = "0.12"
 prost = "0.13"

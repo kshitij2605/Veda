@@ -220,6 +220,11 @@ async fn fetch_candidate_texts(
 /// Instruction-following rerankers (Voyage rerank-2.5, Cohere
 /// rerank-3.5, Qwen3-Reranker) honour it; classic cross-encoders
 /// (older rerank-2, bge-reranker-v2-m3) ignore unknown fields.
+#[tracing::instrument(
+    name = "rerank_call",
+    skip(query, documents, model_override, instruction),
+    fields(n_documents = documents.len(), top_k)
+)]
 pub async fn call_reranker(
     query: &str,
     documents: &[String],
@@ -258,8 +263,11 @@ pub async fn call_reranker(
         obj.insert("instruction".to_owned(), serde_json::Value::String(inst.to_owned()));
     }
 
+    let mut trace_headers = reqwest::header::HeaderMap::new();
+    veda_core::trace_propagation::inject_current_context(&mut trace_headers);
     let mut req_builder = client
         .post(&url)
+        .headers(trace_headers)
         .json(&body)
         .timeout(std::time::Duration::from_secs(30));
     if !api_key.is_empty() {

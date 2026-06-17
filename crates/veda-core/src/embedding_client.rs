@@ -116,9 +116,12 @@ impl EmbeddingClient {
         let body = self.build_multimodal_payload(data, modality)?;
 
         let url = format!("{}/v1/embeddings", self.config.endpoint.trim_end_matches('/'));
+        let mut trace_headers = reqwest::header::HeaderMap::new();
+        crate::trace_propagation::inject_current_context(&mut trace_headers);
         let mut request = self
             .http
             .post(&url)
+            .headers(trace_headers)
             .json(&body)
             .timeout(std::time::Duration::from_secs(self.config.timeout_seconds as u64));
 
@@ -165,9 +168,12 @@ impl EmbeddingClient {
         });
 
         let url = format!("{}/v1/embeddings", self.config.endpoint.trim_end_matches('/'));
+        let mut trace_headers = reqwest::header::HeaderMap::new();
+        crate::trace_propagation::inject_current_context(&mut trace_headers);
         let mut request = self
             .http
             .post(&url)
+            .headers(trace_headers)
             .json(&body)
             .timeout(std::time::Duration::from_secs(self.config.timeout_seconds as u64));
 

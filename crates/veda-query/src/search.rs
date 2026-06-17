@@ -572,6 +572,11 @@ fn search_growing_segment(
 }
 
 /// Search a sealed segment with optional filter.
+#[instrument(
+    name = "index_search",
+    skip(reader, index, request, filter_expr),
+    fields(k = request.k, dim = index.dimension(), metric = ?index.metric())
+)]
 fn search_sealed_segment(
     reader: &SegmentReader,
     index: &dyn VectorIndex,

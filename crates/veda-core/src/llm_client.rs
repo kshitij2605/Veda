@@ -280,7 +280,13 @@ impl LlmClient {
             tools: None,
             tool_choice: None,
         };
-        let mut req = self.http.post(&self.config.endpoint).json(&body);
+        let mut trace_headers = reqwest::header::HeaderMap::new();
+        crate::trace_propagation::inject_current_context(&mut trace_headers);
+        let mut req = self
+            .http
+            .post(&self.config.endpoint)
+            .headers(trace_headers)
+            .json(&body);
         if let Some(key) = &self.config.api_key {
             req = req.bearer_auth(key);
         }
@@ -339,7 +345,13 @@ impl LlmClient {
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
         };
-        let mut req = self.http.post(&self.config.endpoint).json(&body);
+        let mut trace_headers = reqwest::header::HeaderMap::new();
+        crate::trace_propagation::inject_current_context(&mut trace_headers);
+        let mut req = self
+            .http
+            .post(&self.config.endpoint)
+            .headers(trace_headers)
+            .json(&body);
         if let Some(key) = &self.config.api_key {
             req = req.bearer_auth(key);
         }

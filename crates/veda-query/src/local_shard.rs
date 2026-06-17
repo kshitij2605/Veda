@@ -344,6 +344,11 @@ fn seed_from_field(name: &str) -> u64 {
 }
 
 impl ShardSearcher for LocalShardSearcher {
+    #[tracing::instrument(
+        name = "local_shard_search",
+        skip(self, request),
+        fields(shard_id = _shard_id, k = request.k)
+    )]
     fn search_shard(
         &self,
         _shard_id: u32,

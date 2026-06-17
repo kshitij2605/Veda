@@ -184,6 +184,11 @@ impl TonicFollower {
         }
     }
 
+    #[tracing::instrument(
+        name = "log_replication_rpc",
+        skip(self, which, payload),
+        fields(shard_id = %self.shard_id)
+    )]
     async fn rpc<T: serde::Serialize, R: for<'de> serde::Deserialize<'de>>(
         &self,
         which: RpcKind,

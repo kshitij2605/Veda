@@ -169,8 +169,28 @@ class VedaClient:
             took_ms=data.get("took_ms", 0.0),
         )
 
+    def _trace_headers(self) -> dict:
+        """W3C trace-context headers for the current span, if any.
+
+        Returns ``traceparent`` / ``tracestate`` when OpenTelemetry is
+        installed and a span context is active, so downstream Veda calls
+        join the caller's trace. Returns an empty dict (and never raises)
+        when OpenTelemetry is absent or there is no active context, so the
+        SDK works unchanged without the optional ``otel`` extra.
+        """
+        try:
+            from opentelemetry import propagate
+        except ImportError:
+            return {}
+        carrier: dict = {}
+        propagate.inject(carrier)
+        return carrier
+
     def _request(self, method, path, **kwargs):
         """Make HTTP request, handle errors."""
+        trace_headers = self._trace_headers()
+        if trace_headers:
+            kwargs["headers"] = {**trace_headers, **kwargs.get("headers", {})}
         resp = self.session.request(method, self.url + path, **kwargs)
 
         if resp.status_code >= 400:
