@@ -22,6 +22,7 @@ pub mod config;
 pub mod engine;
 pub mod event;
 pub mod notify;
+pub mod recall_probe;
 pub mod remediation;
 pub mod rules;
 pub mod slo;
@@ -38,6 +39,10 @@ pub use slo::{
 pub use synthetic::{
     run_probe, ProbeKind, ProbeResult, SyntheticProbe, SyntheticRegistry, SyntheticResults,
     SyntheticSummary,
+};
+
+pub use recall_probe::{
+    probe_recall, run_recall_probes, spawn_recall_prober, IndexParams, RecallResults, RecallSample,
 };
 
 pub use snapshot::{

@@ -37,6 +37,7 @@ use crate::advisor::rules::{catalog, run_rules, Rule, RuleHit};
 use crate::advisor::event::{RemediationAction, Scope, Severity};
 use crate::advisor::slo::{SloKind, SloRegistry, SloState, SloStatus};
 use crate::advisor::synthetic::{run_probe, SyntheticRegistry, SyntheticResults};
+use crate::advisor::recall_probe::RecallResults;
 use crate::advisor::snapshot::{collect, OpsSnapshot, SnapshotHistory, DEFAULT_HISTORY_CAP};
 use crate::advisor::anomaly::detect_anomalies;
 use crate::logs::{LogCategory, categorize::CategorizeOptions};
@@ -82,6 +83,12 @@ pub struct AdvisorState {
     /// Per-probe bounded result rings, persisted to
     /// `{data_dir}/_synthetic_results.json`.
     pub synthetic_results: Mutex<SyntheticResults>,
+    /// Per-collection proxy-recall samples, persisted to
+    /// `{data_dir}/_recall_results.json`. Populated by the dedicated
+    /// off-tick recall-probe task ([`crate::advisor::run_recall_probes`]),
+    /// READ (cheaply) by [`crate::advisor::snapshot::collect`] to build
+    /// `index_health`. The probe NEVER runs inside `run_tick`.
+    pub recall_results: Mutex<RecallResults>,
     /// Shared async HTTP client, reused by the per-tick [`Notifier`].
     pub http: reqwest::Client,
 }
@@ -100,6 +107,9 @@ impl AdvisorState {
             synthetics: RwLock::new(SyntheticRegistry::load(&data_dir.join(SYNTHETICS_FILE))),
             synthetic_results: Mutex::new(SyntheticResults::load(
                 &data_dir.join(SYNTHETIC_RESULTS_FILE),
+            )),
+            recall_results: Mutex::new(crate::advisor::recall_probe::RecallResults::load(
+                &data_dir.join(crate::advisor::recall_probe::RECALL_RESULTS_FILE),
             )),
             http: reqwest::Client::new(),
         }
@@ -603,6 +613,7 @@ mod tests {
             warn_log_count: 0,
             slo_statuses: Vec::new(),
             synthetic_summaries: Vec::new(),
+            index_health: Vec::new(),
         }
     }
 

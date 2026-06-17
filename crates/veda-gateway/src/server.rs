@@ -59,6 +59,13 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let _advisor = crate::advisor::spawn_advisor(app_state.clone());
     tracing::info!("advisor: tick loop started");
 
+    // Proxy recall-probe loop — a SEPARATE, much-slower task (default
+    // 600s; VEDA_RECALL_PROBE_INTERVAL_SECS). Runs the expensive
+    // ANN-vs-exact brute-force scans OFF the advisor tick so they never
+    // stall the advisor's rules/anomaly/notify pipeline.
+    let _recall_prober = crate::advisor::spawn_recall_prober(app_state.clone());
+    tracing::info!("advisor: recall-probe loop started");
+
     // Optional NATS streaming ingestion worker.
     if let Ok(url) = std::env::var("VEDA_STREAMING_NATS")
         && !url.is_empty()
