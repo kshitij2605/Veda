@@ -26,6 +26,8 @@ pub mod llm;
 pub mod logs;
 pub mod mcp;
 pub mod metrics_middleware;
+#[cfg(feature = "profiling")]
+pub mod pprof;
 pub mod query_log;
 pub mod records;
 pub mod rerank;
@@ -131,6 +133,16 @@ fn resources_router() -> Router<state::AppState> {
 fn correlations_router() -> Router<state::AppState> {
     Router::new()
         .route("/v1/admin/correlations", get(correlations::correlations))
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// On-demand CPU-profiling admin route, gated by an extra
+/// `require_admin` route layer (same pattern as [`resources_router`]).
+/// Compiled only under the `profiling` cargo feature.
+#[cfg(feature = "profiling")]
+fn pprof_router() -> Router<state::AppState> {
+    Router::new()
+        .route("/v1/admin/pprof", get(pprof::pprof))
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
@@ -350,7 +362,14 @@ pub fn build_router(app_state: state::AppState) -> Router {
         // Node resources — admin-only (extra require_admin route layer).
         .merge(resources_router())
         // Slow-query / error correlations — admin-only (extra require_admin).
-        .merge(correlations_router())
+        .merge(correlations_router());
+
+    // On-demand CPU profiling — admin-only, only present under the
+    // `profiling` cargo feature (no route, no `pprof` dep otherwise).
+    #[cfg(feature = "profiling")]
+    let protected = protected.merge(pprof_router());
+
+    let protected = protected
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             auth::auth_middleware,
