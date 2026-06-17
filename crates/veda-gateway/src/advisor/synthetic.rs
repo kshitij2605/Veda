@@ -74,6 +74,9 @@ pub enum ProbeKind {
 /// A user-defined synthetic probe.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SyntheticProbe {
+    /// Stable id. May be omitted on create (`POST /v1/admin/synthetics`), in
+    /// which case the gateway assigns `synthetic-<uuid>`.
+    #[serde(default)]
     pub id: String,
     pub name: String,
     pub kind: ProbeKind,

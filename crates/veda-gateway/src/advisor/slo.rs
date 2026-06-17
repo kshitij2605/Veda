@@ -96,6 +96,9 @@ pub fn default_slow_burn() -> BurnConfig {
 /// A user-defined service-level objective.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SloDef {
+    /// Stable id. May be omitted on create (`POST /v1/admin/slos`), in which
+    /// case the gateway assigns `slo-<uuid>`.
+    #[serde(default)]
     pub id: String,
     pub name: String,
     pub kind: SloKind,
