@@ -375,10 +375,10 @@ components:
         remediation_note: { type: string, nullable: true }
     SloDef:
       type: object
-      description: A service-level objective. `id` is required on create/update.
-      required: [id, name, kind, target_pct, window_secs, fast_burn, slow_burn]
+      description: A service-level objective. `id` is optional on create (server assigns `slo-<uuid>` when omitted).
+      required: [name, kind, target_pct, window_secs, fast_burn, slow_burn]
       properties:
-        id: { type: string }
+        id: { type: string, description: "optional on create; server-assigned if omitted" }
         name: { type: string }
         kind:
           type: object
@@ -415,10 +415,10 @@ components:
         compliant: { type: boolean }
     SyntheticProbe:
       type: object
-      description: An in-process synthetic self-check. `id` is required on create/update.
-      required: [id, name, kind, interval_secs, timeout_ms]
+      description: An in-process synthetic self-check. `id` is optional on create (server assigns `synthetic-<uuid>` when omitted).
+      required: [name, kind, interval_secs, timeout_ms]
       properties:
-        id: { type: string }
+        id: { type: string, description: "optional on create; server-assigned if omitted" }
         name: { type: string }
         kind:
           type: object

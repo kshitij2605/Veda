@@ -138,7 +138,8 @@ async fn create_assigns_id_when_absent() {
     let (base, _tmp) = start_server().await;
     let c = Client::new();
     let mut body = latency_slo_body("");
-    body["id"] = json!("");
+    // Truly OMIT the id key (the real client case), not just send "".
+    body.as_object_mut().unwrap().remove("id");
     let r = c
         .post(format!("{base}/v1/admin/slos"))
         .json(&body)
