@@ -639,6 +639,8 @@ mod tests {
             &[],
             &prompt,
             DEFAULT_MAX_STEPS,
+            "openai",
+            "test-model",
         )
         .await;
 
