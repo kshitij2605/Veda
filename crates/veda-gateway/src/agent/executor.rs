@@ -13,6 +13,8 @@
 //! This module is the engine only — it has no REST surface. The REST
 //! handler (a later task) calls [`run`] and persists the returned trace.
 
+use serde::{Deserialize, Serialize};
+
 use veda_core::llm_client::{
     ChatMessage, ChatModel, CompletionOptions, ToolDef,
 };
@@ -30,6 +32,23 @@ pub const DEFAULT_MAX_STEPS: usize = 8;
 /// outputs (e.g. large search hit sets) are truncated to this so a
 /// verbose tool can't blow up the context window across iterations.
 const TOOL_RESULT_CAP_BYTES: usize = 8 * 1024;
+
+/// Run-level APM metrics accumulated across one [`run`] invocation: an
+/// LLM-application analog of request timing. `total_ms` is the wall-clock
+/// span of the whole loop; `llm_ms` / `tool_ms` are the summed latencies
+/// of the model calls and tool dispatches respectively (their sum is `<=
+/// total_ms` modulo bookkeeping overhead). Token counts mirror the ones
+/// already reported by the model.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct RunMetrics {
+    pub total_ms: f64,
+    pub llm_ms: f64,
+    pub tool_ms: f64,
+    pub steps: u32,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
 
 /// Outcome of an [`run`] invocation.
 pub struct RunResult {
@@ -51,6 +70,8 @@ pub struct RunResult {
     /// limit) rather than on a clean final answer. `response` still
     /// carries a usable fallback message.
     pub hit_limit_or_error: bool,
+    /// Run-level timing + token metrics for this turn.
+    pub metrics: RunMetrics,
 }
 
 /// Build the system prompt: the agent's instructions followed by a
@@ -221,15 +242,43 @@ pub async fn run<M: ChatModel>(
     let mut completion_tokens = 0u32;
     let mut total_tokens = 0u32;
 
+    // APM timing accumulators. `run_start` measures the whole loop;
+    // `llm_ms` / `tool_ms` sum per-call latencies.
+    let run_start = std::time::Instant::now();
+    let mut llm_ms = 0f64;
+    let mut tool_ms = 0f64;
+    let mut step_calls = 0u32;
+
+    // Build the run-level metrics snapshot at each return point.
+    macro_rules! run_metrics {
+        () => {
+            RunMetrics {
+                total_ms: run_start.elapsed().as_secs_f64() * 1000.0,
+                llm_ms,
+                tool_ms,
+                steps: step_calls,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+            }
+        };
+    }
+
     let mut last_content: Option<String> = None;
 
     for _ in 0..max_steps {
+        step_calls = step_calls.saturating_add(1);
+        let llm_start = std::time::Instant::now();
         let completion = match model
             .complete_with_tools(&messages, &tools, Some("auto"), &opts)
             .await
         {
-            Ok(c) => c,
+            Ok(c) => {
+                llm_ms += llm_start.elapsed().as_secs_f64() * 1000.0;
+                c
+            }
             Err(e) => {
+                llm_ms += llm_start.elapsed().as_secs_f64() * 1000.0;
                 let msg = format!("The model call failed: {e}");
                 steps.push(AgentStep::Reasoning { text: msg.clone() });
                 return RunResult {
@@ -240,6 +289,7 @@ pub async fn run<M: ChatModel>(
                     completion_tokens,
                     total_tokens,
                     hit_limit_or_error: true,
+                    metrics: run_metrics!(),
                 };
             }
         };
@@ -261,6 +311,7 @@ pub async fn run<M: ChatModel>(
                 completion_tokens,
                 total_tokens,
                 hit_limit_or_error: false,
+                metrics: run_metrics!(),
             };
         }
 
@@ -294,11 +345,15 @@ pub async fn run<M: ChatModel>(
                         tool_id: tool_id.clone(),
                         args: args.clone(),
                     });
+                    let dispatch_start = std::time::Instant::now();
                     let outcome = catalog.dispatch(ctx, tool_id, args).await;
+                    let dispatch_ms = dispatch_start.elapsed().as_secs_f64() * 1000.0;
+                    tool_ms += dispatch_ms;
                     steps.push(AgentStep::ToolResult {
                         tool_call_id: call.id.clone(),
                         result: outcome.content.clone(),
                         is_error: outcome.is_error,
+                        duration_ms: Some(dispatch_ms),
                     });
                     let result_str = outcome.content.to_string();
                     let tool_msg = ChatMessage::tool_result(
@@ -321,6 +376,7 @@ pub async fn run<M: ChatModel>(
                         tool_call_id: call.id.clone(),
                         result: err.clone(),
                         is_error: true,
+                        duration_ms: None,
                     });
                     let tool_msg = ChatMessage::tool_result(call.id.clone(), err.to_string());
                     messages.push(tool_msg.clone());
@@ -348,6 +404,7 @@ answer. Here is what I gathered so far in the steps."
         completion_tokens,
         total_tokens,
         hit_limit_or_error: true,
+        metrics: run_metrics!(),
     }
 }
 
@@ -568,6 +625,63 @@ mod tests {
 
         // Token usage is summed across both turns.
         assert_eq!(result.total_tokens, 20);
+    }
+
+    #[tokio::test]
+    async fn run_metrics_capture_timing_and_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_state(tmp.path(), "docs").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let agent = test_agent(vec!["list_collections".to_owned()]);
+
+        // [tool_call → final]: two LLM turns, one dispatch.
+        let model = FakeModel::scripted(vec![
+            completion_with_call(
+                Some("Checking."),
+                tool_call("call_1", "list_collections", "{}"),
+            ),
+            final_completion("Done."),
+        ]);
+
+        let result = run(
+            &model, &cat, &ctx, &agent, "sys", &[], "what collections?", DEFAULT_MAX_STEPS,
+        )
+        .await;
+
+        let m = result.metrics;
+        // Two model turns happened.
+        assert_eq!(m.steps, 2, "expected 2 model turns");
+        // Trace has >= 2 steps (reasoning, tool_call, tool_result, reasoning).
+        assert!(result.steps.len() >= 2);
+        // LLM time was measured; tool time is non-negative; their sum fits
+        // within the whole-run span (with generous slack for bookkeeping).
+        assert!(m.llm_ms > 0.0, "llm_ms should be > 0, got {}", m.llm_ms);
+        assert!(m.tool_ms >= 0.0, "tool_ms should be >= 0, got {}", m.tool_ms);
+        assert!(
+            m.llm_ms + m.tool_ms <= m.total_ms + 5.0,
+            "llm_ms ({}) + tool_ms ({}) should be <= total_ms ({}) + slack",
+            m.llm_ms, m.tool_ms, m.total_ms
+        );
+        // Tokens match the summed RunResult totals (5+5 + 3+7 = 20).
+        assert_eq!(m.total_tokens, result.total_tokens);
+        assert_eq!(m.total_tokens, 20);
+        assert_eq!(m.prompt_tokens, 8);
+        assert_eq!(m.completion_tokens, 12);
+
+        // The dispatched tool-result step carries its own duration_ms.
+        let durations: Vec<Option<f64>> = result
+            .steps
+            .iter()
+            .filter_map(|s| match s {
+                AgentStep::ToolResult { duration_ms, .. } => Some(*duration_ms),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            durations.iter().any(|d| d.is_some()),
+            "a dispatched tool-result should carry duration_ms"
+        );
     }
 
     #[tokio::test]
