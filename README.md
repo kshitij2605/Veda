@@ -99,6 +99,17 @@ See [documentation/2026-06-16-node-resource-signals.md](documentation/2026-06-16
 
 See [documentation/2026-06-16-service-reliability-slo.md](documentation/2026-06-16-service-reliability-slo.md) for the full Service Reliability guide.
 
+### APM & Performance Observability
+- **Distributed tracing + sampling + dependency spans** -- the OTel pipeline takes a configurable sampler (`OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG`, default `parentbased_traceidratio` @ 1.0) and **injects W3C trace context into outbound calls** (LLM / embedding / rerank HTTP + remote-shard gRPC metadata), so a Veda trace stitches into the calling app's and out to its dependencies. The previously-missing dependency spans (remote-shard gRPC, rerank, local-shard, vector-index search, NATS) are now emitted, and the Python SDK propagates context too (`veda-client[otel]`, no-op without OTel).
+- **On-demand CPU profiling** -- `GET /v1/admin/pprof?seconds=&frequency=&format=` samples the running server and returns a flamegraph **SVG** or **pprof protobuf** (409 if one is already running; empty when idle by design). Behind a `profiling` cargo feature, so default builds carry no `pprof` dependency (`cargo build -p veda-server --features profiling`).
+- **Agent / GenAI-semconv tracing + RunMetrics** -- the agent loop emits OTel **GenAI semantic-convention** spans: `invoke_agent` → `chat {model}` (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.*_tokens`, `gen_ai.response.finish_reasons`) → `execute_tool {id}` (`gen_ai.tool.*`), so RAG/agent traces drop natively into Datadog / Grafana / Phoenix / Langfuse. Each run also returns `metrics { total_ms, llm_ms, tool_ms, steps, prompt_tokens, completion_tokens, total_tokens }` (per-step `duration_ms` on tool results).
+- **Cost / token observability** -- Prometheus `veda_llm_tokens_total{type,model}`, `veda_agent_run_duration_seconds{model}`, and `veda_llm_cost_usd_total{model}` (accumulated in **micro-USD** — divide by 1e6). Pricing via `VEDA_LLM_PRICES` JSON (`{"model":{"input":x,"output":y}}` per-1k-tokens) else a built-in default; an unpriced model still emits tokens and just skips cost (never fails).
+- **Slow-query / error correlation** -- `GET /v1/admin/correlations` groups the query-log window by collection / query_type / has_filter / reranked / index_type / result_count + top_k buckets and reports per-bucket count, p50, p95, slow_count, and error_rate, ranked worst-first — so you can see *which kind of query* is slow or failing. The query log gained the enriching fields and now **logs errors too** (was success-only), independent of trace sampling.
+- **Retrieval-quality traces + dependency map** -- the search span carries `db.system=veda`, `db.collection`, and `retrieval.query_type`/`top_k`/`result_count`/`reranked`/`has_filter`/`index_type` (and the `ExplainTiming` `filter_ms`/`ann_search_ms`/`scoring_ms`/`fusion_ms`/`total_ms` under `explain`); `GET /v1/admin/depmap` returns a declarative 9-node/8-edge service graph.
+- **ANN index advisor** -- a low-cadence proxy **recall probe** (`VEDA_RECALL_PROBE_INTERVAL_SECS`, default 600) compares ANN top-k against an exact brute-force scan over a sampled subset → `recall@k` (`is_proxy=true`) + p95, exported as `veda_index_recall{collection}` / `veda_index_p95_ms{collection}`. Rules `index_recall_degraded` (High, `recall < 0.90`) and `index_latency_high_for_recall` (Medium, `p95_ms > 50` at `recall >= 0.95`) open events with directional recommendations (raise/lower efSearch, reindex, or switch index type). `GET /v1/admin/index-advisor` surfaces per-collection index_type/params/p95/recall/recommendations/open events; the Niriksha **IndexAdvisor** panel adds opt-in reindex.
+
+See [documentation/2026-06-17-apm-observability.md](documentation/2026-06-17-apm-observability.md) for the full APM & Performance Observability guide.
+
 ## Quick Start
 
 ### Docker Compose (recommended)
@@ -219,6 +230,10 @@ Veda runs in two modes; the admin REST surface differs depending on which one is
 | `GET /v1/admin/slos` | ✓ | ✓ | SLO defs + per-SLO SLI/error-budget/burn-rate (`/slos/{id}/status`); CRUD admin-only |
 | `GET /v1/admin/synthetics` | ✓ | ✓ | Synthetic-probe defs + results (`/synthetics/{id}/results`); probes run in-process each tick |
 | `POST /v1/admin/insights/{event_id}/triage` | ✓ | ✓ | AI triage of an event via the `veda-ops` agent; 404 unknown event, 503 when no LLM |
+| `GET /v1/admin/correlations` | ✓ | ✓ | Slow-query/error correlation over the query-log window, bucketed and ranked worst-first |
+| `GET /v1/admin/pprof` | ✓ | ✓ | On-demand CPU profile (flamegraph SVG / pprof proto); `profiling` feature build; 409 if already running |
+| `GET /v1/admin/depmap` | ✓ | ✓ | Declarative service dependency graph (9 nodes / 8 edges) |
+| `GET /v1/admin/index-advisor` | ✓ | ✓ | Per-collection index_type/params/p95/recall (proxy) + directional recommendations + open events |
 | `GET /v1/admin/nodes` | ✓ (1 node) | ✓ (N nodes) | `mode` field reports which path is active |
 | `GET /v1/admin/region_topology` | ✓ (returns `{topology:null}`) | ✓ | Read works even without `_meta` |
 | `PUT /v1/admin/region_topology` | ✗ 503 | ✓ | Mutates `_meta::shard_ensembles` |
