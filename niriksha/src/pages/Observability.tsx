@@ -14,6 +14,12 @@ import {
   fetchCorrelations,
   type CorrelationDimension,
 } from '../api/correlations'
+import {
+  fetchDepMap,
+  type DepNode,
+  type DepEdge,
+  type DepMapResponse,
+} from '../api/depmap'
 import { Button, CopyButton, Skeleton } from '../components/primitives'
 import {
   useSavedObjects,
@@ -124,6 +130,8 @@ export function Observability() {
             <RawMetricsTable latest={latest} />
             <EvalDriftPanel />
             <CorrelationsPanel />
+            <DependenciesPanel />
+            <RagTraceLegend />
             <ServerSlowQueries />
           </>
         )}
@@ -580,6 +588,197 @@ function DimensionCard({ dim }: { dim: CorrelationDimension }) {
         </tbody>
       </table>
     </div>
+  )
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Dependencies — static service / dependency graph from
+   GET /v1/admin/depmap. Rendered as nodes grouped by kind + an edge list
+   (no heavy graph lib; reuses tokens). Shows what a request fans out to.
+   ──────────────────────────────────────────────────────────────────── */
+
+const DEP_KIND_LABELS: Record<string, string> = {
+  gateway: 'Gateway',
+  query: 'Query',
+  index: 'Index',
+  storage: 'Storage',
+  external: 'External services',
+}
+
+/** Stable display order for the kind groups. */
+const DEP_KIND_ORDER = ['gateway', 'query', 'index', 'storage', 'external']
+
+function DependenciesPanel() {
+  const [graph, setGraph] = useState<DepMapResponse | null>(null)
+  useEffect(() => {
+    let alive = true
+    fetchDepMap()
+      .then(({ data }) => {
+        if (alive) setGraph(data ?? null)
+      })
+      .catch(() => {
+        if (alive) setGraph(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const nodes = graph?.nodes ?? []
+  const edges = graph?.edges ?? []
+  if (nodes.length === 0) return null
+
+  // Group nodes by kind, preserving the declared display order.
+  const byKind = new Map<string, DepNode[]>()
+  for (const n of nodes) {
+    if (!byKind.has(n.kind)) byKind.set(n.kind, [])
+    byKind.get(n.kind)!.push(n)
+  }
+  const kinds = DEP_KIND_ORDER.filter((k) => byKind.has(k)).concat(
+    Array.from(byKind.keys()).filter((k) => !DEP_KIND_ORDER.includes(k)),
+  )
+  const labelOf = (id: string) =>
+    nodes.find((n) => n.id === id)?.label ?? id
+
+  return (
+    <section>
+      <header className="mb-2">
+        <h2 className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)]">
+          Dependencies
+          <span className="ml-2 font-mono normal-case tracking-normal text-[var(--color-text-muted)]">
+            (request topology · what a search fans out to)
+          </span>
+        </h2>
+      </header>
+      <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3 space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+          {kinds.map((k) => (
+            <div
+              key={k}
+              className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-bg)] p-2"
+            >
+              <div className="text-[10px] uppercase tracking-[0.06em] text-[var(--color-text-subtle)] mb-1.5">
+                {DEP_KIND_LABELS[k] ?? k}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {byKind.get(k)!.map((n) => (
+                  <span
+                    key={n.id}
+                    className="inline-flex items-center rounded-[var(--radius-xs)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-2 py-0.5 text-[11px] text-[var(--color-text)]"
+                  >
+                    {n.label}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        {edges.length > 0 && (
+          <div className="border-t border-[var(--color-border)] pt-2">
+            <div className="text-[10px] uppercase tracking-[0.06em] text-[var(--color-text-subtle)] mb-1.5">
+              Edges
+            </div>
+            <ul className="flex flex-col gap-1">
+              {edges.map((e: DepEdge, i) => (
+                <li
+                  key={i}
+                  className="flex items-center gap-1.5 text-[11.5px] text-[var(--color-text-muted)] font-mono"
+                >
+                  <span className="text-[var(--color-text)]">
+                    {labelOf(e.from)}
+                  </span>
+                  <span className="text-[var(--color-text-subtle)]">→</span>
+                  <span className="text-[var(--color-text)]">
+                    {labelOf(e.to)}
+                  </span>
+                  {e.label && (
+                    <span className="text-[var(--color-text-subtle)]">
+                      ({e.label})
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   RAG trace legend — explains the retrieval span breakdown
+   (filter / ANN / scoring / fusion / total) attached to the `search`
+   span as `retrieval.*` attributes (APM Phase 5.1). Static reference so
+   operators reading a Veda RAG trace know what each phase means.
+   ──────────────────────────────────────────────────────────────────── */
+
+const RAG_PHASES: { key: string; label: string; desc: string }[] = [
+  {
+    key: 'retrieval.filter_ms',
+    label: 'Filter',
+    desc: 'Applying the scalar / RLS filter before the vector walk.',
+  },
+  {
+    key: 'retrieval.ann_search_ms',
+    label: 'ANN search',
+    desc: 'Walking the vector index (HNSW / IVF-PQ / …) for candidates.',
+  },
+  {
+    key: 'retrieval.scoring_ms',
+    label: 'Scoring',
+    desc: 'Exact distance / similarity scoring of candidates.',
+  },
+  {
+    key: 'retrieval.fusion_ms',
+    label: 'Fusion',
+    desc: 'Fusing multi-leg (hybrid) / multi-vector results.',
+  },
+  {
+    key: 'retrieval.total_ms',
+    label: 'Total',
+    desc: 'Sum of the retrieval phases above.',
+  },
+]
+
+function RagTraceLegend() {
+  return (
+    <section>
+      <header className="mb-2">
+        <h2 className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)]">
+          RAG trace
+          <span className="ml-2 font-mono normal-case tracking-normal text-[var(--color-text-muted)]">
+            (search span retrieval breakdown)
+          </span>
+        </h2>
+      </header>
+      <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3">
+        <p className="text-[11.5px] text-[var(--color-text-muted)] mb-2">
+          Each <code className="font-mono text-[var(--color-text)]">search</code>{' '}
+          span carries{' '}
+          <code className="font-mono text-[var(--color-text)]">db.system</code>,{' '}
+          <code className="font-mono text-[var(--color-text)]">db.collection</code>{' '}
+          and{' '}
+          <code className="font-mono text-[var(--color-text)]">retrieval.*</code>{' '}
+          attributes. When the query is run with{' '}
+          <code className="font-mono text-[var(--color-text)]">explain</code>, the
+          per-phase timing breakdown is also recorded so a trace shows whether
+          retrieval timing — not the LLM — is the bottleneck.
+        </p>
+        <ul className="flex flex-col gap-1">
+          {RAG_PHASES.map((p) => (
+            <li key={p.key} className="flex items-baseline gap-2 text-[11.5px]">
+              <code className="font-mono text-[var(--color-accent)] whitespace-nowrap">
+                {p.key}
+              </code>
+              <span className="text-[var(--color-text-subtle)]">·</span>
+              <span className="text-[var(--color-text)]">{p.label}</span>
+              <span className="text-[var(--color-text-muted)]">— {p.desc}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
   )
 }
 
