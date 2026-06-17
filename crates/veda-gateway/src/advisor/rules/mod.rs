@@ -846,6 +846,107 @@ impl Rule for SyntheticFailing {
     }
 }
 
+// ---------------------------------------------------------------------
+// Index-advisor rules — iterate `snap.index_health` (the recall-vs-latency
+// pairing assembled in Phase 6a) and emit one hit per collection scoped
+// `Scope::Index(collection)`. Both skip cleanly when `index_health` is
+// empty or the needed signal (`recall` / `p95_ms`) is `None`. Recall is a
+// **proxy** measurement (sampled queries + capped brute force), so the
+// recommendations are directional and advisory only.
+// ---------------------------------------------------------------------
+
+/// A collection's proxy recall@k has fallen below the target floor — the
+/// ANN index is dropping true neighbours. Advisory only.
+struct IndexRecallDegraded;
+impl Rule for IndexRecallDegraded {
+    fn id(&self) -> &'static str {
+        "index_recall_degraded"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::High
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let min = threshold_f64(cfg, "recall_min", 0.90);
+        let mut hits = Vec::new();
+        for ih in &snap.index_health {
+            // Skip cleanly when recall is unmeasured.
+            let Some(recall) = ih.recall else {
+                continue;
+            };
+            if recall < min {
+                hits.push(RuleHit {
+                    rule_id: self.id().into(),
+                    scope: Scope::Index(ih.collection.clone()),
+                    severity: self.default_severity(),
+                    title: format!("Index recall degraded on '{}'", ih.collection),
+                    detail: format!(
+                        "Proxy recall@k for '{}' ({} index) is {:.2}, below the {:.2} target. The ANN index is missing true nearest neighbours, so search quality is degraded. Recall is a proxy measurement (sampled queries + capped brute force).",
+                        ih.collection, ih.index_type, recall, min
+                    ),
+                    recommendation: format!(
+                        "Raise recall for '{}': increase efSearch (and efConstruction for a denser graph), or POST /v1/collections/{}/reindex with a higher-recall config. Current index params may be unknown, so tune directionally and re-probe.",
+                        ih.collection, ih.collection
+                    ),
+                    runbook: Some(format!(
+                        "GET /v1/admin/index-advisor; POST /v1/collections/{}/reindex",
+                        ih.collection
+                    )),
+                    remediation: RemediationAction::None,
+                });
+            }
+        }
+        hits
+    }
+}
+
+/// A collection is spending more latency than its (already adequate)
+/// recall needs — the index is over-tuned for recall it already has.
+/// Advisory only; only fires when recall is known to be good.
+struct IndexLatencyHighForRecall;
+impl Rule for IndexLatencyHighForRecall {
+    fn id(&self) -> &'static str {
+        "index_latency_high_for_recall"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let latency_limit = threshold_f64(cfg, "p95_ms", 50.0);
+        let recall_ok = threshold_f64(cfg, "recall_ok", 0.95);
+        let mut hits = Vec::new();
+        for ih in &snap.index_health {
+            // Need BOTH signals: a measured p95 over budget AND recall
+            // already adequate (otherwise the recall rule owns it). Skip
+            // cleanly when either is `None`.
+            let (Some(p95), Some(recall)) = (ih.p95_ms, ih.recall) else {
+                continue;
+            };
+            if p95 > latency_limit && recall >= recall_ok {
+                hits.push(RuleHit {
+                    rule_id: self.id().into(),
+                    scope: Scope::Index(ih.collection.clone()),
+                    severity: self.default_severity(),
+                    title: format!("Index over-spending latency on '{}'", ih.collection),
+                    detail: format!(
+                        "'{}' ({} index) has p95 {:.0} ms (threshold {:.0} ms) while proxy recall is already {:.2} (>= {:.2}). It is paying latency for recall it does not need. Recall is a proxy measurement.",
+                        ih.collection, ih.index_type, p95, latency_limit, recall, recall_ok
+                    ),
+                    recommendation: format!(
+                        "Trade some recall headroom for latency on '{}': lower efSearch, or switch index type — HNSW→IvfPq/DiskAnn at scale, or RaBitQ to cut memory. POST /v1/collections/{}/reindex to apply, then re-probe.",
+                        ih.collection, ih.collection
+                    ),
+                    runbook: Some(format!(
+                        "GET /v1/admin/index-advisor; POST /v1/collections/{}/reindex",
+                        ih.collection
+                    )),
+                    remediation: RemediationAction::None,
+                });
+            }
+        }
+        hits
+    }
+}
+
 /// The built-in rule catalog.
 pub fn catalog() -> Vec<Box<dyn Rule>> {
     vec![
@@ -870,6 +971,8 @@ pub fn catalog() -> Vec<Box<dyn Rule>> {
         Box::new(SloBurnRateSlow),
         Box::new(SloBudgetExhausted),
         Box::new(SyntheticFailing),
+        Box::new(IndexRecallDegraded),
+        Box::new(IndexLatencyHighForRecall),
     ]
 }
 
@@ -1409,5 +1512,111 @@ mod tests {
         ] {
             assert!(find(&hits, id).is_none(), "{id} fired on resourceless snapshot");
         }
+    }
+
+    // --- index-advisor rules -------------------------------------------
+
+    fn index_health(
+        collection: &str,
+        p95_ms: Option<f64>,
+        recall: Option<f64>,
+    ) -> crate::advisor::snapshot::IndexSnapshot {
+        crate::advisor::snapshot::IndexSnapshot {
+            collection: collection.into(),
+            index_type: "hnsw".into(),
+            p95_ms,
+            recall,
+            params: crate::advisor::recall_probe::IndexParams::default(),
+        }
+    }
+
+    #[test]
+    fn index_recall_degraded_fires_below_target() {
+        let mut snap = base_snapshot();
+        snap.index_health = vec![index_health("docs", Some(20.0), Some(0.7))];
+        let hits = IndexRecallDegraded.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "index_recall_degraded");
+        assert_eq!(hits[0].scope, Scope::Index("docs".into()));
+        assert_eq!(hits[0].severity, Severity::High);
+        assert!(hits[0].detail.to_lowercase().contains("proxy"));
+        assert!(!hits[0].recommendation.is_empty());
+        assert_eq!(hits[0].remediation, RemediationAction::None);
+    }
+
+    #[test]
+    fn index_recall_degraded_silent_when_adequate() {
+        let mut snap = base_snapshot();
+        snap.index_health = vec![index_health("docs", Some(20.0), Some(0.95))];
+        let hits = IndexRecallDegraded.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn index_recall_degraded_skips_on_empty_or_none() {
+        // Empty index_health → nothing.
+        let snap = base_snapshot();
+        assert!(IndexRecallDegraded
+            .check(&snap, &empty_history(), &RuleConfig::default())
+            .is_empty());
+        // recall == None → skip cleanly (cannot judge).
+        let mut snap2 = base_snapshot();
+        snap2.index_health = vec![index_health("docs", Some(20.0), None)];
+        assert!(IndexRecallDegraded
+            .check(&snap2, &empty_history(), &RuleConfig::default())
+            .is_empty());
+    }
+
+    #[test]
+    fn index_latency_high_for_recall_fires_when_recall_already_good() {
+        let mut snap = base_snapshot();
+        // p95 120ms > 50ms AND recall 0.98 >= 0.95 → over-spending.
+        snap.index_health = vec![index_health("docs", Some(120.0), Some(0.98))];
+        let hits =
+            IndexLatencyHighForRecall.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "index_latency_high_for_recall");
+        assert_eq!(hits[0].scope, Scope::Index("docs".into()));
+        assert_eq!(hits[0].severity, Severity::Medium);
+        assert!(!hits[0].recommendation.is_empty());
+    }
+
+    #[test]
+    fn index_latency_high_for_recall_silent_when_recall_low() {
+        // High p95 but recall NOT adequate → that's the recall rule's job.
+        let mut snap = base_snapshot();
+        snap.index_health = vec![index_health("docs", Some(120.0), Some(0.7))];
+        let hits =
+            IndexLatencyHighForRecall.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn index_latency_high_for_recall_silent_when_latency_low() {
+        let mut snap = base_snapshot();
+        snap.index_health = vec![index_health("docs", Some(10.0), Some(0.98))];
+        let hits =
+            IndexLatencyHighForRecall.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn index_latency_high_for_recall_skips_on_empty_or_none() {
+        let snap = base_snapshot();
+        assert!(IndexLatencyHighForRecall
+            .check(&snap, &empty_history(), &RuleConfig::default())
+            .is_empty());
+        // p95 present but recall None → skip (cannot tell it's over-spending).
+        let mut snap2 = base_snapshot();
+        snap2.index_health = vec![index_health("docs", Some(120.0), None)];
+        assert!(IndexLatencyHighForRecall
+            .check(&snap2, &empty_history(), &RuleConfig::default())
+            .is_empty());
+        // recall present but p95 None → skip.
+        let mut snap3 = base_snapshot();
+        snap3.index_health = vec![index_health("docs", None, Some(0.98))];
+        assert!(IndexLatencyHighForRecall
+            .check(&snap3, &empty_history(), &RuleConfig::default())
+            .is_empty());
     }
 }
