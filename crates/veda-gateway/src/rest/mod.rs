@@ -15,6 +15,7 @@ pub mod aggregate;
 pub mod chunk_preview;
 pub mod collections;
 pub mod correlations;
+pub mod depmap;
 pub mod document;
 pub mod embed;
 pub mod embed_insert;
@@ -133,6 +134,14 @@ fn resources_router() -> Router<state::AppState> {
 fn correlations_router() -> Router<state::AppState> {
     Router::new()
         .route("/v1/admin/correlations", get(correlations::correlations))
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// Self-service dependency-map admin route, gated by an extra
+/// `require_admin` route layer (same pattern as [`correlations_router`]).
+fn depmap_router() -> Router<state::AppState> {
+    Router::new()
+        .route("/v1/admin/depmap", get(depmap::depmap))
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
@@ -362,7 +371,9 @@ pub fn build_router(app_state: state::AppState) -> Router {
         // Node resources — admin-only (extra require_admin route layer).
         .merge(resources_router())
         // Slow-query / error correlations — admin-only (extra require_admin).
-        .merge(correlations_router());
+        .merge(correlations_router())
+        // Self-service dependency map — admin-only (extra require_admin).
+        .merge(depmap_router());
 
     // On-demand CPU profiling — admin-only, only present under the
     // `profiling` cargo feature (no route, no `pprof` dep otherwise).

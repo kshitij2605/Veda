@@ -6,6 +6,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 use veda_core::metrics as m;
+use veda_core::retrieval_semconv as rsc;
 use veda_core::types::DistanceMetric;
 use veda_query::distributed::DistributedQueryExecutor;
 use veda_query::fusion::{FieldQuery, FusionStrategy, MultiVectorQuery};
@@ -252,7 +253,32 @@ pub struct SearchHit {
 
 // ── Handler ──────────────────────────────────────────────────────────────
 
-#[instrument(name = "search", skip(state, req), fields(collection = %name, top_k = req.limit, has_filter = req.filter.is_some()))]
+#[instrument(
+    name = "search",
+    skip(state, req),
+    fields(
+        collection = %name,
+        top_k = req.limit,
+        has_filter = req.filter.is_some(),
+        // APM Phase 5.1: retrieval-quality + db.* attributes, recorded
+        // below once the per-request `QueryMeta` and result count are known.
+        // Declared Empty so the keys exist on the span even when a phase
+        // returns early; `tracing_opentelemetry` maps them to OTel attrs.
+        db.system = tracing::field::Empty,
+        db.collection = tracing::field::Empty,
+        retrieval.query_type = tracing::field::Empty,
+        retrieval.top_k = tracing::field::Empty,
+        retrieval.result_count = tracing::field::Empty,
+        retrieval.reranked = tracing::field::Empty,
+        retrieval.has_filter = tracing::field::Empty,
+        retrieval.index_type = tracing::field::Empty,
+        retrieval.filter_ms = tracing::field::Empty,
+        retrieval.ann_search_ms = tracing::field::Empty,
+        retrieval.scoring_ms = tracing::field::Empty,
+        retrieval.fusion_ms = tracing::field::Empty,
+        retrieval.total_ms = tracing::field::Empty,
+    )
+)]
 pub async fn search(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -330,6 +356,23 @@ pub async fn search(
     // RLS may have injected a filter where none existed — reflect that.
     meta.has_filter = req.filter.is_some() || req.filter_expr.is_some();
 
+    // APM Phase 5.1: record the always-known retrieval / db.* span
+    // attributes from the Phase-1 `QueryMeta` (reusing the values already
+    // computed — query_type, top_k, reranked, has_filter, index_type — plus
+    // the user-facing collection name). `result_count` and the per-phase
+    // timing breakdown are recorded after the search runs. These span attrs
+    // are independent of the response body's `explain` flag.
+    let span = tracing::Span::current();
+    span.record(rsc::DB_SYSTEM, rsc::DB_SYSTEM_VEDA);
+    span.record(rsc::DB_COLLECTION, display.as_str());
+    span.record(rsc::RETRIEVAL_QUERY_TYPE, meta.query_type.as_str());
+    span.record(rsc::RETRIEVAL_TOP_K, meta.top_k);
+    span.record(rsc::RETRIEVAL_RERANKED, meta.reranked);
+    span.record(rsc::RETRIEVAL_HAS_FILTER, meta.has_filter);
+    if let Some(ref it) = meta.index_type {
+        span.record(rsc::RETRIEVAL_INDEX_TYPE, it.as_str());
+    }
+
     // Run the fallible search body. A single match below logs EXACTLY
     // one query-log entry per request: `record_success` on Ok,
     // `record_error` on Err — mutually exclusive, never both. Both
@@ -337,6 +380,18 @@ pub async fn search(
     match run_search(&state, &name, &schema, &req, rerank_cfg, final_limit, start).await {
         Ok((results, explain_timing, mut hybrid_explain, took_ms)) => {
             let count = results.len();
+            // APM Phase 5.1: result_count is always known; the per-phase
+            // timing breakdown is only computed when the caller requested
+            // `explain`, so record it conditionally (the span attrs are
+            // otherwise independent of the response body).
+            span.record(rsc::RETRIEVAL_RESULT_COUNT, count);
+            if let Some(ref t) = explain_timing {
+                span.record(rsc::RETRIEVAL_FILTER_MS, t.filter_ms);
+                span.record(rsc::RETRIEVAL_ANN_SEARCH_MS, t.ann_search_ms);
+                span.record(rsc::RETRIEVAL_SCORING_MS, t.scoring_ms);
+                span.record(rsc::RETRIEVAL_FUSION_MS, t.fusion_ms);
+                span.record(rsc::RETRIEVAL_TOTAL_MS, t.total_ms);
+            }
             let doc_ids: Vec<String> = results.iter().map(|h| h.id.clone()).collect();
             super::query_log::record_success(&state, &name, &display, &meta, doc_ids, took_ms);
             if let Some(ref mut hx) = hybrid_explain {

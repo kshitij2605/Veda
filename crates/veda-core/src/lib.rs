@@ -6,6 +6,7 @@ pub mod genai_semconv;
 pub mod llm_client;
 pub mod metrics;
 pub mod record;
+pub mod retrieval_semconv;
 pub mod schema;
 pub mod simd;
 #[cfg(feature = "simsimd")]
