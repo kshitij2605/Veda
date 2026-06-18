@@ -947,6 +947,151 @@ impl Rule for IndexLatencyHighForRecall {
     }
 }
 
+// ---------------------------------------------------------------------
+// Capacity-forecast rules — read the predictive ETAs the engine attaches
+// to `snap.forecasts` (least-squares trend over the snapshot history, with
+// a warm-up + min-R² guard so they never fire on a flat/noisy series).
+// Each fires only when a forecast's ETA falls inside the rule's window;
+// all skip cleanly when there is no matching forecast (or its `eta_ms` is
+// `None`). Forecasts are directional projections — the recommendations are
+// advisory and the detail always surfaces the ETA + R² confidence.
+// ---------------------------------------------------------------------
+
+/// Convert an `eta_ms` epoch + `now` into "in ~N day(s)/hour(s)" plus the
+/// fractional days remaining (for the threshold comparison).
+fn eta_human_and_days(eta_ms: i64, now_ms: i64) -> (String, f64) {
+    let dt_ms = (eta_ms - now_ms).max(0) as f64;
+    let days = dt_ms / 86_400_000.0;
+    let human = if days >= 1.0 {
+        format!("~{days:.1} day(s)")
+    } else {
+        let hours = dt_ms / 3_600_000.0;
+        format!("~{hours:.1} hour(s)")
+    };
+    (human, days)
+}
+
+/// Disk projected to reach the near-full mark within `days` (default 7).
+struct DiskFullForecast;
+impl Rule for DiskFullForecast {
+    fn id(&self) -> &'static str {
+        "disk_full_forecast"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::High
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let days_limit = threshold_f64(cfg, "days", 7.0);
+        for f in &snap.forecasts {
+            if f.metric != "disk_used_pct" {
+                continue;
+            }
+            let Some(eta_ms) = f.eta_ms else { continue };
+            let (human, days) = eta_human_and_days(eta_ms, snap.taken_at_ms);
+            if days > days_limit {
+                continue;
+            }
+            return vec![RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Global,
+                severity: self.default_severity(),
+                title: "Disk projected to fill".into(),
+                detail: format!(
+                    "Disk usage is trending up ({:.4} %/s) and is forecast to reach {:.0}% in {} (currently {:.0}%; threshold {:.0} day(s); fit confidence R²={:.2}).",
+                    f.slope_per_sec, f.threshold, human, f.current, days_limit, f.r2
+                ),
+                recommendation: "Free disk space (delete old data/logs), run compaction to reclaim space, or scale out / add storage before the disk fills.".into(),
+                runbook: Some("GET /v1/admin/forecast; GET /v1/admin/resources".into()),
+                remediation: RemediationAction::None,
+            }];
+        }
+        Vec::new()
+    }
+}
+
+/// Available memory projected to exhaust within `days` (default 7).
+struct MemoryGrowthForecast;
+impl Rule for MemoryGrowthForecast {
+    fn id(&self) -> &'static str {
+        "memory_growth_forecast"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let days_limit = threshold_f64(cfg, "days", 7.0);
+        for f in &snap.forecasts {
+            if f.metric != "mem_available_bytes" {
+                continue;
+            }
+            let Some(eta_ms) = f.eta_ms else { continue };
+            let (human, days) = eta_human_and_days(eta_ms, snap.taken_at_ms);
+            if days > days_limit {
+                continue;
+            }
+            return vec![RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Global,
+                severity: self.default_severity(),
+                title: "Memory projected to exhaust".into(),
+                detail: format!(
+                    "Available system memory is trending down and is forecast to reach 0 in {} (currently {:.1} GiB; threshold {:.0} day(s); fit confidence R²={:.2}).",
+                    human, f.current / 1.073_741_824e9, days_limit, f.r2
+                ),
+                recommendation: "Reduce in-memory footprint (quantization/use_log_primary), stop competing processes, or add RAM / scale out before memory is exhausted.".into(),
+                runbook: Some("GET /v1/admin/forecast; GET /v1/admin/resources".into()),
+                remediation: RemediationAction::None,
+            }];
+        }
+        Vec::new()
+    }
+}
+
+/// A collection's proxy recall projected to fall below the target within
+/// `days` (default 7). Advisory — recall is a proxy measurement.
+struct RecallDecayForecast;
+impl Rule for RecallDecayForecast {
+    fn id(&self) -> &'static str {
+        "recall_decay_forecast"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        let days_limit = threshold_f64(cfg, "days", 7.0);
+        let mut hits = Vec::new();
+        for f in &snap.forecasts {
+            if f.metric != "recall" {
+                continue;
+            }
+            let Some(eta_ms) = f.eta_ms else { continue };
+            let (human, days) = eta_human_and_days(eta_ms, snap.taken_at_ms);
+            if days > days_limit {
+                continue;
+            }
+            let coll = f.scope.clone().unwrap_or_else(|| "?".into());
+            hits.push(RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Index(coll.clone()),
+                severity: self.default_severity(),
+                title: format!("Recall projected to decay on '{coll}'"),
+                detail: format!(
+                    "Proxy recall for '{}' is trending down and is forecast to fall below the {:.2} target in {} (currently {:.2}; threshold {:.0} day(s); fit confidence R²={:.2}). Recall is a proxy measurement.",
+                    coll, f.threshold, human, f.current, days_limit, f.r2
+                ),
+                recommendation: format!(
+                    "Pre-empt recall loss on '{coll}': raise efSearch or reindex with a higher-recall config, and re-probe. Investigate data drift / growing unindexed segments."
+                ),
+                runbook: Some(format!(
+                    "GET /v1/admin/forecast; POST /v1/collections/{coll}/reindex"
+                )),
+                remediation: RemediationAction::None,
+            });
+        }
+        hits
+    }
+}
+
 /// The built-in rule catalog.
 pub fn catalog() -> Vec<Box<dyn Rule>> {
     vec![
@@ -973,6 +1118,9 @@ pub fn catalog() -> Vec<Box<dyn Rule>> {
         Box::new(SyntheticFailing),
         Box::new(IndexRecallDegraded),
         Box::new(IndexLatencyHighForRecall),
+        Box::new(DiskFullForecast),
+        Box::new(MemoryGrowthForecast),
+        Box::new(RecallDecayForecast),
     ]
 }
 
@@ -1067,6 +1215,7 @@ mod tests {
             slo_statuses: Vec::new(),
             synthetic_summaries: Vec::new(),
             index_health: Vec::new(),
+            forecasts: Vec::new(),
         }
     }
 
@@ -1618,5 +1767,109 @@ mod tests {
         assert!(IndexLatencyHighForRecall
             .check(&snap3, &empty_history(), &RuleConfig::default())
             .is_empty());
+    }
+
+    // --- capacity-forecast rules ---------------------------------------
+
+    /// A forecast for `metric`/`scope` with an ETA `days_out` days after
+    /// the snapshot's `taken_at_ms`. `days_out = None` → no ETA (flat/away).
+    fn forecast(
+        snap: &OpsSnapshot,
+        metric: &str,
+        scope: Option<&str>,
+        current: f64,
+        threshold: f64,
+        days_out: Option<f64>,
+    ) -> crate::advisor::forecast::Forecast {
+        crate::advisor::forecast::Forecast {
+            metric: metric.into(),
+            scope: scope.map(|s| s.to_owned()),
+            current,
+            slope_per_sec: if current < threshold { 1.0 } else { -1.0 },
+            r2: 0.97,
+            threshold,
+            eta_ms: days_out.map(|d| snap.taken_at_ms + (d * 86_400_000.0) as i64),
+        }
+    }
+
+    #[test]
+    fn disk_full_forecast_fires_when_eta_within_window() {
+        let mut snap = base_snapshot();
+        snap.forecasts = vec![forecast(&snap, "disk_used_pct", None, 80.0, 95.0, Some(3.0))];
+        let hits = DiskFullForecast.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "disk_full_forecast");
+        assert_eq!(hits[0].scope, Scope::Global);
+        assert_eq!(hits[0].severity, Severity::High);
+        assert!(hits[0].detail.to_lowercase().contains("forecast"));
+        assert!(hits[0].detail.contains("day"));
+        assert!(!hits[0].recommendation.is_empty());
+    }
+
+    #[test]
+    fn disk_full_forecast_silent_when_eta_beyond_window() {
+        let mut snap = base_snapshot();
+        // ETA 30 days out, default window 7 → no fire.
+        snap.forecasts = vec![forecast(&snap, "disk_used_pct", None, 80.0, 95.0, Some(30.0))];
+        let hits = DiskFullForecast.check(&snap, &empty_history(), &RuleConfig::default());
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn disk_full_forecast_silent_when_no_eta_or_no_forecast() {
+        // No forecast at all.
+        let snap = base_snapshot();
+        assert!(DiskFullForecast
+            .check(&snap, &empty_history(), &RuleConfig::default())
+            .is_empty());
+        // Forecast present but flat (eta None) → no fire.
+        let mut snap2 = base_snapshot();
+        snap2.forecasts = vec![forecast(&snap2, "disk_used_pct", None, 80.0, 95.0, None)];
+        assert!(DiskFullForecast
+            .check(&snap2, &empty_history(), &RuleConfig::default())
+            .is_empty());
+    }
+
+    #[test]
+    fn memory_growth_forecast_fires_within_window() {
+        let mut snap = base_snapshot();
+        snap.forecasts = vec![forecast(
+            &snap,
+            "mem_available_bytes",
+            None,
+            2.0 * 1.073_741_824e9,
+            0.0,
+            Some(2.0),
+        )];
+        let hits = MemoryGrowthForecast.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "memory_growth_forecast");
+        assert_eq!(hits[0].severity, Severity::Medium);
+        assert!(hits[0].detail.to_lowercase().contains("forecast"));
+    }
+
+    #[test]
+    fn recall_decay_forecast_fires_for_downward_collection() {
+        let mut snap = base_snapshot();
+        snap.forecasts = vec![forecast(&snap, "recall", Some("docs"), 0.93, 0.90, Some(4.0))];
+        let hits = RecallDecayForecast.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "recall_decay_forecast");
+        assert_eq!(hits[0].scope, Scope::Index("docs".into()));
+        assert_eq!(hits[0].severity, Severity::Medium);
+        assert!(hits[0].detail.to_lowercase().contains("proxy"));
+    }
+
+    #[test]
+    fn forecast_rules_silent_on_forecastless_snapshot() {
+        let snap = base_snapshot();
+        let hits = run_rules(&catalog(), &snap, &empty_history(), &AdvisorConfig::default());
+        for id in [
+            "disk_full_forecast",
+            "memory_growth_forecast",
+            "recall_decay_forecast",
+        ] {
+            assert!(find(&hits, id).is_none(), "{id} fired without a forecast");
+        }
     }
 }

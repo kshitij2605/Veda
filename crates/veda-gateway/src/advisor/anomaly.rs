@@ -359,6 +359,7 @@ mod tests {
             slo_statuses: Vec::new(),
             synthetic_summaries: Vec::new(),
             index_health: Vec::new(),
+            forecasts: Vec::new(),
         }
     }
 
