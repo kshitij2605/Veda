@@ -67,6 +67,8 @@ The ops side gets the same vector intelligence as the agent side: a storm of rel
 
 With no embedder, it falls back to a `rule_id + scope` grouping, so dedup still works without semantics. Correlation runs on a separate off-tick runner (`VEDA_INCIDENT_INTERVAL_SECS`, default 300s) so it never stalls the advisor tick. `GET /v1/admin/incidents` returns the clusters; a Niriksha Insights **Incidents** tab renders them. It's a clustering surface that sits *beside* the [rule catalog](/docs/ops-advisor#the-rule-catalog), not a rule inside it.
 
+Each incident also carries a proactive `veda-ops`-drafted RCA, an `is_novel` / `novelty_score` flag (unprecedented patterns escalate to High), and a `noise_reduction` summary — notifications fire **once per incident**, not per event. See [AIOps](/docs/aiops#root-cause-agentic) for proactive drafts, novelty detection, and alert-storm noise reduction.
+
 ## Capacity forecasting
 
 Veda already records a time series of resource snapshots (disk, memory, recall). Forecasting fits a **least-squares trend** over that history and extrapolates to each rule's threshold, producing a threshold-crossing ETA — *when* the disk fills, *when* memory exhausts, *when* recall decays below target. Two guards keep it honest: a **warm-up** (won't forecast without enough history) and a **min-R²** (won't forecast off a flat or noisy series), so it never fires on flat/noisy data.
