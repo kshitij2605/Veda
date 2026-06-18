@@ -1,5 +1,19 @@
 import { type ComponentType } from 'react'
-import { Boxes, Cpu, Layers, GitMerge, FileText, Server, Activity, Shield, Bot, Gauge, Waypoints } from 'lucide-react'
+import {
+  Boxes,
+  Cpu,
+  Layers,
+  GitMerge,
+  FileText,
+  Server,
+  Activity,
+  Shield,
+  Bot,
+  Gauge,
+  Waypoints,
+  BadgeCheck,
+  Radar,
+} from 'lucide-react'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
 
@@ -59,7 +73,7 @@ export const FEATURES: Feature[] = [
     accent: 'var(--color-node-2)',
     title: 'Observability + built-in AutoOps',
     blurb:
-      'Metrics, traces, and logs out of the box — Prometheus, Tempo, Loki, Grafana — plus an Ops Advisor that detects issues across 30 rules (latency, disk, CPU, error & log anomalies, SLO burn-rate, recall drift), explains the root cause, alerts Slack/PagerDuty, and can auto-remediate.',
+      'Metrics, traces, and logs out of the box — Prometheus, Tempo, Loki, Grafana — plus an Ops Advisor that detects issues across 33 rules (latency, disk, CPU, error & log anomalies, SLO burn-rate, recall drift, capacity forecasts), explains the root cause, alerts Slack/PagerDuty, and can auto-remediate.',
   },
   {
     icon: Shield,
@@ -88,5 +102,19 @@ export const FEATURES: Feature[] = [
     title: 'GenAI tracing + cost observability',
     blurb:
       'Agent and LLM calls emit OpenTelemetry GenAI-semantic-convention spans that drop natively into Datadog, Grafana Tempo, Phoenix, and Langfuse — with per-run token, latency, and USD cost metrics, and W3C context propagation that stitches Veda into your existing distributed trace.',
+  },
+  {
+    icon: BadgeCheck,
+    accent: 'var(--color-node-5)',
+    title: 'Grounded agents with faithfulness scoring',
+    blurb:
+      'Every agent answer returns citations to the exact retrieved chunks and a 0–1 faithfulness + relevancy score (LLM-judge, embedding fallback) — the #1 RAG quality metric, scorable only because Veda owns the retriever. Plus an eval harness that graduates production traces into regression tests.',
+  },
+  {
+    icon: Radar,
+    accent: 'var(--color-node-2)',
+    title: 'AIOps: forecasting + incident correlation',
+    blurb:
+      'Veda forecasts disk-full, memory, and recall-decay ETAs from its own trend history, semantically clusters related alerts into single incidents, and assembles a cross-signal root-cause bundle (logs + queries + traces + resources) for an AI triage agent — predictive and causal AIOps a metrics store without an embedder can’t do.',
   },
 ]

@@ -18,12 +18,14 @@ export function Differentiators() {
       >
         {FEATURES.map((f, i) => {
           const Icon = f.icon
-          // Keep the bordered grid clean: have the last card fill whatever
-          // gap it would otherwise leave on the final lg (3-col) row.
+          // Keep the bordered grid clean at any card count: have the last card
+          // span whatever fills the final row on each breakpoint (sm = 2-col,
+          // lg = 3-col) so it never leaves a lonely empty cell.
           const isLast = i === FEATURES.length - 1
-          const remainder = FEATURES.length % 3
-          const span =
-            isLast && remainder === 1 ? 'lg:col-span-3' : isLast && remainder === 2 ? 'sm:col-span-2' : ''
+          const n = FEATURES.length
+          const lgSpan = n % 3 === 1 ? 'lg:col-span-3' : n % 3 === 2 ? 'lg:col-span-2' : ''
+          const smSpan = n % 2 === 1 ? 'sm:col-span-2' : ''
+          const span = isLast ? [smSpan, lgSpan].filter(Boolean).join(' ') : ''
           const wide = span !== ''
           return (
             <div
