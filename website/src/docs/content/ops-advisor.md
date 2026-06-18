@@ -18,7 +18,7 @@ The reconcile phase runs under a lock, which is released before any network call
 
 ## The rule catalog
 
-Thirty rules ship today — 23 threshold/correlation rules and 7 anomaly detectors — including three log-content rules powered by [Log Insights](/docs/log-insights), seven [node resource signals](/docs/resource-signals), four [Service Reliability](/docs/service-reliability) rules (`slo_burn_rate_fast`, `slo_burn_rate_slow`, `slo_budget_exhausted`, `synthetic_failing`), and two [index advisor](/docs/apm-observability#ann-index-advisor) rules (`index_recall_degraded`, `index_latency_high_for_recall`). Thresholds and severities are tunable per rule via the API; defaults are shown.
+Thirty-three rules ship today — 26 threshold/correlation rules and 7 anomaly detectors — including three log-content rules powered by [Log Insights](/docs/log-insights), seven [node resource signals](/docs/resource-signals), four [Service Reliability](/docs/service-reliability) rules (`slo_burn_rate_fast`, `slo_burn_rate_slow`, `slo_budget_exhausted`, `synthetic_failing`), two [index advisor](/docs/apm-observability#ann-index-advisor) rules (`index_recall_degraded`, `index_latency_high_for_recall`), and three [capacity-forecast](/docs/rag-aiops#capacity-forecasting) rules (`disk_full_forecast`, `memory_growth_forecast`, `recall_decay_forecast`). Thresholds and severities are tunable per rule via the API; defaults are shown. [Semantic incident correlation](/docs/rag-aiops#semantic-incident-correlation) groups related events into clusters *beside* this catalog (it's a clustering surface, not a rule).
 
 | Rule | Severity | Fires when | Recommendation |
 |---|---|---|---|
@@ -53,8 +53,11 @@ Thirty rules ship today — 23 threshold/correlation rules and 7 anomaly detecto
 | `synthetic_failing` | High | a [synthetic probe](/docs/service-reliability#synthetic-self-checks) fails K times in a row (default 3) | the probed path is down |
 | `index_recall_degraded` | High | a collection's proxy `recall` < `recall_min` (default 0.90) | raise `efSearch`/`efConstruction`, or reindex |
 | `index_latency_high_for_recall` | Medium | `p95_ms` > 50 while `recall >= 0.95` | lower `efSearch`, or switch index type |
+| `disk_full_forecast` | High | a least-squares trend projects the data-dir disk filling | free space / scale out before the ETA |
+| `memory_growth_forecast` | Medium | the trend projects memory exhaustion | scale out / reduce pressure before the ETA |
+| `recall_decay_forecast` | Medium | the trend projects recall dropping below target | retune / reindex before the ETA |
 
-The two [index advisor](/docs/apm-observability#ann-index-advisor) rules are per-collection, driven by an off-tick proxy recall probe. The four [Service Reliability](/docs/service-reliability) rules are scoped per-SLO/per-probe. The seven [node resource signals](/docs/resource-signals) (Linux `/proc` + `statvfs`) each skip cleanly when their signal is unavailable. Anomaly detectors use EWMA / rolling mean+stddev baselines. They warm up over `min_samples` (default 20) and fire above the configured `sigma` (default 3σ → Medium, ≥5σ → High).
+The three [capacity-forecast](/docs/rag-aiops#capacity-forecasting) rules extrapolate the resource-snapshot history to a threshold-crossing ETA (warm-up + min-R² guards mean they never fire on flat/noisy data). The two [index advisor](/docs/apm-observability#ann-index-advisor) rules are per-collection, driven by an off-tick proxy recall probe. The four [Service Reliability](/docs/service-reliability) rules are scoped per-SLO/per-probe. The seven [node resource signals](/docs/resource-signals) (Linux `/proc` + `statvfs`) each skip cleanly when their signal is unavailable. Anomaly detectors use EWMA / rolling mean+stddev baselines. They warm up over `min_samples` (default 20) and fire above the configured `sigma` (default 3σ → Medium, ≥5σ → High).
 
 ## Events & lifecycle
 
@@ -103,6 +106,9 @@ All endpoints are admin-only.
 | `POST /v1/admin/insights/run` | Force one evaluation tick → `{ opened, closed }` |
 | `POST /v1/admin/insights/{event_id}/ack` | Acknowledge an open event |
 | `POST /v1/admin/insights/{event_id}/triage` | [AI triage](/docs/service-reliability#ai-ops-triage) of an event — grounded explanation + tool trace (`404` unknown, `503` no LLM) |
+| `GET /v1/admin/insights/{event_id}/rca` | [Cross-signal root-cause bundle](/docs/rag-aiops#cross-signal-rca) — logs + queries + traces + resources + incident |
+| `GET /v1/admin/incidents` | [Semantic incident clusters](/docs/rag-aiops#semantic-incident-correlation) (dedup of correlated events) |
+| `GET /v1/admin/forecast` | [Capacity forecasts](/docs/rag-aiops#capacity-forecasting) — disk / memory / recall ETAs |
 
 ### Example: configure a webhook, tune a rule, evaluate now
 

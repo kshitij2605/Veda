@@ -103,7 +103,8 @@ The agentic layer and MCP surface. See [Agents & MCP](/docs/agents-mcp) for the 
 | `GET` | `/v1/agents` | List agents |
 | `POST` | `/v1/agents` | Create or upsert an agent (empty `id` → generated) |
 | `GET/PUT/DELETE` | `/v1/agents/{id}` | Manage one agent |
-| `POST` | `/v1/agents/{id}/converse` | Run a tool-calling turn — body `{ input, conversation_id?, attachments? }`; `503` without an LLM, `404` for an unknown non-default agent |
+| `POST` | `/v1/agents/{id}/converse` | Run a tool-calling turn — body `{ input, conversation_id?, attachments? }`; returns `metrics` + [`citations` + `grounding`](/docs/rag-aiops#faithfulness-citations); `503` without an LLM, `404` for an unknown non-default agent |
+| `POST` | `/v1/agents/{id}/converse/stream` | [Streaming converse over SSE](/docs/rag-aiops#streaming-converse-sse) — reasoning/tool/answer deltas then a `done` frame with `metrics` + `citations` + `grounding`; `503` no LLM |
 
 **Tools**
 
@@ -120,6 +121,16 @@ The agentic layer and MCP surface. See [Agents & MCP](/docs/agents-mcp) for the 
 |---|---|---|
 | `GET` | `/v1/conversations` | List conversations |
 | `GET/DELETE` | `/v1/conversations/{id}` | Fetch / delete one conversation |
+
+**Eval harness** — see [RAG & AIOps Intelligence](/docs/rag-aiops#eval-harness-the-production-trace-flywheel).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET/POST` | `/v1/eval-sets` | List / create-or-overwrite eval sets (`id` server-assigned if omitted) |
+| `GET/DELETE` | `/v1/eval-sets/{id}` | Get / delete an eval set |
+| `POST` | `/v1/eval-sets/{id}/run` | Run → per-case + aggregate recall@k / faithfulness / answer-relevancy / pass_rate; `503` no LLM |
+| `GET` | `/v1/eval-sets/{id}/runs` | List past runs |
+| `POST` | `/v1/eval-sets/{id}/cases/from-conversation` | Graduate a production conversation into a regression case |
 
 **MCP & A2A**
 
@@ -176,7 +187,10 @@ Admin-only automated-operations surface. See [Ops Advisor](/docs/ops-advisor) fo
 | `GET/PUT` | `/v1/admin/insights/channels` | Alert-channel config (secrets write-only on `GET`) |
 | `POST` | `/v1/admin/insights/run` | Force one evaluation tick → `{ opened, closed }` |
 | `POST` | `/v1/admin/insights/{event_id}/ack` | Acknowledge an open event |
-| `POST` | `/v1/admin/insights/{event_id}/triage` | AI triage of an event — grounded explanation + tool trace (`404` unknown, `503` no LLM) |
+| `POST` | `/v1/admin/insights/{event_id}/triage` | AI triage of an event — grounded explanation + tool trace, now enriched with the RCA bundle (`404` unknown, `503` no LLM) |
+| `GET` | `/v1/admin/insights/{event_id}/rca` | [Cross-signal root-cause bundle](/docs/rag-aiops#cross-signal-rca) — logs + queries + traces + resources + incident |
+| `GET` | `/v1/admin/incidents` | [Semantic incident clusters](/docs/rag-aiops#semantic-incident-correlation) (dedup of correlated ops events) |
+| `GET` | `/v1/admin/forecast` | [Capacity forecasts](/docs/rag-aiops#capacity-forecasting) — disk-full / memory-exhaustion / recall-decay ETAs |
 | `GET` | `/v1/admin/resources` | Local node's latest resource snapshot — disk, CPU, load, fds, memory, RSS (see [Node Resource Signals](/docs/resource-signals)); always `200`, fields nullable |
 
 ## Service Reliability (SLOs & synthetics)

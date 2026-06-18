@@ -36,6 +36,8 @@ The agent's system prompt is augmented with a **modality-awareness block** listi
 
 The loop is bounded by `max_steps` (default 8) and truncates large tool results to keep context in check. `converse` returns `503` when no LLM is configured.
 
+> Each run also returns `citations` + a `grounding` faithfulness score, there's a [streaming SSE variant](/docs/rag-aiops#streaming-converse-sse), opt-in [vector-backed memory](/docs/rag-aiops#vector-backed-agent-memory), and an [eval harness](/docs/rag-aiops#eval-harness-the-production-trace-flywheel) — see [RAG & AIOps Intelligence](/docs/rag-aiops).
+
 ## The tool catalog
 
 Eight built-in tools back both the agent and the MCP server:

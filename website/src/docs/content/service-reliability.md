@@ -69,8 +69,10 @@ Each tick the engine sources good/total per SLO from data the advisor already co
 | `availability` | `veda_requests_total` / `veda_errors_total` deltas | (requests − errors) / requests |
 | `error_rate` | same counters | (requests − errors) / requests |
 | `synthetic` | probe results since the last tick | ok runs / total runs |
+| `recall` | the [ANN recall probe](/docs/apm-observability#ann-index-advisor) (proxy) | top-k recall vs an exact scan |
+| `faithfulness` | a persisted sample of [converse faithfulness scores](/docs/rag-aiops#faithfulness-citations) | grounded turns / sampled turns |
 
-Availability/error-rate use **deltas** between ticks, so the SLI tracks the per-window rate rather than the lifetime counter.
+Availability/error-rate use **deltas** between ticks, so the SLI tracks the per-window rate rather than the lifetime counter. The `recall` and `faithfulness` kinds bring [RAG-native quality SLOs](/docs/rag-aiops#quality-slos) — error budgets on retrieval quality and answer grounding, not just latency.
 
 ## SLO rules
 
