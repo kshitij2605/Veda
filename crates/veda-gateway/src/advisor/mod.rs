@@ -18,6 +18,7 @@
 //! exposes anything.
 
 pub mod anomaly;
+pub mod changepoint;
 pub mod config;
 pub mod engine;
 pub mod event;
@@ -52,6 +53,8 @@ pub use recall_probe::{
 pub use faithfulness::{FaithfulnessResults, FaithfulnessSample};
 
 pub use forecast::{compute_forecasts, linear_fit, Forecast, TrendFit};
+
+pub use changepoint::{compute_change_points, detect_change_point, ChangeKind, ChangePoint};
 
 pub use incidents::{
     cluster_incidents, compute_incidents, run_incident_correlation, spawn_incident_correlator,

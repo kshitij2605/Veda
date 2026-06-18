@@ -103,6 +103,7 @@ fn disk_snapshot(taken_at_ms: i64, disk_used_pct: f64) -> OpsSnapshot {
         synthetic_summaries: Vec::new(),
         index_health: Vec::new(),
         forecasts: Vec::new(),
+        change_points: Vec::new(),
     }
 }
 

@@ -583,6 +583,16 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
         );
         snap.forecasts = forecasts.clone();
         history.set_latest_forecasts(forecasts);
+        // Change points: sustained level/trend shifts over the post-push
+        // history (pure means/slopes, no network). Attach to both the
+        // reconcile snapshot and the just-pushed copy, like forecasts.
+        let change_points = crate::advisor::changepoint::compute_change_points(
+            &history,
+            crate::advisor::changepoint::DEFAULT_MIN_POINTS,
+            crate::advisor::changepoint::DEFAULT_MIN_MAGNITUDE,
+        );
+        snap.change_points = change_points.clone();
+        history.set_latest_change_points(change_points);
         let mut events = advisor.events.lock().await;
         reconcile_hits(
             &snap,
@@ -706,6 +716,7 @@ mod tests {
             synthetic_summaries: Vec::new(),
             index_health: Vec::new(),
             forecasts: Vec::new(),
+            change_points: Vec::new(),
         }
     }
 
