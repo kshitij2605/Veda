@@ -1445,8 +1445,19 @@ mod tests {
         // Both `chat` spans carry the GenAI request attributes (operation /
         // system / model). HashMap order is nondeterministic, so identify
         // the two turns by their recorded `finish_reasons`.
-        let chat_spans: Vec<&&CapturedSpan> =
-            all.iter().filter(|s| s.name == "chat").collect();
+        //
+        // Filter to THIS run's spans by the unique model marker (`gpt-test`).
+        // Under a parallel test run the collector could otherwise observe a
+        // sibling test's `chat`/`execute_tool` spans and inflate the counts;
+        // keying on this run's identity makes the assertions contamination-proof.
+        let chat_spans: Vec<&&CapturedSpan> = all
+            .iter()
+            .filter(|s| {
+                s.name == "chat"
+                    && s.fields.get("gen_ai.request.model").map(String::as_str)
+                        == Some("gpt-test")
+            })
+            .collect();
         for c in &chat_spans {
             assert_eq!(
                 c.fields.get("gen_ai.operation.name").map(String::as_str),
@@ -1512,10 +1523,15 @@ mod tests {
             Some("7")
         );
 
-        // An `execute_tool` span carrying the tool name + call id.
+        // An `execute_tool` span carrying the tool name + call id. Keyed on
+        // this run's `call_1` id so a concurrent test's tool span can't match.
         let tool = all
             .iter()
-            .find(|s| s.name == "execute_tool")
+            .find(|s| {
+                s.name == "execute_tool"
+                    && s.fields.get("gen_ai.tool.call.id").map(String::as_str)
+                        == Some("call_1")
+            })
             .expect("an `execute_tool` span should be emitted");
         assert_eq!(
             tool.fields.get("gen_ai.operation.name").map(String::as_str),
@@ -1531,13 +1547,21 @@ mod tests {
         );
 
         // Two model turns → two `chat` spans; one dispatch → one tool span.
+        // Counted from THIS run's marker-filtered spans so a parallel test's
+        // spans observed by the collector cannot inflate the totals.
         assert_eq!(
-            all.iter().filter(|s| s.name == "chat").count(),
+            chat_spans.len(),
             2,
             "expected one chat span per LLM turn"
         );
         assert_eq!(
-            all.iter().filter(|s| s.name == "execute_tool").count(),
+            all.iter()
+                .filter(|s| {
+                    s.name == "execute_tool"
+                        && s.fields.get("gen_ai.tool.call.id").map(String::as_str)
+                            == Some("call_1")
+                })
+                .count(),
             1
         );
     }
