@@ -29,6 +29,7 @@ import {
   type ChannelsConfig,
   type ChannelsView,
   type Incident,
+  type NoiseReduction,
   type OpsEvent,
   type RcaBundle,
   type RuleInfo,
@@ -62,6 +63,7 @@ export function Insights() {
   const [events, setEvents] = useState<OpsEvent[] | null>(null)
   const [history, setHistory] = useState<OpsEvent[] | null>(null)
   const [incidents, setIncidents] = useState<Incident[] | null>(null)
+  const [noiseReduction, setNoiseReduction] = useState<NoiseReduction | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
@@ -101,6 +103,7 @@ export function Insights() {
     try {
       const { data } = await fetchIncidents()
       setIncidents(data.incidents)
+      setNoiseReduction(data.noise_reduction ?? null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load incidents')
     }
@@ -241,7 +244,7 @@ export function Insights() {
               description="Recurring events are grouped into incidents by the correlator (runs every few minutes). Once it has run, clusters appear here."
             />
           ) : (
-            <IncidentList incidents={incidents} />
+            <IncidentList incidents={incidents} noiseReduction={noiseReduction} />
           ))}
 
         {view === 'history' &&
@@ -400,48 +403,84 @@ function SeverityBadge({ severity }: { severity: Severity }) {
    Incident list — recurring/duplicate events collapsed into one row each
    ──────────────────────────────────────────────────────────────────── */
 
-function IncidentList({ incidents }: { incidents: Incident[] }) {
+function IncidentList({
+  incidents,
+  noiseReduction,
+}: {
+  incidents: Incident[]
+  noiseReduction: NoiseReduction | null
+}) {
   return (
-    <ul className="flex flex-col gap-2">
-      {incidents.map((inc) => {
-        const ruleIds = inc.rule_ids ?? []
-        const count = inc.count ?? inc.member_event_ids?.length ?? 0
-        return (
-          <li key={inc.id}>
-            <div className="w-full rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2.5">
-              <div className="flex items-center gap-2">
-                <SeverityBadge severity={inc.max_severity} />
-                <span className="text-[13px] font-medium text-[var(--color-text)] truncate">
-                  {inc.representative}
-                </span>
-                <Badge
-                  label={`seen ${count}×`}
-                  variant="accent"
-                  mono
-                  className="flex-none"
-                />
-              </div>
-              <div className="flex items-center gap-2 mt-1 text-[11px] text-[var(--color-text-subtle)] flex-wrap">
-                <span className="inline-flex items-center gap-1">
-                  <Layers size={11} strokeWidth={2} />
-                  {ruleIds.length > 0 ? ruleIds.join(', ') : 'correlated'}
-                </span>
-                <span aria-hidden>·</span>
-                <span>
-                  seen {count}× since {formatRelative(inc.first_seen_ms)}
-                </span>
-                {inc.last_seen_ms > inc.first_seen_ms && (
-                  <>
-                    <span aria-hidden>·</span>
-                    <span>last {formatRelative(inc.last_seen_ms)}</span>
-                  </>
+    <div className="flex flex-col gap-2">
+      {noiseReduction && noiseReduction.suppressed > 0 && (
+        <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-3 py-2 text-[12px] text-[var(--color-text-subtle)]">
+          Alert-storm noise reduction:{' '}
+          <span className="font-medium text-[var(--color-text)] tabular-nums">
+            {noiseReduction.event_count}
+          </span>{' '}
+          alerts collapsed into{' '}
+          <span className="font-medium text-[var(--color-text)] tabular-nums">
+            {noiseReduction.incident_count}
+          </span>{' '}
+          incident{noiseReduction.incident_count === 1 ? '' : 's'} —{' '}
+          <span className="font-medium text-[var(--color-text)] tabular-nums">
+            {noiseReduction.suppressed}
+          </span>{' '}
+          suppressed.
+        </div>
+      )}
+      <ul className="flex flex-col gap-2">
+        {incidents.map((inc) => {
+          const ruleIds = inc.rule_ids ?? []
+          const count = inc.count ?? inc.member_event_ids?.length ?? 0
+          const draft = inc.draft?.trim()
+          return (
+            <li key={inc.id}>
+              <div className="w-full rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2.5">
+                <div className="flex items-center gap-2">
+                  <SeverityBadge severity={inc.max_severity} />
+                  <span className="text-[13px] font-medium text-[var(--color-text)] truncate">
+                    {inc.representative}
+                  </span>
+                  <Badge
+                    label={`${count} alerts → 1 incident`}
+                    variant="accent"
+                    mono
+                    className="flex-none"
+                  />
+                </div>
+                <div className="flex items-center gap-2 mt-1 text-[11px] text-[var(--color-text-subtle)] flex-wrap">
+                  <span className="inline-flex items-center gap-1">
+                    <Layers size={11} strokeWidth={2} />
+                    {ruleIds.length > 0 ? ruleIds.join(', ') : 'correlated'}
+                  </span>
+                  <span aria-hidden>·</span>
+                  <span>
+                    seen {count}× since {formatRelative(inc.first_seen_ms)}
+                  </span>
+                  {inc.last_seen_ms > inc.first_seen_ms && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span>last {formatRelative(inc.last_seen_ms)}</span>
+                    </>
+                  )}
+                </div>
+                {draft && (
+                  <div className="mt-2 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-2.5 py-2">
+                    <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--color-text-subtle)]">
+                      AI draft root-cause
+                    </div>
+                    <p className="mt-1 text-[12px] leading-relaxed text-[var(--color-text)] whitespace-pre-wrap">
+                      {draft}
+                    </p>
+                  </div>
                 )}
               </div>
-            </div>
-          </li>
-        )
-      })}
-    </ul>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
   )
 }
 

@@ -191,3 +191,33 @@ async fn incidents_requires_admin_role() {
         .unwrap();
     assert_eq!(r.status(), 200, "admin must be allowed: {:?}", r.text().await);
 }
+
+#[tokio::test]
+async fn incidents_response_has_noise_reduction_summary() {
+    let (base, state, _tmp) = start_server().await;
+    seed_and_correlate(&state).await;
+
+    let c = Client::new();
+    let r = c
+        .get(format!("{base}/v1/admin/incidents"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    let body: Value = r.json().await.unwrap();
+
+    // event_count = Σ incident.count; incident_count = #incidents;
+    // suppressed = events − incidents. Assert against the incident array so
+    // the test tracks the actual clustering, not a hard-coded seed shape.
+    let arr = body["incidents"].as_array().expect("incidents array");
+    let expected_incidents = arr.len() as u64;
+    let expected_events: u64 = arr.iter().map(|i| i["count"].as_u64().unwrap()).sum();
+
+    let nr = &body["noise_reduction"];
+    let events = nr["event_count"].as_u64().expect("event_count");
+    let incidents = nr["incident_count"].as_u64().expect("incident_count");
+    let suppressed = nr["suppressed"].as_u64().expect("suppressed");
+    assert_eq!(incidents, expected_incidents);
+    assert_eq!(events, expected_events);
+    assert_eq!(suppressed, events - incidents);
+}

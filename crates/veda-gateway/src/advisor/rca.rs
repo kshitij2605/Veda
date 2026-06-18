@@ -429,6 +429,7 @@ mod tests {
             max_severity: Severity::High,
             first_seen_ms: 0,
             last_seen_ms: 0,
+            draft: None,
         }
     }
 
