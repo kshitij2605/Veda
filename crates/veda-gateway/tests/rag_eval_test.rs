@@ -86,6 +86,72 @@ async fn test_eval_set_crud_round_trip() {
 }
 
 #[tokio::test]
+async fn test_create_assigns_ids_when_absent() {
+    let (base, _tmp) = start_test_server().await;
+
+    // Truly OMIT the set id and the case ids (the real client case).
+    let resp = client()
+        .post(format!("{base}/v1/eval-sets"))
+        .json(&json!({
+            "name": "No ids",
+            "cases": [
+                { "query": "what index does veda use?", "expected_chunk_ids": ["id-1"] },
+                { "query": "another", "expected_chunk_ids": [] }
+            ]
+        }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let created: Value = resp.json().await.unwrap();
+
+    let set_id = created["id"].as_str().unwrap();
+    assert!(set_id.starts_with("eval-"), "server should assign set id, got {set_id}");
+
+    let cases = created["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 2);
+    for c in cases {
+        let cid = c["id"].as_str().unwrap();
+        assert!(cid.starts_with("case-"), "server should assign case id, got {cid}");
+    }
+}
+
+#[tokio::test]
+async fn test_create_preserves_explicit_ids_and_update_preserves() {
+    let (base, _tmp) = start_test_server().await;
+
+    // Explicit case id is preserved.
+    let resp = client()
+        .post(format!("{base}/v1/eval-sets"))
+        .json(&json!({
+            "id": "explicit-set",
+            "name": "Explicit",
+            "cases": [{ "id": "c1", "query": "q", "expected_chunk_ids": [] }]
+        }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let created: Value = resp.json().await.unwrap();
+    assert_eq!(created["id"], "explicit-set");
+    assert_eq!(created["cases"][0]["id"], "c1");
+
+    // Update preserves the explicit case id and assigns one for the new case.
+    let resp = client()
+        .put(format!("{base}/v1/eval-sets/explicit-set"))
+        .json(&json!({
+            "id": "explicit-set",
+            "name": "Explicit v2",
+            "cases": [
+                { "id": "c1", "query": "q", "expected_chunk_ids": [] },
+                { "query": "new", "expected_chunk_ids": [] }
+            ]
+        }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let updated: Value = resp.json().await.unwrap();
+    assert_eq!(updated["cases"][0]["id"], "c1");
+    let new_id = updated["cases"][1]["id"].as_str().unwrap();
+    assert!(new_id.starts_with("case-"), "new case should get an id, got {new_id}");
+}
+
+#[tokio::test]
 async fn test_eval_set_tenant_isolation() {
     let (base, _tmp) = start_test_server().await;
 

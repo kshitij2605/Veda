@@ -138,7 +138,9 @@ pub async fn message_send(
     let claims = claims.map(|axum::Extension(c)| c);
     let user = super::agents::rls_user(&claims);
 
-    match run_agent_turn(&state, &tenant, user.as_deref(), &agent_id, &[], &input).await {
+    // A2A does not persist a Veda conversation, so no conversation id is
+    // threaded into agent memory here.
+    match run_agent_turn(&state, &tenant, user.as_deref(), &agent_id, &[], &input, None).await {
         Ok((_agent, result, citations, grounding)) => {
             let message = serde_json::json!({
                 "role": "agent",

@@ -77,6 +77,9 @@ fn bad_request(msg: impl Into<String>) -> GatewayError {
 /// One labeled evaluation case.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EvalCase {
+    /// Case id. Optional on create — the server assigns `case-{uuid}` when
+    /// absent/empty (mirrors `SloDef`/`SyntheticProbe`).
+    #[serde(default)]
     pub id: String,
     pub query: String,
     /// Known-good retrieval for this query — recall@k is measured against
@@ -91,6 +94,9 @@ pub struct EvalCase {
 /// A labeled evaluation set: many cases run against one agent.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EvalSet {
+    /// Set id. Optional on create — the server assigns `eval-{uuid}` when
+    /// absent/empty.
+    #[serde(default)]
     pub id: String,
     pub name: String,
     /// Agent the set evaluates by default; `None`/absent → `veda-agent`.
@@ -429,9 +435,20 @@ pub async fn create_eval_set(
     Json(mut set): Json<EvalSet>,
 ) -> Result<Json<EvalSet>, GatewayError> {
     if set.id.trim().is_empty() {
-        set.id = uuid::Uuid::new_v4().to_string();
+        set.id = format!("eval-{}", uuid::Uuid::new_v4());
     }
+    assign_case_ids(&mut set);
     save_and_return_set(&state, &tenant, set).await
+}
+
+/// Assign a server id (`case-{uuid}`) to every case whose id is empty.
+/// Cases that arrive with an explicit id keep it.
+fn assign_case_ids(set: &mut EvalSet) {
+    for case in &mut set.cases {
+        if case.id.trim().is_empty() {
+            case.id = format!("case-{}", uuid::Uuid::new_v4());
+        }
+    }
 }
 
 pub async fn get_eval_set(
@@ -454,6 +471,7 @@ pub async fn put_eval_set(
     Json(mut set): Json<EvalSet>,
 ) -> Result<Json<EvalSet>, GatewayError> {
     set.id = id;
+    assign_case_ids(&mut set);
     save_and_return_set(&state, &tenant, set).await
 }
 
@@ -552,8 +570,10 @@ pub async fn run_eval(
             let gold = case.gold_answer.clone();
             let turn_agent_id = turn_agent_id.clone();
             async move {
-                match agents::run_agent_turn(state, tenant, user, &turn_agent_id, &[], &case.query)
-                    .await
+                match agents::run_agent_turn(
+                    state, tenant, user, &turn_agent_id, &[], &case.query, None,
+                )
+                .await
                 {
                     Ok((_agent, result, citations, grounding)) => {
                         let gc = gold_cosine(embedder, &result.response, gold.as_deref()).await;
@@ -651,7 +671,7 @@ pub async fn case_from_conversation(
             ))
         })?;
         EvalCase {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: format!("case-{}", uuid::Uuid::new_v4()),
             query: turn.query,
             expected_chunk_ids: turn.expected_chunk_ids,
             gold_answer: turn.gold_answer,
@@ -663,7 +683,7 @@ pub async fn case_from_conversation(
             .filter(|q| !q.trim().is_empty())
             .ok_or_else(|| bad_request("provide either conversation_id or a non-empty query"))?;
         EvalCase {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: format!("case-{}", uuid::Uuid::new_v4()),
             query,
             expected_chunk_ids: req.retrieved_chunk_ids.clone().unwrap_or_default(),
             gold_answer: req.answer.clone(),

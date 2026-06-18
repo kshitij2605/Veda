@@ -446,6 +446,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn turn_record_map_with_empty_conversation_id_still_parses() {
+        // The A2A / triage callers thread no conversation id (`None` →
+        // empty string). The record must still parse — memory write is not
+        // skipped for those callers.
+        let dim = 4u32;
+        let schema = memory_schema("t1::_agent_memory", dim).expect("schema builds");
+        let raw = turn_record_map("ag-1", "", "user", "no conversation", 1, vec![0.1, 0.2, 0.3, 0.4]);
+        let rec = crate::rest::records::parse_record_public(&raw, &schema).expect("record parses");
+        assert_eq!(string_field(&rec, "conversation_id"), "");
+    }
+
     // ── Best-effort / off-lock wiring against a bare AppState ────────────
     //
     // The test env has no live embedder registered, so both entry points

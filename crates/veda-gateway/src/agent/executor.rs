@@ -16,6 +16,8 @@
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
+use futures::StreamExt;
+
 use veda_core::genai_semconv as gen_ai;
 use veda_core::llm_client::{
     ChatMessage, ChatModel, CompletionOptions, ToolDef,
@@ -453,13 +455,76 @@ async fn run_core<M: ChatModel>(
 
         // No tool calls → this is the final answer.
         if completion.tool_calls.is_empty() {
-            let answer = completion.content.unwrap_or_default();
-            // Stream the final answer to the live sink as ≥1 AnswerDelta.
-            // (The computed answer is chunked rather than re-requested so
-            // tokens/metrics stay identical to the blocking path.)
-            for chunk in answer_chunks(&answer) {
-                emit(StreamEvent::AnswerDelta { text: chunk });
-            }
+            let blocking_answer = completion.content.unwrap_or_default();
+            // The blocking path (`event_tx: None`) is byte-identical to the
+            // original `run`: it keeps the answer + token tally from the
+            // `complete_with_tools` call above and emits nothing.
+            //
+            // The streaming path issues ONE additional content-only
+            // `complete_stream` over the SAME message list to stream the
+            // final answer for real (token-by-token for `LlmClient`; a
+            // single delta for the default-impl fakes). Each real
+            // `StreamDelta.content` is forwarded as an `AnswerDelta` and
+            // accumulated into the response. This extra final-turn
+            // completion replaces the blocking one's answer, so its token
+            // usage is added to the running tally (the blocking call's
+            // tokens were already counted above). On any stream error we
+            // fall back to chunking the blocking answer so the client still
+            // gets a complete answer.
+            let answer = if event_tx.is_some() {
+                let llm_start = std::time::Instant::now();
+                match model.complete_stream(&messages, &opts).await {
+                    Ok(mut stream) => {
+                        let mut acc = String::new();
+                        let mut stream_completion_tokens = 0u32;
+                        let mut stream_prompt_tokens = 0u32;
+                        let mut stream_total_tokens = 0u32;
+                        while let Some(item) = stream.next().await {
+                            match item {
+                                Ok(delta) => {
+                                    if !delta.content.is_empty() {
+                                        acc.push_str(&delta.content);
+                                        emit(StreamEvent::AnswerDelta { text: delta.content });
+                                    }
+                                    // Usage rides the terminal chunk.
+                                    stream_prompt_tokens =
+                                        stream_prompt_tokens.max(delta.prompt_tokens);
+                                    stream_completion_tokens =
+                                        stream_completion_tokens.max(delta.completion_tokens);
+                                    stream_total_tokens =
+                                        stream_total_tokens.max(delta.total_tokens);
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        llm_ms += llm_start.elapsed().as_secs_f64() * 1000.0;
+                        // Account for the extra streaming completion's usage.
+                        prompt_tokens = prompt_tokens.saturating_add(stream_prompt_tokens);
+                        completion_tokens =
+                            completion_tokens.saturating_add(stream_completion_tokens);
+                        total_tokens = total_tokens.saturating_add(stream_total_tokens);
+                        // If the stream produced nothing (e.g. empty/failed
+                        // mid-flight), fall back to the blocking answer.
+                        if acc.is_empty() {
+                            for chunk in answer_chunks(&blocking_answer) {
+                                emit(StreamEvent::AnswerDelta { text: chunk });
+                            }
+                            blocking_answer
+                        } else {
+                            acc
+                        }
+                    }
+                    Err(_) => {
+                        llm_ms += llm_start.elapsed().as_secs_f64() * 1000.0;
+                        for chunk in answer_chunks(&blocking_answer) {
+                            emit(StreamEvent::AnswerDelta { text: chunk });
+                        }
+                        blocking_answer
+                    }
+                }
+            } else {
+                blocking_answer
+            };
             steps.push(AgentStep::Reasoning { text: answer.clone() });
             new_messages.push(ChatMessage::text("assistant", answer.clone()));
             return RunResult {
@@ -630,6 +695,17 @@ mod tests {
         queue: RefCell<VecDeque<ToolCompletion>>,
         always: Option<ToolCompletion>,
         calls: std::cell::Cell<usize>,
+        /// Content of the most recent FINAL (no-tool-call) completion, so
+        /// the default `complete_stream` can stream the real answer without
+        /// consuming a fresh queue item (mirrors how `LlmClient` issues one
+        /// extra content-only final-turn completion).
+        last_final: RefCell<Option<String>>,
+        /// When set, `complete_stream` yields these content fragments as
+        /// separate deltas (to exercise real multi-delta streaming) instead
+        /// of the single `last_final` delta.
+        stream_deltas: Option<Vec<String>>,
+        /// Counts `complete_stream` calls separately from blocking calls.
+        stream_calls: std::cell::Cell<usize>,
     }
 
     impl FakeModel {
@@ -638,6 +714,22 @@ mod tests {
                 queue: RefCell::new(items.into_iter().collect()),
                 always: None,
                 calls: std::cell::Cell::new(0),
+                last_final: RefCell::new(None),
+                stream_deltas: None,
+                stream_calls: std::cell::Cell::new(0),
+            }
+        }
+
+        /// Like `scripted`, but the final answer is streamed as the given
+        /// content fragments (multiple real `AnswerDelta`s).
+        fn scripted_streaming(items: Vec<ToolCompletion>, deltas: Vec<&str>) -> Self {
+            Self {
+                queue: RefCell::new(items.into_iter().collect()),
+                always: None,
+                calls: std::cell::Cell::new(0),
+                last_final: RefCell::new(None),
+                stream_deltas: Some(deltas.into_iter().map(str::to_owned).collect()),
+                stream_calls: std::cell::Cell::new(0),
             }
         }
 
@@ -646,11 +738,18 @@ mod tests {
                 queue: RefCell::new(VecDeque::new()),
                 always: Some(c),
                 calls: std::cell::Cell::new(0),
+                last_final: RefCell::new(None),
+                stream_deltas: None,
+                stream_calls: std::cell::Cell::new(0),
             }
         }
 
         fn call_count(&self) -> usize {
             self.calls.get()
+        }
+
+        fn stream_call_count(&self) -> usize {
+            self.stream_calls.get()
         }
     }
 
@@ -663,19 +762,50 @@ mod tests {
             _opts: &CompletionOptions,
         ) -> LlmResult<ToolCompletion> {
             self.calls.set(self.calls.get() + 1);
-            if let Some(c) = &self.always {
-                return Ok(c.clone());
-            }
-            Ok(self.queue.borrow_mut().pop_front().unwrap_or_else(|| {
-                ToolCompletion {
+            let c = if let Some(c) = &self.always {
+                c.clone()
+            } else {
+                self.queue.borrow_mut().pop_front().unwrap_or_else(|| ToolCompletion {
                     content: Some("done".to_owned()),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".to_owned()),
                     prompt_tokens: 0,
                     completion_tokens: 0,
                     total_tokens: 0,
-                }
-            }))
+                })
+            };
+            if c.tool_calls.is_empty() {
+                *self.last_final.borrow_mut() = c.content.clone();
+            }
+            Ok(c)
+        }
+
+        async fn complete_stream<'a>(
+            &'a self,
+            _messages: &'a [ChatMessage],
+            _opts: &'a CompletionOptions,
+        ) -> LlmResult<veda_core::llm_client::DeltaStream<'a>> {
+            use futures::stream;
+            self.stream_calls.set(self.stream_calls.get() + 1);
+            // Build the delta list eagerly (don't capture the !Send RefCell
+            // in the returned stream).
+            let deltas: Vec<veda_core::llm_client::StreamDelta> =
+                if let Some(frags) = &self.stream_deltas {
+                    frags
+                        .iter()
+                        .map(|f| veda_core::llm_client::StreamDelta {
+                            content: f.clone(),
+                            ..Default::default()
+                        })
+                        .collect()
+                } else {
+                    let content = self.last_final.borrow().clone().unwrap_or_default();
+                    vec![veda_core::llm_client::StreamDelta {
+                        content,
+                        ..Default::default()
+                    }]
+                };
+            Ok(Box::pin(stream::iter(deltas.into_iter().map(Ok))))
         }
     }
 
@@ -915,6 +1045,71 @@ mod tests {
         assert!(
             events.iter().filter(|e| matches!(e, StreamEvent::AnswerDelta { .. })).count() >= 1,
             "answer must arrive as ≥1 delta"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_streaming_forwards_real_per_token_deltas() {
+        // The final answer is produced by a streaming call that yields
+        // MULTIPLE content fragments. run_streaming must forward each as its
+        // own AnswerDelta (real streaming, not a re-chunk of one blob), the
+        // assembled response must equal their concatenation, and tool turns
+        // must still emit tool events.
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_state(tmp.path(), "docs").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let agent = test_agent(vec!["list_collections".to_owned()]);
+
+        // Blocking final completion content differs from the streamed
+        // fragments so we can prove the response came from the stream.
+        let model = FakeModel::scripted_streaming(
+            vec![
+                completion_with_call(
+                    Some("Let me check."),
+                    tool_call("call_1", "list_collections", "{}"),
+                ),
+                final_completion("blocking-blob"),
+            ],
+            vec!["The ", "answer ", "is ", "docs."],
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+        let streamed = run_streaming(
+            &model, &cat, &ctx, &agent, "sys", &[], "what collections exist?", DEFAULT_MAX_STEPS,
+            "openai", "test-model", tx,
+        )
+        .await;
+
+        let mut events: Vec<StreamEvent> = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            events.push(ev);
+        }
+
+        // Exactly one extra streaming call was made for the final answer.
+        assert_eq!(model.stream_call_count(), 1);
+
+        // The four streamed fragments arrive as four separate AnswerDeltas.
+        let deltas: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::AnswerDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["The ", "answer ", "is ", "docs."]);
+
+        // The assembled response equals the concatenation of the stream.
+        assert_eq!(streamed.response, "The answer is docs.");
+
+        // Tool events still fire before the answer.
+        assert!(
+            events.iter().any(|e| matches!(e, StreamEvent::ToolCall { tool_id, .. } if tool_id == "list_collections")),
+            "tool_call event must still be emitted"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, StreamEvent::ToolResult { is_error: false, .. })),
+            "tool_result event must still be emitted"
         );
     }
 

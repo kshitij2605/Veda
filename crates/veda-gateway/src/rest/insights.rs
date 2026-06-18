@@ -571,8 +571,10 @@ pub async fn triage_event(
     // Admin caller (no RLS user). Resolve the in-memory `veda-ops` agent
     // and drive the executor via the shared agent-turn helper.
     let tenant = TenantId::default_tenant();
+    // Triage runs a one-off agent turn without a persisted conversation, so
+    // no conversation id is threaded into agent memory.
     let (_agent, result, citations, grounding) =
-        run_agent_turn(&state, &tenant, None, "veda-ops", &[], &prompt)
+        run_agent_turn(&state, &tenant, None, "veda-ops", &[], &prompt, None)
         .await
         .map_err(|e| match e {
             AgentTurnError::NoLlm => (
