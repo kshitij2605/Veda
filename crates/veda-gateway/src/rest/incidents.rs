@@ -80,6 +80,8 @@ mod tests {
             first_seen_ms: 1,
             last_seen_ms: 2,
             draft: None,
+            is_novel: false,
+            novelty_score: None,
         }
     }
 

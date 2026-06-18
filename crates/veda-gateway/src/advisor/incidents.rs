@@ -48,10 +48,20 @@ pub const MAX_HISTORY: usize = 100;
 pub const INCIDENTS_FILE: &str = "_incidents.json";
 /// Default seconds between incident-correlation passes (env override).
 pub const DEFAULT_INCIDENT_INTERVAL_SECS: u64 = 300;
+/// Default novelty threshold: an incident is novel when its score
+/// (`1 - max_cosine_to_history`) is at or above this — i.e. its nearest
+/// historical incident is below 0.75 cosine.
+pub const NOVELTY_THRESHOLD: f64 = 0.25;
+/// Minimum number of historical incident embeddings before novelty is
+/// flagged. A fresh deployment must accumulate this much history first, so
+/// the first incidents are not all spuriously flagged "unprecedented".
+pub const NOVELTY_WARMUP: usize = 5;
+/// Maximum number of incident embeddings retained for novelty comparison.
+pub const MAX_EMBED_HISTORY: usize = 500;
 
 /// A cluster of semantically-similar (or same-rule/scope) ops events —
 /// one distinct incident the operator should act on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Incident {
     /// Stable-ish id derived from the representative event id.
     pub id: String,
@@ -74,6 +84,18 @@ pub struct Incident {
     /// forms. `None` until drafted (or when no LLM is configured).
     #[serde(default)]
     pub draft: Option<String>,
+    /// `true` when this incident's representative embedding is far from
+    /// every prior incident in the embedding history — a genuinely
+    /// unprecedented pattern. Only ever set on the embedding path, after a
+    /// warm-up of [`NOVELTY_WARMUP`] historical incidents; never set when
+    /// no embedder is configured (no false novelty).
+    #[serde(default)]
+    pub is_novel: bool,
+    /// Novelty score in `0..=1`: `1 - max_cosine_to_history` (higher =
+    /// more novel). `None` when novelty was not scored (no embedder, or
+    /// still in warm-up).
+    #[serde(default)]
+    pub novelty_score: Option<f64>,
 }
 
 impl Incident {
@@ -147,7 +169,16 @@ impl Accum {
             first_seen_ms: self.first_seen_ms,
             last_seen_ms: self.last_seen_ms,
             draft: None,
+            is_novel: false,
+            novelty_score: None,
         }
+    }
+
+    /// The incident's representative embedding (the cluster centroid), used
+    /// for novelty scoring against the embedding history. Empty in the
+    /// fallback (no-embedder) path.
+    fn representative_embedding(&self) -> Vec<f32> {
+        self.centroid.clone()
     }
 }
 
@@ -170,17 +201,31 @@ pub fn cluster_incidents(
     embeddings: Option<&[Vec<f32>]>,
     threshold: f32,
 ) -> Vec<Incident> {
-    match embeddings {
-        Some(embs) if embs.len() == events.len() => {
-            cluster_by_embedding(events, embs, threshold)
-        }
+    cluster_incidents_with_embeddings(events, embeddings, threshold).0
+}
+
+/// Like [`cluster_incidents`], but also returns each incident's
+/// representative embedding (its final cluster centroid), in the same order
+/// as the returned incidents. On the fallback (no-embedder) path the
+/// embeddings are all empty. Reusing these centroids avoids re-embedding
+/// for novelty scoring.
+pub fn cluster_incidents_with_embeddings(
+    events: &[OpsEvent],
+    embeddings: Option<&[Vec<f32>]>,
+    threshold: f32,
+) -> (Vec<Incident>, Vec<Vec<f32>>) {
+    let accs = match embeddings {
+        Some(embs) if embs.len() == events.len() => cluster_by_embedding(events, embs, threshold),
         // No embeddings (or a length mismatch we won't trust) → fallback.
         _ => cluster_by_rule_scope(events),
-    }
+    };
+    let embs: Vec<Vec<f32>> = accs.iter().map(Accum::representative_embedding).collect();
+    let incidents: Vec<Incident> = accs.into_iter().map(Accum::finish).collect();
+    (incidents, embs)
 }
 
 /// Embedding path: greedy cosine clustering against running-mean centroids.
-fn cluster_by_embedding(events: &[OpsEvent], embs: &[Vec<f32>], threshold: f32) -> Vec<Incident> {
+fn cluster_by_embedding(events: &[OpsEvent], embs: &[Vec<f32>], threshold: f32) -> Vec<Accum> {
     let mut accs: Vec<Accum> = Vec::new();
     for (ev, emb) in events.iter().zip(embs.iter()) {
         let mut best: Option<usize> = None;
@@ -207,12 +252,12 @@ fn cluster_by_embedding(events: &[OpsEvent], embs: &[Vec<f32>], threshold: f32) 
             None => accs.push(Accum::new(ev, emb.clone())),
         }
     }
-    accs.into_iter().map(Accum::finish).collect()
+    accs
 }
 
 /// Fallback path: group by `(rule_id, scope.key())`, deterministic in
 /// first-seen (input) order.
-fn cluster_by_rule_scope(events: &[OpsEvent]) -> Vec<Incident> {
+fn cluster_by_rule_scope(events: &[OpsEvent]) -> Vec<Accum> {
     let mut order: Vec<String> = Vec::new();
     let mut map: HashMap<String, Accum> = HashMap::new();
     for ev in events {
@@ -228,19 +273,78 @@ fn cluster_by_rule_scope(events: &[OpsEvent]) -> Vec<Incident> {
     order
         .into_iter()
         .filter_map(|k| map.remove(&k))
-        .map(Accum::finish)
         .collect()
 }
 
-/// Sort incidents most-urgent-first: severity desc, then count desc, then
-/// id for determinism.
-fn sort_incidents(incidents: &mut [Incident]) {
-    incidents.sort_by(|a, b| {
-        b.max_severity
-            .cmp(&a.max_severity)
-            .then(b.count.cmp(&a.count))
-            .then(a.id.cmp(&b.id))
+/// Sort incidents most-urgent-first (severity desc, then count desc, then
+/// id for determinism) while keeping the parallel `embeddings` vector
+/// aligned by incident.
+fn sort_incidents_with_embeddings(incidents: &mut Vec<Incident>, embeddings: &mut Vec<Vec<f32>>) {
+    let mut paired: Vec<(Incident, Vec<f32>)> = incidents
+        .drain(..)
+        .zip(embeddings.drain(..))
+        .collect();
+    paired.sort_by(|a, b| {
+        b.0.max_severity
+            .cmp(&a.0.max_severity)
+            .then(b.0.count.cmp(&a.0.count))
+            .then(a.0.id.cmp(&b.0.id))
     });
+    for (inc, emb) in paired {
+        incidents.push(inc);
+        embeddings.push(emb);
+    }
+}
+
+/// Score how *novel* `current` is against a history of prior incident
+/// embeddings. Pure — no I/O.
+///
+/// `max_sim` is the maximum cosine similarity of `current` to any history
+/// vector (`0.0` when the history is empty, so a first-ever incident scores
+/// as maximally novel — warm-up is applied by the caller, not here). The
+/// novelty `score = 1 - max_sim` (clamped to `0..=1`), and `is_novel` is
+/// `score >= novelty_threshold`. An empty `current` (no embedder) is never
+/// novel.
+pub fn score_novelty(current: &[f32], history: &[Vec<f32>], novelty_threshold: f64) -> (bool, f64) {
+    if current.is_empty() {
+        return (false, 0.0);
+    }
+    let mut max_sim = 0.0f64;
+    for h in history {
+        if h.is_empty() {
+            continue;
+        }
+        let sim = cosine(current, h) as f64;
+        if sim > max_sim {
+            max_sim = sim;
+        }
+    }
+    let score = (1.0 - max_sim).clamp(0.0, 1.0);
+    (score >= novelty_threshold, score)
+}
+
+/// Annotate each incident with novelty, in place, reusing the parallel
+/// `embeddings` (the clustering centroids — no re-embedding). For each
+/// incident with a non-empty embedding, set `novelty_score`; flag
+/// `is_novel` only when the `history` is warmed up (`>= NOVELTY_WARMUP`)
+/// AND the score clears the threshold. Incidents with an empty embedding
+/// (fallback / no-embedder path) are left untouched — never flagged.
+/// Pure (no I/O); the caller supplies the history snapshot.
+pub fn annotate_novelty(
+    incidents: &mut [Incident],
+    embeddings: &[Vec<f32>],
+    history: &[Vec<f32>],
+    threshold: f64,
+) {
+    let warmed_up = history.len() >= NOVELTY_WARMUP;
+    for (inc, emb) in incidents.iter_mut().zip(embeddings.iter()) {
+        if emb.is_empty() {
+            continue;
+        }
+        let (is_novel, score) = score_novelty(emb, history, threshold);
+        inc.novelty_score = Some(score);
+        inc.is_novel = warmed_up && is_novel;
+    }
 }
 
 /// Recompute incidents from the advisor's current open + recent (history)
@@ -254,6 +358,14 @@ fn sort_incidents(incidents: &mut [Incident]) {
 /// rule/scope grouping when no text embedder is configured or any embed
 /// fails.
 pub async fn compute_incidents(state: &AppState) -> Vec<Incident> {
+    compute_incidents_with_embeddings(state).await.0
+}
+
+/// Like [`compute_incidents`], but also returns each incident's
+/// representative embedding (cluster centroid), in incident order, so the
+/// caller can score novelty without re-embedding. On the fallback path the
+/// embeddings are all empty (no embedder → no novelty).
+pub async fn compute_incidents_with_embeddings(state: &AppState) -> (Vec<Incident>, Vec<Vec<f32>>) {
     let advisor = state.advisor();
 
     // Brief events lock: clone open + history events out, then drop it.
@@ -264,7 +376,7 @@ pub async fn compute_incidents(state: &AppState) -> Vec<Incident> {
         all
     };
     if events.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // Resolve a text embedding model config (clone it so we don't hold the
@@ -282,9 +394,10 @@ pub async fn compute_incidents(state: &AppState) -> Vec<Incident> {
         None => None,
     };
 
-    let mut incidents = cluster_incidents(&events, embeddings.as_deref(), DEFAULT_THRESHOLD);
-    sort_incidents(&mut incidents);
-    incidents
+    let (mut incidents, mut embs) =
+        cluster_incidents_with_embeddings(&events, embeddings.as_deref(), DEFAULT_THRESHOLD);
+    sort_incidents_with_embeddings(&mut incidents, &mut embs);
+    (incidents, embs)
 }
 
 /// Embed each event's `title + " " + detail` (deduping identical texts via
@@ -337,6 +450,23 @@ pub struct IncidentStore {
     /// passes. Persisted so a restart doesn't re-notify. Bounded.
     #[serde(default)]
     notified_ids: Vec<String>,
+    /// Newest-last ring of representative embeddings of incidents seen on
+    /// prior passes, used as the comparison corpus for novelty detection.
+    /// Bounded to [`MAX_EMBED_HISTORY`]. Empty when no embedder is ever
+    /// configured (the fallback path stores no embeddings).
+    #[serde(default)]
+    incident_embeddings: Vec<StoredEmbedding>,
+}
+
+/// A persisted incident embedding for novelty comparison.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredEmbedding {
+    /// The incident id this embedding came from.
+    pub id: String,
+    /// The representative (centroid) embedding.
+    pub embedding: Vec<f32>,
+    /// When it was recorded (ms epoch), for debugging/aging.
+    pub ts_ms: i64,
 }
 
 impl IncidentStore {
@@ -378,6 +508,37 @@ impl IncidentStore {
                 let excess = self.notified_ids.len() - MAX_HISTORY;
                 self.notified_ids.drain(0..excess);
             }
+        }
+    }
+
+    /// The persisted incident embeddings (the novelty comparison corpus).
+    pub fn incident_embeddings(&self) -> &[StoredEmbedding] {
+        &self.incident_embeddings
+    }
+
+    /// Just the embedding vectors of the history, for [`score_novelty`].
+    pub fn history_embeddings(&self) -> Vec<Vec<f32>> {
+        self.incident_embeddings
+            .iter()
+            .map(|e| e.embedding.clone())
+            .collect()
+    }
+
+    /// Append a representative embedding to the novelty corpus (bounded to
+    /// [`MAX_EMBED_HISTORY`], dropping oldest). Empty embeddings (fallback
+    /// path) are ignored — only real embeddings feed novelty detection.
+    pub fn push_embedding(&mut self, id: &str, embedding: Vec<f32>, ts_ms: i64) {
+        if embedding.is_empty() {
+            return;
+        }
+        self.incident_embeddings.push(StoredEmbedding {
+            id: id.to_owned(),
+            embedding,
+            ts_ms,
+        });
+        if self.incident_embeddings.len() > MAX_EMBED_HISTORY {
+            let excess = self.incident_embeddings.len() - MAX_EMBED_HISTORY;
+            self.incident_embeddings.drain(0..excess);
         }
     }
 
@@ -527,15 +688,29 @@ pub async fn draft_incidents<D: IncidentDrafter>(
 /// "N alerts → 1 incident" framing + a one-line draft summary (if any).
 /// Pure + testable.
 pub fn incident_notification_event(incident: &Incident) -> OpsEvent {
-    let title = format!(
-        "Incident: {} ({} alerts → 1 incident)",
-        incident.representative, incident.count
-    );
+    let title = if incident.is_novel {
+        format!(
+            "⚠ UNPRECEDENTED Incident: {} ({} alerts → 1 incident)",
+            incident.representative, incident.count
+        )
+    } else {
+        format!(
+            "Incident: {} ({} alerts → 1 incident)",
+            incident.representative, incident.count
+        )
+    };
     let mut detail = format!(
         "{} correlated alert(s) collapsed into one incident (rules: {}).",
         incident.count,
         incident.rule_ids.join(", "),
     );
+    if incident.is_novel {
+        let score = incident.novelty_score.unwrap_or(0.0);
+        detail.push_str(&format!(
+            "\n\n⚠ UNPRECEDENTED pattern — this incident is unlike anything in the incident history \
+(novelty score {score:.2}; no similar prior incident). Investigate as a genuinely new failure mode."
+        ));
+    }
     let recommendation = match &incident.draft {
         Some(d) => {
             // One-line draft summary: first non-empty line, bounded.
@@ -546,11 +721,18 @@ pub fn incident_notification_event(incident: &Incident) -> OpsEvent {
         }
         None => "Review the correlated incident in the Insights → Incidents view.".to_owned(),
     };
+    // A genuinely unprecedented pattern is escalated to High regardless of
+    // its constituent alerts' severities.
+    let severity = if incident.is_novel {
+        incident.max_severity.max(Severity::High)
+    } else {
+        incident.max_severity
+    };
     OpsEvent {
         id: incident.id.clone(),
         rule_id: incident.rule_ids.first().cloned().unwrap_or_default(),
         scope: crate::advisor::event::Scope::Global,
-        severity: incident.max_severity,
+        severity,
         status: crate::advisor::event::EventStatus::Open,
         title,
         detail,
@@ -584,15 +766,27 @@ pub async fn run_incident_correlation(state: &AppState) {
 /// faithfulness off-tick tasks: network awaits (embed, draft, notify) all
 /// run with no advisor lock held.
 pub async fn run_incident_correlation_with<D: IncidentDrafter>(state: &AppState, drafter: &D) {
-    // 1. Cluster (embedding await off-lock inside compute_incidents).
-    let mut incidents = compute_incidents(state).await;
+    // 1. Cluster (embedding await off-lock inside compute_incidents). Reuse
+    //    the clustering centroids as the per-incident representative
+    //    embeddings — NO second embedding pass for novelty.
+    let (mut incidents, incident_embs) = compute_incidents_with_embeddings(state).await;
     let advisor = state.advisor();
 
-    // 2. Carry forward drafts + identify which incidents are newly formed
-    //    (not yet notified) — a brief read of the store, no await held.
+    // 2. Carry forward drafts, score novelty against the persisted
+    //    embedding history, and identify newly-formed (not-yet-notified)
+    //    incidents — all under a brief read of the store, no await held.
+    //    `score_novelty` is pure (no I/O), so this stays lock-safe.
     let new_ids: Vec<String> = {
         let store = advisor.incidents.lock().await;
         store.carry_drafts_into(&mut incidents);
+
+        // Novelty: reuse the clustering centroids (no re-embed). Only the
+        // embedding path produces non-empty centroids; with no embedder
+        // they are empty → annotate_novelty leaves is_novel=false /
+        // novelty_score=None (no false novelty). Warm-up is applied inside.
+        let history = store.history_embeddings();
+        annotate_novelty(&mut incidents, &incident_embs, &history, NOVELTY_THRESHOLD);
+
         incidents
             .iter()
             .filter(|i| !store.is_notified(&i.id))
@@ -604,7 +798,8 @@ pub async fn run_incident_correlation_with<D: IncidentDrafter>(state: &AppState,
     draft_incidents(state, &mut incidents, drafter).await;
 
     // 4. Notify each newly-formed incident exactly once, OFF any advisor
-    //    lock. Reuses the transition notifier with a synthesized event.
+    //    lock. Reuses the transition notifier with a synthesized event
+    //    (novel incidents get an "UNPRECEDENTED" framing + High severity).
     let channels = advisor.config.read().await.channels.clone();
     let notifier = Notifier::new(channels);
     for inc in incidents.iter().filter(|i| new_ids.contains(&i.id)) {
@@ -612,8 +807,15 @@ pub async fn run_incident_correlation_with<D: IncidentDrafter>(state: &AppState,
         notifier.notify_transitions(std::slice::from_ref(&ev), &[]).await;
     }
 
-    // 5. Record + mark notified + persist under a brief lock.
+    // 5. Record + mark notified + append NEW incidents' embeddings to the
+    //    novelty corpus + persist, under a brief lock.
+    let now_ms = crate::advisor::engine::now_ms();
     let mut store = advisor.incidents.lock().await;
+    for (inc, emb) in incidents.iter().zip(incident_embs.iter()) {
+        if new_ids.contains(&inc.id) {
+            store.push_embedding(&inc.id, emb.clone(), now_ms);
+        }
+    }
     store.record(incidents);
     for id in &new_ids {
         store.mark_notified(id);
@@ -776,6 +978,8 @@ mod tests {
             first_seen_ms: 1,
             last_seen_ms: 2,
             draft: None,
+            is_novel: false,
+            novelty_score: None,
         }
     }
 
@@ -1051,5 +1255,187 @@ mod tests {
         // The notified-id is persisted.
         let store = state.advisor().incidents.lock().await;
         assert!(store.is_notified(&store.latest()[0].id.clone()));
+    }
+
+    // ---- 4.1 novelty model + detector ----------------------------------
+
+    #[test]
+    fn score_novelty_flags_embedding_far_from_all_history() {
+        // An embedding orthogonal to all history → max_sim 0 → score 1.0 →
+        // novel.
+        let history = vec![vec![1.0, 0.0, 0.0], vec![0.9, 0.1, 0.0]];
+        let current = vec![0.0, 0.0, 1.0];
+        let (is_novel, score) = score_novelty(&current, &history, NOVELTY_THRESHOLD);
+        assert!(is_novel, "orthogonal embedding must be novel");
+        assert!((score - 1.0).abs() < 1e-6, "score should be ~1.0, got {score}");
+    }
+
+    #[test]
+    fn score_novelty_does_not_flag_embedding_near_history() {
+        // Near-identical to a history vector → max_sim ~1 → score ~0 → not
+        // novel.
+        let history = vec![vec![1.0, 0.0, 0.0]];
+        let current = vec![0.999, 0.01, 0.0];
+        let (is_novel, score) = score_novelty(&current, &history, NOVELTY_THRESHOLD);
+        assert!(!is_novel, "near-duplicate embedding must not be novel");
+        assert!(score < NOVELTY_THRESHOLD, "score {score} should be below threshold");
+    }
+
+    #[test]
+    fn score_novelty_empty_history_scores_first_incident_maximally_novel() {
+        // No history → max_sim 0 → score 1.0. (Warm-up — applied by the
+        // caller, not here — is what prevents flagging on a fresh deploy.)
+        let (is_novel, score) = score_novelty(&[1.0, 0.0], &[], NOVELTY_THRESHOLD);
+        assert!(is_novel);
+        assert!((score - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_novelty_empty_current_is_never_novel() {
+        // No embedder (empty centroid) → never novel, score 0.
+        let history = vec![vec![1.0, 0.0]];
+        let (is_novel, score) = score_novelty(&[], &history, NOVELTY_THRESHOLD);
+        assert!(!is_novel);
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn store_push_embedding_ignores_empty_and_bounds_history() {
+        let mut store = IncidentStore::new();
+        store.push_embedding("a", vec![], 1); // empty → ignored
+        assert!(store.incident_embeddings().is_empty());
+        store.push_embedding("b", vec![1.0, 0.0], 2);
+        assert_eq!(store.incident_embeddings().len(), 1);
+        // Overfill past the cap → oldest dropped.
+        for i in 0..(MAX_EMBED_HISTORY + 10) {
+            store.push_embedding(&format!("x{i}"), vec![i as f32, 1.0], i as i64);
+        }
+        assert_eq!(store.incident_embeddings().len(), MAX_EMBED_HISTORY);
+    }
+
+    #[test]
+    fn store_embeddings_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(INCIDENTS_FILE);
+        let mut store = IncidentStore::new();
+        store.push_embedding("inc_a", vec![0.1, 0.2, 0.3], 99);
+        store.save(&path);
+        let loaded = IncidentStore::load(&path);
+        assert_eq!(loaded.incident_embeddings().len(), 1);
+        assert_eq!(loaded.incident_embeddings()[0].id, "inc_a");
+        assert_eq!(loaded.history_embeddings(), vec![vec![0.1, 0.2, 0.3]]);
+    }
+
+    // ---- 4.2 novelty wiring --------------------------------------------
+
+    #[test]
+    fn cluster_with_embeddings_returns_aligned_centroids() {
+        // The representative embedding of each incident is its cluster
+        // centroid — reused for novelty (no re-embed).
+        let events = vec![
+            ev("a", Scope::Global, Severity::High, "thing a", 1),
+            ev("b", Scope::Global, Severity::High, "thing b", 2),
+        ];
+        let embs = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let (incidents, centroids) = cluster_incidents_with_embeddings(&events, Some(&embs), 0.82);
+        assert_eq!(incidents.len(), 2);
+        assert_eq!(centroids.len(), 2);
+        assert!(centroids.iter().all(|c| c.len() == 2), "centroids carry the embedding dim");
+    }
+
+    #[test]
+    fn cluster_with_embeddings_fallback_yields_empty_centroids() {
+        // No embeddings → fallback path → empty centroids → no novelty.
+        let events = vec![ev("r", Scope::Global, Severity::High, "x", 1)];
+        let (incidents, centroids) = cluster_incidents_with_embeddings(&events, None, 0.82);
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(centroids.len(), 1);
+        assert!(centroids[0].is_empty(), "fallback path stores no embedding");
+    }
+
+    #[tokio::test]
+    async fn run_correlation_no_embedder_flags_no_novelty() {
+        // No embedder configured → fallback clustering → is_novel stays
+        // false and novelty_score stays None (never false novelty).
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        seed_one_event(&state).await;
+        let drafter = FakeDrafter::new(None);
+        run_incident_correlation_with(&state, &drafter).await;
+        let store = state.advisor().incidents.lock().await;
+        assert_eq!(store.latest().len(), 1);
+        assert!(!store.latest()[0].is_novel);
+        assert!(store.latest()[0].novelty_score.is_none());
+        // Fallback path persisted no embeddings.
+        assert!(store.incident_embeddings().is_empty());
+    }
+
+    fn warm_history(n: usize) -> Vec<Vec<f32>> {
+        // n history vectors all near [1,0,0].
+        (0..n).map(|i| vec![1.0, 0.001 * i as f32, 0.0]).collect()
+    }
+
+    #[test]
+    fn annotate_novelty_flags_dissimilar_and_not_similar_when_warmed_up() {
+        let history = warm_history(NOVELTY_WARMUP); // warmed up
+        let mut incidents = vec![incident("inc_far", 1), incident("inc_near", 1)];
+        let embs = vec![
+            vec![0.0, 0.0, 1.0],   // orthogonal to history → novel
+            vec![1.0, 0.002, 0.0], // ~identical to history → not novel
+        ];
+        annotate_novelty(&mut incidents, &embs, &history, NOVELTY_THRESHOLD);
+        assert!(incidents[0].is_novel, "dissimilar incident is novel");
+        assert!(incidents[0].novelty_score.unwrap() >= NOVELTY_THRESHOLD);
+        assert!(!incidents[1].is_novel, "similar incident is not novel");
+        assert!(incidents[1].novelty_score.unwrap() < NOVELTY_THRESHOLD);
+    }
+
+    #[test]
+    fn annotate_novelty_warmup_suppresses_until_k_history() {
+        // Below warm-up: a dissimilar incident gets a SCORE but is NOT
+        // flagged novel.
+        let history = warm_history(NOVELTY_WARMUP - 1);
+        let mut incidents = vec![incident("inc_far", 1)];
+        let embs = vec![vec![0.0, 0.0, 1.0]];
+        annotate_novelty(&mut incidents, &embs, &history, NOVELTY_THRESHOLD);
+        assert!(!incidents[0].is_novel, "warm-up suppresses novelty flag");
+        assert!(
+            incidents[0].novelty_score.unwrap() >= NOVELTY_THRESHOLD,
+            "score is still computed during warm-up"
+        );
+    }
+
+    #[test]
+    fn annotate_novelty_skips_empty_embeddings() {
+        let history = warm_history(NOVELTY_WARMUP);
+        let mut incidents = vec![incident("inc_fallback", 1)];
+        let embs = vec![vec![]]; // fallback path — no embedding
+        annotate_novelty(&mut incidents, &embs, &history, NOVELTY_THRESHOLD);
+        assert!(!incidents[0].is_novel);
+        assert!(incidents[0].novelty_score.is_none(), "no score without an embedding");
+    }
+
+    #[test]
+    fn novel_incident_notification_is_escalated_and_framed() {
+        let mut inc = incident("inc_novel", 2);
+        inc.representative = "weird new failure".into();
+        inc.max_severity = Severity::Low;
+        inc.is_novel = true;
+        inc.novelty_score = Some(0.93);
+        let ev = incident_notification_event(&inc);
+        assert!(ev.title.contains("UNPRECEDENTED"), "title flags unprecedented");
+        assert!(ev.detail.contains("UNPRECEDENTED pattern"));
+        assert!(ev.detail.contains("0.93"), "novelty score surfaced");
+        assert_eq!(ev.severity, Severity::High, "novel incident escalated to High");
+    }
+
+    #[test]
+    fn non_novel_incident_notification_unchanged() {
+        let mut inc = incident("inc_plain", 3);
+        inc.max_severity = Severity::Medium;
+        let ev = incident_notification_event(&inc);
+        assert!(!ev.title.contains("UNPRECEDENTED"));
+        assert!(!ev.detail.contains("UNPRECEDENTED"));
+        assert_eq!(ev.severity, Severity::Medium, "non-novel keeps its severity");
     }
 }

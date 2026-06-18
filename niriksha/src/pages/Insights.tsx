@@ -434,11 +434,27 @@ function IncidentList({
           const ruleIds = inc.rule_ids ?? []
           const count = inc.count ?? inc.member_event_ids?.length ?? 0
           const draft = inc.draft?.trim()
+          const isNovel = inc.is_novel === true
+          const noveltyPct =
+            typeof inc.novelty_score === 'number'
+              ? Math.round(inc.novelty_score * 100)
+              : null
           return (
             <li key={inc.id}>
               <div className="w-full rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2.5">
                 <div className="flex items-center gap-2">
                   <SeverityBadge severity={inc.max_severity} />
+                  {isNovel && (
+                    <Badge
+                      label={
+                        noveltyPct !== null
+                          ? `NEW · unprecedented ${noveltyPct}%`
+                          : 'NEW · unprecedented'
+                      }
+                      variant="error"
+                      className="flex-none"
+                    />
+                  )}
                   <span className="text-[13px] font-medium text-[var(--color-text)] truncate">
                     {inc.representative}
                   </span>

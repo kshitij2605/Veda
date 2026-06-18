@@ -307,6 +307,18 @@ export interface Incident {
    * until drafted, or when no LLM is configured.
    */
   draft?: string | null
+  /**
+   * `true` when this incident's embedding is unlike anything in the
+   * incident history — a genuinely unprecedented pattern. Only ever set on
+   * the embedding path, after a warm-up of historical incidents; never set
+   * without an embedder (no false novelty).
+   */
+  is_novel?: boolean
+  /**
+   * Novelty score in `0..=1` (`1 - max_cosine_to_history`; higher = more
+   * novel). Absent when novelty was not scored (no embedder, or warm-up).
+   */
+  novelty_score?: number | null
 }
 
 /**
