@@ -30,7 +30,10 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures::stream::Stream;
 use serde::Serialize;
 use tracing::Instrument;
 
@@ -643,6 +646,365 @@ pub async fn converse(
         citations,
         grounding,
     }))
+}
+
+// ── Converse (streaming, SSE) ────────────────────────────────────────────
+
+/// Drive one streaming agent turn: resolve the agent + model + prompt +
+/// tool context (mirroring [`run_agent_turn`]), run the executor's
+/// [`executor::run_streaming`] loop feeding `event_tx`, then — post-run,
+/// off the hot path — emit run/grounding metrics, persist the conversation
+/// like `/converse`, and assemble the terminal [`StreamDonePayload`].
+///
+/// The caller has already verified an LLM is configured (the 503 path) and
+/// resolved the `Conversation` shell; agent resolution failures here yield
+/// a graceful `done` payload rather than an HTTP error (streaming has
+/// begun). Best-effort grounding never fails the turn, mirroring the
+/// blocking helper.
+async fn run_streaming_turn(
+    state: &AppState,
+    tenant: &TenantId,
+    user: Option<&str>,
+    agent_id: &str,
+    conversation: &mut Conversation,
+    input: &str,
+    event_tx: tokio::sync::mpsc::Sender<executor::StreamEvent>,
+) -> StreamDonePayload {
+    let user_facing_cid = tenant::strip_prefix(tenant, &conversation.id)
+        .unwrap_or(&conversation.id)
+        .to_owned();
+
+    // LLM config (the handler already 503'd if absent; treat a race as a
+    // graceful failure rather than a panic).
+    let llm_cfg = match state.inner.llm_config.read().await.clone() {
+        Some(c) => c,
+        None => {
+            return StreamDonePayload {
+                conversation_id: user_facing_cid,
+                response: "no LLM configured".to_owned(),
+                metrics: None,
+                citations: Vec::new(),
+                grounding: None,
+            };
+        }
+    };
+
+    // Resolve the agent (same rules as run_agent_turn).
+    let scoped_agent_id = tenant::scope(tenant, agent_id);
+    let agent = match store::get_agent(&state.inner.saved_objects, &scoped_agent_id).await {
+        Some(a) => a,
+        None if agent_id == "veda-agent" => default_agent(),
+        None if agent_id == "veda-ops" => crate::agent::model::default_ops_agent(),
+        None => {
+            return StreamDonePayload {
+                conversation_id: user_facing_cid,
+                response: format!("agent '{agent_id}' not found"),
+                metrics: None,
+                citations: Vec::new(),
+                grounding: None,
+            };
+        }
+    };
+
+    let model_name = agent
+        .model
+        .as_ref()
+        .and_then(|ov| ov.model.clone())
+        .unwrap_or_else(|| llm_cfg.model.clone());
+    let provider = genai_system_for(&model_name);
+    let client = build_client(llm_cfg, &agent);
+
+    // System prompt + optional memory recall (mirrors run_agent_turn).
+    let summary = executor::collections_modality_summary(state, tenant).await;
+    let mut sys = executor::build_system_prompt(&agent, &summary);
+    if crate::agent::memory::should_use_memory(&agent) {
+        let turns = crate::agent::memory::retrieve_memory(
+            state,
+            tenant,
+            agent_id,
+            input,
+            crate::agent::memory::DEFAULT_RECALL_K,
+        )
+        .await;
+        if let Some(block) = crate::agent::memory::format_memory_block(
+            &turns,
+            crate::agent::memory::DEFAULT_MEMORY_BLOCK_CHARS,
+        ) {
+            sys = format!("{block}\n\n{sys}");
+        }
+    }
+
+    let ctx = ToolContext::new(state, tenant).with_user(user);
+
+    use veda_core::genai_semconv as gen_ai;
+    let root = tracing::info_span!(
+        "invoke_agent",
+        otel.name = gen_ai::invoke_agent_span_name(&agent.name),
+        "gen_ai.operation.name" = gen_ai::OP_INVOKE_AGENT,
+        "gen_ai.agent.name" = %agent.name,
+    );
+    let history = conversation.messages.clone();
+    let result = executor::run_streaming(
+        &client,
+        &state.inner.tool_catalog,
+        &ctx,
+        &agent,
+        &sys,
+        &history,
+        input,
+        DEFAULT_MAX_STEPS,
+        &provider,
+        &model_name,
+        event_tx,
+    )
+    .instrument(root)
+    .await;
+
+    emit_run_metrics(&model_name, &result.metrics);
+
+    // Post-run grounding (same logic as run_agent_turn).
+    let citations = grounding::extract_citations(&result.steps);
+    let grounding = if citations.is_empty() {
+        None
+    } else {
+        let contexts: Vec<String> =
+            citations.iter().filter_map(|c| c.snippet.clone()).collect();
+        let embedder = {
+            use veda_core::embedding::Modality;
+            let registry = state.inner.embedding_registry.read().await;
+            registry
+                .find_by_modality(Modality::Text)
+                .first()
+                .map(|c| veda_core::embedding_client::EmbeddingClient::new((*c).clone()))
+        };
+        let g = grounding::score_grounding(
+            Some(&client),
+            embedder.as_ref(),
+            input,
+            &result.response,
+            &contexts,
+        )
+        .await;
+        emit_grounding_metrics(&model_name, citations.len(), &g);
+        if let Some(f) = g.faithfulness {
+            let now = crate::advisor::engine::now_ms().max(0) as u64;
+            let mut fr = state.advisor().faithfulness_results.lock().await;
+            fr.record(agent_id, f, now);
+            fr.save(
+                &state
+                    .inner
+                    .data_dir
+                    .join(crate::advisor::faithfulness::FAITHFULNESS_RESULTS_FILE),
+            );
+        }
+        Some(g)
+    };
+
+    // Memory write-back (mirrors run_agent_turn).
+    if crate::agent::memory::should_use_memory(&agent) {
+        let ts = crate::advisor::engine::now_ms().max(0);
+        crate::agent::memory::write_turn(state, tenant, agent_id, "", "user", input, ts).await;
+        if !result.response.trim().is_empty() {
+            crate::agent::memory::write_turn(
+                state, tenant, agent_id, "", "assistant", &result.response, ts,
+            )
+            .await;
+        }
+    }
+
+    // Persist the conversation exactly like /converse.
+    conversation.messages.push(ConversationMessage {
+        role: "user".to_owned(),
+        content: Some(input.to_owned()),
+    });
+    for m in &result.new_messages {
+        conversation.messages.push(ConversationMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        });
+    }
+    conversation.steps.extend(result.steps.iter().cloned());
+    store::save_conversation(&state.inner.saved_objects, conversation).await;
+
+    StreamDonePayload {
+        conversation_id: user_facing_cid,
+        response: result.response,
+        metrics: Some(result.metrics),
+        citations,
+        grounding,
+    }
+}
+
+
+/// Terminal `done` SSE frame payload: the same summary fields the blocking
+/// `/converse` returns, sent once the streaming run completes.
+#[derive(Serialize)]
+struct StreamDonePayload {
+    conversation_id: String,
+    response: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics: Option<RunMetrics>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    citations: Vec<Citation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grounding: Option<Grounding>,
+}
+
+/// `POST /v1/agents/{id}/converse/stream` — the streaming twin of
+/// [`converse`]. Same auth / tenant / RLS. Streams the agent run live over
+/// Server-Sent Events: a named `reasoning` / `tool_call` / `tool_result` /
+/// `answer` event per [`executor::StreamEvent`], then a terminal `done`
+/// event carrying `{ conversation_id, response, metrics, citations,
+/// grounding }`. Persists the conversation exactly like `/converse`.
+///
+/// Returns HTTP 503 *before* streaming starts when no LLM is configured.
+/// The blocking `/converse` and the A2A handler are untouched.
+pub async fn converse_stream(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+    claims: Option<axum::Extension<Claims>>,
+    Json(req): Json<ConverseRequest>,
+) -> Response {
+    // 503 before any streaming if no LLM is configured (mirrors converse).
+    if state.inner.llm_config.read().await.is_none() {
+        return service_unavailable(
+            "VEDA_LLM_ENDPOINT not configured. Set the env var to enable agent converse.",
+        )
+        .into_response();
+    }
+
+    // Resolve the conversation up front (same persistence rules as converse).
+    let scoped_agent_id = tenant::scope(&tenant, &id);
+    let conversation = match &req.conversation_id {
+        Some(cid) => {
+            let scoped_cid = tenant::scope(&tenant, cid);
+            match store::get_conversation(&state.inner.saved_objects, &scoped_cid).await {
+                Some(c) => c,
+                None => {
+                    return not_found(format!("conversation '{cid}' not found"))
+                        .into_response();
+                }
+            }
+        }
+        None => Conversation {
+            id: tenant::scope(&tenant, &uuid::Uuid::new_v4().to_string()),
+            agent_id: scoped_agent_id.clone(),
+            title: None,
+            messages: Vec::new(),
+            steps: Vec::new(),
+        },
+    };
+
+    let claims = claims.map(|axum::Extension(c)| c);
+    let user = rls_user(&claims);
+
+    let user_input = match &req.attachments {
+        Some(atts) if !atts.is_empty() => {
+            format!("{}\n\n[the user attached {} image(s)]", req.input, atts.len())
+        }
+        _ => req.input.clone(),
+    };
+
+    // Channel carrying live executor events to the SSE forwarder, plus a
+    // oneshot for the terminal `done` summary.
+    let (event_tx, event_rx) =
+        tokio::sync::mpsc::channel::<executor::StreamEvent>(64);
+    let (done_tx, done_rx) =
+        tokio::sync::oneshot::channel::<StreamDonePayload>();
+
+    // Spawn the streaming run on an owned-state task (everything it needs is
+    // reachable from the cloned AppState). It emits StreamEvents as it goes
+    // and returns the final summary over the oneshot.
+    let task_state = state.clone();
+    let task_tenant = tenant.clone();
+    let task_user = user.clone();
+    let task_input = user_input.clone();
+    let mut conversation = conversation;
+    tokio::spawn(async move {
+        let payload = run_streaming_turn(
+            &task_state,
+            &task_tenant,
+            task_user.as_deref(),
+            &id,
+            &mut conversation,
+            &task_input,
+            event_tx,
+        )
+        .await;
+        let _ = done_tx.send(payload);
+    });
+
+    Sse::new(build_sse_stream(event_rx, done_rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// State threaded through the SSE [`futures::stream::unfold`]: live events
+/// first, then the terminal `done` frame, then end.
+enum SseState {
+    /// Still forwarding live executor events; carries the receivers.
+    Live(
+        tokio::sync::mpsc::Receiver<executor::StreamEvent>,
+        tokio::sync::oneshot::Receiver<StreamDonePayload>,
+    ),
+    /// Finished.
+    End,
+}
+
+/// Map a live [`executor::StreamEvent`] to its named SSE [`Event`].
+fn event_to_sse(ev: &executor::StreamEvent) -> Event {
+    use executor::StreamEvent as E;
+    let (name, data) = match ev {
+        E::Reasoning { .. } => ("reasoning", serde_json::to_string(ev)),
+        E::ToolCall { .. } => ("tool_call", serde_json::to_string(ev)),
+        E::ToolResult { .. } => ("tool_result", serde_json::to_string(ev)),
+        E::AnswerDelta { .. } => ("answer", serde_json::to_string(ev)),
+    };
+    Event::default()
+        .event(name)
+        .data(data.unwrap_or_else(|_| "{}".to_owned()))
+}
+
+/// Build the SSE item stream: forward each live event as a named SSE event
+/// (`reasoning` / `tool_call` / `tool_result` / `answer`), then a terminal
+/// `done` event carrying the summary payload.
+fn build_sse_stream(
+    event_rx: tokio::sync::mpsc::Receiver<executor::StreamEvent>,
+    done_rx: tokio::sync::oneshot::Receiver<StreamDonePayload>,
+) -> impl Stream<Item = std::result::Result<Event, std::convert::Infallible>> {
+    futures::stream::unfold(
+        SseState::Live(event_rx, done_rx),
+        |state| async move {
+            match state {
+                SseState::Live(mut event_rx, done_rx) => match event_rx.recv().await {
+                    Some(ev) => {
+                        Some((Ok(event_to_sse(&ev)), SseState::Live(event_rx, done_rx)))
+                    }
+                    // Sender dropped → run finished; emit the done frame.
+                    None => emit_done(done_rx).await,
+                },
+                SseState::End => None,
+            }
+        },
+    )
+}
+
+/// Await the terminal summary and emit it as the `done` SSE event. A
+/// dropped oneshot (run task panicked) yields a minimal error `done`.
+async fn emit_done(
+    done_rx: tokio::sync::oneshot::Receiver<StreamDonePayload>,
+) -> Option<(std::result::Result<Event, std::convert::Infallible>, SseState)> {
+    let payload = done_rx.await.unwrap_or_else(|_| StreamDonePayload {
+        conversation_id: String::new(),
+        response: "the agent run failed".to_owned(),
+        metrics: None,
+        citations: Vec::new(),
+        grounding: None,
+    });
+    let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
+    let event = Event::default().event("done").data(data);
+    Some((Ok(event), SseState::End))
 }
 
 // ── Conversations ────────────────────────────────────────────────────────

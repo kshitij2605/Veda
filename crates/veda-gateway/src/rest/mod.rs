@@ -334,6 +334,12 @@ pub fn build_router(app_state: state::AppState) -> Router {
                 .delete(agents::delete_agent),
         )
         .route("/v1/agents/{id}/converse", post(agents::converse))
+        // Streaming converse over Server-Sent Events (additive; blocking
+        // /converse above is unchanged). Same auth/tenant/RLS.
+        .route(
+            "/v1/agents/{id}/converse/stream",
+            post(agents::converse_stream),
+        )
         // Agent-to-Agent (A2A) — discovery card + sync JSON-RPC message/send
         .route("/v1/a2a/{agent_id}/card", get(a2a::agent_card))
         .route("/v1/a2a/{agent_id}", post(a2a::message_send))
