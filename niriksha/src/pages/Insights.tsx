@@ -5,6 +5,7 @@ import {
   Bell,
   Check,
   ChevronRight,
+  Layers,
   Play,
   RotateCw,
   ShieldAlert,
@@ -13,6 +14,7 @@ import {
 import {
   ackInsight,
   fetchChannels,
+  fetchIncidents,
   fetchInsights,
   fetchInsightsHistory,
   fetchRules,
@@ -24,6 +26,7 @@ import {
   type AgentStep,
   type ChannelsConfig,
   type ChannelsView,
+  type Incident,
   type OpsEvent,
   type RuleInfo,
   type Severity,
@@ -43,7 +46,7 @@ import {
 import { useInsightsStore } from '../stores/insightsStore'
 import { cn } from '../lib/cn'
 
-type View = 'open' | 'history' | 'rules' | 'channels'
+type View = 'open' | 'incidents' | 'history' | 'rules' | 'channels'
 
 /**
  * Insights — the ops-advisor surface. Open events (severity-sorted) with
@@ -55,6 +58,7 @@ export function Insights() {
   const [view, setView] = useState<View>('open')
   const [events, setEvents] = useState<OpsEvent[] | null>(null)
   const [history, setHistory] = useState<OpsEvent[] | null>(null)
+  const [incidents, setIncidents] = useState<Incident[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
@@ -90,6 +94,15 @@ export function Insights() {
     }
   }, [])
 
+  const loadIncidents = useCallback(async () => {
+    try {
+      const { data } = await fetchIncidents()
+      setIncidents(data.incidents)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load incidents')
+    }
+  }, [])
+
   // Initial load + 5 s poll of open events while the open view is up.
   useEffect(() => {
     loadOpen(true)
@@ -105,6 +118,10 @@ export function Insights() {
     if (view === 'history' && history === null) loadHistory()
   }, [view, history, loadHistory])
 
+  useEffect(() => {
+    if (view === 'incidents' && incidents === null) loadIncidents()
+  }, [view, incidents, loadIncidents])
+
   const runCheck = async () => {
     setRunning(true)
     try {
@@ -112,6 +129,7 @@ export function Insights() {
       toast.success(`Advisor tick: ${data.opened} opened, ${data.closed} closed`)
       await loadOpen(false)
       if (view === 'history') await loadHistory()
+      if (view === 'incidents') await loadIncidents()
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Run failed')
     } finally {
@@ -183,6 +201,7 @@ export function Insights() {
 
       <nav className="flex items-center gap-1 px-4 h-10 border-b border-[var(--color-border)] flex-none">
         <ViewTab id="open" label="Open" view={view} onSelect={setView} />
+        <ViewTab id="incidents" label="Incidents" view={view} onSelect={setView} />
         <ViewTab id="history" label="History" view={view} onSelect={setView} />
         <ViewTab id="rules" label="Rules" view={view} onSelect={setView} />
         <ViewTab id="channels" label="Channels" view={view} onSelect={setView} />
@@ -207,6 +226,19 @@ export function Insights() {
             />
           ) : (
             <EventList events={events} onSelect={setSelected} onAck={ack} />
+          ))}
+
+        {view === 'incidents' &&
+          (incidents === null ? (
+            <ListSkeleton />
+          ) : incidents.length === 0 ? (
+            <EmptyState
+              icon={<Layers size={20} strokeWidth={2} />}
+              title="No incidents yet"
+              description="Recurring events are grouped into incidents by the correlator (runs every few minutes). Once it has run, clusters appear here."
+            />
+          ) : (
+            <IncidentList incidents={incidents} />
           ))}
 
         {view === 'history' &&
@@ -359,6 +391,55 @@ function SeverityBadge({ severity }: { severity: Severity }) {
   }
   const { label, variant } = map[severity]
   return <Badge label={label} variant={variant} dot className="flex-none" />
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Incident list — recurring/duplicate events collapsed into one row each
+   ──────────────────────────────────────────────────────────────────── */
+
+function IncidentList({ incidents }: { incidents: Incident[] }) {
+  return (
+    <ul className="flex flex-col gap-2">
+      {incidents.map((inc) => {
+        const ruleIds = inc.rule_ids ?? []
+        const count = inc.count ?? inc.member_event_ids?.length ?? 0
+        return (
+          <li key={inc.id}>
+            <div className="w-full rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2.5">
+              <div className="flex items-center gap-2">
+                <SeverityBadge severity={inc.max_severity} />
+                <span className="text-[13px] font-medium text-[var(--color-text)] truncate">
+                  {inc.representative}
+                </span>
+                <Badge
+                  label={`seen ${count}×`}
+                  variant="accent"
+                  mono
+                  className="flex-none"
+                />
+              </div>
+              <div className="flex items-center gap-2 mt-1 text-[11px] text-[var(--color-text-subtle)] flex-wrap">
+                <span className="inline-flex items-center gap-1">
+                  <Layers size={11} strokeWidth={2} />
+                  {ruleIds.length > 0 ? ruleIds.join(', ') : 'correlated'}
+                </span>
+                <span aria-hidden>·</span>
+                <span>
+                  seen {count}× since {formatRelative(inc.first_seen_ms)}
+                </span>
+                {inc.last_seen_ms > inc.first_seen_ms && (
+                  <>
+                    <span aria-hidden>·</span>
+                    <span>last {formatRelative(inc.last_seen_ms)}</span>
+                  </>
+                )}
+              </div>
+            </div>
+          </li>
+        )
+      })}
+    </ul>
+  )
 }
 
 /* ────────────────────────────────────────────────────────────────────────

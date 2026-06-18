@@ -227,6 +227,33 @@ export const triageEvent = (eventId: string) =>
     `/admin/insights/${encodeURIComponent(eventId)}/triage`,
   )
 
+/**
+ * A semantic incident cluster — recurring/duplicate ops events collapsed
+ * into one row. Mirrors `advisor::incidents::Incident`. Produced by the
+ * off-tick incident correlator and read from `GET /admin/incidents`.
+ */
+export interface Incident {
+  id: string
+  /** Representative title (highest-severity / earliest member). */
+  representative: string
+  /** Member event ids collapsed into this incident. */
+  member_event_ids: string[]
+  /** Distinct rule ids contributing to this incident. */
+  rule_ids: string[]
+  /** Number of member events (alert-noise collapsed). */
+  count: number
+  max_severity: Severity
+  first_seen_ms: number
+  last_seen_ms: number
+}
+
+export interface IncidentsResponse {
+  incidents: Incident[]
+}
+
+export const fetchIncidents = () =>
+  api.get<IncidentsResponse>('/admin/incidents')
+
 /** Human-readable label for a scope. */
 export function scopeLabel(scope: Scope): string {
   switch (scope.kind) {
