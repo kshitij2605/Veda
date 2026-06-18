@@ -7,6 +7,7 @@
 
 pub mod catalog;
 pub mod executor;
+pub mod grounding;
 pub mod model;
 pub mod store;
 pub mod tools;

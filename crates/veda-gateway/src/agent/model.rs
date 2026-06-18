@@ -177,6 +177,14 @@ pub struct ConverseResponse {
     /// Additive + serde-back-compat: omitted when unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<crate::agent::executor::RunMetrics>,
+    /// Retrieved chunks the answer is grounded in (empty when the agent
+    /// did not retrieve). Additive + serde-back-compat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citations: Vec<crate::agent::grounding::Citation>,
+    /// Faithfulness / answer-relevancy scores for this turn, when scored.
+    /// Additive + serde-back-compat: omitted when unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grounding: Option<crate::agent::grounding::Grounding>,
 }
 
 #[cfg(test)]
@@ -248,8 +256,12 @@ mod tests {
             response: "hi".to_owned(),
             steps: Vec::new(),
             metrics: None,
+            citations: Vec::new(),
+            grounding: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("metrics").is_none(), "metrics should be skipped: {v}");
+        assert!(v.get("citations").is_none(), "empty citations should be skipped: {v}");
+        assert!(v.get("grounding").is_none(), "grounding should be skipped: {v}");
     }
 }

@@ -407,6 +407,14 @@ pub struct TriageResponse {
     pub steps: Vec<AgentStep>,
     /// Run-level APM metrics (timing + token usage) for the triage turn.
     pub metrics: crate::agent::executor::RunMetrics,
+    /// Retrieved chunks the explanation is grounded in (empty when the ops
+    /// agent did not retrieve from a collection).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citations: Vec<crate::agent::grounding::Citation>,
+    /// Faithfulness / answer-relevancy scores for the triage turn, when
+    /// scored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grounding: Option<crate::agent::grounding::Grounding>,
 }
 
 /// Find an event by id: open events first, then closed history.
@@ -468,7 +476,8 @@ pub async fn triage_event(
     // Admin caller (no RLS user). Resolve the in-memory `veda-ops` agent
     // and drive the executor via the shared agent-turn helper.
     let tenant = TenantId::default_tenant();
-    let (_agent, result) = run_agent_turn(&state, &tenant, None, "veda-ops", &[], &prompt)
+    let (_agent, result, citations, grounding) =
+        run_agent_turn(&state, &tenant, None, "veda-ops", &[], &prompt)
         .await
         .map_err(|e| match e {
             AgentTurnError::NoLlm => (
@@ -491,6 +500,8 @@ pub async fn triage_event(
         explanation: result.response,
         steps: result.steps,
         metrics: result.metrics,
+        citations,
+        grounding,
     }))
 }
 

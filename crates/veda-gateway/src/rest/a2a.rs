@@ -139,12 +139,16 @@ pub async fn message_send(
     let user = super::agents::rls_user(&claims);
 
     match run_agent_turn(&state, &tenant, user.as_deref(), &agent_id, &[], &input).await {
-        Ok((_agent, result)) => {
+        Ok((_agent, result, citations, grounding)) => {
             let message = serde_json::json!({
                 "role": "agent",
                 "parts": [ { "kind": "text", "text": result.response } ],
                 "kind": "message",
-                "metadata": { "steps": result.steps },
+                "metadata": {
+                    "steps": result.steps,
+                    "citations": citations,
+                    "grounding": grounding,
+                },
             });
             Json(serde_json::json!({
                 "jsonrpc": "2.0",

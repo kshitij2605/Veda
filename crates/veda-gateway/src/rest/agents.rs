@@ -40,6 +40,7 @@ use super::collections::ErrorResponse;
 use super::state::AppState;
 use crate::agent::catalog::{ToolContext, ToolErrorKind, ToolSpec};
 use crate::agent::executor::{self, DEFAULT_MAX_STEPS};
+use crate::agent::grounding::{self, Citation, Grounding};
 use crate::agent::model::{
     default_agent, Agent, AgentTool, Conversation, ConversationMessage, ConverseRequest,
     ConverseResponse,
@@ -307,7 +308,7 @@ pub(crate) async fn run_agent_turn(
     agent_id: &str,
     history: &[ConversationMessage],
     input: &str,
-) -> Result<(Agent, RunResult), AgentTurnError> {
+) -> Result<(Agent, RunResult, Vec<Citation>, Option<Grounding>), AgentTurnError> {
     // 1. LLM must be configured.
     let llm_cfg = state
         .inner
@@ -378,7 +379,61 @@ pub(crate) async fn run_agent_turn(
     //    A2A message/send, and ops triage).
     emit_run_metrics(&model_name, &result.metrics);
 
-    Ok((agent, result))
+    // 8. Post-run grounding: extract citations from the trace and (best-
+    //    effort, off the hot path) score faithfulness + answer-relevancy.
+    //    A scoring failure/timeout must NEVER fail the turn — everything
+    //    here is non-fatal and falls back to `None`/no-context.
+    let citations = grounding::extract_citations(&result.steps);
+    let grounding = if citations.is_empty() {
+        None
+    } else {
+        let contexts: Vec<String> = citations
+            .iter()
+            .filter_map(|c| c.snippet.clone())
+            .collect();
+        // Resolve a text embedder for the fallback path (clone the config
+        // off the lock; build the client off the lock — mirrors logs
+        // categorize). `None` when the deployment can't embed text.
+        let embedder = {
+            use veda_core::embedding::Modality;
+            let registry = state.inner.embedding_registry.read().await;
+            registry
+                .find_by_modality(Modality::Text)
+                .first()
+                .map(|c| veda_core::embedding_client::EmbeddingClient::new((*c).clone()))
+        };
+        let g = grounding::score_grounding(
+            Some(&client),
+            embedder.as_ref(),
+            input,
+            &result.response,
+            &contexts,
+        )
+        .await;
+        emit_grounding_metrics(&model_name, citations.len(), &g);
+        Some(g)
+    };
+
+    Ok((agent, result, citations, grounding))
+}
+
+/// Emit grounding metrics for one scored run: a `veda_agent_citations`
+/// count and, when faithfulness was scored, a `veda_agent_faithfulness`
+/// gauge. Best-effort; never fails the turn.
+fn emit_grounding_metrics(model: &str, citation_count: usize, g: &Grounding) {
+    metrics::counter!(
+        "veda_agent_citations",
+        "model" => model.to_owned()
+    )
+    .increment(citation_count as u64);
+    if let Some(f) = g.faithfulness {
+        metrics::gauge!(
+            "veda_agent_faithfulness",
+            "model" => model.to_owned(),
+            "method" => g.method.clone()
+        )
+        .set(f);
+    }
 }
 
 /// Best-effort `gen_ai.system` (GenAI-semconv provider) value for a model
@@ -486,7 +541,7 @@ pub async fn converse(
 
     // Run the turn via the shared helper (resolves agent, builds the model
     // + prompt + tool context, drives the executor loop).
-    let (_agent, result) = run_agent_turn(
+    let (_agent, result, citations, grounding) = run_agent_turn(
         &state,
         &tenant,
         user.as_deref(),
@@ -525,6 +580,8 @@ pub async fn converse(
         response: result.response,
         steps: result.steps,
         metrics: Some(result.metrics),
+        citations,
+        grounding,
     }))
 }
 
@@ -609,6 +666,141 @@ mod tests {
         assert!(out.contains("veda_agent_run_duration_seconds"), "missing duration series:\n{out}");
         assert!(out.contains("veda_llm_cost_usd_total"), "missing cost series:\n{out}");
         assert!(out.contains("gpt-4o-mini"), "missing model label:\n{out}");
+    }
+
+    // ── Grounding wiring (post-run, the shape `converse`/triage return) ───
+    //
+    // `run_agent_turn` builds a real LlmClient (network) internally, so the
+    // post-run grounding wiring is exercised here against the same
+    // building blocks the handler uses: citations are extracted from the
+    // trace and scored with a fake judge, then assembled into the response
+    // shape. The full no-LLM converse path (503) is covered by the
+    // gateway integration test `test_converse_without_llm_returns_503`.
+
+    use crate::agent::grounding::{self, Grounding};
+    use crate::agent::model::AgentStep;
+    use veda_core::error::Result as LlmResult;
+    use veda_core::llm_client::{
+        ChatMessage, ChatModel, CompletionOptions, ToolCompletion, ToolDef,
+    };
+
+    struct FakeJudge(String);
+    impl ChatModel for FakeJudge {
+        async fn complete_with_tools(
+            &self,
+            _m: &[ChatMessage],
+            _t: &[ToolDef],
+            _tc: Option<&str>,
+            _o: &CompletionOptions,
+        ) -> LlmResult<ToolCompletion> {
+            Ok(ToolCompletion {
+                content: Some(self.0.clone()),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+            })
+        }
+    }
+
+    fn search_steps() -> Vec<AgentStep> {
+        vec![
+            AgentStep::ToolCall {
+                tool_call_id: "c1".to_owned(),
+                tool_id: "search".to_owned(),
+                args: serde_json::json!({ "collection": "docs", "query": "hnsw" }),
+            },
+            AgentStep::ToolResult {
+                tool_call_id: "c1".to_owned(),
+                result: serde_json::json!({
+                    "count": 1,
+                    "hits": [{ "id": "id-1", "distance": 0.1, "fields": { "body": "HNSW is a graph index." } }]
+                }),
+                is_error: false,
+                duration_ms: Some(1.0),
+            },
+            AgentStep::Reasoning { text: "Veda uses HNSW.".to_owned() },
+        ]
+    }
+
+    /// When the agent used `search`, the converse-level surface carries
+    /// citations + a (judged) grounding score — the shape `converse`
+    /// builds from the post-run wiring.
+    #[tokio::test]
+    async fn converse_surface_has_citations_and_grounding_when_searched() {
+        let steps = search_steps();
+        let citations = grounding::extract_citations(&steps);
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].collection.as_deref(), Some("docs"));
+
+        let contexts: Vec<String> =
+            citations.iter().filter_map(|c| c.snippet.clone()).collect();
+        let judge = FakeJudge("FAITHFULNESS: 0.9\nANSWER_RELEVANCY: 0.8".to_owned());
+        let g = grounding::score_grounding(
+            Some(&judge),
+            None,
+            "what index does veda use?",
+            "Veda uses HNSW.",
+            &contexts,
+        )
+        .await;
+
+        let resp = ConverseResponse {
+            conversation_id: "c".to_owned(),
+            response: "Veda uses HNSW.".to_owned(),
+            steps,
+            metrics: None,
+            citations,
+            grounding: Some(g),
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["citations"][0]["chunk_id"], "id-1");
+        assert_eq!(v["grounding"]["method"], "llm_judge");
+        assert_eq!(v["grounding"]["faithfulness"], 0.9);
+    }
+
+    /// No search → no citations and grounding is `None`/`no_context`; the
+    /// response omits the empty `citations`/null `grounding` (serde skip).
+    #[tokio::test]
+    async fn converse_surface_empty_citations_no_context_when_not_searched() {
+        let steps = vec![AgentStep::Reasoning { text: "hi, no tools".to_owned() }];
+        let citations = grounding::extract_citations(&steps);
+        assert!(citations.is_empty());
+
+        // Mirror the handler: no citations → grounding stays None.
+        let grounding: Option<Grounding> = None;
+        let resp = ConverseResponse {
+            conversation_id: "c".to_owned(),
+            response: "hi".to_owned(),
+            steps,
+            metrics: None,
+            citations,
+            grounding,
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert!(v.get("citations").is_none(), "empty citations skipped: {v}");
+        assert!(v.get("grounding").is_none(), "null grounding skipped: {v}");
+    }
+
+    #[test]
+    fn grounding_metrics_emit_count_and_faithfulness_gauge() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            emit_grounding_metrics(
+                "gpt-4o-mini",
+                3,
+                &Grounding {
+                    faithfulness: Some(0.77),
+                    answer_relevancy: Some(0.6),
+                    method: "llm_judge".to_owned(),
+                },
+            );
+        });
+        let out = handle.render();
+        assert!(out.contains("veda_agent_citations"), "missing citations series:\n{out}");
+        assert!(out.contains("veda_agent_faithfulness"), "missing faithfulness series:\n{out}");
     }
 
     /// An unpriced model still emits tokens + duration, but no cost series
