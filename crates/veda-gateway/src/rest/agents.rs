@@ -311,6 +311,7 @@ pub(crate) async fn run_agent_turn(
     agent_id: &str,
     history: &[ConversationMessage],
     input: &str,
+    conversation_id: Option<&str>,
 ) -> Result<(Agent, RunResult, Vec<Citation>, Option<Grounding>), AgentTurnError> {
     // 1. LLM must be configured.
     let llm_cfg = state
@@ -458,7 +459,7 @@ pub(crate) async fn run_agent_turn(
     //    the path is byte-identical to today.
     if crate::agent::memory::should_use_memory(&agent) {
         let ts = crate::advisor::engine::now_ms().max(0);
-        let conversation_id = "";
+        let conversation_id = conversation_id.unwrap_or("");
         crate::agent::memory::write_turn(
             state, tenant, agent_id, conversation_id, "user", input, ts,
         )
@@ -611,6 +612,7 @@ pub async fn converse(
         &id,
         &history,
         &user_input,
+        Some(&conversation.id),
     )
     .await
     .map_err(|e| match e {
@@ -800,13 +802,24 @@ async fn run_streaming_turn(
         Some(g)
     };
 
-    // Memory write-back (mirrors run_agent_turn).
+    // Memory write-back (mirrors run_agent_turn). The conversation id is
+    // owned here (the streaming handler created/loaded the Conversation).
     if crate::agent::memory::should_use_memory(&agent) {
         let ts = crate::advisor::engine::now_ms().max(0);
-        crate::agent::memory::write_turn(state, tenant, agent_id, "", "user", input, ts).await;
+        let conversation_id = conversation.id.as_str();
+        crate::agent::memory::write_turn(
+            state, tenant, agent_id, conversation_id, "user", input, ts,
+        )
+        .await;
         if !result.response.trim().is_empty() {
             crate::agent::memory::write_turn(
-                state, tenant, agent_id, "", "assistant", &result.response, ts,
+                state,
+                tenant,
+                agent_id,
+                conversation_id,
+                "assistant",
+                &result.response,
+                ts,
             )
             .await;
         }
