@@ -38,6 +38,7 @@ use crate::advisor::event::{RemediationAction, Scope, Severity};
 use crate::advisor::slo::{SloKind, SloRegistry, SloState, SloStatus};
 use crate::advisor::synthetic::{run_probe, SyntheticRegistry, SyntheticResults};
 use crate::advisor::recall_probe::RecallResults;
+use crate::advisor::faithfulness::FaithfulnessResults;
 use crate::advisor::snapshot::{collect, OpsSnapshot, SnapshotHistory, DEFAULT_HISTORY_CAP};
 use crate::advisor::anomaly::detect_anomalies;
 use crate::logs::{LogCategory, categorize::CategorizeOptions};
@@ -89,6 +90,12 @@ pub struct AdvisorState {
     /// READ (cheaply) by [`crate::advisor::snapshot::collect`] to build
     /// `index_health`. The probe NEVER runs inside `run_tick`.
     pub recall_results: Mutex<RecallResults>,
+    /// Bounded faithfulness-score series, persisted to
+    /// `{data_dir}/_faithfulness_results.json`. Written (brief lock, off
+    /// the network path) by `run_agent_turn` when a turn scored
+    /// faithfulness; READ by [`run_tick`] to feed the
+    /// [`SloKind::Faithfulness`] SLI. Mirrors [`RecallResults`].
+    pub faithfulness_results: Mutex<FaithfulnessResults>,
     /// Shared async HTTP client, reused by the per-tick [`Notifier`].
     pub http: reqwest::Client,
 }
@@ -110,6 +117,9 @@ impl AdvisorState {
             )),
             recall_results: Mutex::new(crate::advisor::recall_probe::RecallResults::load(
                 &data_dir.join(crate::advisor::recall_probe::RECALL_RESULTS_FILE),
+            )),
+            faithfulness_results: Mutex::new(crate::advisor::faithfulness::FaithfulnessResults::load(
+                &data_dir.join(crate::advisor::faithfulness::FAITHFULNESS_RESULTS_FILE),
             )),
             http: reqwest::Client::new(),
         }
@@ -278,7 +288,12 @@ fn slo_observation(kind: &SloKind, snap: &OpsSnapshot, prev: Option<&OpsSnapshot
             let good = lats.iter().filter(|&&ms| ms <= *threshold_ms).count() as u64;
             (good, total)
         }
-        SloKind::Synthetic { .. } => (0, 0),
+        // Synthetic / Recall / Faithfulness observations come from the
+        // advisor's result stores, not the snapshot, so the caller gathers
+        // them separately (see `run_tick`).
+        SloKind::Synthetic { .. } | SloKind::Recall { .. } | SloKind::Faithfulness { .. } => {
+            (0, 0)
+        }
     }
 }
 
@@ -468,10 +483,65 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
                         })
                         .collect()
                 };
+
+                // Recall (proxy) observations: read each Recall SLO's
+                // latest sample under a brief recall_results lock, scale to
+                // good/1000 so `sli_pct = recall%`. Skip when no sample.
+                let recall_obs: Vec<(String, (u64, u64))> = {
+                    let results = advisor.recall_results.lock().await;
+                    defs.iter()
+                        .filter_map(|d| match &d.kind {
+                            SloKind::Recall { collection, .. } => results
+                                .latest_recall(collection)
+                                .map(|s| {
+                                    let good = (s.recall_at_k * 1000.0).round() as u64;
+                                    (d.id.clone(), (good.min(1000), 1000u64))
+                                }),
+                            _ => None,
+                        })
+                        .collect()
+                };
+
+                // Faithfulness observations: every score recorded since the
+                // previous tick, each scaled to good/100 so the accumulated
+                // `sli_pct` is the mean faithfulness %. Skip when no samples.
+                let faith_obs: Vec<(String, (u64, u64))> = {
+                    let results = advisor.faithfulness_results.lock().await;
+                    let since = prev_tick_ms.unwrap_or(0);
+                    defs.iter()
+                        .filter_map(|d| match &d.kind {
+                            SloKind::Faithfulness { agent } => {
+                                let scores = results.since(agent.as_deref(), since);
+                                if scores.is_empty() {
+                                    return None;
+                                }
+                                let mut good = 0u64;
+                                let mut total = 0u64;
+                                for f in scores {
+                                    good += (f * 100.0).round().clamp(0.0, 100.0) as u64;
+                                    total += 100;
+                                }
+                                Some((d.id.clone(), (good, total)))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                };
+
                 let mut slo_state = advisor.slo_state.lock().await;
                 for d in defs {
                     let (good, total) = match &d.kind {
                         SloKind::Synthetic { .. } => synth_obs
+                            .iter()
+                            .find(|(id, _)| id == &d.id)
+                            .map(|(_, gt)| *gt)
+                            .unwrap_or((0, 0)),
+                        SloKind::Recall { .. } => recall_obs
+                            .iter()
+                            .find(|(id, _)| id == &d.id)
+                            .map(|(_, gt)| *gt)
+                            .unwrap_or((0, 0)),
+                        SloKind::Faithfulness { .. } => faith_obs
                             .iter()
                             .find(|(id, _)| id == &d.id)
                             .map(|(_, gt)| *gt)
@@ -972,6 +1042,186 @@ mod tests {
             !hits.iter().any(|h| h.rule_id == "synthetic_failing"),
             "healthy probe must trip no synthetic_failing: {hits:?}"
         );
+    }
+
+    fn recall_slo(id: &str, collection: &str) -> crate::advisor::slo::SloDef {
+        crate::advisor::slo::SloDef {
+            id: id.into(),
+            name: format!("{id} recall"),
+            kind: SloKind::Recall {
+                collection: collection.into(),
+                k: Some(10),
+            },
+            target_pct: 90.0,
+            window_secs: 300,
+            fast_burn: crate::advisor::slo::default_fast_burn(),
+            slow_burn: crate::advisor::slo::default_slow_burn(),
+        }
+    }
+
+    fn faith_slo(id: &str, agent: Option<&str>) -> crate::advisor::slo::SloDef {
+        crate::advisor::slo::SloDef {
+            id: id.into(),
+            name: format!("{id} faithfulness"),
+            kind: SloKind::Faithfulness {
+                agent: agent.map(|a| a.to_owned()),
+            },
+            target_pct: 90.0,
+            window_secs: 300,
+            fast_burn: crate::advisor::slo::default_fast_burn(),
+            slow_burn: crate::advisor::slo::default_slow_burn(),
+        }
+    }
+
+    #[test]
+    fn recall_sample_feeds_recall_sli_as_proxy() {
+        use crate::advisor::slo::SloState;
+
+        // recall 0.7 → good 700 / total 1000 → sli 70% vs target 90 →
+        // non-compliant + budget exhausted (consumed = 0.30/0.10 = 3.0×).
+        // The slo_budget_exhausted rule fires on this unchanged.
+        let def = recall_slo("docs", "docs");
+        let now_u = 10_000_000u64;
+        let recall_at_k: f64 = 0.7;
+        let good = (recall_at_k * 1000.0).round() as u64;
+
+        let mut slo_state = SloState::new(60);
+        slo_state.record(&def.id, good, 1000, now_u);
+        let status = slo_state.status(&def, now_u);
+        assert!((status.sli_pct.unwrap() - 70.0).abs() < 1e-9);
+        assert!(!status.compliant);
+        assert!(status.budget_exhausted);
+        // burn = 0.30 / 0.10 = 3.0× (below the 14.4 fast threshold but a
+        // sustained over-budget burn the slow window catches).
+        assert!((status.burn_rate_fast.unwrap() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn healthy_recall_sample_is_compliant() {
+        use crate::advisor::slo::SloState;
+        let def = recall_slo("docs", "docs");
+        let now_u = 10_000_000u64;
+        let good = (0.99_f64 * 1000.0).round() as u64; // 990
+        let mut slo_state = SloState::new(60);
+        slo_state.record(&def.id, good, 1000, now_u);
+        let status = slo_state.status(&def, now_u);
+        assert!((status.sli_pct.unwrap() - 99.0).abs() < 1e-9);
+        assert!(status.compliant);
+        assert!(!status.breaching_fast);
+        assert!(!status.budget_exhausted);
+    }
+
+    #[test]
+    fn faithfulness_samples_feed_mean_faithfulness_sli() {
+        use crate::advisor::faithfulness::FaithfulnessResults;
+        use crate::advisor::slo::SloState;
+
+        // Seeded scores with mean 0.6 → accumulating good/100 each → sli
+        // ≈ 60%. Mirrors how run_tick gathers faith_obs.
+        let mut fr = FaithfulnessResults::new();
+        let now_u = 10_000_000u64;
+        for (i, f) in [0.5, 0.6, 0.7].iter().enumerate() {
+            fr.record("veda-agent", *f, now_u - 100 + i as u64);
+        }
+        let def = faith_slo("agent-faith", Some("veda-agent"));
+        let since = now_u - 1000;
+        let scores = fr.since(Some("veda-agent"), since);
+        assert_eq!(scores.len(), 3);
+
+        let mut good = 0u64;
+        let mut total = 0u64;
+        for f in scores {
+            good += (f * 100.0).round().clamp(0.0, 100.0) as u64;
+            total += 100;
+        }
+        // (50 + 60 + 70) / 300 = 60%.
+        assert_eq!((good, total), (180, 300));
+
+        let mut slo_state = SloState::new(60);
+        slo_state.record(&def.id, good, total, now_u);
+        let status = slo_state.status(&def, now_u);
+        assert!((status.sli_pct.unwrap() - 60.0).abs() < 1e-9);
+        assert!(!status.compliant, "60% mean faithfulness vs target 90");
+    }
+
+    #[tokio::test]
+    async fn run_tick_records_recall_and_faithfulness_slis() {
+        // End-to-end through run_tick: seed a Recall SLO + a recall sample
+        // (0.7) and a Faithfulness SLO + scores (mean 0.6); after a tick the
+        // slo_state status should reflect ~70% and ~60% SLIs.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let advisor = state.advisor();
+        let now_u = now_ms().max(0) as u64;
+
+        // Register the two quality SLOs.
+        {
+            let mut slos = advisor.slos.write().await;
+            slos.upsert(recall_slo("docs-recall", "docs"));
+            slos.upsert(faith_slo("agent-faith", Some("veda-agent")));
+        }
+        // Seed a recall sample for "docs".
+        {
+            let mut rr = advisor.recall_results.lock().await;
+            rr.record(crate::advisor::recall_probe::RecallSample {
+                collection: "docs".into(),
+                index_type: "hnsw".into(),
+                recall_at_k: 0.7,
+                k: 10,
+                sampled_queries: 20,
+                p95_ms: None,
+                params: Default::default(),
+                ts_ms: now_u,
+                is_proxy: true,
+            });
+        }
+        // Seed faithfulness scores after the (empty) previous-tick boundary.
+        {
+            let mut fr = advisor.faithfulness_results.lock().await;
+            for f in [0.5, 0.6, 0.7] {
+                fr.record("veda-agent", f, now_u);
+            }
+        }
+
+        run_tick(&state).await;
+
+        let slo_state = advisor.slo_state.lock().await;
+        let now_after = now_ms().max(0) as u64;
+        let r_status = slo_state.status(&recall_slo("docs-recall", "docs"), now_after);
+        assert!(
+            (r_status.sli_pct.unwrap() - 70.0).abs() < 1e-6,
+            "recall sli {:?}",
+            r_status.sli_pct
+        );
+        let f_status = slo_state.status(&faith_slo("agent-faith", Some("veda-agent")), now_after);
+        assert!(
+            (f_status.sli_pct.unwrap() - 60.0).abs() < 1e-6,
+            "faith sli {:?}",
+            f_status.sli_pct
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tick_skips_quality_slis_with_no_sample() {
+        // A Recall SLO with no sample + a Faithfulness SLO with no scores →
+        // the tick records nothing → status has no data (None sli, compliant).
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let advisor = state.advisor();
+        {
+            let mut slos = advisor.slos.write().await;
+            slos.upsert(recall_slo("docs-recall", "missing-coll"));
+            slos.upsert(faith_slo("agent-faith", Some("nobody")));
+        }
+        run_tick(&state).await;
+        let slo_state = advisor.slo_state.lock().await;
+        let now_after = now_ms().max(0) as u64;
+        let r = slo_state.status(&recall_slo("docs-recall", "missing-coll"), now_after);
+        assert_eq!(r.sli_pct, None);
+        assert!(r.compliant);
+        let f = slo_state.status(&faith_slo("agent-faith", Some("nobody")), now_after);
+        assert_eq!(f.sli_pct, None);
+        assert!(f.compliant);
     }
 
     #[test]

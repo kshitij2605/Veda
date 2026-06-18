@@ -395,6 +395,8 @@ const KIND_OPTIONS: { value: SloKindTag; label: string }[] = [
   { value: 'latency', label: 'Latency' },
   { value: 'error_rate', label: 'Error rate' },
   { value: 'synthetic', label: 'Synthetic probe' },
+  { value: 'recall', label: 'Recall (proxy)' },
+  { value: 'faithfulness', label: 'Faithfulness' },
 ]
 
 function SloFormModal({
@@ -413,6 +415,15 @@ function SloFormModal({
   )
   const [probeId, setProbeId] = useState(
     slo?.kind.kind === 'synthetic' ? slo.kind.probe_id : '',
+  )
+  const [collection, setCollection] = useState(
+    slo?.kind.kind === 'recall' ? slo.kind.collection : '',
+  )
+  const [recallK, setRecallK] = useState(
+    slo?.kind.kind === 'recall' && slo.kind.k != null ? String(slo.kind.k) : '10',
+  )
+  const [agent, setAgent] = useState(
+    slo?.kind.kind === 'faithfulness' ? (slo.kind.agent ?? '') : '',
   )
   const [targetPct, setTargetPct] = useState(String(slo?.target_pct ?? 99))
   // Window expressed in minutes for friendlier entry.
@@ -439,18 +450,29 @@ function SloFormModal({
         return { kind: 'latency', threshold_ms: Number(thresholdMs) || 0 }
       case 'synthetic':
         return { kind: 'synthetic', probe_id: probeId.trim() }
+      case 'recall':
+        return {
+          kind: 'recall',
+          collection: collection.trim(),
+          ...(recallK.trim() ? { k: Number(recallK) } : {}),
+        }
+      case 'faithfulness':
+        return agent.trim()
+          ? { kind: 'faithfulness', agent: agent.trim() }
+          : { kind: 'faithfulness' }
       case 'error_rate':
         return { kind: 'error_rate' }
       default:
         return { kind: 'availability' }
     }
-  }, [kindTag, thresholdMs, probeId])
+  }, [kindTag, thresholdMs, probeId, collection, recallK, agent])
 
   const valid =
     name.trim().length > 0 &&
     Number(targetPct) > 0 &&
     Number(windowMin) > 0 &&
-    (kindTag !== 'synthetic' || probeId.trim().length > 0)
+    (kindTag !== 'synthetic' || probeId.trim().length > 0) &&
+    (kindTag !== 'recall' || collection.trim().length > 0)
 
   const submit = async () => {
     if (!valid) return
@@ -520,6 +542,43 @@ function SloFormModal({
               value={probeId}
               onChange={(e) => setProbeId(e.target.value)}
               placeholder="synthetic-…"
+              mono
+            />
+          </FormRow>
+        )}
+        {kindTag === 'recall' && (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <FormRow label="Collection">
+                <Input
+                  value={collection}
+                  onChange={(e) => setCollection(e.target.value)}
+                  placeholder="docs"
+                  mono
+                />
+              </FormRow>
+              <FormRow label="k (optional)">
+                <Input
+                  type="number"
+                  value={recallK}
+                  onChange={(e) => setRecallK(e.target.value)}
+                  mono
+                />
+              </FormRow>
+            </div>
+            <p className="text-[11px] text-[var(--color-text-subtle)] leading-relaxed -mt-1">
+              Recall is a <span className="font-medium">proxy</span> SLI (sampled
+              queries vs. a capped brute-force exact set), refreshed by the
+              background recall probe.
+            </p>
+          </>
+        )}
+        {kindTag === 'faithfulness' && (
+          <FormRow label="Agent (optional — blank = all agents)">
+            <Input
+              value={agent}
+              onChange={(e) => setAgent(e.target.value)}
+              placeholder="veda-agent"
               mono
             />
           </FormRow>
