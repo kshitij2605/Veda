@@ -28,6 +28,7 @@ pub mod ingest_logs;
 pub mod insights;
 pub mod jobs;
 pub mod llm;
+pub mod log_rate_analysis;
 pub mod logs;
 pub mod mcp;
 pub mod metrics_middleware;
@@ -175,6 +176,18 @@ fn forecast_router() -> Router<state::AppState> {
 fn changepoint_router() -> Router<state::AppState> {
     Router::new()
         .route("/v1/admin/change-points", get(changepoint::change_points))
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// Log-rate-analysis admin route (semantic spike root-cause attribution),
+/// gated by an extra `require_admin` route layer (same pattern as
+/// [`changepoint_router`]).
+fn log_rate_analysis_router() -> Router<state::AppState> {
+    Router::new()
+        .route(
+            "/v1/admin/log-rate-analysis",
+            get(log_rate_analysis::log_rate_analysis),
+        )
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
@@ -446,6 +459,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .merge(forecast_router())
         // Change-point detection — admin-only (extra require_admin).
         .merge(changepoint_router())
+        // Semantic spike root-cause attribution — admin-only (extra require_admin).
+        .merge(log_rate_analysis_router())
         // Semantic incident correlation — admin-only (extra require_admin).
         .merge(incidents_router());
 
