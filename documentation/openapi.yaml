@@ -1025,6 +1025,80 @@ paths:
                           type: array
                           items: { $ref: '#/components/schemas/OpsEvent' }
 
+  /v1/admin/change-points:
+    get:
+      summary: Change-point detections (admin-only).
+      description: |
+        Detects sustained LEVEL shifts and TREND breaks (not single-point
+        anomalies) in the advisor metric series (`disk_used_pct`, `rss_bytes`,
+        query `p95`, error-log count, per-collection `recall`). A pure
+        least-squares / two-window statistic with a well-fit gate plus a
+        warm-up (>=20 points) and a min-magnitude (1.5 sigma) guard, so it
+        never fires on a flat or noisy series. Computed in-tick (no network);
+        attached to the advisor snapshot's `change_points` and backed by the
+        rule `change_point_detected` (Medium).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  change_points:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        metric: { type: string, description: "e.g. disk_used_pct / rss_bytes / p95 / error_log_count / recall" }
+                        scope: { type: string, nullable: true }
+                        kind: { type: string, enum: [level, trend], description: "sustained level shift vs trend break" }
+                        before: { type: number, description: "pre-shift level (or slope, for a trend break)" }
+                        after: { type: number, description: "post-shift level (or slope, for a trend break)" }
+                        magnitude_sigma: { type: number, description: "shift size in baseline sigmas" }
+                        detected_at_ms: { type: integer }
+
+  /v1/admin/log-rate-analysis:
+    get:
+      summary: Semantic spike root-cause attribution (admin-only).
+      description: |
+        When the error/warn-log rate spikes, attributes it to the semantic
+        CATEGORIES driving it by reusing the embedding `LogCategorizer` — the
+        vector-native answer to a statistical log-rate analysis: it names
+        *which meaning-cluster* drove the spike, not just that one occurred.
+        Embedding runs off the advisor lock; a normalized-template fallback is
+        used (`method` = `template`) when no embedder is configured.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: query, name: window_secs, required: false, schema: { type: integer }, description: "the spike window to analyze" }
+        - { in: query, name: baseline_secs, required: false, schema: { type: integer }, description: "the baseline window to compare against" }
+        - { in: query, name: min_level, required: false, schema: { type: string, enum: [warn, error] }, description: "minimum log level to include" }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  window: { type: integer, description: "analyzed spike-window seconds" }
+                  baseline: { type: integer, description: "baseline-window seconds" }
+                  total_delta: { type: integer, description: "spike-count minus baseline-count over the categories" }
+                  method: { type: string, enum: [embedding, template], description: "embedding clustering, or normalized-template fallback" }
+                  drivers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        category: { type: string }
+                        representative: { type: string }
+                        spike_count: { type: integer }
+                        baseline_count: { type: integer }
+                        growth: { type: number, description: "spike/baseline growth ratio" }
+                        share_of_growth: { type: number, description: "this category's fraction of total_delta" }
+                        is_new: { type: boolean, description: "category not present in the baseline window" }
+
   /v1/admin/incidents:
     get:
       summary: Semantic incident clusters (admin-only).
@@ -1032,7 +1106,12 @@ paths:
         Ops-event title+detail are embedded and clustered by cosine into
         incidents (rule_id+scope fallback when no embedder is configured), so
         a storm of related events collapses into one incident. Produced by an
-        off-tick runner (`VEDA_INCIDENT_INTERVAL_SECS`, default 300).
+        off-tick runner (`VEDA_INCIDENT_INTERVAL_SECS`, default 300). On a
+        newly-correlated incident the `veda-ops` agent best-effort drafts a
+        root-cause paragraph + runbook step into `draft` (None without an
+        LLM), and the incident is scored for embedding-based novelty
+        (`is_novel` / `novelty_score`). The response also carries a
+        `noise_reduction` summary (N alerts collapsed to one incident).
       security: [ { bearerAuth: [] } ]
       responses:
         '200':
@@ -1054,6 +1133,16 @@ paths:
                         max_severity: { type: string, enum: [high, medium, low] }
                         first_seen: { type: integer }
                         last_seen: { type: integer }
+                        draft: { type: string, nullable: true, description: "veda-ops-drafted root-cause paragraph + runbook step; null without an LLM or for a non-new incident" }
+                        is_novel: { type: boolean, description: "true when the incident is an unprecedented pattern (warm-up >=5 historical incidents; false when skipped)" }
+                        novelty_score: { type: number, nullable: true, description: "1 - max cosine similarity to incident history; null when no embedder or below warm-up" }
+                  noise_reduction:
+                    type: object
+                    description: "alert-storm noise-reduction summary (notify per incident, not per event)"
+                    properties:
+                      event_count: { type: integer }
+                      incident_count: { type: integer }
+                      suppressed: { type: integer, description: "event_count - incident_count" }
 
   /v1/admin/forecast:
     get:

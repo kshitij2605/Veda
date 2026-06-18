@@ -122,6 +122,15 @@ See [documentation/2026-06-17-apm-observability.md](documentation/2026-06-17-apm
 
 See [documentation/2026-06-18-rag-aiops-intelligence.md](documentation/2026-06-18-rag-aiops-intelligence.md) for the full RAG & AIOps Intelligence guide.
 
+### Agentic AIOps
+Where Elastic's AIOps is statistical and template-based over text, Veda's is **semantic and embedding-based over every signal it owns**.
+- **Change-point detection** -- `advisor/changepoint.rs` detects sustained **LEVEL** shifts and **TREND** breaks (not single-point anomalies) in the advisor metric series (`disk_used_pct`, `rss_bytes`, query `p95`, error-log count, per-collection `recall`) via a least-squares / two-window statistic with a well-fit gate + warm-up (≥20 pts) + min-magnitude (1.5σ) guard, so it never fires on a flat/noisy series. Computed in-tick, attached to `OpsSnapshot.change_points`; rule `change_point_detected` (Medium). `GET /v1/admin/change-points`.
+- **Semantic spike root-cause attribution** -- when the error/warn-log rate spikes, `advisor/spike_attribution.rs` attributes it to the semantic **categories** driving it by reusing the embedding `LogCategorizer` — `{ window, baseline, total_delta, drivers: [{ category, representative, spike_count, baseline_count, growth, share_of_growth, is_new }], method }`. The vector-native answer to a statistical "log rate analysis": it names *which meaning-cluster* drove the spike. Off-lock embedding; normalized-template fallback (`method="template"`) without an embedder. `GET /v1/admin/log-rate-analysis?window_secs=&baseline_secs=&min_level=`.
+- **Proactive incident RCA drafts + noise reduction** -- on a newly-correlated incident (off-tick), the `veda-ops` agent auto-runs over the incident's cross-signal RCA bundle to draft a root-cause paragraph + runbook step into `Incident.draft` (best-effort, 503-safe → None without an LLM, new-incident-only). Notifications fire per **incident** not per event ("N alerts → 1 incident", deduped via persisted notified-ids), and `/v1/admin/incidents` gains a `noise_reduction { event_count, incident_count, suppressed }` summary.
+- **Incident novelty detection** -- reuses the incident-clustering embeddings to flag genuinely **unprecedented** incidents — `Incident.is_novel` + `novelty_score = 1 − max_cosine_to_history` against a persisted embedding history (warm-up ≥5 historical incidents; embedder-free skip so no false novelty). Novel incidents escalate the per-incident notification ("⚠ UNPRECEDENTED pattern", severity → High). Surfaced on `/v1/admin/incidents` + a Niriksha badge.
+
+See [documentation/2026-06-18-agentic-aiops.md](documentation/2026-06-18-agentic-aiops.md) for the full Agentic AIOps guide.
+
 ## Quick Start
 
 ### Docker Compose (recommended)
@@ -246,7 +255,9 @@ Veda runs in two modes; the admin REST surface differs depending on which one is
 | `GET /v1/admin/pprof` | ✓ | ✓ | On-demand CPU profile (flamegraph SVG / pprof proto); `profiling` feature build; 409 if already running |
 | `GET /v1/admin/depmap` | ✓ | ✓ | Declarative service dependency graph (9 nodes / 8 edges) |
 | `GET /v1/admin/index-advisor` | ✓ | ✓ | Per-collection index_type/params/p95/recall (proxy) + directional recommendations + open events |
-| `GET /v1/admin/incidents` | ✓ | ✓ | Semantic incident clusters (dedup of correlated ops events); off-tick runner |
+| `GET /v1/admin/change-points` | ✓ | ✓ | Change-point detections (sustained level shifts / trend breaks) in the advisor metric series; warm-up + min-magnitude guarded |
+| `GET /v1/admin/log-rate-analysis` | ✓ | ✓ | Semantic spike root-cause attribution — names the meaning-clusters driving a log-rate spike (`?window_secs=&baseline_secs=&min_level=`); template fallback w/o embedder |
+| `GET /v1/admin/incidents` | ✓ | ✓ | Semantic incident clusters (dedup of correlated ops events); off-tick runner; now carries `draft` (veda-ops RCA), `is_novel`/`novelty_score`, and a `noise_reduction` summary |
 | `GET /v1/admin/forecast` | ✓ | ✓ | Capacity forecasts — disk-full / memory-exhaustion / recall-decay ETAs (warm-up + min-R² guarded) |
 | `GET /v1/admin/insights/{event_id}/rca` | ✓ | ✓ | Cross-signal root-cause bundle (logs + slow/errored queries + traces + resources + incident) |
 | `POST /v1/agents/{id}/converse/stream` | ✓ | ✓ | Streaming converse over SSE (reasoning/tool_call/tool_result/answer deltas + `done` w/ citations+grounding); 503 no LLM. Tenant/RLS-scoped |
