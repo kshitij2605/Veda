@@ -32,6 +32,7 @@ pub mod remediation;
 pub mod rules;
 pub mod slo;
 pub mod snapshot;
+pub mod spike_attribution;
 pub mod synthetic;
 
 pub use engine::{run_tick, spawn_advisor, AdvisorState};
@@ -55,6 +56,8 @@ pub use faithfulness::{FaithfulnessResults, FaithfulnessSample};
 pub use forecast::{compute_forecasts, linear_fit, Forecast, TrendFit};
 
 pub use changepoint::{compute_change_points, detect_change_point, ChangeKind, ChangePoint};
+
+pub use spike_attribution::{analyze_log_rate, attribute, Driver, SpikeAttribution};
 
 pub use incidents::{
     cluster_incidents, compute_incidents, run_incident_correlation, spawn_incident_correlator,
