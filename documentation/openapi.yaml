@@ -358,6 +358,69 @@ components:
           type: array
           items: { $ref: '#/components/schemas/AgentStep' }
         metrics: { $ref: '#/components/schemas/RunMetrics' }
+        citations:
+          type: array
+          description: Citations extracted from the run's retrieval tool calls (best-effort).
+          items: { $ref: '#/components/schemas/Citation' }
+        grounding: { $ref: '#/components/schemas/Grounding' }
+    Citation:
+      type: object
+      properties:
+        chunk_id: { type: string }
+        collection: { type: string }
+        snippet: { type: string }
+        score: { type: number }
+    Grounding:
+      type: object
+      description: Post-run grounding scores (0–1), best-effort and non-fatal.
+      properties:
+        faithfulness: { type: number, description: "0–1; how grounded the answer is in retrieved context" }
+        answer_relevancy: { type: number, description: "0–1; how relevant the answer is to the query" }
+        method:
+          type: string
+          enum: [llm_judge, embedding_overlap, no_context]
+          description: "llm_judge (RAGAS-style, primary), embedding_overlap (no-LLM fallback), or no_context (no retrieval)"
+    EvalCase:
+      type: object
+      description: A single eval case. `id` is required on create today (id-optional is a known follow-up).
+      required: [id, query]
+      properties:
+        id: { type: string }
+        query: { type: string }
+        expected_chunk_ids: { type: array, items: { type: string }, description: "for recall@k" }
+        gold_answer: { type: string, description: "optional reference answer" }
+    EvalSet:
+      type: object
+      description: A named set of eval cases run against an agent.
+      required: [id, name, cases]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        agent_id: { type: string, nullable: true }
+        cases:
+          type: array
+          items: { $ref: '#/components/schemas/EvalCase' }
+    EvalRun:
+      type: object
+      description: The result of running an eval set — per-case detail plus aggregate scores.
+      properties:
+        run_id: { type: string }
+        eval_set_id: { type: string }
+        ts_ms: { type: integer }
+        recall_at_k: { type: number }
+        faithfulness: { type: number }
+        answer_relevancy: { type: number }
+        pass_rate: { type: number }
+        cases:
+          type: array
+          items:
+            type: object
+            properties:
+              case_id: { type: string }
+              recall_at_k: { type: number }
+              faithfulness: { type: number }
+              answer_relevancy: { type: number }
+              passed: { type: boolean }
     OpsEvent:
       type: object
       description: An ops-advisor event (open or closed).
@@ -397,11 +460,16 @@ components:
           type: object
           description: |
             Internally-tagged on `kind` (snake_case): `latency` { threshold_ms },
-            `availability`, `error_rate`, `synthetic` { probe_id }.
+            `availability`, `error_rate`, `synthetic` { probe_id },
+            `recall` { collection, k? } (SLI from the proxy ANN recall probe),
+            `faithfulness` { agent? } (SLI from a persisted faithfulness sample of converse turns).
           properties:
-            kind: { type: string, enum: [latency, availability, error_rate, synthetic] }
+            kind: { type: string, enum: [latency, availability, error_rate, synthetic, recall, faithfulness] }
             threshold_ms: { type: integer, description: "latency only" }
             probe_id: { type: string, description: "synthetic only" }
+            collection: { type: string, description: "recall only" }
+            k: { type: integer, description: "recall only (top-k)" }
+            agent: { type: string, description: "faithfulness only (optional agent filter)" }
         target_pct: { type: number, description: "objective, e.g. 99.9" }
         window_secs: { type: integer, description: "SLI compliance window" }
         fast_burn: { $ref: '#/components/schemas/BurnWindow' }
@@ -957,6 +1025,67 @@ paths:
                           type: array
                           items: { $ref: '#/components/schemas/OpsEvent' }
 
+  /v1/admin/incidents:
+    get:
+      summary: Semantic incident clusters (admin-only).
+      description: |
+        Ops-event title+detail are embedded and clustered by cosine into
+        incidents (rule_id+scope fallback when no embedder is configured), so
+        a storm of related events collapses into one incident. Produced by an
+        off-tick runner (`VEDA_INCIDENT_INTERVAL_SECS`, default 300).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  incidents:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        representative: { type: string, description: "the representative event title/detail" }
+                        member_event_ids: { type: array, items: { type: string } }
+                        rule_ids: { type: array, items: { type: string } }
+                        count: { type: integer }
+                        max_severity: { type: string, enum: [high, medium, low] }
+                        first_seen: { type: integer }
+                        last_seen: { type: integer }
+
+  /v1/admin/forecast:
+    get:
+      summary: Capacity forecasts (admin-only).
+      description: |
+        Least-squares trend over the snapshot history projects
+        threshold-crossing ETAs (disk-full date, memory exhaustion, recall
+        decay) with warm-up and min-R² guards so it never fires on a flat or
+        noisy series. Backs the rules `disk_full_forecast` (High),
+        `memory_growth_forecast` (Medium), and `recall_decay_forecast`
+        (Medium).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  forecasts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        metric: { type: string, description: "e.g. disk_used / memory / recall" }
+                        scope: { type: string, nullable: true }
+                        slope_per_sec: { type: number }
+                        r_squared: { type: number }
+                        threshold: { type: number }
+                        eta_ms: { type: integer, nullable: true, description: "projected threshold-crossing time; null if not trending toward it" }
+
   /v1/admin/cluster/join:
     post:
       summary: Add a voter to the Raft cluster.
@@ -1365,6 +1494,141 @@ paths:
         '404': { description: agent not found }
         '503': { description: no LLM configured }
 
+  /v1/agents/{id}/converse/stream:
+    post:
+      summary: Converse with an agent, streamed over Server-Sent Events.
+      description: |
+        Runs the same ReAct-style loop as `/converse` but streams progress as
+        SSE frames — `event: reasoning | tool_call | tool_result | answer`
+        deltas as the loop runs, then a terminal `event: done` whose data is
+        `{ conversation_id, response, metrics, citations, grounding }`.
+        Tenant-scoped; row-level security is enforced through tool calls via
+        the caller's identity. Returns 503 when no LLM endpoint is configured.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConverseRequest' }
+      responses:
+        '200':
+          description: SSE stream of reasoning/tool_call/tool_result/answer events then a final done event.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '404': { description: agent not found }
+        '503': { description: no LLM configured }
+
+  /v1/eval-sets:
+    get:
+      summary: List eval sets (tenant-scoped).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/EvalSet' }
+    post:
+      summary: Create or overwrite an eval set (tenant-scoped).
+      description: An explicit `id` is required in the body today (id-optional is a known follow-up).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EvalSet' }
+      responses:
+        '200': { description: stored }
+        '400': { description: bad request }
+
+  /v1/eval-sets/{id}:
+    get:
+      summary: Get an eval set.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EvalSet' }
+        '404': { description: not found }
+    delete:
+      summary: Delete an eval set (idempotent).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '204': { description: removed }
+
+  /v1/eval-sets/{id}/run:
+    post:
+      summary: Run an eval set and score recall@k / faithfulness / answer-relevancy / pass_rate.
+      description: |
+        Runs every case through the agent and returns per-case + aggregate
+        scores. Returns 503 when no LLM endpoint is configured.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EvalRun' }
+        '404': { description: not found }
+        '503': { description: no LLM configured }
+
+  /v1/eval-sets/{id}/runs:
+    get:
+      summary: List past runs for an eval set.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/EvalRun' }
+        '404': { description: not found }
+
+  /v1/eval-sets/{id}/cases/from-conversation:
+    post:
+      summary: Graduate a production conversation trace into a regression case (the flywheel).
+      description: |
+        Adds a new `EvalCase` to the eval set derived from a recorded
+        conversation (its query, retrieved chunk ids as `expected_chunk_ids`,
+        and the produced answer as `gold_answer`).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [conversation_id]
+              properties:
+                conversation_id: { type: string }
+                case_id: { type: string, description: "id for the new case (required today)" }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EvalCase' }
+        '404': { description: eval set or conversation not found }
+
   /v1/agent-tools:
     get:
       summary: List user-defined custom tools.
@@ -1688,8 +1952,47 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/AgentStep' }
                   metrics: { $ref: '#/components/schemas/RunMetrics' }
+                  citations:
+                    type: array
+                    items: { $ref: '#/components/schemas/Citation' }
+                  grounding: { $ref: '#/components/schemas/Grounding' }
         '404': { description: no such event }
         '503': { description: no LLM configured }
+
+  /v1/admin/insights/{event_id}/rca:
+    get:
+      summary: Cross-signal root-cause bundle for an event (admin-only).
+      description: |
+        Joins, for one event, the correlated logs + the slow/errored queries +
+        the traces (by `trace_id` and the event time window) + the nearest
+        resource snapshot + the related incident into a single bundle. The
+        same join the `correlate_incident` ops tool exposes to the `veda-ops`
+        triage agent.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: event_id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event: { $ref: '#/components/schemas/OpsEvent' }
+                  logs:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+                  queries:
+                    type: array
+                    description: slow / errored queries in the event window
+                    items: { type: object, additionalProperties: true }
+                  traces:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+                  resource_snapshot: { type: object, additionalProperties: true, nullable: true }
+                  incident: { type: object, additionalProperties: true, nullable: true }
+        '404': { description: no such event }
 
   /v1/admin/jobs:
     get:

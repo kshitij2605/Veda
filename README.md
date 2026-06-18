@@ -110,6 +110,18 @@ See [documentation/2026-06-16-service-reliability-slo.md](documentation/2026-06-
 
 See [documentation/2026-06-17-apm-observability.md](documentation/2026-06-17-apm-observability.md) for the full APM & Performance Observability guide.
 
+### RAG & AIOps Intelligence
+- **Answer citations + faithfulness/relevancy** -- every agent run is scored for grounding. `ConverseResponse` (and the triage / A2A responses) carry `citations: [{ chunk_id, collection, snippet, score }]` and `grounding: { faithfulness, answer_relevancy, method }` (0–1). Faithfulness is **LLM-as-judge** (RAGAS-style) with an **embedding-overlap** fallback when no LLM is configured, and `no_context` when the run did no retrieval. Scoring is post-run, best-effort, and never fails the answer. Metrics `veda_agent_faithfulness` / `veda_agent_citations`.
+- **Retrieval & faithfulness quality SLOs** -- `SloKind` gains **`recall`** (`{ collection, k? }`, SLI from the ANN recall probe — proxy) and **`faithfulness`** (`{ agent? }`, SLI from a persisted faithfulness sample of converse turns), so retrieval quality and answer grounding get the same multi-window burn-rate / error-budget treatment as latency and availability — at `/v1/admin/slos`.
+- **RAG/agent eval harness + flywheel** -- define `eval-sets` of cases `{ query, expected_chunk_ids?, gold_answer? }`; `POST /v1/eval-sets/{id}/run` reports per-case + aggregate **recall@k, faithfulness, answer-relevancy, and pass_rate**, `GET /v1/eval-sets/{id}/runs` lists past runs, and `POST /v1/eval-sets/{id}/cases/from-conversation` graduates a production trace into a regression case (the flywheel). 503 without an LLM. A Niriksha **Eval Harness** page renders it.
+- **Vector-backed agent memory** -- opt-in `Agent.memory` (default off; existing agents unchanged). When enabled, each turn is embedded into a per-tenant `_agent_memory` collection and the most semantically-similar prior turns are retrieved and injected (bounded) into the system prompt, giving the agent recall across conversations. Best-effort and off the request lock.
+- **Streaming `/converse` over SSE** -- `POST /v1/agents/{id}/converse/stream` emits `event: reasoning | tool_call | tool_result | answer` deltas as the loop runs, then a final `event: done` carrying `{ conversation_id, response, metrics, citations, grounding }`. The blocking `/converse` is unchanged and A2A stays sync. 503 without an LLM.
+- **Semantic incident correlation & dedup** -- ops-event title+detail are embedded and clustered by cosine into `Incident { representative, member_event_ids, rule_ids, count, max_severity, first_seen, last_seen }` (rule_id+scope fallback without an embedder), collapsing a storm of related events into one incident. Off-tick runner (`VEDA_INCIDENT_INTERVAL_SECS`, default 300). `GET /v1/admin/incidents`; a Niriksha Insights **"Incidents"** tab.
+- **Capacity forecasting** -- a least-squares trend over the snapshot history projects threshold-crossing ETAs (disk-full date, memory exhaustion, recall decay) with warm-up + min-R² guards so it never fires on a flat/noisy series. Rules `disk_full_forecast` (High), `memory_growth_forecast` (Medium), `recall_decay_forecast` (Medium). `GET /v1/admin/forecast`; a Niriksha forecast panel.
+- **Cross-signal RCA bundle** -- `GET /v1/admin/insights/{event_id}/rca` joins the correlated logs + slow/errored queries + traces (by `trace_id` + the event time window) + the nearest resource snapshot + the related incident into one bundle; a `correlate_incident` ops tool lets the `veda-ops` triage agent pull it, and the triage prompt is enriched with a bounded RCA summary. Niriksha event-drawer **"Root-cause bundle"**.
+
+See [documentation/2026-06-18-rag-aiops-intelligence.md](documentation/2026-06-18-rag-aiops-intelligence.md) for the full RAG & AIOps Intelligence guide.
+
 ## Quick Start
 
 ### Docker Compose (recommended)
@@ -234,6 +246,11 @@ Veda runs in two modes; the admin REST surface differs depending on which one is
 | `GET /v1/admin/pprof` | ✓ | ✓ | On-demand CPU profile (flamegraph SVG / pprof proto); `profiling` feature build; 409 if already running |
 | `GET /v1/admin/depmap` | ✓ | ✓ | Declarative service dependency graph (9 nodes / 8 edges) |
 | `GET /v1/admin/index-advisor` | ✓ | ✓ | Per-collection index_type/params/p95/recall (proxy) + directional recommendations + open events |
+| `GET /v1/admin/incidents` | ✓ | ✓ | Semantic incident clusters (dedup of correlated ops events); off-tick runner |
+| `GET /v1/admin/forecast` | ✓ | ✓ | Capacity forecasts — disk-full / memory-exhaustion / recall-decay ETAs (warm-up + min-R² guarded) |
+| `GET /v1/admin/insights/{event_id}/rca` | ✓ | ✓ | Cross-signal root-cause bundle (logs + slow/errored queries + traces + resources + incident) |
+| `POST /v1/agents/{id}/converse/stream` | ✓ | ✓ | Streaming converse over SSE (reasoning/tool_call/tool_result/answer deltas + `done` w/ citations+grounding); 503 no LLM. Tenant/RLS-scoped |
+| `GET` / `POST /v1/eval-sets`, `/{id}`, `/{id}/run`, `/{id}/runs`, `/{id}/cases/from-conversation` | ✓ | ✓ | RAG/agent eval harness + production-trace flywheel (recall@k/faithfulness/relevancy/pass_rate); 503 no LLM. Tenant/RLS-scoped |
 | `GET /v1/admin/nodes` | ✓ (1 node) | ✓ (N nodes) | `mode` field reports which path is active |
 | `GET /v1/admin/region_topology` | ✓ (returns `{topology:null}`) | ✓ | Read works even without `_meta` |
 | `PUT /v1/admin/region_topology` | ✗ 503 | ✓ | Mutates `_meta::shard_ensembles` |
