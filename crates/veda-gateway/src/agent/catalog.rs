@@ -195,7 +195,7 @@ impl ToolCatalog {
         }
     }
 
-    /// All built-in tool specs (currently 12).
+    /// All built-in tool specs (currently 13).
     pub fn builtin_specs(&self) -> &[ToolSpec] {
         &self.builtins
     }
@@ -235,6 +235,7 @@ impl ToolCatalog {
             "get_logs" => super::tools::ops::get_logs(ctx, args).await,
             "get_resources" => super::tools::ops::get_resources(ctx, args).await,
             "get_slo_status" => super::tools::ops::get_slo_status(ctx, args).await,
+            "correlate_incident" => super::tools::ops::correlate_incident(ctx, args).await,
             other => ToolOutcome::error(format!("unknown tool: {other}")),
         }
     }
@@ -293,9 +294,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_specs_count_is_twelve() {
+    fn builtin_specs_count_is_thirteen() {
         let cat = ToolCatalog::new();
-        assert_eq!(cat.builtin_specs().len(), 12);
+        assert_eq!(cat.builtin_specs().len(), 13);
         let ids: Vec<&str> = cat.builtin_specs().iter().map(|s| s.id.as_str()).collect();
         for expected in [
             "list_collections",
@@ -310,6 +311,7 @@ mod tests {
             "get_logs",
             "get_resources",
             "get_slo_status",
+            "correlate_incident",
         ] {
             assert!(ids.contains(&expected), "missing builtin {expected}");
         }
@@ -318,7 +320,7 @@ mod tests {
     #[test]
     fn specs_for_empty_whitelist_returns_all() {
         let cat = ToolCatalog::new();
-        assert_eq!(cat.specs_for(&[]).len(), 12);
+        assert_eq!(cat.specs_for(&[]).len(), 13);
     }
 
     #[test]

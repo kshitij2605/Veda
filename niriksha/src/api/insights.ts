@@ -228,6 +228,62 @@ export const triageEvent = (eventId: string) =>
   )
 
 /**
+ * Cross-signal root-cause bundle for one event. Mirrors
+ * `advisor::rca::RcaBundle` — the correlated logs + slow/errored queries +
+ * nearest resource snapshot + related incident joined in the incident
+ * window. Read from `GET /admin/insights/{id}/rca`.
+ */
+export interface RcaLogLine {
+  ts_ms: number
+  level: string
+  target: string
+  message: string
+  trace_id?: string | null
+}
+
+export interface RcaQueryLine {
+  ts_ms: number
+  took_ms: number
+  status: string
+  error_kind?: string | null
+  query_type: string
+  collection: string
+  index_type?: string | null
+  trace_id?: string | null
+}
+
+export interface RcaResourceState {
+  taken_at_ms: number
+  disk_used_pct?: number | null
+  rss_bytes?: number | null
+  query_p95_ms: number
+  error_log_count: number
+}
+
+export interface RcaIncidentRef {
+  id: string
+  representative: string
+  count: number
+}
+
+export interface RcaBundle {
+  event_id: string
+  /** Half-window Δ (ms) applied around opened_at_ms. */
+  window_ms: number
+  logs: RcaLogLine[]
+  slow_queries: RcaQueryLine[]
+  /** Distinct trace ids across the correlated logs + queries. */
+  trace_ids: string[]
+  resource_snapshot?: RcaResourceState | null
+  related_incident?: RcaIncidentRef | null
+}
+
+export const fetchEventRca = (eventId: string) =>
+  api.get<RcaBundle>(
+    `/admin/insights/${encodeURIComponent(eventId)}/rca`,
+  )
+
+/**
  * A semantic incident cluster — recurring/duplicate ops events collapsed
  * into one row. Mirrors `advisor::incidents::Incident`. Produced by the
  * off-tick incident correlator and read from `GET /admin/incidents`.

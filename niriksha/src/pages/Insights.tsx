@@ -5,6 +5,7 @@ import {
   Bell,
   Check,
   ChevronRight,
+  GitMerge,
   Layers,
   Play,
   RotateCw,
@@ -14,6 +15,7 @@ import {
 import {
   ackInsight,
   fetchChannels,
+  fetchEventRca,
   fetchIncidents,
   fetchInsights,
   fetchInsightsHistory,
@@ -28,6 +30,7 @@ import {
   type ChannelsView,
   type Incident,
   type OpsEvent,
+  type RcaBundle,
   type RuleInfo,
   type Severity,
 } from '../api/insights'
@@ -556,12 +559,189 @@ function EventDrawer({
             </Button>
           )}
 
+          {/* Cross-signal root-cause bundle — auto-joined logs + slow/errored
+              queries + resource state + related incident. `key` resets the
+              section's local state per event. */}
+          <RcaSection key={`rca-${ev.id}`} eventId={ev.id} />
+
           {/* AI triage — runs the built-in veda-ops agent to explain the
               alert. `key` resets the section's local state per event. */}
           <TriageSection key={ev.id} eventId={ev.id} />
         </div>
       )}
     </Drawer>
+  )
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Cross-signal root-cause bundle — correlated logs + slow/errored queries
+   + nearest resource snapshot + related incident
+   ──────────────────────────────────────────────────────────────────── */
+
+function RcaSection({ eventId }: { eventId: string }) {
+  const [loading, setLoading] = useState(true)
+  const [bundle, setBundle] = useState<RcaBundle | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    fetchEventRca(eventId)
+      .then(({ data }) => {
+        if (!cancelled) setBundle(data)
+      })
+      .catch((e) => {
+        if (!cancelled)
+          setError(e instanceof Error ? e.message : 'Failed to load root-cause bundle')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [eventId])
+
+  const logs = bundle?.logs ?? []
+  const queries = bundle?.slow_queries ?? []
+  const traceIds = bundle?.trace_ids ?? []
+  const snap = bundle?.resource_snapshot ?? null
+  const incident = bundle?.related_incident ?? null
+  const empty =
+    !loading &&
+    !error &&
+    logs.length === 0 &&
+    queries.length === 0 &&
+    traceIds.length === 0 &&
+    !snap &&
+    !incident
+
+  return (
+    <div className="pt-1 border-t border-[var(--color-border)]">
+      <SectionLabel>
+        <span className="inline-flex items-center gap-1">
+          <GitMerge size={12} strokeWidth={2.25} />
+          Root-cause bundle
+        </span>
+      </SectionLabel>
+
+      {loading && <Skeleton className="h-16 w-full rounded-[var(--radius-sm)]" />}
+
+      {error && (
+        <div className="rounded-[var(--radius-sm)] border border-[color-mix(in_oklch,var(--color-error)_30%,transparent)] bg-[color-mix(in_oklch,var(--color-error)_8%,transparent)] px-3 py-2 text-[12px] text-[var(--color-error)] flex items-center gap-2">
+          <AlertCircle size={12} strokeWidth={2.25} />
+          {error}
+        </div>
+      )}
+
+      {empty && (
+        <p className="text-[12px] text-[var(--color-text-muted)]">
+          No correlated signals found in the incident window.
+        </p>
+      )}
+
+      {!loading && !error && !empty && (
+        <div className="space-y-3">
+          {incident && (
+            <div className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-base-1)] px-2.5 py-2">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <Badge label="incident" variant="accent" mono />
+                <span className="text-[11px] font-mono text-[var(--color-text-subtle)]">
+                  {incident.id} · {incident.count} events
+                </span>
+              </div>
+              <p className="text-[12px] text-[var(--color-text)] break-words">
+                {incident.representative}
+              </p>
+            </div>
+          )}
+
+          {snap && (
+            <div className="grid grid-cols-2 gap-2">
+              <Field
+                label="Disk used"
+                value={snap.disk_used_pct != null ? `${snap.disk_used_pct.toFixed(1)}%` : '—'}
+                mono
+              />
+              <Field label="Query p95" value={`${snap.query_p95_ms.toFixed(1)} ms`} mono />
+              <Field
+                label="RSS"
+                value={snap.rss_bytes != null ? formatBytes(snap.rss_bytes) : '—'}
+                mono
+              />
+              <Field label="Errors (log)" value={String(snap.error_log_count)} mono />
+            </div>
+          )}
+
+          {traceIds.length > 0 && (
+            <div>
+              <SectionLabel>Correlated trace ids</SectionLabel>
+              <div className="flex flex-wrap gap-1">
+                {traceIds.slice(0, 8).map((t) => (
+                  <Badge key={t} label={t} variant="ghost" mono />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {logs.length > 0 && (
+            <div>
+              <SectionLabel>Correlated logs ({logs.length})</SectionLabel>
+              <div className="space-y-1.5">
+                {logs.slice(0, 12).map((l, i) => (
+                  <div
+                    key={i}
+                    className="rounded-[var(--radius-sm)] bg-[var(--color-base-1)] border border-[var(--color-border)] px-2.5 py-1.5"
+                  >
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <Badge
+                        label={l.level}
+                        variant={l.level.toUpperCase() === 'ERROR' ? 'error' : 'default'}
+                        mono
+                      />
+                      <span className="text-[11px] font-mono text-[var(--color-text-subtle)] truncate">
+                        {l.target}
+                      </span>
+                    </div>
+                    <p className="text-[12px] text-[var(--color-text)] leading-relaxed whitespace-pre-wrap break-words">
+                      {l.message}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {queries.length > 0 && (
+            <div>
+              <SectionLabel>Slow / errored queries ({queries.length})</SectionLabel>
+              <div className="space-y-1.5">
+                {queries.slice(0, 12).map((q, i) => (
+                  <div
+                    key={i}
+                    className="rounded-[var(--radius-sm)] bg-[var(--color-base-1)] border border-[var(--color-border)] px-2.5 py-1.5 flex items-center gap-2"
+                  >
+                    <Badge
+                      label={q.status}
+                      variant={q.status === 'error' ? 'error' : 'default'}
+                      mono
+                    />
+                    <span className="text-[11.5px] font-mono text-[var(--color-text)]">
+                      {q.collection} · {q.query_type}
+                    </span>
+                    <span className="ml-auto text-[11.5px] font-mono tabular-nums text-[var(--color-text-muted)]">
+                      {q.took_ms} ms
+                      {q.error_kind ? ` · ${q.error_kind}` : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -1274,4 +1454,16 @@ function formatRelative(ts: number): string {
 
 function formatAbsolute(ts: number): string {
   return new Date(ts).toLocaleString()
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(1)} ${units[i]}`
 }

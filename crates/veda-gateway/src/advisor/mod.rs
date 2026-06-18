@@ -25,6 +25,7 @@ pub mod faithfulness;
 pub mod forecast;
 pub mod incidents;
 pub mod notify;
+pub mod rca;
 pub mod recall_probe;
 pub mod remediation;
 pub mod rules;
@@ -56,6 +57,8 @@ pub use incidents::{
     cluster_incidents, compute_incidents, run_incident_correlation, spawn_incident_correlator,
     Incident, IncidentStore,
 };
+
+pub use rca::{correlate, correlate_incident, IncidentRef, LogLine, QueryLine, RcaBundle, ResourceState};
 
 pub use snapshot::{
     collect, parse_prom_counter, CollectionSnapshot, GlobalSnapshot, HealthSnapshot,
