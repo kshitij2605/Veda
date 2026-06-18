@@ -32,6 +32,13 @@ pub struct Agent {
     /// Optional per-agent LLM override; `None` uses the global config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelOverride>,
+    /// Opt-in vector-backed long-term memory. When `true`, the agent
+    /// recalls semantically relevant past turns (across conversations)
+    /// from Veda's own vector store and writes each turn back. Defaults
+    /// to `false` (serde-default → existing agents are unchanged and
+    /// behave byte-identically).
+    #[serde(default)]
+    pub memory: bool,
 }
 
 /// The default, always-available agent used when a converse request
@@ -49,6 +56,7 @@ provided tools to ground your answers in real data; be concise and cite what you
             .to_owned(),
         tool_ids: Vec::new(),
         model: None,
+        memory: false,
     }
 }
 
@@ -79,6 +87,7 @@ be specific and brief."
             "route".to_owned(),
         ],
         model: None,
+        memory: false,
     }
 }
 
@@ -247,6 +256,28 @@ mod tests {
             args: serde_json::json!({}),
         };
         assert_eq!(serde_json::to_value(&call).unwrap()["kind"], "tool_call");
+    }
+
+    #[test]
+    fn agent_memory_defaults_false_and_is_serde_back_compat() {
+        // An agent JSON from before the field existed parses with
+        // memory = false (additive + serde-default → no behavior change).
+        let v = serde_json::json!({
+            "id": "ag-1",
+            "name": "Legacy",
+            "instructions": "be brief",
+            "tool_ids": []
+        });
+        let agent: Agent = serde_json::from_value(v).unwrap();
+        assert!(!agent.memory, "memory must default to false");
+
+        // A false flag is serialized (plain bool, not skipped) and an
+        // explicit true round-trips.
+        let mut a = default_agent();
+        assert!(!a.memory);
+        a.memory = true;
+        let back: Agent = serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap();
+        assert!(back.memory);
     }
 
     #[test]

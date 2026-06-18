@@ -341,9 +341,29 @@ pub(crate) async fn run_agent_turn(
     let provider = genai_system_for(&model_name);
     let client = build_client(llm_cfg, &agent);
 
-    // 4. System prompt with the modality-awareness block.
+    // 4. System prompt with the modality-awareness block. When the agent
+    //    has opted into long-term memory, recall the most relevant past
+    //    turns (across conversations) and prepend a bounded context block.
+    //    Best-effort + off any lock: a recall failure yields an empty
+    //    block and never fails the turn (mirrors logs categorize).
     let summary = executor::collections_modality_summary(state, tenant).await;
-    let sys = executor::build_system_prompt(&agent, &summary);
+    let mut sys = executor::build_system_prompt(&agent, &summary);
+    if crate::agent::memory::should_use_memory(&agent) {
+        let turns = crate::agent::memory::retrieve_memory(
+            state,
+            tenant,
+            agent_id,
+            input,
+            crate::agent::memory::DEFAULT_RECALL_K,
+        )
+        .await;
+        if let Some(block) = crate::agent::memory::format_memory_block(
+            &turns,
+            crate::agent::memory::DEFAULT_MEMORY_BLOCK_CHARS,
+        ) {
+            sys = format!("{block}\n\n{sys}");
+        }
+    }
 
     // 5. Tool context with RLS user.
     let ctx = ToolContext::new(state, tenant).with_user(user);
@@ -427,6 +447,32 @@ pub(crate) async fn run_agent_turn(
         }
         Some(g)
     };
+
+    // 9. Write-back: when memory is on, persist the user input and the
+    //    assistant response into the agent's long-term memory. Best-effort
+    //    + off any lock; a write failure NEVER fails the turn (write_turn
+    //    swallows its own errors). Skipped entirely for memory==false so
+    //    the path is byte-identical to today.
+    if crate::agent::memory::should_use_memory(&agent) {
+        let ts = crate::advisor::engine::now_ms().max(0);
+        let conversation_id = "";
+        crate::agent::memory::write_turn(
+            state, tenant, agent_id, conversation_id, "user", input, ts,
+        )
+        .await;
+        if !result.response.trim().is_empty() {
+            crate::agent::memory::write_turn(
+                state,
+                tenant,
+                agent_id,
+                conversation_id,
+                "assistant",
+                &result.response,
+                ts,
+            )
+            .await;
+        }
+    }
 
     Ok((agent, result, citations, grounding))
 }

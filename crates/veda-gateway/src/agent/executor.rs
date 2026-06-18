@@ -626,6 +626,7 @@ mod tests {
             instructions: "Be concise and helpful.".to_owned(),
             tool_ids,
             model: None,
+            memory: false,
         }
     }
 
