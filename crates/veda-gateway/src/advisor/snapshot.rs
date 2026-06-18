@@ -186,6 +186,12 @@ pub struct OpsSnapshot {
     /// recall results. Default empty; `#[serde(default)]`.
     #[serde(default)]
     pub index_health: Vec<IndexSnapshot>,
+    /// Capacity forecasts (disk-full / memory-exhaustion / recall-decay
+    /// ETAs) derived from the recent history. Like [`Self::slo_statuses`],
+    /// NOT populated by [`collect`]; the engine fills it each tick (from
+    /// the post-push history) before reconcile. Default empty.
+    #[serde(default)]
+    pub forecasts: Vec<crate::advisor::forecast::Forecast>,
 }
 
 /// Collect a live snapshot from `state`. `now_ms` is injected so
@@ -358,6 +364,7 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
         slo_statuses: Vec::new(),
         synthetic_summaries: Vec::new(),
         index_health,
+        forecasts: Vec::new(),
     }
 }
 
@@ -841,6 +848,16 @@ impl SnapshotHistory {
         self.buf.back()
     }
 
+    /// Overwrite the most-recent snapshot's `forecasts`. Used by the engine
+    /// to attach capacity forecasts computed from the post-push history
+    /// onto the just-pushed snapshot (so both the in-history copy and the
+    /// reconcile path see them). No-op on an empty history.
+    pub fn set_latest_forecasts(&mut self, forecasts: Vec<crate::advisor::forecast::Forecast>) {
+        if let Some(s) = self.buf.back_mut() {
+            s.forecasts = forecasts;
+        }
+    }
+
     /// Second-most-recent snapshot.
     pub fn previous(&self) -> Option<&OpsSnapshot> {
         let n = self.buf.len();
@@ -869,6 +886,13 @@ impl SnapshotHistory {
             return None;
         }
         Some(delta / (dt_ms as f64 / 1000.0))
+    }
+
+    /// Iterate the retained snapshots oldest-first. Used by forecasting to
+    /// build per-collection signal series the scalar [`Self::series`]
+    /// projection can't express.
+    pub fn iter(&self) -> impl Iterator<Item = &OpsSnapshot> {
+        self.buf.iter()
     }
 
     /// Project a derived signal out of each retained snapshot, oldest
@@ -1098,6 +1122,7 @@ veda_records_total 7
             slo_statuses: Vec::new(),
             synthetic_summaries: Vec::new(),
             index_health: Vec::new(),
+            forecasts: Vec::new(),
         }
     }
 

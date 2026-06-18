@@ -7,6 +7,7 @@ import { Badge } from '../components/Badge'
 import api from '../api/client'
 import { listNodes, type ListNodesResponse } from '../api/collections'
 import { getResources, type ResourcesView } from '../api/resources'
+import { fetchForecast, type Forecast } from '../api/forecast'
 import { SyntheticsPanel } from './SyntheticsPanel'
 
 interface MetricEntry {
@@ -268,6 +269,11 @@ export function SystemHealth() {
         )}
       </div>
 
+      {/* Capacity forecasts — predictive ETAs (disk-full / memory-exhaust /
+          recall-decay) from the ops-advisor's snapshot-history trend fits
+          (GET /admin/forecast). Warning-colored when an ETA is near. */}
+      <ForecastPanel />
+
       {/* Synthetic self-check probes — uptime / last result / failures,
           from the ops-advisor's probe rings (GET /admin/synthetics). */}
       <SyntheticsPanel />
@@ -397,6 +403,130 @@ export function SystemHealth() {
         )}
       </div>
     </motion.div>
+  )
+}
+
+/** Human label + a metric's current value for a forecast row. */
+function forecastLabel(f: Forecast): { title: string; current: string } {
+  switch (f.metric) {
+    case 'disk_used_pct':
+      return { title: 'Disk full', current: `${f.current.toFixed(1)}% used` }
+    case 'mem_available_bytes':
+      return {
+        title: 'Memory exhaustion',
+        current: `${(f.current / 1024 ** 3).toFixed(1)} GiB available`,
+      }
+    case 'recall':
+      return {
+        title: `Recall decay${f.scope ? ` · ${f.scope}` : ''}`,
+        current: `recall ${f.current.toFixed(3)}`,
+      }
+    default:
+      return { title: f.metric, current: f.current.toFixed(2) }
+  }
+}
+
+/** ETA epoch-ms → "in ~N days" / "in ~N hours"; null → "no trend". */
+function formatEta(etaMs: number | null): { text: string; days: number | null } {
+  if (etaMs == null) return { text: 'stable — no projected crossing', days: null }
+  const dtMs = Math.max(0, etaMs - Date.now())
+  const days = dtMs / 86_400_000
+  if (days >= 1) return { text: `in ~${days.toFixed(1)} days`, days }
+  const hours = dtMs / 3_600_000
+  return { text: `in ~${hours.toFixed(1)} hours`, days }
+}
+
+/**
+ * Capacity-forecast panel. Reads `GET /admin/forecast` (admin-only) and
+ * renders one row per metric with its current value, projected ETA, and
+ * fit confidence (R²). Rows whose ETA is within 7 days are warning-colored;
+ * within 2 days, danger-colored.
+ */
+function ForecastPanel() {
+  const [forecasts, setForecasts] = useState<Forecast[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState(false)
+
+  const load = useCallback(async () => {
+    setError(null)
+    try {
+      const { data } = await fetchForecast()
+      setForecasts(data.forecasts)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch forecasts')
+    } finally {
+      setLoaded(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  return (
+    <div className="mb-6">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider">
+          Capacity Forecasts
+        </h2>
+        <button
+          onClick={load}
+          className="text-xs text-accent hover:text-accent-hover transition-colors"
+        >
+          Refresh
+        </button>
+      </div>
+      {error ? (
+        <div className="rounded-lg bg-error/10 border border-error/20 px-4 py-3 text-sm text-error">
+          Forecast lookup failed: {error}
+        </div>
+      ) : forecasts.length === 0 ? (
+        <div className="rounded-lg border border-border bg-bg-secondary p-5 text-sm text-text-muted">
+          {loaded
+            ? 'No forecasts yet — the advisor needs enough snapshot history to fit a trend.'
+            : 'Loading forecasts...'}
+        </div>
+      ) : (
+        <div className="rounded-lg border border-border overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-bg-secondary text-text-muted text-left">
+                <th className="px-4 py-3 font-medium">Metric</th>
+                <th className="px-4 py-3 font-medium">Current</th>
+                <th className="px-4 py-3 font-medium">Projected</th>
+                <th className="px-4 py-3 font-medium text-right">Confidence</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {forecasts.map((f, i) => {
+                const { title, current } = forecastLabel(f)
+                const { text, days } = formatEta(f.eta_ms)
+                const etaColor =
+                  days == null
+                    ? 'text-text-muted'
+                    : days <= 2
+                      ? 'text-error'
+                      : days <= 7
+                        ? 'text-warning'
+                        : 'text-text-secondary'
+                return (
+                  <tr key={i} className="hover:bg-bg-tertiary transition-colors">
+                    <td className="px-4 py-3 text-text-primary font-medium">{title}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-text-secondary tabular-nums">
+                      {current}
+                    </td>
+                    <td className={`px-4 py-3 tabular-nums ${etaColor}`}>{text}</td>
+                    <td className="px-4 py-3 text-right font-mono text-xs text-text-muted tabular-nums">
+                      R²={f.r2.toFixed(2)}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   )
 }
 

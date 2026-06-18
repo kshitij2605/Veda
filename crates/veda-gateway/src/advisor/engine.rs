@@ -571,6 +571,18 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
 
         let mut history = advisor.history.lock().await;
         history.push(snap.clone());
+        // Capacity forecasts: pure least-squares over the post-push history
+        // (cheap, no network). Attach to both the snapshot used for
+        // reconcile and the just-pushed copy so the rules and the REST
+        // endpoint see the same forecasts.
+        let forecasts = crate::advisor::forecast::compute_forecasts(
+            &history,
+            now,
+            crate::advisor::forecast::DEFAULT_MIN_POINTS,
+            crate::advisor::forecast::DEFAULT_MIN_R2,
+        );
+        snap.forecasts = forecasts.clone();
+        history.set_latest_forecasts(forecasts);
         let mut events = advisor.events.lock().await;
         reconcile_hits(
             &snap,
@@ -693,6 +705,7 @@ mod tests {
             slo_statuses: Vec::new(),
             synthetic_summaries: Vec::new(),
             index_health: Vec::new(),
+            forecasts: Vec::new(),
         }
     }
 

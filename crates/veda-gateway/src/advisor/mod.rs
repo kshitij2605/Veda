@@ -22,6 +22,7 @@ pub mod config;
 pub mod engine;
 pub mod event;
 pub mod faithfulness;
+pub mod forecast;
 pub mod incidents;
 pub mod notify;
 pub mod recall_probe;
@@ -48,6 +49,8 @@ pub use recall_probe::{
 };
 
 pub use faithfulness::{FaithfulnessResults, FaithfulnessSample};
+
+pub use forecast::{compute_forecasts, linear_fit, Forecast, TrendFit};
 
 pub use incidents::{
     cluster_incidents, compute_incidents, run_incident_correlation, spawn_incident_correlator,
