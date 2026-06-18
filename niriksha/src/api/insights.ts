@@ -301,10 +301,28 @@ export interface Incident {
   max_severity: Severity
   first_seen_ms: number
   last_seen_ms: number
+  /**
+   * LLM-drafted root-cause paragraph + suggested runbook step, generated
+   * once (best-effort, off-tick) when the incident first forms. Absent
+   * until drafted, or when no LLM is configured.
+   */
+  draft?: string | null
+}
+
+/**
+ * Alert-storm noise reduction: how many raw alert events collapsed into how
+ * many distinct incidents on the latest correlation pass.
+ */
+export interface NoiseReduction {
+  event_count: number
+  incident_count: number
+  /** `event_count − incident_count`. */
+  suppressed: number
 }
 
 export interface IncidentsResponse {
   incidents: Incident[]
+  noise_reduction: NoiseReduction
 }
 
 export const fetchIncidents = () =>

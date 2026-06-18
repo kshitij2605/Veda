@@ -31,7 +31,10 @@ use veda_core::embedding::Modality;
 use veda_core::embedding_client::EmbeddingClient;
 
 use crate::advisor::event::{OpsEvent, Severity};
+use crate::advisor::notify::Notifier;
+use crate::advisor::rca::{correlate_incident, RcaBundle};
 use crate::logs::categorize::cosine;
+use crate::rest::insights::rca_summary;
 use crate::rest::state::AppState;
 
 /// Default cosine threshold for the embedding clustering path. Matches
@@ -66,6 +69,19 @@ pub struct Incident {
     pub first_seen_ms: i64,
     /// Latest `opened_at_ms` across members.
     pub last_seen_ms: i64,
+    /// LLM-drafted root-cause paragraph + suggested runbook step,
+    /// generated once (best-effort, off-tick) when the incident first
+    /// forms. `None` until drafted (or when no LLM is configured).
+    #[serde(default)]
+    pub draft: Option<String>,
+}
+
+impl Incident {
+    /// The representative *event* id, recovered from the incident id
+    /// (`inc_{event_id}`). Used to fetch the RCA bundle for drafting.
+    pub fn representative_event_id(&self) -> &str {
+        self.id.strip_prefix("inc_").unwrap_or(&self.id)
+    }
 }
 
 /// Mutable accumulator while clustering events into an incident.
@@ -130,6 +146,7 @@ impl Accum {
             max_severity: self.max_severity,
             first_seen_ms: self.first_seen_ms,
             last_seen_ms: self.last_seen_ms,
+            draft: None,
         }
     }
 }
@@ -315,6 +332,11 @@ pub struct IncidentStore {
     /// Newest-last ring of prior passes' incidents (one entry per
     /// recorded pass), bounded to [`MAX_HISTORY`].
     history: Vec<Vec<Incident>>,
+    /// Incident ids already notified (alert-storm dedup): one notification
+    /// is sent per *incident*, not per event, and never re-sent on later
+    /// passes. Persisted so a restart doesn't re-notify. Bounded.
+    #[serde(default)]
+    notified_ids: Vec<String>,
 }
 
 impl IncidentStore {
@@ -339,6 +361,38 @@ impl IncidentStore {
     /// The latest correlation pass's incidents.
     pub fn latest(&self) -> &[Incident] {
         &self.latest
+    }
+
+    /// Has incident `id` already been notified on a prior pass?
+    pub fn is_notified(&self, id: &str) -> bool {
+        self.notified_ids.iter().any(|n| n == id)
+    }
+
+    /// Record that incident `id` has been notified (idempotent). The
+    /// notified-id ring is bounded to [`MAX_HISTORY`] so a long-running
+    /// process with churning incident ids cannot grow it unboundedly.
+    pub fn mark_notified(&mut self, id: &str) {
+        if !self.is_notified(id) {
+            self.notified_ids.push(id.to_owned());
+            if self.notified_ids.len() > MAX_HISTORY {
+                let excess = self.notified_ids.len() - MAX_HISTORY;
+                self.notified_ids.drain(0..excess);
+            }
+        }
+    }
+
+    /// Carry forward already-generated drafts from the previous `latest`
+    /// onto the freshly-clustered `incidents`, matching by incident id.
+    /// A stable incident keeps its draft so the LLM is not re-run for it.
+    pub fn carry_drafts_into(&self, incidents: &mut [Incident]) {
+        for inc in incidents.iter_mut() {
+            if inc.draft.is_none()
+                && let Some(prev) = self.latest.iter().find(|p| p.id == inc.id)
+                && prev.draft.is_some()
+            {
+                inc.draft = prev.draft.clone();
+            }
+        }
     }
 
     /// Persist to `path` as pretty JSON. Failure is logged, not surfaced.
@@ -384,18 +438,186 @@ pub fn incident_interval_secs() -> u64 {
         .unwrap_or(DEFAULT_INCIDENT_INTERVAL_SECS)
 }
 
-/// Recompute incidents from the current events and store + persist them.
+/// Generates an LLM root-cause draft for an incident. Abstracted so the
+/// correlation cycle can be driven with a fake drafter in tests (the
+/// production drafter runs the `veda-ops` agent over the network).
+pub trait IncidentDrafter {
+    /// Draft a root-cause paragraph for `prompt`, or `None` on any
+    /// failure / no-LLM (best-effort — never fails the cycle).
+    fn draft(&self, prompt: &str) -> impl std::future::Future<Output = Option<String>> + Send;
+}
+
+/// Production drafter: runs the built-in `veda-ops` agent (one off-lock
+/// turn, default tenant, no conversation). Any error — including no LLM
+/// configured (`AgentTurnError::NoLlm`) → `None`.
+pub struct OpsAgentDrafter<'a> {
+    state: &'a AppState,
+}
+
+impl<'a> OpsAgentDrafter<'a> {
+    pub fn new(state: &'a AppState) -> Self {
+        Self { state }
+    }
+}
+
+impl IncidentDrafter for OpsAgentDrafter<'_> {
+    async fn draft(&self, prompt: &str) -> Option<String> {
+        let tenant = crate::tenant::TenantId::default_tenant();
+        match crate::rest::agents::run_agent_turn(
+            self.state, &tenant, None, "veda-ops", &[], prompt, None,
+        )
+        .await
+        {
+            Ok((_agent, result, _citations, _grounding)) => Some(result.response),
+            Err(_) => None,
+        }
+    }
+}
+
+/// Build the incident-draft prompt: the representative + member count +
+/// the bounded cross-signal RCA summary, asking for a root cause + one
+/// runbook step. Pure + testable.
+pub fn build_incident_draft_prompt(incident: &Incident, bundle: &RcaBundle) -> String {
+    let mut prompt = format!(
+        "A new ops incident formed in Veda by collapsing {count} correlated alert(s) into one. \
+Give a concise ROOT-CAUSE paragraph and ONE concrete runbook step the operator should take. \
+Be specific and brief.\n\n\
+Incident:\n\
+- representative: {rep}\n\
+- alerts collapsed: {count}\n\
+- rule_ids: {rules}\n\
+- max_severity: {sev:?}",
+        count = incident.count,
+        rep = incident.representative,
+        rules = incident.rule_ids.join(", "),
+        sev = incident.max_severity,
+    );
+    prompt.push_str(&rca_summary(bundle));
+    prompt
+}
+
+/// Best-effort: for each incident **without a draft yet**, resolve its
+/// representative event id, fetch the cross-signal RCA bundle, prompt the
+/// `drafter`, and set `incident.draft`. Already-drafted incidents (drafts
+/// carried forward from the previous pass) are skipped so the LLM is not
+/// re-run for a stable incident. Runs entirely OFF any advisor lock; a
+/// failed draft simply leaves `draft = None` and never fails the cycle.
+pub async fn draft_incidents<D: IncidentDrafter>(
+    state: &AppState,
+    incidents: &mut [Incident],
+    drafter: &D,
+) {
+    for inc in incidents.iter_mut() {
+        if inc.draft.is_some() {
+            continue; // stable / already drafted — don't re-run the LLM.
+        }
+        let event_id = inc.representative_event_id().to_owned();
+        let Some(bundle) = correlate_incident(state, &event_id).await else {
+            continue; // representative event vanished — skip, leave None.
+        };
+        let prompt = build_incident_draft_prompt(inc, &bundle);
+        if let Some(draft) = drafter.draft(&prompt).await {
+            inc.draft = Some(draft);
+        }
+    }
+}
+
+/// Synthesize the one-shot [`OpsEvent`] used to push a per-incident
+/// notification through the existing transition notifier. Carries the
+/// "N alerts → 1 incident" framing + a one-line draft summary (if any).
+/// Pure + testable.
+pub fn incident_notification_event(incident: &Incident) -> OpsEvent {
+    let title = format!(
+        "Incident: {} ({} alerts → 1 incident)",
+        incident.representative, incident.count
+    );
+    let mut detail = format!(
+        "{} correlated alert(s) collapsed into one incident (rules: {}).",
+        incident.count,
+        incident.rule_ids.join(", "),
+    );
+    let recommendation = match &incident.draft {
+        Some(d) => {
+            // One-line draft summary: first non-empty line, bounded.
+            let line = d.lines().find(|l| !l.trim().is_empty()).unwrap_or(d).trim();
+            let line: String = line.chars().take(280).collect();
+            detail.push_str(&format!("\n\nDraft root-cause: {line}"));
+            line
+        }
+        None => "Review the correlated incident in the Insights → Incidents view.".to_owned(),
+    };
+    OpsEvent {
+        id: incident.id.clone(),
+        rule_id: incident.rule_ids.first().cloned().unwrap_or_default(),
+        scope: crate::advisor::event::Scope::Global,
+        severity: incident.max_severity,
+        status: crate::advisor::event::EventStatus::Open,
+        title,
+        detail,
+        recommendation,
+        runbook: None,
+        remediation: crate::advisor::event::RemediationAction::None,
+        opened_at_ms: incident.first_seen_ms,
+        closed_at_ms: None,
+        acknowledged: false,
+        remediation_note: None,
+    }
+}
+
+/// Recompute incidents from the current events, draft NEW incidents
+/// (best-effort, via the production [`OpsAgentDrafter`]), notify on
+/// newly-formed incidents (once each), then store + persist.
 ///
 /// Invoked exclusively from the dedicated [`spawn_incident_correlator`]
-/// task, **never** from `run_tick`, so the embedding network calls never
-/// run inside the advisor's locked tick. [`compute_incidents`] keeps every
-/// embed await off the advisor lock; this function only re-locks the
-/// `incidents` mutex briefly to record + save.
+/// task, **never** from `run_tick`, so neither the embedding nor the
+/// draft/notify network calls run inside the advisor's locked tick.
+/// Every network await runs OFF any advisor lock; the `incidents` mutex is
+/// only re-locked *briefly* to read the carry-forward drafts/notified set
+/// and to record + save.
 pub async fn run_incident_correlation(state: &AppState) {
-    let incidents = compute_incidents(state).await;
+    let drafter = OpsAgentDrafter::new(state);
+    run_incident_correlation_with(state, &drafter).await;
+}
+
+/// [`run_incident_correlation`] parameterized over the drafter, so tests
+/// can inject a fake LLM. Mirrors the lock discipline of the recall /
+/// faithfulness off-tick tasks: network awaits (embed, draft, notify) all
+/// run with no advisor lock held.
+pub async fn run_incident_correlation_with<D: IncidentDrafter>(state: &AppState, drafter: &D) {
+    // 1. Cluster (embedding await off-lock inside compute_incidents).
+    let mut incidents = compute_incidents(state).await;
     let advisor = state.advisor();
+
+    // 2. Carry forward drafts + identify which incidents are newly formed
+    //    (not yet notified) — a brief read of the store, no await held.
+    let new_ids: Vec<String> = {
+        let store = advisor.incidents.lock().await;
+        store.carry_drafts_into(&mut incidents);
+        incidents
+            .iter()
+            .filter(|i| !store.is_notified(&i.id))
+            .map(|i| i.id.clone())
+            .collect()
+    };
+
+    // 3. Draft NEW (undrafted) incidents OFF any advisor lock.
+    draft_incidents(state, &mut incidents, drafter).await;
+
+    // 4. Notify each newly-formed incident exactly once, OFF any advisor
+    //    lock. Reuses the transition notifier with a synthesized event.
+    let channels = advisor.config.read().await.channels.clone();
+    let notifier = Notifier::new(channels);
+    for inc in incidents.iter().filter(|i| new_ids.contains(&i.id)) {
+        let ev = incident_notification_event(inc);
+        notifier.notify_transitions(std::slice::from_ref(&ev), &[]).await;
+    }
+
+    // 5. Record + mark notified + persist under a brief lock.
     let mut store = advisor.incidents.lock().await;
     store.record(incidents);
+    for id in &new_ids {
+        store.mark_notified(id);
+    }
     store.save(&state.inner.data_dir.join(INCIDENTS_FILE));
 }
 
@@ -553,6 +775,7 @@ mod tests {
             max_severity: Severity::High,
             first_seen_ms: 1,
             last_seen_ms: 2,
+            draft: None,
         }
     }
 
@@ -657,5 +880,176 @@ mod tests {
         let store = state.advisor().incidents.lock().await;
         assert_eq!(store.latest().len(), 1);
         assert_eq!(store.latest()[0].count, 1);
+    }
+
+    // ---- 3.1 incident drafts -------------------------------------------
+
+    /// Fake drafter: returns a fixed draft and counts invocations so the
+    /// "stable incident is not re-drafted" property is observable.
+    struct FakeDrafter {
+        reply: Option<String>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl FakeDrafter {
+        fn new(reply: Option<&str>) -> Self {
+            Self {
+                reply: reply.map(str::to_owned),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    impl IncidentDrafter for FakeDrafter {
+        async fn draft(&self, _prompt: &str) -> Option<String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.reply.clone()
+        }
+    }
+
+    async fn seed_one_event(state: &AppState) {
+        let mut store = state.advisor().events.lock().await;
+        store.reconcile(
+            vec![crate::advisor::rules::RuleHit {
+                rule_id: "high_error_rate".into(),
+                scope: Scope::Global,
+                severity: Severity::High,
+                title: "errors spiking".into(),
+                detail: "5xx ratio over threshold".into(),
+                recommendation: "inspect logs".into(),
+                runbook: None,
+                remediation: RemediationAction::None,
+            }],
+            1000,
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_llm_sets_incident_draft() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        seed_one_event(&state).await;
+        let drafter = FakeDrafter::new(Some("Root cause: error spike. Step: inspect logs."));
+        run_incident_correlation_with(&state, &drafter).await;
+
+        let store = state.advisor().incidents.lock().await;
+        assert_eq!(store.latest().len(), 1);
+        assert_eq!(
+            store.latest()[0].draft.as_deref(),
+            Some("Root cause: error spike. Step: inspect logs.")
+        );
+        assert_eq!(drafter.call_count(), 1, "the one new incident is drafted once");
+    }
+
+    #[tokio::test]
+    async fn no_llm_leaves_draft_none_and_cycle_completes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        seed_one_event(&state).await;
+        // Drafter returns None (mirrors AgentTurnError::NoLlm).
+        let drafter = FakeDrafter::new(None);
+        run_incident_correlation_with(&state, &drafter).await;
+
+        let store = state.advisor().incidents.lock().await;
+        assert_eq!(store.latest().len(), 1, "cycle still completes");
+        assert!(store.latest()[0].draft.is_none(), "draft stays None");
+    }
+
+    #[tokio::test]
+    async fn stable_incident_is_not_redrafted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        seed_one_event(&state).await;
+        let drafter = FakeDrafter::new(Some("draft v1"));
+
+        // First pass drafts the incident.
+        run_incident_correlation_with(&state, &drafter).await;
+        assert_eq!(drafter.call_count(), 1);
+
+        // Second pass: same incident (carry-forward draft) → NOT re-drafted.
+        run_incident_correlation_with(&state, &drafter).await;
+        assert_eq!(drafter.call_count(), 1, "stable incident not re-drafted");
+        let store = state.advisor().incidents.lock().await;
+        assert_eq!(store.latest()[0].draft.as_deref(), Some("draft v1"));
+    }
+
+    // ---- 3.2 per-incident notification ---------------------------------
+
+    #[test]
+    fn notification_event_frames_alert_storm_and_draft() {
+        let mut inc = incident("inc_x", 5);
+        inc.representative = "errors spiking".into();
+        inc.rule_ids = vec!["high_error_rate".into(), "disk_pressure".into()];
+        inc.draft = Some("Root cause: error spike.\nNext: inspect logs.".into());
+        let ev = incident_notification_event(&inc);
+        assert!(ev.title.contains("5 alerts → 1 incident"));
+        assert!(ev.title.contains("errors spiking"));
+        assert!(ev.detail.contains("Draft root-cause: Root cause: error spike."));
+        // dedup_key is the incident id → one PagerDuty/webhook identity.
+        assert_eq!(ev.id, "inc_x");
+        assert_eq!(ev.severity, Severity::High);
+    }
+
+    #[tokio::test]
+    async fn new_incident_notified_once_then_not_renotified() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener as StdTcpListener;
+        use std::sync::mpsc;
+
+        // A capture webhook counting every POST it receives.
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut tmp = [0u8; 2048];
+                let _ = stream.read(&mut tmp);
+                let reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+                if tx.send(()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        // Configure an enabled webhook (Low floor → all severities pass).
+        {
+            let mut cfg = state.advisor().config.write().await;
+            cfg.channels.webhook = Some(crate::advisor::config::WebhookChannel {
+                enabled: true,
+                url: url.clone(),
+                min_severity: Severity::Low,
+            });
+        }
+        seed_one_event(&state).await;
+        let drafter = FakeDrafter::new(Some("Root cause: x"));
+
+        // First pass: one new incident → exactly one notification.
+        run_incident_correlation_with(&state, &drafter).await;
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("exactly one incident notification");
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "only one notification on the first pass"
+        );
+
+        // Second pass: same incident → NOT re-notified (deduped).
+        run_incident_correlation_with(&state, &drafter).await;
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(500)).is_err(),
+            "stable incident must not be re-notified"
+        );
+
+        // The notified-id is persisted.
+        let store = state.advisor().incidents.lock().await;
+        assert!(store.is_notified(&store.latest()[0].id.clone()));
     }
 }
