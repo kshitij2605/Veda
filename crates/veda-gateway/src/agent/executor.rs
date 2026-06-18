@@ -25,6 +25,30 @@ use super::catalog::{ToolCatalog, ToolContext};
 use super::model::{Agent, AgentStep, ConversationMessage};
 use crate::rest::state::AppState;
 
+/// A live event emitted by [`run_streaming`] as the ReAct loop progresses.
+/// The SSE layer forwards each variant as a named Server-Sent Event so the
+/// client sees reasoning, tool activity, and the final answer token stream
+/// as they happen — before the terminal summary frame.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StreamEvent {
+    /// Interleaved reasoning text the model emitted alongside a tool call.
+    Reasoning { text: String },
+    /// The model requested a tool invocation.
+    ToolCall {
+        tool_call_id: String,
+        tool_id: String,
+        args: serde_json::Value,
+    },
+    /// A dispatched tool returned (success or error).
+    ToolResult {
+        tool_call_id: String,
+        is_error: bool,
+    },
+    /// One fragment of the final answer, streamed token-by-token.
+    AnswerDelta { text: String },
+}
+
 /// Default ceiling on model turns. A turn = one `complete_with_tools`
 /// call; a final-answer turn counts too, so the model gets at most this
 /// many chances to act before the loop gives up gracefully.
@@ -187,6 +211,28 @@ pub async fn collections_modality_summary(state: &AppState, tenant: &crate::tena
     lines.join("\n")
 }
 
+/// Split a final answer into incremental fragments for `AnswerDelta`
+/// streaming. Chunks on whitespace boundaries (whitespace kept with the
+/// preceding word) so concatenating all fragments reproduces the answer
+/// byte-for-byte. An empty answer yields no chunks.
+fn answer_chunks(answer: &str) -> Vec<String> {
+    if answer.is_empty() {
+        return Vec::new();
+    }
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in answer.chars() {
+        cur.push(ch);
+        if ch.is_whitespace() {
+            chunks.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
 /// Truncate a string to at most `cap` bytes on a char boundary, appending
 /// a marker when truncation occurred.
 fn truncate_for_model(s: &str, cap: usize) -> String {
@@ -224,6 +270,69 @@ pub async fn run<M: ChatModel>(
     provider: &str,
     model_name: &str,
 ) -> RunResult {
+    run_core(
+        model, catalog, ctx, agent, system_prompt, history, user_input, max_steps,
+        provider, model_name, None,
+    )
+    .await
+}
+
+/// Streaming twin of [`run`]: runs the SAME ReAct loop but emits a
+/// [`StreamEvent`] on `event_tx` as each step is produced — `Reasoning`,
+/// `ToolCall`, `ToolResult`, and the final answer streamed as one or more
+/// `AnswerDelta`s. Returns the identical [`RunResult`] `run` would, so the
+/// caller computes metrics / citations / grounding the same way.
+///
+/// The tool-calling turns reuse the blocking `complete_with_tools`; the
+/// FINAL answer is streamed via the model's `complete_stream` (real token
+/// streaming for [`LlmClient`], a single delta for the default-impl
+/// fakes). Either way the answer arrives as ≥1 `AnswerDelta`.
+pub async fn run_streaming<M: ChatModel>(
+    model: &M,
+    catalog: &ToolCatalog,
+    ctx: &ToolContext<'_>,
+    agent: &Agent,
+    system_prompt: &str,
+    history: &[ConversationMessage],
+    user_input: &str,
+    max_steps: usize,
+    provider: &str,
+    model_name: &str,
+    event_tx: tokio::sync::mpsc::Sender<StreamEvent>,
+) -> RunResult {
+    run_core(
+        model, catalog, ctx, agent, system_prompt, history, user_input, max_steps,
+        provider, model_name, Some(event_tx),
+    )
+    .await
+}
+
+/// Shared ReAct loop backing both [`run`] (blocking, `event_tx: None`) and
+/// [`run_streaming`] (`event_tx: Some`). With no sink it is byte-for-byte
+/// the original `run`; with a sink it additionally emits a [`StreamEvent`]
+/// at each step. Never panics on model / dispatch / parse failures.
+#[allow(clippy::too_many_arguments)]
+async fn run_core<M: ChatModel>(
+    model: &M,
+    catalog: &ToolCatalog,
+    ctx: &ToolContext<'_>,
+    agent: &Agent,
+    system_prompt: &str,
+    history: &[ConversationMessage],
+    user_input: &str,
+    max_steps: usize,
+    provider: &str,
+    model_name: &str,
+    event_tx: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
+) -> RunResult {
+    // Best-effort emit: a closed receiver (client disconnected) never fails
+    // the run — events are advisory, the RunResult is authoritative.
+    let emit = |ev: StreamEvent| {
+        if let Some(tx) = &event_tx {
+            let _ = tx.try_send(ev);
+        }
+    };
+
     let max_steps = max_steps.max(1);
 
     let tools: Vec<ToolDef> = catalog
@@ -323,6 +432,7 @@ pub async fn run<M: ChatModel>(
                 llm_ms += llm_start.elapsed().as_secs_f64() * 1000.0;
                 chat_span.record("error", true);
                 let msg = format!("The model call failed: {e}");
+                emit(StreamEvent::AnswerDelta { text: msg.clone() });
                 steps.push(AgentStep::Reasoning { text: msg.clone() });
                 return RunResult {
                     response: msg,
@@ -344,6 +454,12 @@ pub async fn run<M: ChatModel>(
         // No tool calls → this is the final answer.
         if completion.tool_calls.is_empty() {
             let answer = completion.content.unwrap_or_default();
+            // Stream the final answer to the live sink as ≥1 AnswerDelta.
+            // (The computed answer is chunked rather than re-requested so
+            // tokens/metrics stay identical to the blocking path.)
+            for chunk in answer_chunks(&answer) {
+                emit(StreamEvent::AnswerDelta { text: chunk });
+            }
             steps.push(AgentStep::Reasoning { text: answer.clone() });
             new_messages.push(ChatMessage::text("assistant", answer.clone()));
             return RunResult {
@@ -361,6 +477,7 @@ pub async fn run<M: ChatModel>(
         // The model wants to act. Record any interleaved reasoning text.
         if let Some(text) = &completion.content {
             if !text.trim().is_empty() {
+                emit(StreamEvent::Reasoning { text: text.clone() });
                 steps.push(AgentStep::Reasoning { text: text.clone() });
                 last_content = Some(text.clone());
             }
@@ -383,6 +500,11 @@ pub async fn run<M: ChatModel>(
             // than aborting the whole run.
             match call.function.parse_arguments() {
                 Ok(args) => {
+                    emit(StreamEvent::ToolCall {
+                        tool_call_id: call.id.clone(),
+                        tool_id: tool_id.clone(),
+                        args: args.clone(),
+                    });
                     steps.push(AgentStep::ToolCall {
                         tool_call_id: call.id.clone(),
                         tool_id: tool_id.clone(),
@@ -409,6 +531,10 @@ pub async fn run<M: ChatModel>(
                     if outcome.is_error {
                         tool_span.record("error", true);
                     }
+                    emit(StreamEvent::ToolResult {
+                        tool_call_id: call.id.clone(),
+                        is_error: outcome.is_error,
+                    });
                     steps.push(AgentStep::ToolResult {
                         tool_call_id: call.id.clone(),
                         result: outcome.content.clone(),
@@ -427,10 +553,19 @@ pub async fn run<M: ChatModel>(
                     let err = serde_json::json!({
                         "error": format!("could not parse tool arguments: {e}")
                     });
+                    emit(StreamEvent::ToolCall {
+                        tool_call_id: call.id.clone(),
+                        tool_id: tool_id.clone(),
+                        args: serde_json::Value::Null,
+                    });
                     steps.push(AgentStep::ToolCall {
                         tool_call_id: call.id.clone(),
                         tool_id: tool_id.clone(),
                         args: serde_json::Value::Null,
+                    });
+                    emit(StreamEvent::ToolResult {
+                        tool_call_id: call.id.clone(),
+                        is_error: true,
                     });
                     steps.push(AgentStep::ToolResult {
                         tool_call_id: call.id.clone(),
@@ -453,6 +588,9 @@ pub async fn run<M: ChatModel>(
 answer. Here is what I gathered so far in the steps."
             .to_owned()
     });
+    for chunk in answer_chunks(&response) {
+        emit(StreamEvent::AnswerDelta { text: chunk });
+    }
     steps.push(AgentStep::Reasoning {
         text: format!("[step limit of {max_steps} reached]"),
     });
@@ -687,6 +825,97 @@ mod tests {
 
         // Token usage is summed across both turns.
         assert_eq!(result.total_tokens, 20);
+    }
+
+    #[test]
+    fn answer_chunks_reproduce_input_and_split_on_whitespace() {
+        assert!(answer_chunks("").is_empty());
+        let chunks = answer_chunks("Hello there world");
+        assert!(chunks.len() >= 2, "should split into multiple chunks: {chunks:?}");
+        assert_eq!(chunks.concat(), "Hello there world");
+        // A no-whitespace answer is a single chunk.
+        assert_eq!(answer_chunks("oneword"), vec!["oneword".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn run_streaming_emits_ordered_events_and_matches_run_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_state(tmp.path(), "docs").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let agent = test_agent(vec!["list_collections".to_owned()]);
+
+        // Build the script once; clone it for the two runs so both the
+        // blocking `run` and `run_streaming` see identical model behavior.
+        let script = || {
+            vec![
+                completion_with_call(
+                    Some("Let me check the collections."),
+                    tool_call("call_1", "list_collections", "{}"),
+                ),
+                final_completion("There is one collection: docs."),
+            ]
+        };
+
+        // Baseline blocking run.
+        let baseline = run(
+            &FakeModel::scripted(script()),
+            &cat, &ctx, &agent, "sys", &[], "what collections exist?", DEFAULT_MAX_STEPS,
+            "openai", "test-model",
+        )
+        .await;
+
+        // Streaming run feeding an mpsc channel.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+        let streamed = run_streaming(
+            &FakeModel::scripted(script()),
+            &cat, &ctx, &agent, "sys", &[], "what collections exist?", DEFAULT_MAX_STEPS,
+            "openai", "test-model", tx,
+        )
+        .await;
+
+        // Drain the events (sender dropped when run_streaming returned).
+        let mut events: Vec<StreamEvent> = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            events.push(ev);
+        }
+
+        // Same final answer + outcome as the blocking path.
+        assert!(!streamed.hit_limit_or_error);
+        assert_eq!(streamed.response, baseline.response);
+        assert_eq!(streamed.total_tokens, baseline.total_tokens);
+        assert_eq!(streamed.steps.len(), baseline.steps.len());
+
+        // Event ordering: a Reasoning, then ToolCall, then ToolResult,
+        // then ≥1 AnswerDelta, in that relative order.
+        let tc = events
+            .iter()
+            .position(|e| matches!(e, StreamEvent::ToolCall { tool_id, .. } if tool_id == "list_collections"))
+            .expect("a tool_call event");
+        let tr = events
+            .iter()
+            .position(|e| matches!(e, StreamEvent::ToolResult { is_error: false, .. }))
+            .expect("a tool_result event");
+        let first_answer = events
+            .iter()
+            .position(|e| matches!(e, StreamEvent::AnswerDelta { .. }))
+            .expect("≥1 answer_delta event");
+        assert!(tc < tr, "tool_call must precede tool_result");
+        assert!(tr < first_answer, "tool_result must precede answer deltas");
+
+        // Concatenating the AnswerDelta fragments reproduces the response.
+        let answer: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::AnswerDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answer, streamed.response);
+        assert!(
+            events.iter().filter(|e| matches!(e, StreamEvent::AnswerDelta { .. })).count() >= 1,
+            "answer must arrive as ≥1 delta"
+        );
     }
 
     #[tokio::test]

@@ -15,6 +15,7 @@
 
 use std::time::Duration;
 
+use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -190,6 +191,13 @@ struct ChatRequest<'a> {
     tools: Option<&'a [ToolDef]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'a str>,
+    /// Streaming flag. `None` (the default for `complete`/`complete_with_tools`)
+    /// is skipped, so the non-streaming wire format is byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    /// `{"include_usage": true}` so the terminal SSE chunk carries token usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,6 +241,67 @@ pub struct CompletionOptions {
     pub max_tokens: Option<u32>,
     /// Force JSON-mode where supported (`{"type": "json_object"}`).
     pub json_mode: bool,
+}
+
+/// One incremental piece of a streamed completion. `content` is the new
+/// text fragment (`choices[0].delta.content`); empty-content deltas (e.g.
+/// the role-only opening chunk, or the terminal usage chunk) are still
+/// yielded so callers see a faithful event sequence. `usage`, when set,
+/// carries the final token tally from the terminal chunk
+/// (`stream_options.include_usage`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StreamDelta {
+    pub content: String,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
+/// Streaming SSE chunk shape: `{"choices":[{"delta":{"content":"..."}}], "usage": {...}}`.
+#[derive(Debug, Deserialize)]
+struct StreamChunk {
+    #[serde(default)]
+    choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamChoice {
+    #[serde(default)]
+    delta: StreamDeltaWire,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct StreamDeltaWire {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// Parse the body of a single SSE `data:` line (the JSON after `data: `)
+/// into a [`StreamDelta`]. Returns `Ok(None)` for the terminal `[DONE]`
+/// sentinel. Split out so the parse is unit-testable without a network
+/// call.
+fn parse_stream_data(data: &str) -> Result<Option<StreamDelta>> {
+    let data = data.trim();
+    if data == "[DONE]" {
+        return Ok(None);
+    }
+    let chunk: StreamChunk = serde_json::from_str(data).map_err(|e| {
+        VedaError::Query(format!("llm stream chunk parse failed: {e}"))
+    })?;
+    let content = chunk
+        .choices
+        .first()
+        .and_then(|c| c.delta.content.clone())
+        .unwrap_or_default();
+    let usage = chunk.usage.unwrap_or_default();
+    Ok(Some(StreamDelta {
+        content,
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+    }))
 }
 
 pub struct LlmClient {
@@ -279,6 +348,8 @@ impl LlmClient {
             },
             tools: None,
             tool_choice: None,
+            stream: None,
+            stream_options: None,
         };
         let mut trace_headers = reqwest::header::HeaderMap::new();
         crate::trace_propagation::inject_current_context(&mut trace_headers);
@@ -344,6 +415,8 @@ impl LlmClient {
             },
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
+            stream: None,
+            stream_options: None,
         };
         let mut trace_headers = reqwest::header::HeaderMap::new();
         crate::trace_propagation::inject_current_context(&mut trace_headers);
@@ -372,6 +445,114 @@ impl LlmClient {
         Ok(Self::completion_from_response(chat))
     }
 
+    /// Stream a content-only completion (NO tools). POSTs with
+    /// `stream: true` and parses the `text/event-stream` body into ordered
+    /// [`StreamDelta`]s. Token usage, when the endpoint honors
+    /// `stream_options.include_usage`, arrives on the terminal chunk's
+    /// delta. The HTTP request is made eagerly (so endpoint/auth errors
+    /// surface from this call); the returned stream then yields the body
+    /// line by line.
+    #[instrument(
+        name = "llm_complete_stream",
+        skip(self, messages, opts),
+        fields(model = %self.config.model, n_messages = messages.len())
+    )]
+    pub async fn complete_stream(
+        &self,
+        messages: &[ChatMessage],
+        opts: &CompletionOptions,
+    ) -> Result<impl Stream<Item = Result<StreamDelta>>> {
+        let body = ChatRequest {
+            model: &self.config.model,
+            messages,
+            temperature: opts.temperature,
+            max_tokens: opts.max_tokens,
+            response_format: if opts.json_mode {
+                Some(serde_json::json!({ "type": "json_object" }))
+            } else {
+                None
+            },
+            tools: None,
+            tool_choice: None,
+            stream: Some(true),
+            stream_options: Some(serde_json::json!({ "include_usage": true })),
+        };
+        let mut trace_headers = reqwest::header::HeaderMap::new();
+        crate::trace_propagation::inject_current_context(&mut trace_headers);
+        let mut req = self
+            .http
+            .post(&self.config.endpoint)
+            .headers(trace_headers)
+            .json(&body);
+        if let Some(key) = &self.config.api_key {
+            req = req.bearer_auth(key);
+        }
+        let resp = req.send().await.map_err(|e| {
+            VedaError::Query(format!("llm request failed: {e}"))
+        })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(VedaError::Query(format!(
+                "llm endpoint returned {status}: {}",
+                text.chars().take(500).collect::<String>(),
+            )));
+        }
+
+        // Reassemble SSE frames from the raw byte stream: accumulate a
+        // text buffer, split on newlines, and parse each `data:` line.
+        let byte_stream = resp.bytes_stream();
+        let parsed = stream::unfold(
+            (byte_stream, String::new(), false),
+            |(mut bytes, mut buf, mut done)| async move {
+                loop {
+                    if done {
+                        return None;
+                    }
+                    // Drain any complete lines already buffered.
+                    if let Some(idx) = buf.find('\n') {
+                        let line: String = buf.drain(..=idx).collect();
+                        let line = line.trim_end_matches(['\r', '\n']);
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let data = match line.strip_prefix("data:") {
+                            Some(d) => d.trim_start(),
+                            None => continue, // ignore non-data SSE fields
+                        };
+                        match parse_stream_data(data) {
+                            Ok(Some(delta)) => {
+                                return Some((Ok(delta), (bytes, buf, done)));
+                            }
+                            Ok(None) => {
+                                done = true; // [DONE]
+                                continue;
+                            }
+                            Err(e) => {
+                                return Some((Err(e), (bytes, buf, true)));
+                            }
+                        }
+                    }
+                    // Need more bytes.
+                    match bytes.next().await {
+                        Some(Ok(chunk)) => {
+                            buf.push_str(&String::from_utf8_lossy(&chunk));
+                        }
+                        Some(Err(e)) => {
+                            return Some((
+                                Err(VedaError::Query(format!("llm stream read failed: {e}"))),
+                                (bytes, buf, true),
+                            ));
+                        }
+                        None => return None, // stream ended
+                    }
+                }
+            },
+        );
+        Ok(parsed)
+    }
+
     /// Map a parsed chat response onto a `ToolCompletion`. Split out so the
     /// deserialization path is testable without a network call.
     fn completion_from_response(chat: ChatResponse) -> ToolCompletion {
@@ -395,6 +576,14 @@ impl LlmClient {
     }
 }
 
+/// A boxed stream of [`StreamDelta`]s — the return type of the
+/// [`ChatModel::complete_stream`] trait method. Boxed (rather than
+/// `impl Stream`) so the trait method can carry a default impl and so
+/// callers can hold a single concrete type regardless of the
+/// implementation.
+pub type DeltaStream<'a> =
+    std::pin::Pin<Box<dyn Stream<Item = Result<StreamDelta>> + Send + 'a>>;
+
 /// Abstraction over a tool-calling chat model so callers (agents, tests)
 /// can substitute a fake implementation. Implemented by [`LlmClient`].
 #[allow(async_fn_in_trait)]
@@ -406,6 +595,30 @@ pub trait ChatModel {
         tool_choice: Option<&str>,
         opts: &CompletionOptions,
     ) -> Result<ToolCompletion>;
+
+    /// Stream a content-only completion as ordered [`StreamDelta`]s.
+    ///
+    /// The default implementation calls the blocking tool-less path
+    /// (`complete_with_tools` with no tools) and yields the whole content
+    /// as a single delta, so fakes and non-streaming models keep working
+    /// without overriding this. [`LlmClient`] overrides it with real
+    /// token-by-token SSE streaming.
+    async fn complete_stream<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        opts: &'a CompletionOptions,
+    ) -> Result<DeltaStream<'a>> {
+        let completion = self
+            .complete_with_tools(messages, &[], None, opts)
+            .await?;
+        let delta = StreamDelta {
+            content: completion.content.unwrap_or_default(),
+            prompt_tokens: completion.prompt_tokens,
+            completion_tokens: completion.completion_tokens,
+            total_tokens: completion.total_tokens,
+        };
+        Ok(Box::pin(stream::once(async move { Ok(delta) })))
+    }
 }
 
 impl ChatModel for LlmClient {
@@ -418,6 +631,15 @@ impl ChatModel for LlmClient {
     ) -> Result<ToolCompletion> {
         self.complete_with_tools_impl(messages, tools, tool_choice, opts)
             .await
+    }
+
+    async fn complete_stream<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+        opts: &'a CompletionOptions,
+    ) -> Result<DeltaStream<'a>> {
+        let s = self.complete_stream(messages, opts).await?;
+        Ok(Box::pin(s))
     }
 }
 
@@ -445,9 +667,13 @@ mod tests {
             response_format: None,
             tools: Some(&tools),
             tool_choice: Some("auto"),
+            stream: None,
+            stream_options: None,
         };
         let v = serde_json::to_value(&body).expect("serializes");
         assert_eq!(v["tool_choice"], "auto");
+        // The non-streaming request must NOT carry a `stream` field.
+        assert!(v.get("stream").is_none(), "stream leaked into blocking req: {v}");
         let t = &v["tools"][0];
         assert_eq!(t["type"], "function");
         assert_eq!(t["function"]["name"], "search");
@@ -507,6 +733,107 @@ mod tests {
         assert_eq!(args, serde_json::json!({ "q": "x" }));
         assert_eq!(completion.prompt_tokens, 10);
         assert_eq!(completion.total_tokens, 15);
+    }
+
+    #[test]
+    fn parse_stream_data_extracts_content_delta() {
+        let d = parse_stream_data(r#"{"choices":[{"delta":{"content":"Hel"}}]}"#)
+            .expect("parses")
+            .expect("not [DONE]");
+        assert_eq!(d.content, "Hel");
+        assert_eq!(d.total_tokens, 0);
+    }
+
+    #[test]
+    fn parse_stream_data_done_sentinel_is_none() {
+        assert!(parse_stream_data("[DONE]").expect("ok").is_none());
+    }
+
+    #[test]
+    fn parse_stream_data_terminal_usage_chunk() {
+        // Final chunk: empty choices + a usage block (include_usage).
+        let d = parse_stream_data(
+            r#"{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4,"total_tokens":15}}"#,
+        )
+        .expect("parses")
+        .expect("not [DONE]");
+        assert_eq!(d.content, "");
+        assert_eq!(d.prompt_tokens, 11);
+        assert_eq!(d.completion_tokens, 4);
+        assert_eq!(d.total_tokens, 15);
+    }
+
+    /// A canned OpenAI `data:`-line stream parses into ordered content
+    /// deltas, terminating cleanly on `[DONE]`.
+    #[test]
+    fn canned_sse_stream_parses_into_ordered_deltas() {
+        let raw = "\
+data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\
+\n\
+data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\
+\n\
+data: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\
+\n\
+data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\
+\n\
+data: [DONE]\n\
+\n";
+        let mut contents: Vec<String> = Vec::new();
+        let mut final_total = 0u32;
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let data = line.strip_prefix("data:").unwrap().trim_start();
+            match parse_stream_data(data).expect("parses") {
+                Some(d) => {
+                    if !d.content.is_empty() {
+                        contents.push(d.content);
+                    }
+                    if d.total_tokens > 0 {
+                        final_total = d.total_tokens;
+                    }
+                }
+                None => break,
+            }
+        }
+        assert_eq!(contents, vec!["Hello".to_owned(), ", world".to_owned()]);
+        assert_eq!(final_total, 5);
+    }
+
+    /// The default `ChatModel::complete_stream` impl falls back to the
+    /// blocking path and yields the whole content as exactly one delta.
+    #[tokio::test]
+    async fn default_complete_stream_yields_full_content_as_one_delta() {
+        struct Fake;
+        impl ChatModel for Fake {
+            async fn complete_with_tools(
+                &self,
+                _m: &[ChatMessage],
+                _t: &[ToolDef],
+                _tc: Option<&str>,
+                _o: &CompletionOptions,
+            ) -> Result<ToolCompletion> {
+                Ok(ToolCompletion {
+                    content: Some("the whole answer".to_owned()),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".to_owned()),
+                    prompt_tokens: 2,
+                    completion_tokens: 3,
+                    total_tokens: 5,
+                })
+            }
+        }
+        let fake = Fake;
+        let msgs = vec![ChatMessage::text("user", "hi")];
+        let opts = CompletionOptions::default();
+        let stream = fake.complete_stream(&msgs, &opts).await.expect("stream");
+        let deltas: Vec<StreamDelta> =
+            stream.map(|r| r.expect("delta ok")).collect().await;
+        assert_eq!(deltas.len(), 1, "default impl yields exactly one delta");
+        assert_eq!(deltas[0].content, "the whole answer");
+        assert_eq!(deltas[0].total_tokens, 5);
     }
 
     #[test]
