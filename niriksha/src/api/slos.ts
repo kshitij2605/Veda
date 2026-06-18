@@ -15,6 +15,8 @@ export type SloKind =
   | { kind: 'availability' }
   | { kind: 'error_rate' }
   | { kind: 'synthetic'; probe_id: string }
+  | { kind: 'recall'; collection: string; k?: number }
+  | { kind: 'faithfulness'; agent?: string }
 
 export type SloKindTag = SloKind['kind']
 
@@ -94,5 +96,9 @@ export function sloKindLabel(kind: SloKind): string {
       return 'Error rate'
     case 'synthetic':
       return `Synthetic · ${kind.probe_id}`
+    case 'recall':
+      return `Recall@${kind.k ?? '?'} · ${kind.collection} (proxy)`
+    case 'faithfulness':
+      return `Faithfulness · ${kind.agent ?? 'all agents'}`
   }
 }

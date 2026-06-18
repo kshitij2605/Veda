@@ -21,6 +21,7 @@ pub mod anomaly;
 pub mod config;
 pub mod engine;
 pub mod event;
+pub mod faithfulness;
 pub mod notify;
 pub mod recall_probe;
 pub mod remediation;
@@ -44,6 +45,8 @@ pub use synthetic::{
 pub use recall_probe::{
     probe_recall, run_recall_probes, spawn_recall_prober, IndexParams, RecallResults, RecallSample,
 };
+
+pub use faithfulness::{FaithfulnessResults, FaithfulnessSample};
 
 pub use snapshot::{
     collect, parse_prom_counter, CollectionSnapshot, GlobalSnapshot, HealthSnapshot,

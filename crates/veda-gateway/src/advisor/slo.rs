@@ -67,6 +67,22 @@ pub enum SloKind {
     ErrorRate,
     /// "good" = synthetic probe succeeded.
     Synthetic { probe_id: String },
+    /// Retrieval-quality SLO: "good" is scaled from the latest proxy
+    /// `recall@k` for `collection` (see [`crate::advisor::recall_probe`]).
+    /// `k` is advisory (the probe's own k is used); kept for display. The
+    /// SLI is a **proxy** (sampled queries + capped brute force).
+    Recall {
+        collection: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        k: Option<usize>,
+    },
+    /// Faithfulness-quality SLO: "good" is scaled from agent-turn
+    /// faithfulness scores (Phase A grounding). `agent` optionally scopes
+    /// to one agent id; `None` aggregates all agents.
+    Faithfulness {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+    },
 }
 
 /// A burn-rate alert window: observe the burn rate over `window_secs`
@@ -710,6 +726,76 @@ mod tests {
         assert!(!reg.remove("nope"));
         assert!(reg.get("a").is_none());
         assert_eq!(reg.list().len(), 1);
+    }
+
+    #[test]
+    fn recall_kind_serde_round_trip() {
+        let k = SloKind::Recall {
+            collection: "docs".into(),
+            k: Some(10),
+        };
+        let v = serde_json::to_value(&k).unwrap();
+        assert_eq!(v["kind"], serde_json::json!("recall"));
+        assert_eq!(v["collection"], serde_json::json!("docs"));
+        assert_eq!(v["k"], serde_json::json!(10));
+        let back: SloKind = serde_json::from_value(v).unwrap();
+        assert_eq!(back, k);
+
+        // k omitted → None (skip_serializing_if), parses back as None.
+        let no_k: SloKind =
+            serde_json::from_value(serde_json::json!({"kind":"recall","collection":"imgs"}))
+                .unwrap();
+        assert_eq!(
+            no_k,
+            SloKind::Recall {
+                collection: "imgs".into(),
+                k: None
+            }
+        );
+        let v = serde_json::to_value(&no_k).unwrap();
+        assert!(v.get("k").is_none(), "None k must not serialize: {v}");
+    }
+
+    #[test]
+    fn faithfulness_kind_serde_round_trip() {
+        let k = SloKind::Faithfulness {
+            agent: Some("veda-agent".into()),
+        };
+        let v = serde_json::to_value(&k).unwrap();
+        assert_eq!(v["kind"], serde_json::json!("faithfulness"));
+        assert_eq!(v["agent"], serde_json::json!("veda-agent"));
+        let back: SloKind = serde_json::from_value(v).unwrap();
+        assert_eq!(back, k);
+
+        // agent omitted → None.
+        let none_agent: SloKind =
+            serde_json::from_value(serde_json::json!({"kind":"faithfulness"})).unwrap();
+        assert_eq!(none_agent, SloKind::Faithfulness { agent: None });
+        let v = serde_json::to_value(&none_agent).unwrap();
+        assert!(v.get("agent").is_none(), "None agent must not serialize: {v}");
+    }
+
+    #[test]
+    fn status_math_unaffected_by_quality_kind() {
+        // The rolling counter is kind-agnostic: a Recall SLO computes the
+        // same SLI/burn math as any other kind from (good, total).
+        let mut st = SloState::new(60);
+        st.record("r", 700, 1000, 1_000); // recall 70% scaled to 700/1000
+        let def = SloDef {
+            id: "r".into(),
+            name: "docs recall".into(),
+            kind: SloKind::Recall {
+                collection: "docs".into(),
+                k: Some(10),
+            },
+            target_pct: 90.0,
+            window_secs: 2_592_000,
+            fast_burn: default_fast_burn(),
+            slow_burn: default_slow_burn(),
+        };
+        let status = st.status(&def, 2_000);
+        assert!((status.sli_pct.unwrap() - 70.0).abs() < APPROX);
+        assert!(!status.compliant, "70% recall vs target 90 → non-compliant");
     }
 
     #[test]

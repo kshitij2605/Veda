@@ -411,6 +411,20 @@ pub(crate) async fn run_agent_turn(
         )
         .await;
         emit_grounding_metrics(&model_name, citations.len(), &g);
+        // Persist the faithfulness score for the quality-SLO engine. Brief
+        // advisor lock, taken AFTER the scoring await above has completed
+        // (never held across `score_grounding`), off the network path.
+        if let Some(f) = g.faithfulness {
+            let now = crate::advisor::engine::now_ms().max(0) as u64;
+            let mut fr = state.advisor().faithfulness_results.lock().await;
+            fr.record(agent_id, f, now);
+            fr.save(
+                &state
+                    .inner
+                    .data_dir
+                    .join(crate::advisor::faithfulness::FAITHFULNESS_RESULTS_FILE),
+            );
+        }
         Some(g)
     };
 

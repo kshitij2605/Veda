@@ -134,6 +134,75 @@ async fn create_list_get_status_delete_slo() {
 }
 
 #[tokio::test]
+async fn create_recall_and_faithfulness_quality_slos() {
+    let (base, _tmp) = start_server().await;
+    let c = Client::new();
+
+    // Recall SLO (collection + optional k).
+    let r = c
+        .post(format!("{base}/v1/admin/slos"))
+        .json(&json!({
+            "id": "docs-recall",
+            "name": "Docs recall",
+            "kind": { "kind": "recall", "collection": "docs", "k": 10 },
+            "target_pct": 90.0,
+            "window_secs": 2592000
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{:?}", r.text().await);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["id"], json!("docs-recall"));
+    assert_eq!(body["kind"]["kind"], json!("recall"));
+    assert_eq!(body["kind"]["collection"], json!("docs"));
+
+    // Status (200) — no recall sample yet → null sli, compliant shape.
+    let r = c
+        .get(format!("{base}/v1/admin/slos/docs-recall/status"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["slo_id"], json!("docs-recall"));
+    assert_eq!(body["compliant"], json!(true));
+
+    // Faithfulness SLO (optional agent).
+    let r = c
+        .post(format!("{base}/v1/admin/slos"))
+        .json(&json!({
+            "id": "agent-faith",
+            "name": "Agent faithfulness",
+            "kind": { "kind": "faithfulness", "agent": "veda-agent" },
+            "target_pct": 90.0,
+            "window_secs": 2592000
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{:?}", r.text().await);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["kind"]["kind"], json!("faithfulness"));
+    assert_eq!(body["kind"]["agent"], json!("veda-agent"));
+
+    // Faithfulness with the agent omitted is also valid.
+    let r = c
+        .post(format!("{base}/v1/admin/slos"))
+        .json(&json!({
+            "id": "any-faith",
+            "name": "Any-agent faithfulness",
+            "kind": { "kind": "faithfulness" },
+            "target_pct": 90.0,
+            "window_secs": 2592000
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{:?}", r.text().await);
+}
+
+#[tokio::test]
 async fn create_assigns_id_when_absent() {
     let (base, _tmp) = start_server().await;
     let c = Client::new();

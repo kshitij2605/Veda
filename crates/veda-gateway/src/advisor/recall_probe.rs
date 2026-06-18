@@ -365,6 +365,13 @@ impl RecallResults {
         self.rings.get(collection).and_then(|r| r.last())
     }
 
+    /// Most-recent sample for `collection`, cloned out — a cheap owned
+    /// accessor for the advisor tick, which clones under a brief lock and
+    /// then drops the guard before computing the SLI.
+    pub fn latest_recall(&self, collection: &str) -> Option<RecallSample> {
+        self.latest(collection).cloned()
+    }
+
     /// All retained samples for `collection`, oldest-first.
     pub fn history(&self, collection: &str) -> Vec<RecallSample> {
         self.rings.get(collection).cloned().unwrap_or_default()
