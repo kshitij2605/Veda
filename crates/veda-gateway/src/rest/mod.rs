@@ -12,6 +12,7 @@ pub mod a2a;
 pub mod admin;
 pub mod agents;
 pub mod aggregate;
+pub mod changepoint;
 pub mod chunk_preview;
 pub mod collections;
 pub mod correlations;
@@ -166,6 +167,14 @@ fn index_advisor_router() -> Router<state::AppState> {
 fn forecast_router() -> Router<state::AppState> {
     Router::new()
         .route("/v1/admin/forecast", get(forecast::forecast))
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// Change-point admin route, gated by an extra `require_admin` route
+/// layer (same pattern as [`forecast_router`]).
+fn changepoint_router() -> Router<state::AppState> {
+    Router::new()
+        .route("/v1/admin/change-points", get(changepoint::change_points))
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
@@ -435,6 +444,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .merge(index_advisor_router())
         // Capacity forecasts — admin-only (extra require_admin).
         .merge(forecast_router())
+        // Change-point detection — admin-only (extra require_admin).
+        .merge(changepoint_router())
         // Semantic incident correlation — admin-only (extra require_admin).
         .merge(incidents_router());
 

@@ -1092,6 +1092,65 @@ impl Rule for RecallDecayForecast {
     }
 }
 
+// ---------------------------------------------------------------------
+// Change-point rule — reads the sustained level/trend shifts the engine
+// attaches to `snap.change_points` (mean/slope split-test over the
+// snapshot history, warm-up + min-magnitude guarded so it never fires on a
+// flat/noisy/short series). Skips cleanly when there are no change points.
+// Advisory: a regime shift points at a recent deploy/config/load change.
+// ---------------------------------------------------------------------
+
+/// A sustained level or trend shift detected in a metric series.
+struct ChangePointDetected;
+impl Rule for ChangePointDetected {
+    fn id(&self) -> &'static str {
+        "change_point_detected"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        use crate::advisor::changepoint::ChangeKind;
+        // Optional extra floor on the normalized magnitude (the engine
+        // already applied the detector's own guard).
+        let min_magnitude = threshold_f64(cfg, "min_magnitude", 0.0);
+        let mut hits = Vec::new();
+        for cp in &snap.change_points {
+            if cp.magnitude < min_magnitude {
+                continue;
+            }
+            let kind = match cp.kind {
+                ChangeKind::Level => "level",
+                ChangeKind::Trend => "trend",
+            };
+            // Per-collection recall is index-scoped; everything else global.
+            let scope = match (&cp.metric[..], &cp.scope) {
+                ("recall", Some(coll)) => Scope::Index(coll.clone()),
+                _ => Scope::Global,
+            };
+            let target = cp
+                .scope
+                .as_ref()
+                .map(|s| format!("{} for '{}'", cp.metric, s))
+                .unwrap_or_else(|| cp.metric.clone());
+            hits.push(RuleHit {
+                rule_id: self.id().into(),
+                scope,
+                severity: self.default_severity(),
+                title: format!("Change point detected in {}", cp.metric),
+                detail: format!(
+                    "A sustained {kind} shift in {target}: {:.4} → {:.4} (normalized magnitude {:.2}, confidence {:.2}).",
+                    cp.before, cp.after, cp.magnitude, cp.confidence
+                ),
+                recommendation: "A sustained level/trend shift, not a momentary spike — investigate a recent deploy, config, or load change around the shift time.".into(),
+                runbook: Some("GET /v1/admin/change-points".into()),
+                remediation: RemediationAction::None,
+            });
+        }
+        hits
+    }
+}
+
 /// The built-in rule catalog.
 pub fn catalog() -> Vec<Box<dyn Rule>> {
     vec![
@@ -1121,6 +1180,7 @@ pub fn catalog() -> Vec<Box<dyn Rule>> {
         Box::new(DiskFullForecast),
         Box::new(MemoryGrowthForecast),
         Box::new(RecallDecayForecast),
+        Box::new(ChangePointDetected),
     ]
 }
 
@@ -1216,6 +1276,7 @@ mod tests {
             synthetic_summaries: Vec::new(),
             index_health: Vec::new(),
             forecasts: Vec::new(),
+            change_points: Vec::new(),
         }
     }
 
@@ -1871,5 +1932,56 @@ mod tests {
         ] {
             assert!(find(&hits, id).is_none(), "{id} fired without a forecast");
         }
+    }
+
+    // --- change-point rule --------------------------------------------
+
+    fn change_point(
+        metric: &str,
+        scope: Option<&str>,
+        kind: crate::advisor::changepoint::ChangeKind,
+    ) -> crate::advisor::changepoint::ChangePoint {
+        crate::advisor::changepoint::ChangePoint {
+            metric: metric.into(),
+            scope: scope.map(|s| s.to_owned()),
+            kind,
+            at_ms: 1_700_000_000_000,
+            before: 40.0,
+            after: 80.0,
+            magnitude: 3.0,
+            confidence: 0.6,
+        }
+    }
+
+    #[test]
+    fn change_point_rule_fires_for_global_level_shift() {
+        use crate::advisor::changepoint::ChangeKind;
+        let mut snap = base_snapshot();
+        snap.change_points = vec![change_point("disk_used_pct", None, ChangeKind::Level)];
+        let hits = ChangePointDetected.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "change_point_detected");
+        assert_eq!(hits[0].scope, Scope::Global);
+        assert_eq!(hits[0].severity, Severity::Medium);
+        assert!(hits[0].detail.to_lowercase().contains("level"));
+        assert!(hits[0].detail.contains("40") && hits[0].detail.contains("80"));
+    }
+
+    #[test]
+    fn change_point_rule_scopes_recall_to_index() {
+        use crate::advisor::changepoint::ChangeKind;
+        let mut snap = base_snapshot();
+        snap.change_points = vec![change_point("recall", Some("docs"), ChangeKind::Trend)];
+        let hits = ChangePointDetected.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].scope, Scope::Index("docs".into()));
+        assert!(hits[0].detail.to_lowercase().contains("trend"));
+    }
+
+    #[test]
+    fn change_point_rule_silent_when_empty() {
+        let snap = base_snapshot();
+        let hits = run_rules(&catalog(), &snap, &empty_history(), &AdvisorConfig::default());
+        assert!(find(&hits, "change_point_detected").is_none());
     }
 }

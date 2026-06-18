@@ -192,6 +192,12 @@ pub struct OpsSnapshot {
     /// the post-push history) before reconcile. Default empty.
     #[serde(default)]
     pub forecasts: Vec<crate::advisor::forecast::Forecast>,
+    /// Change points (sustained level/trend shifts) detected over the
+    /// recent history. Like [`Self::forecasts`], NOT populated by
+    /// [`collect`]; the engine fills it each tick (from the post-push
+    /// history) before reconcile. Default empty.
+    #[serde(default)]
+    pub change_points: Vec<crate::advisor::changepoint::ChangePoint>,
 }
 
 /// Collect a live snapshot from `state`. `now_ms` is injected so
@@ -365,6 +371,7 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
         synthetic_summaries: Vec::new(),
         index_health,
         forecasts: Vec::new(),
+        change_points: Vec::new(),
     }
 }
 
@@ -858,6 +865,17 @@ impl SnapshotHistory {
         }
     }
 
+    /// Overwrite the most-recent snapshot's `change_points` (same pattern as
+    /// [`Self::set_latest_forecasts`]). No-op on an empty history.
+    pub fn set_latest_change_points(
+        &mut self,
+        change_points: Vec<crate::advisor::changepoint::ChangePoint>,
+    ) {
+        if let Some(s) = self.buf.back_mut() {
+            s.change_points = change_points;
+        }
+    }
+
     /// Second-most-recent snapshot.
     pub fn previous(&self) -> Option<&OpsSnapshot> {
         let n = self.buf.len();
@@ -1123,6 +1141,7 @@ veda_records_total 7
             synthetic_summaries: Vec::new(),
             index_health: Vec::new(),
             forecasts: Vec::new(),
+            change_points: Vec::new(),
         }
     }
 

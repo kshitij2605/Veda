@@ -360,6 +360,7 @@ mod tests {
             synthetic_summaries: Vec::new(),
             index_health: Vec::new(),
             forecasts: Vec::new(),
+            change_points: Vec::new(),
         }
     }
 
