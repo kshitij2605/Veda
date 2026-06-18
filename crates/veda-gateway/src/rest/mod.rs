@@ -31,6 +31,7 @@ pub mod metrics_middleware;
 #[cfg(feature = "profiling")]
 pub mod pprof;
 pub mod query_log;
+pub mod rag_eval;
 pub mod records;
 pub mod rerank;
 pub mod resources;
@@ -358,6 +359,25 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/conversations/{id}",
             get(agents::get_conversation).delete(agents::delete_conversation),
+        )
+        // RAG/agent eval harness + production-trace flywheel. Tenant/RLS-
+        // scoped like /converse (not admin-only): eval runs under the
+        // caller's identity.
+        .route(
+            "/v1/eval-sets",
+            get(rag_eval::list_eval_sets).post(rag_eval::create_eval_set),
+        )
+        .route(
+            "/v1/eval-sets/{id}",
+            get(rag_eval::get_eval_set)
+                .put(rag_eval::put_eval_set)
+                .delete(rag_eval::delete_eval_set),
+        )
+        .route("/v1/eval-sets/{id}/run", post(rag_eval::run_eval))
+        .route("/v1/eval-sets/{id}/runs", get(rag_eval::list_runs))
+        .route(
+            "/v1/eval-sets/{id}/cases/from-conversation",
+            post(rag_eval::case_from_conversation),
         )
         // Document processing (OCR)
         .route(

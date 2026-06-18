@@ -61,6 +61,9 @@ const DashboardPage = lazy(() =>
 const QualityLab = lazy(() =>
   import('./pages/quality/QualityLab').then((m) => ({ default: m.QualityLab })),
 )
+const EvalHarness = lazy(() =>
+  import('./pages/quality/EvalHarness').then((m) => ({ default: m.EvalHarness })),
+)
 const Console = lazy(() =>
   import('./pages/Console').then((m) => ({ default: m.Console })),
 )
@@ -119,6 +122,7 @@ export default function App() {
             <Route path="/indexes" element={<IndexManager />} />
             <Route path="/evaluation" element={<EvaluationView />} />
             <Route path="/quality" element={<QualityLab />} />
+            <Route path="/eval-harness" element={<EvalHarness />} />
             <Route path="/pipelines" element={<Pipelines />} />
             <Route path="/chunker" element={<ChunkerAB />} />
             <Route path="/dashboards" element={<DashboardsList />} />
