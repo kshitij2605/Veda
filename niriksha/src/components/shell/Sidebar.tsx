@@ -17,6 +17,7 @@ import {
   Search,
   Settings,
   ShieldAlert,
+  Target,
   TerminalSquare,
 } from 'lucide-react'
 import { type ComponentType, useEffect } from 'react'
@@ -64,6 +65,7 @@ const GROUPS: NavGroup[] = [
     items: [
       { to: '/evaluation', label: 'Evaluation', icon: Beaker },
       { to: '/quality', label: 'Quality Lab', icon: FlaskConical },
+      { to: '/eval-harness', label: 'Eval Harness', icon: Target },
       { to: '/dashboards', label: 'Dashboards', icon: BarChart3 },
     ],
   },
