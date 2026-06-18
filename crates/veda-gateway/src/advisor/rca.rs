@@ -430,6 +430,8 @@ mod tests {
             first_seen_ms: 0,
             last_seen_ms: 0,
             draft: None,
+            is_novel: false,
+            novelty_score: None,
         }
     }
 
