@@ -22,6 +22,7 @@ pub mod config;
 pub mod engine;
 pub mod event;
 pub mod faithfulness;
+pub mod incidents;
 pub mod notify;
 pub mod recall_probe;
 pub mod remediation;
@@ -47,6 +48,11 @@ pub use recall_probe::{
 };
 
 pub use faithfulness::{FaithfulnessResults, FaithfulnessSample};
+
+pub use incidents::{
+    cluster_incidents, compute_incidents, run_incident_correlation, spawn_incident_correlator,
+    Incident, IncidentStore,
+};
 
 pub use snapshot::{
     collect, parse_prom_counter, CollectionSnapshot, GlobalSnapshot, HealthSnapshot,

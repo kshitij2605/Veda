@@ -66,6 +66,13 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     let _recall_prober = crate::advisor::spawn_recall_prober(app_state.clone());
     tracing::info!("advisor: recall-probe loop started");
 
+    // Semantic incident-correlation loop — a SEPARATE, slow task (default
+    // 300s; VEDA_INCIDENT_INTERVAL_SECS). Embeds + clusters ops events OFF
+    // the advisor tick so the embedding network calls never stall the
+    // advisor's rules/anomaly/notify pipeline.
+    let _incident_correlator = crate::advisor::spawn_incident_correlator(app_state.clone());
+    tracing::info!("advisor: incident-correlation loop started");
+
     // Optional NATS streaming ingestion worker.
     if let Ok(url) = std::env::var("VEDA_STREAMING_NATS")
         && !url.is_empty()

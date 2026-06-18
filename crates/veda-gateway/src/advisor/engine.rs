@@ -39,6 +39,7 @@ use crate::advisor::slo::{SloKind, SloRegistry, SloState, SloStatus};
 use crate::advisor::synthetic::{run_probe, SyntheticRegistry, SyntheticResults};
 use crate::advisor::recall_probe::RecallResults;
 use crate::advisor::faithfulness::FaithfulnessResults;
+use crate::advisor::incidents::IncidentStore;
 use crate::advisor::snapshot::{collect, OpsSnapshot, SnapshotHistory, DEFAULT_HISTORY_CAP};
 use crate::advisor::anomaly::detect_anomalies;
 use crate::logs::{LogCategory, categorize::CategorizeOptions};
@@ -96,6 +97,11 @@ pub struct AdvisorState {
     /// faithfulness; READ by [`run_tick`] to feed the
     /// [`SloKind::Faithfulness`] SLI. Mirrors [`RecallResults`].
     pub faithfulness_results: Mutex<FaithfulnessResults>,
+    /// Latest semantic incident clusters + bounded history, persisted to
+    /// `{data_dir}/_incidents.json`. Populated by the dedicated off-tick
+    /// incident-correlation task ([`crate::advisor::run_incident_correlation`])
+    /// — the embedding network calls NEVER run inside `run_tick`.
+    pub incidents: Mutex<IncidentStore>,
     /// Shared async HTTP client, reused by the per-tick [`Notifier`].
     pub http: reqwest::Client,
 }
@@ -120,6 +126,9 @@ impl AdvisorState {
             )),
             faithfulness_results: Mutex::new(crate::advisor::faithfulness::FaithfulnessResults::load(
                 &data_dir.join(crate::advisor::faithfulness::FAITHFULNESS_RESULTS_FILE),
+            )),
+            incidents: Mutex::new(crate::advisor::incidents::IncidentStore::load(
+                &data_dir.join(crate::advisor::incidents::INCIDENTS_FILE),
             )),
             http: reqwest::Client::new(),
         }
