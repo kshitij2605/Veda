@@ -8,6 +8,7 @@
 pub mod catalog;
 pub mod executor;
 pub mod grounding;
+pub mod memory;
 pub mod model;
 pub mod store;
 pub mod tools;
@@ -37,6 +38,7 @@ mod tests {
                 endpoint: Some("http://llm:9000/v1/chat/completions".to_owned()),
                 model: Some("Qwen3.5".to_owned()),
             }),
+            memory: false,
         };
 
         save_agent(&store, &agent).await;
@@ -140,6 +142,7 @@ mod tests {
                 instructions: String::new(),
                 tool_ids: vec![],
                 model: None,
+                memory: false,
             },
         )
         .await;
