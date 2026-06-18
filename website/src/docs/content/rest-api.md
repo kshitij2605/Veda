@@ -189,8 +189,10 @@ Admin-only automated-operations surface. See [Ops Advisor](/docs/ops-advisor) fo
 | `POST` | `/v1/admin/insights/{event_id}/ack` | Acknowledge an open event |
 | `POST` | `/v1/admin/insights/{event_id}/triage` | AI triage of an event — grounded explanation + tool trace, now enriched with the RCA bundle (`404` unknown, `503` no LLM) |
 | `GET` | `/v1/admin/insights/{event_id}/rca` | [Cross-signal root-cause bundle](/docs/rag-aiops#cross-signal-rca) — logs + queries + traces + resources + incident |
-| `GET` | `/v1/admin/incidents` | [Semantic incident clusters](/docs/rag-aiops#semantic-incident-correlation) (dedup of correlated ops events) |
+| `GET` | `/v1/admin/incidents` | [Semantic incident clusters](/docs/rag-aiops#semantic-incident-correlation) — with `draft` (proactive RCA), `is_novel` / `novelty_score`, and a `noise_reduction` summary |
 | `GET` | `/v1/admin/forecast` | [Capacity forecasts](/docs/rag-aiops#capacity-forecasting) — disk-full / memory-exhaustion / recall-decay ETAs |
+| `GET` | `/v1/admin/change-points` | [Change-point detections](/docs/aiops#change-point-detection) — sustained level shifts / trend breaks (warm-up ≥20 pts, 1.5σ) |
+| `GET` | `/v1/admin/log-rate-analysis` | [Semantic spike attribution](/docs/aiops#semantic-spike-root-cause-attribution) — meaning-clusters driving a log-rate spike (`?window_secs=&baseline_secs=&min_level=`) |
 | `GET` | `/v1/admin/resources` | Local node's latest resource snapshot — disk, CPU, load, fds, memory, RSS (see [Node Resource Signals](/docs/resource-signals)); always `200`, fields nullable |
 
 ## Service Reliability (SLOs & synthetics)

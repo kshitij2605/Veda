@@ -73,7 +73,7 @@ export const FEATURES: Feature[] = [
     accent: 'var(--color-node-2)',
     title: 'Observability + built-in AutoOps',
     blurb:
-      'Metrics, traces, and logs out of the box — Prometheus, Tempo, Loki, Grafana — plus an Ops Advisor that detects issues across 33 rules (latency, disk, CPU, error & log anomalies, SLO burn-rate, recall drift, capacity forecasts), explains the root cause, alerts Slack/PagerDuty, and can auto-remediate.',
+      'Metrics, traces, and logs out of the box — Prometheus, Tempo, Loki, Grafana — plus an Ops Advisor that detects issues across 34 rules (latency, disk, CPU, error & log anomalies, SLO burn-rate, recall drift, capacity forecasts, change-points), explains the root cause, alerts Slack/PagerDuty, and can auto-remediate.',
   },
   {
     icon: Shield,
@@ -115,6 +115,6 @@ export const FEATURES: Feature[] = [
     accent: 'var(--color-node-2)',
     title: 'AIOps: forecasting + incident correlation',
     blurb:
-      'Veda forecasts disk-full, memory, and recall-decay ETAs from its own trend history, semantically clusters related alerts into single incidents, and assembles a cross-signal root-cause bundle (logs + queries + traces + resources) for an AI triage agent — predictive and causal AIOps a metrics store without an embedder can’t do.',
+      'Veda forecasts disk-full, memory, and recall-decay ETAs, detects sustained change-points, and semantically clusters related alerts into single incidents — flagging unprecedented ones — while an AI agent drafts the root cause from a cross-signal bundle (logs + queries + traces + resources). Predictive, causal, vector-native AIOps a metrics store without an embedder can’t do.',
   },
 ]
