@@ -26,6 +26,7 @@ use crate::advisor::anomaly::anomaly_rule_ids;
 use crate::advisor::config::{ChannelsConfig, RuleConfig};
 use crate::advisor::engine::{engine_rule_ids, run_tick, save_config};
 use crate::advisor::event::{OpsEvent, Severity};
+use crate::advisor::rca::{correlate_incident, RcaBundle};
 use crate::advisor::rules::catalog;
 use crate::agent::model::AgentStep;
 use crate::rest::agents::{run_agent_turn, AgentTurnError};
@@ -395,6 +396,29 @@ pub async fn ack_event(
 }
 
 // ---------------------------------------------------------------------
+// GET /v1/admin/insights/{event_id}/rca — cross-signal root-cause bundle
+// ---------------------------------------------------------------------
+
+/// `GET /v1/admin/insights/{event_id}/rca` — the cross-signal root-cause
+/// bundle for an event: correlated WARN/ERROR logs + slow/errored queries +
+/// nearest resource snapshot + related incident in the incident window.
+/// 404 when no event (open or history) has that id.
+pub async fn event_rca(
+    State(state): State<AppState>,
+    Path(event_id): Path<String>,
+) -> Result<Json<RcaBundle>, (StatusCode, Json<ErrorResponse>)> {
+    match correlate_incident(&state, &event_id).await {
+        Some(bundle) => Ok(Json(bundle)),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("no event with id '{event_id}'"),
+            }),
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------
 // POST /v1/admin/insights/{event_id}/triage — AI-assisted triage
 // ---------------------------------------------------------------------
 
@@ -452,6 +476,71 @@ Alert:\n\
     )
 }
 
+/// Build a compact, bounded summary of the cross-signal RCA bundle to
+/// append to the triage prompt so the agent's explanation is grounded in
+/// the joined signals (top correlated logs + slow/errored queries +
+/// resource snapshot + related incident). Pure + testable; capped so the
+/// prompt stays bounded regardless of how many signals were joined.
+pub fn rca_summary(bundle: &RcaBundle) -> String {
+    const MAX_LOGS: usize = 8;
+    const MAX_QUERIES: usize = 8;
+
+    let mut s = String::new();
+    s.push_str("\n\nCross-signal context (auto-joined in the incident window):");
+
+    if !bundle.trace_ids.is_empty() {
+        let shown: Vec<&str> = bundle.trace_ids.iter().take(5).map(String::as_str).collect();
+        s.push_str(&format!("\n- correlated trace_ids: {}", shown.join(", ")));
+    }
+
+    if let Some(rs) = &bundle.resource_snapshot {
+        s.push_str(&format!(
+            "\n- resource @ {}: disk_used_pct={:?}, rss_bytes={:?}, query_p95_ms={:.1}, error_log_count={}",
+            rs.taken_at_ms, rs.disk_used_pct, rs.rss_bytes, rs.query_p95_ms, rs.error_log_count
+        ));
+    }
+
+    if let Some(inc) = &bundle.related_incident {
+        s.push_str(&format!(
+            "\n- related incident {} ({} events): {}",
+            inc.id, inc.count, inc.representative
+        ));
+    }
+
+    if bundle.logs.is_empty() {
+        s.push_str("\n- correlated logs: none");
+    } else {
+        s.push_str(&format!("\n- correlated logs (top {}):", MAX_LOGS.min(bundle.logs.len())));
+        for l in bundle.logs.iter().take(MAX_LOGS) {
+            s.push_str(&format!("\n  [{}] {} {}: {}", l.ts_ms, l.level, l.target, l.message));
+        }
+    }
+
+    if bundle.slow_queries.is_empty() {
+        s.push_str("\n- slow/errored queries: none");
+    } else {
+        s.push_str(&format!(
+            "\n- slow/errored queries (top {}):",
+            MAX_QUERIES.min(bundle.slow_queries.len())
+        ));
+        for q in bundle.slow_queries.iter().take(MAX_QUERIES) {
+            s.push_str(&format!(
+                "\n  [{}] {} {}/{} took={}ms{}",
+                q.ts_ms,
+                q.status,
+                q.collection,
+                q.query_type,
+                q.took_ms,
+                q.error_kind
+                    .as_deref()
+                    .map(|e| format!(" error_kind={e}"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    s
+}
+
 /// `POST /v1/admin/insights/{event_id}/triage` — run the built-in
 /// `veda-ops` agent to explain why an alert fired.
 ///
@@ -471,7 +560,13 @@ pub async fn triage_event(
         )
     })?;
 
-    let prompt = build_triage_input(&ev);
+    // Ground the prompt in the auto-joined cross-signal RCA bundle (bounded
+    // summary). The agent can still call `correlate_incident`/`get_logs`
+    // itself for more detail.
+    let mut prompt = build_triage_input(&ev);
+    if let Some(bundle) = correlate_incident(&state, &event_id).await {
+        prompt.push_str(&rca_summary(&bundle));
+    }
 
     // Admin caller (no RLS user). Resolve the in-memory `veda-ops` agent
     // and drive the executor via the shared agent-turn helper.
@@ -578,6 +673,60 @@ mod tests {
         assert!(prompt.contains("errors spiking"));
         assert!(prompt.contains("5xx ratio over threshold"));
         assert!(prompt.contains("ROOT CAUSE"));
+    }
+
+    #[test]
+    fn rca_summary_includes_joined_signals_and_is_bounded() {
+        use crate::advisor::rca::{IncidentRef, LogLine, QueryLine, RcaBundle, ResourceState};
+        // 20 logs + 20 queries → summary must cap each at 8.
+        let logs: Vec<LogLine> = (0..20)
+            .map(|i| LogLine {
+                ts_ms: 1000 + i,
+                level: "ERROR".to_owned(),
+                target: "veda_gateway::search".to_owned(),
+                message: format!("log {i}"),
+                trace_id: Some("t1".to_owned()),
+            })
+            .collect();
+        let slow_queries: Vec<QueryLine> = (0..20)
+            .map(|i| QueryLine {
+                ts_ms: 1000 + i,
+                took_ms: 2000,
+                status: "error".to_owned(),
+                error_kind: Some("internal".to_owned()),
+                query_type: "dense".to_owned(),
+                collection: "docs".to_owned(),
+                index_type: Some("hnsw".to_owned()),
+                trace_id: Some("t1".to_owned()),
+            })
+            .collect();
+        let bundle = RcaBundle {
+            event_id: "high_error_rate:global".to_owned(),
+            window_ms: 300_000,
+            logs,
+            slow_queries,
+            trace_ids: vec!["t1".to_owned()],
+            resource_snapshot: Some(ResourceState {
+                taken_at_ms: 1000,
+                disk_used_pct: Some(91.0),
+                rss_bytes: Some(123),
+                query_p95_ms: 88.0,
+                error_log_count: 5,
+            }),
+            related_incident: Some(IncidentRef {
+                id: "inc_x".to_owned(),
+                representative: "errors spiking".to_owned(),
+                count: 3,
+            }),
+        };
+        let s = rca_summary(&bundle);
+        assert!(s.contains("correlated trace_ids: t1"));
+        assert!(s.contains("inc_x"));
+        assert!(s.contains("disk_used_pct"));
+        assert!(s.contains("error_kind=internal"));
+        // Bounded: at most 8 of each surfaced.
+        assert_eq!(s.matches("ERROR veda_gateway::search").count(), 8);
+        assert_eq!(s.matches("error docs/dense").count(), 8);
     }
 
     /// The veda-ops agent, driven by a fake LLM that calls an ops tool

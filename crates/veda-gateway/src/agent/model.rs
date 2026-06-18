@@ -81,6 +81,7 @@ be specific and brief."
             "get_logs".to_owned(),
             "get_resources".to_owned(),
             "get_slo_status".to_owned(),
+            "correlate_incident".to_owned(),
             "list_collections".to_owned(),
             "describe_collection".to_owned(),
             "aggregate".to_owned(),

@@ -78,6 +78,22 @@ pub fn ops_specs() -> Vec<ToolSpec> {
             destructive: false,
             title: Some("Get SLO status".to_owned()),
         },
+        ToolSpec {
+            id: "correlate_incident".to_owned(),
+            name: "correlate_incident".to_owned(),
+            description: "Build the cross-signal root-cause bundle for an ops event `event_id`: auto-joins the correlated WARN/ERROR logs, slow/errored search queries, the nearest resource snapshot and the related incident within the event's incident window. Use this to ground a root-cause explanation in the signals that surrounded the alert. Returns null when no event has that id.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "event_id": { "type": "string", "description": "The ops event id to correlate" }
+                },
+                "required": ["event_id"]
+            }),
+            kind: "builtin".to_owned(),
+            read_only: true,
+            destructive: false,
+            title: Some("Correlate incident".to_owned()),
+        },
     ]
 }
 
@@ -209,12 +225,33 @@ pub async fn get_slo_status(ctx: &ToolContext<'_>, args: serde_json::Value) -> T
     ToolOutcome::ok(serde_json::json!({ "statuses": statuses, "count": statuses.len() }))
 }
 
+/// `correlate_incident` — the cross-signal root-cause bundle for an event.
+/// Returns the bundle JSON, or `{ "bundle": null }` when no event has that
+/// id, so the triage agent can pull joined logs/queries/resources/incident
+/// context itself.
+pub async fn correlate_incident(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
+    let Some(event_id) = args["event_id"].as_str().filter(|s| !s.is_empty()) else {
+        return ToolOutcome::invalid_args("event_id is required");
+    };
+    match crate::advisor::rca::correlate_incident(ctx.state, event_id).await {
+        Some(bundle) => match serde_json::to_value(&bundle) {
+            Ok(v) => ToolOutcome::ok(v),
+            Err(e) => ToolOutcome::internal(format!("serialize rca bundle: {e}")),
+        },
+        None => ToolOutcome::ok(serde_json::json!({ "bundle": null })),
+    }
+}
+
 /// Whether `id` is one of the read-only ops tools (used by the
 /// `veda-ops` agent's whitelist).
 pub fn is_ops_tool(id: &str) -> bool {
     matches!(
         id,
-        "get_insights" | "get_logs" | "get_resources" | "get_slo_status"
+        "get_insights"
+            | "get_logs"
+            | "get_resources"
+            | "get_slo_status"
+            | "correlate_incident"
     )
 }
 
@@ -360,6 +397,66 @@ mod tests {
             fast_burn: default_fast_burn(),
             slow_burn: default_slow_burn(),
         }
+    }
+
+    #[tokio::test]
+    async fn correlate_incident_returns_bundle_for_seeded_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = crate::tenant::TenantId::default_tenant();
+        // Seed one open event so the gatherer finds it.
+        {
+            let mut store = state.advisor().events.lock().await;
+            store.reconcile(
+                vec![hit("high_error_rate", Scope::Global, Severity::High)],
+                crate::advisor::engine::now_ms(),
+            );
+        }
+        // Seed an in-window ERROR log carrying a trace id.
+        state.log_buffer().push(LogRecord {
+            ts_ms: crate::advisor::engine::now_ms(),
+            level: "ERROR".to_owned(),
+            target: "veda_gateway::search".to_owned(),
+            message: "boom".to_owned(),
+            fields: serde_json::Map::new(),
+            trace_id: Some("trace-xyz".to_owned()),
+            span_id: None,
+        });
+
+        let ctx = ToolContext::new(&state, &tenant);
+        let id = OpsEvent::make_id("high_error_rate", &Scope::Global);
+        let out = correlate_incident(&ctx, serde_json::json!({ "event_id": id })).await;
+        assert!(!out.is_error, "{:?}", out.content);
+        // Bundle shape: event_id + the joined-signal arrays.
+        assert_eq!(out.content["event_id"], "high_error_rate:global");
+        assert!(out.content["logs"].is_array());
+        assert!(out.content["slow_queries"].is_array());
+        assert!(out.content["trace_ids"].is_array());
+        // The seeded ERROR log was joined and its trace id collected.
+        assert_eq!(out.content["logs"][0]["message"], "boom");
+        assert_eq!(out.content["trace_ids"][0], "trace-xyz");
+    }
+
+    #[tokio::test]
+    async fn correlate_incident_missing_event_returns_null_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = crate::tenant::TenantId::default_tenant();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out =
+            correlate_incident(&ctx, serde_json::json!({ "event_id": "nope:global" })).await;
+        assert!(!out.is_error);
+        assert!(out.content["bundle"].is_null());
+    }
+
+    #[tokio::test]
+    async fn correlate_incident_requires_event_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = crate::tenant::TenantId::default_tenant();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = correlate_incident(&ctx, serde_json::json!({})).await;
+        assert!(out.is_error);
     }
 
     #[tokio::test]
