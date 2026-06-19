@@ -218,7 +218,10 @@ pub async fn retrieve_memory(
 
     // Filter to this agent (the `agent_id` field is filterable). The id is
     // a UUID/slug from our own scoping, so a simple equality string is safe.
-    let filter = format!("{AGENT_ID_FIELD} == \"{agent_id}\"");
+    // NB: the filter grammar's equality operator is a single `=` (see
+    // veda-query FilterParser); `==` fails to parse and would silently
+    // turn every recall into an empty result.
+    let filter = format!("{AGENT_ID_FIELD} = \"{agent_id}\"");
     let request = VectorSearchRequest {
         field: EMBEDDING_FIELD.to_owned(),
         query_vector: vector,
@@ -341,6 +344,26 @@ pub async fn write_turn(
             return;
         }
     };
+
+    write_turn_embedded(state, tenant, agent_id, conversation_id, role, text, ts, embedding).await;
+}
+
+/// Write one already-embedded memory turn and make it **immediately
+/// recallable**. Ensures the collection, parses the record, then inserts it
+/// via the shared seal + executor-rebuild path so a subsequent vector recall
+/// finds it (a bare `SegmentManager::insert` would leave it only in the
+/// growing segment the executor never sees). Best-effort. The vector is
+/// supplied explicitly so this is unit-testable without a live embedder.
+async fn write_turn_embedded(
+    state: &AppState,
+    tenant: &TenantId,
+    agent_id: &str,
+    conversation_id: &str,
+    role: &str,
+    text: &str,
+    ts: i64,
+    embedding: Vec<f32>,
+) {
     let dimension = embedding.len() as u32;
 
     let Some(scoped) = ensure_memory_collection(state, tenant, dimension).await else {
@@ -364,21 +387,7 @@ pub async fn write_turn(
         }
     };
 
-    // Insert directly into the growing segment for the routed shard. The
-    // segment write lock is taken briefly and never across an await.
-    let mut managers = state.inner.segment_managers.write().await;
-    let Some(shard_map) = managers.get_mut(&scoped) else {
-        return;
-    };
-    let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
-        &record.id(),
-        schema.shard_count(),
-    );
-    if let Some(sm) = shard_map.get_mut(&shard_id) {
-        if let Err(e) = sm.insert(record) {
-            tracing::debug!(error = %e, "agent memory: insert failed; skipping write");
-        }
-    }
+    crate::agent::index::insert_and_index(state, &scoped, &schema, record, "agent memory").await;
 }
 
 #[cfg(test)]
@@ -491,6 +500,46 @@ mod tests {
         assert!(
             !schemas.contains_key(&scoped),
             "write_turn must not create the memory collection when it cannot embed",
+        );
+    }
+
+    // Searchability regression: a written turn must be recallable by a
+    // vector search for its own embedding immediately after write. Supplies
+    // the vector via the `write_turn_embedded` seam (no live embedder).
+    // Before the seal + executor-rebuild fix this returned 0 hits.
+    #[tokio::test]
+    async fn written_turn_is_immediately_searchable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = TenantId::default_tenant();
+        let agent_id = "ag-1";
+        let embedding = vec![0.0f32, 1.0, 0.0, 0.0];
+
+        write_turn_embedded(
+            &state, &tenant, agent_id, "conv-1", "user", "remember HNSW", 1, embedding.clone(),
+        )
+        .await;
+
+        let scoped = tenant::scope(&tenant, MEMORY_COLLECTION);
+        assert!(state.inner.schemas.read().await.contains_key(&scoped));
+
+        let request = VectorSearchRequest {
+            field: EMBEDDING_FIELD.to_owned(),
+            query_vector: embedding,
+            k: DEFAULT_RECALL_K,
+            metric: DistanceMetric::Cosine,
+            filter: Some(format!("{AGENT_ID_FIELD} = \"{agent_id}\"")),
+            filter_expr: None,
+            truncate_to: None,
+            read_ts: None,
+        };
+        let executors = state.inner.query_executors.read().await;
+        let executor = executors.get(&scoped).expect("executor exists");
+        let (response, _) = executor.search(&request).expect("search runs");
+        assert_eq!(
+            response.results.len(),
+            1,
+            "the written memory turn must be returned by a vector recall for its own embedding"
         );
     }
 
