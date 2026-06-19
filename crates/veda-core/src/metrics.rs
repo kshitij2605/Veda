@@ -31,6 +31,13 @@ pub const AGENT_RUN_DURATION: &str = "veda_agent_run_duration_seconds";
 /// the value is accumulated in **micro-USD** (1e-6 USD); divide by 1e6 in
 /// dashboards to get dollars. See [`cost_micro_usd`].
 pub const LLM_COST_USD_TOTAL: &str = "veda_llm_cost_usd_total";
+/// Histogram of time-to-first-token (seconds) for streaming agent runs,
+/// labelled `model`. Only emitted on the streaming path; the blocking
+/// `/converse` path leaves TTFT unset and emits nothing here.
+pub const LLM_TTFT_SECONDS: &str = "veda_llm_ttft_seconds";
+/// Counter of user feedback on agent conversations, labelled
+/// `rating="up"|"down"`.
+pub const LLM_FEEDBACK_TOTAL: &str = "veda_llm_feedback_total";
 
 /// Built-in fallback price table: USD per 1,000 tokens, `(input, output)`.
 /// Deliberately tiny — covers a few common OpenAI-compatible models. Any

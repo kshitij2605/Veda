@@ -361,6 +361,7 @@ mod tests {
             index_health: Vec::new(),
             forecasts: Vec::new(),
             change_points: Vec::new(),
+            faithfulness_recent: Vec::new(),
         }
     }
 

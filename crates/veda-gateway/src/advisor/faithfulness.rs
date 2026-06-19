@@ -75,6 +75,17 @@ impl FaithfulnessResults {
             .collect()
     }
 
+    /// The most-recent up-to-`limit` faithfulness scores, oldest-first
+    /// (chronological), across all agents. Used by the advisor to attach a
+    /// drift-detection series to the snapshot. `limit == 0` → empty.
+    pub fn recent(&self, limit: usize) -> Vec<f64> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let start = self.samples.len().saturating_sub(limit);
+        self.samples[start..].iter().map(|s| s.faithfulness).collect()
+    }
+
     /// Total retained sample count (test/inspection aid).
     pub fn len(&self) -> usize {
         self.samples.len()
@@ -157,6 +168,20 @@ mod tests {
         // Oldest dropped: nothing at ts < 30 survives.
         assert!(r.since(None, 0).len() == MAX_FAITHFULNESS_SAMPLES);
         assert_eq!(r.since(Some("a"), n - 2).len(), 1); // only the newest ts
+    }
+
+    #[test]
+    fn recent_returns_newest_limit_oldest_first() {
+        let mut r = FaithfulnessResults::new();
+        for (i, v) in [0.9, 0.8, 0.5, 0.4].into_iter().enumerate() {
+            r.record("a", v, i as u64);
+        }
+        // Newest 2, in chronological order.
+        assert_eq!(r.recent(2), vec![0.5, 0.4]);
+        // limit > len → whole series.
+        assert_eq!(r.recent(10), vec![0.9, 0.8, 0.5, 0.4]);
+        // limit 0 → empty.
+        assert!(r.recent(0).is_empty());
     }
 
     #[test]

@@ -27,6 +27,7 @@
 //!   GET    /v1/conversations                   list
 //!   GET    /v1/conversations/{id}              fetch
 //!   DELETE /v1/conversations/{id}              delete
+//!   POST   /v1/conversations/{id}/feedback     capture user feedback
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -34,7 +35,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures::stream::Stream;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
 use veda_core::llm_client::LlmClient;
@@ -46,7 +47,7 @@ use crate::agent::executor::{self, DEFAULT_MAX_STEPS};
 use crate::agent::grounding::{self, Citation, Grounding};
 use crate::agent::model::{
     default_agent, Agent, AgentStep, AgentTool, Conversation, ConversationMessage, ConverseRequest,
-    ConverseResponse,
+    ConverseResponse, Feedback,
 };
 use crate::agent::store;
 use crate::auth::Claims;
@@ -760,6 +761,12 @@ fn emit_run_metrics(model: &str, m: &RunMetrics) {
     metrics::histogram!(vm::AGENT_RUN_DURATION, "model" => model.to_owned())
         .record(m.total_ms / 1000.0);
 
+    // Time-to-first-token (streaming path only; `None` on the blocking path).
+    if let Some(ttft_ms) = m.ttft_ms {
+        metrics::histogram!(vm::LLM_TTFT_SECONDS, "model" => model.to_owned())
+            .record(ttft_ms / 1000.0);
+    }
+
     match vm::model_price(model) {
         Some(price) => {
             let micro = vm::cost_micro_usd(m.prompt_tokens, m.completion_tokens, price);
@@ -814,6 +821,7 @@ pub async fn converse(
             title: None,
             messages: Vec::new(),
             steps: Vec::new(),
+            feedback: Vec::new(),
         },
     };
     let history = conversation.messages.clone();
@@ -1246,6 +1254,7 @@ pub async fn converse_stream(
             title: None,
             messages: Vec::new(),
             steps: Vec::new(),
+            feedback: Vec::new(),
         },
     };
 
@@ -1411,6 +1420,52 @@ pub async fn delete_conversation(
     StatusCode::NO_CONTENT
 }
 
+/// Request body for `POST /v1/conversations/{id}/feedback`.
+#[derive(Deserialize)]
+pub struct FeedbackRequest {
+    /// `"up"` or `"down"`.
+    pub rating: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+fn bad_request(msg: impl Into<String>) -> GatewayError {
+    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: msg.into() }))
+}
+
+/// Capture user feedback (thumbs up/down + optional note) on a conversation.
+/// Tenant/RLS-scoped exactly like the other conversation endpoints: the id is
+/// scoped on the way in, so a caller can only annotate their own tenant's
+/// conversations. 404 for an unknown id. Increments
+/// `veda_llm_feedback_total{rating}`. Feeds the eval flywheel later.
+pub async fn submit_feedback(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(id): Path<String>,
+    Json(req): Json<FeedbackRequest>,
+) -> Result<StatusCode, GatewayError> {
+    let rating = req.rating.trim().to_ascii_lowercase();
+    if rating != "up" && rating != "down" {
+        return Err(bad_request("rating must be \"up\" or \"down\""));
+    }
+    let scoped = tenant::scope(&tenant, &id);
+    let mut conv = store::get_conversation(&state.inner.saved_objects, &scoped)
+        .await
+        .ok_or_else(|| not_found(format!("conversation '{id}' not found")))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    conv.feedback.push(Feedback {
+        rating: rating.clone(),
+        note: req.note.filter(|n| !n.trim().is_empty()),
+        ts,
+    });
+    store::save_conversation(&state.inner.saved_objects, &conv).await;
+    metrics::counter!(veda_core::metrics::LLM_FEEDBACK_TOTAL, "rating" => rating).increment(1);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1425,6 +1480,7 @@ mod tests {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: prompt + completion,
+            ttft_ms: None,
         }
     }
 
@@ -1442,6 +1498,139 @@ mod tests {
         assert!(out.contains("veda_agent_run_duration_seconds"), "missing duration series:\n{out}");
         assert!(out.contains("veda_llm_cost_usd_total"), "missing cost series:\n{out}");
         assert!(out.contains("gpt-4o-mini"), "missing model label:\n{out}");
+        // No TTFT on the blocking path (the helper leaves ttft_ms None).
+        assert!(!out.contains("veda_llm_ttft_seconds"), "blocking metrics must not emit ttft:\n{out}");
+    }
+
+    /// A streaming run (ttft_ms = Some) emits the TTFT histogram series.
+    #[test]
+    fn streaming_metrics_emit_ttft_histogram() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut m = metrics(2000, 1000);
+        m.ttft_ms = Some(42.0);
+        metrics::with_local_recorder(&recorder, || {
+            emit_run_metrics("gpt-4o-mini", &m);
+        });
+        let out = handle.render();
+        assert!(out.contains("veda_llm_ttft_seconds"), "missing ttft series:\n{out}");
+    }
+
+    // ── Conversation feedback capture ────────────────────────────────────
+
+    use crate::agent::model::{Conversation, Feedback};
+    use crate::tenant::{Tenant, TenantId};
+
+    /// Seed a conversation owned by `tenant` (user-facing id `cid`) and
+    /// return the AppState (+ tempdir guard).
+    async fn seed_conversation(cid: &str, tenant: &str) -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let scoped = crate::tenant::scope(&TenantId::parse(tenant).unwrap(), cid);
+        let conv = Conversation {
+            id: scoped,
+            agent_id: crate::tenant::scope(&TenantId::parse(tenant).unwrap(), "veda-agent"),
+            title: None,
+            messages: Vec::new(),
+            steps: Vec::new(),
+            feedback: Vec::new(),
+        };
+        store::save_conversation(&state.inner.saved_objects, &conv).await;
+        (state, tmp)
+    }
+
+    #[test]
+    fn feedback_persists_on_conversation_and_increments_metric() {
+        // Single-threaded runtime built explicitly so the whole async flow
+        // runs inside `with_local_recorder` (which is a sync scope guard).
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let _guard = metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let (state, tmp) = seed_conversation("c1", "acme").await;
+                let resp = submit_feedback(
+                    State(state.clone()),
+                    Tenant(TenantId::parse("acme").unwrap()),
+                    Path("c1".to_owned()),
+                    Json(FeedbackRequest {
+                        rating: "up".to_owned(),
+                        note: Some("great answer".to_owned()),
+                    }),
+                )
+                .await
+                .expect("feedback accepted");
+                assert_eq!(resp, StatusCode::NO_CONTENT);
+
+                // Persisted on the conversation.
+                let scoped = crate::tenant::scope(&TenantId::parse("acme").unwrap(), "c1");
+                let conv = store::get_conversation(&state.inner.saved_objects, &scoped)
+                    .await
+                    .expect("conversation present");
+                assert_eq!(conv.feedback.len(), 1);
+                assert_eq!(conv.feedback[0].rating, "up");
+                assert_eq!(conv.feedback[0].note.as_deref(), Some("great answer"));
+                // Return the tempdir guard so it outlives the block.
+                tmp
+            })
+        });
+
+        // Metric incremented with the rating label.
+        let out = handle.render();
+        assert!(out.contains("veda_llm_feedback_total"), "missing feedback metric:\n{out}");
+        assert!(out.contains("rating=\"up\""), "missing rating label:\n{out}");
+    }
+
+    #[tokio::test]
+    async fn feedback_unknown_conversation_is_404() {
+        let (state, _tmp) = seed_conversation("c1", "acme").await;
+        let err = submit_feedback(
+            State(state),
+            Tenant(TenantId::parse("acme").unwrap()),
+            Path("does-not-exist".to_owned()),
+            Json(FeedbackRequest { rating: "down".to_owned(), note: None }),
+        )
+        .await
+        .expect_err("unknown id should 404");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn feedback_is_tenant_scoped() {
+        // Conversation owned by "acme"; a "rival" caller must not reach it.
+        let (state, _tmp) = seed_conversation("c1", "acme").await;
+        let err = submit_feedback(
+            State(state.clone()),
+            Tenant(TenantId::parse("rival").unwrap()),
+            Path("c1".to_owned()),
+            Json(FeedbackRequest { rating: "up".to_owned(), note: None }),
+        )
+        .await
+        .expect_err("cross-tenant feedback should 404");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+
+        // acme's conversation is untouched.
+        let scoped = crate::tenant::scope(&TenantId::parse("acme").unwrap(), "c1");
+        let conv = store::get_conversation(&state.inner.saved_objects, &scoped).await.unwrap();
+        assert!(conv.feedback.is_empty());
+    }
+
+    #[tokio::test]
+    async fn feedback_rejects_invalid_rating() {
+        let (state, _tmp) = seed_conversation("c1", "acme").await;
+        let err = submit_feedback(
+            State(state),
+            Tenant(TenantId::parse("acme").unwrap()),
+            Path("c1".to_owned()),
+            Json(FeedbackRequest { rating: "meh".to_owned(), note: None }),
+        )
+        .await
+        .expect_err("invalid rating should 400");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
     // ── Grounding wiring (post-run, the shape `converse`/triage return) ───
