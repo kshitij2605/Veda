@@ -39,6 +39,13 @@ pub struct Agent {
     /// behave byte-identically).
     #[serde(default)]
     pub memory: bool,
+    /// Opt-in semantic response cache. When `true`, the agent embeds each
+    /// prompt and serves a near-duplicate prompt's prior response straight
+    /// from Veda's vector store (skipping the LLM). Defaults to `false`
+    /// (serde-default → existing agents are unchanged and behave
+    /// byte-identically).
+    #[serde(default)]
+    pub cache: bool,
 }
 
 /// The default, always-available agent used when a converse request
@@ -57,6 +64,7 @@ provided tools to ground your answers in real data; be concise and cite what you
         tool_ids: Vec::new(),
         model: None,
         memory: false,
+        cache: false,
     }
 }
 
@@ -89,6 +97,7 @@ be specific and brief."
         ],
         model: None,
         memory: false,
+        cache: false,
     }
 }
 
@@ -195,6 +204,11 @@ pub struct ConverseResponse {
     /// Additive + serde-back-compat: omitted when unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grounding: Option<crate::agent::grounding::Grounding>,
+    /// `true` when this response was served from the semantic cache without
+    /// calling the LLM (steps empty, zero token/cost metrics). Additive +
+    /// serde-back-compat: defaults to `false` for existing payloads.
+    #[serde(default)]
+    pub cache_hit: bool,
 }
 
 #[cfg(test)]
@@ -282,6 +296,45 @@ mod tests {
     }
 
     #[test]
+    fn agent_cache_defaults_false_and_is_serde_back_compat() {
+        // An agent JSON from before the cache field existed parses with
+        // cache = false (additive + serde-default → no behavior change).
+        let v = serde_json::json!({
+            "id": "ag-1",
+            "name": "Legacy",
+            "instructions": "be brief",
+            "tool_ids": []
+        });
+        let agent: Agent = serde_json::from_value(v).unwrap();
+        assert!(!agent.cache, "cache must default to false");
+
+        let mut a = default_agent();
+        assert!(!a.cache);
+        a.cache = true;
+        let back: Agent = serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap();
+        assert!(back.cache);
+    }
+
+    #[test]
+    fn converse_response_carries_cache_hit_flag() {
+        let r = ConverseResponse {
+            conversation_id: "c".to_owned(),
+            response: "cached".to_owned(),
+            steps: Vec::new(),
+            metrics: None,
+            citations: Vec::new(),
+            grounding: None,
+            cache_hit: true,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["cache_hit"], true, "cache_hit must serialize: {v}");
+        // Back-compat: a payload without the field parses with cache_hit=false.
+        let old = serde_json::json!({ "conversation_id": "c", "response": "x" });
+        let back: ConverseResponse = serde_json::from_value(old).unwrap();
+        assert!(!back.cache_hit);
+    }
+
+    #[test]
     fn converse_response_omits_metrics_when_none() {
         let r = ConverseResponse {
             conversation_id: "c".to_owned(),
@@ -290,6 +343,7 @@ mod tests {
             metrics: None,
             citations: Vec::new(),
             grounding: None,
+            cache_hit: false,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("metrics").is_none(), "metrics should be skipped: {v}");

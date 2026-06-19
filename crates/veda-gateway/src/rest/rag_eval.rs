@@ -575,7 +575,7 @@ pub async fn run_eval(
                 )
                 .await
                 {
-                    Ok((_agent, result, citations, grounding)) => {
+                    Ok((_agent, result, citations, grounding, _cache_hit)) => {
                         let gc = gold_cosine(embedder, &result.response, gold.as_deref()).await;
                         TurnOutcome {
                             response: result.response,

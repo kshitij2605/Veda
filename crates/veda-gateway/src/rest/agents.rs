@@ -312,7 +312,7 @@ pub(crate) async fn run_agent_turn(
     history: &[ConversationMessage],
     input: &str,
     conversation_id: Option<&str>,
-) -> Result<(Agent, RunResult, Vec<Citation>, Option<Grounding>), AgentTurnError> {
+) -> Result<(Agent, RunResult, Vec<Citation>, Option<Grounding>, bool), AgentTurnError> {
     // 1. LLM must be configured.
     let llm_cfg = state
         .inner
@@ -343,6 +343,41 @@ pub(crate) async fn run_agent_turn(
     // OpenAI-compatible endpoint generically; infer a recognized provider
     // from the model name where possible, else fall back to `openai`.
     let provider = genai_system_for(&model_name);
+
+    // 3b. Semantic response cache (opt-in). BEFORE building the client or
+    //     running the loop: if the agent opted in, look up a near-duplicate
+    //     prompt and, on a hit, return the cached response WITHOUT calling
+    //     the LLM. Best-effort / off-lock / fail-open — a lookup problem is
+    //     a miss and the turn runs normally. Skipped entirely (and thus
+    //     byte-identical to today) when cache==false.
+    if crate::agent::cache::should_use_cache(&agent) {
+        if let Some(hit) = crate::agent::cache::lookup(
+            state,
+            tenant,
+            &model_name,
+            input,
+            crate::agent::cache::DEFAULT_SIMILARITY_THRESHOLD,
+        )
+        .await
+        {
+            metrics::counter!("veda_llm_cache_hits_total", "model" => model_name.clone())
+                .increment(1);
+            let result = RunResult {
+                response: hit.response,
+                steps: Vec::new(),
+                new_messages: Vec::new(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                hit_limit_or_error: false,
+                metrics: RunMetrics::default(),
+            };
+            return Ok((agent, result, Vec::new(), None, true));
+        }
+        metrics::counter!("veda_llm_cache_misses_total", "model" => model_name.clone())
+            .increment(1);
+    }
+
     let client = build_client(llm_cfg, &agent);
 
     // 4. System prompt with the modality-awareness block. When the agent
@@ -478,7 +513,20 @@ pub(crate) async fn run_agent_turn(
         }
     }
 
-    Ok((agent, result, citations, grounding))
+    // 10. Cache write-back: when the cache is on and the run completed
+    //     cleanly (not a model error / step-limit), store the prompt →
+    //     response entry for future near-duplicate hits. Best-effort +
+    //     off-lock; a store failure NEVER fails the turn. Skipped for a
+    //     non-empty-response error path so we never cache a fallback.
+    if crate::agent::cache::should_use_cache(&agent)
+        && !result.hit_limit_or_error
+        && !result.response.trim().is_empty()
+    {
+        let ts = crate::advisor::engine::now_ms().max(0);
+        crate::agent::cache::store(state, tenant, &model_name, input, &result.response, ts).await;
+    }
+
+    Ok((agent, result, citations, grounding, false))
 }
 
 /// Emit grounding metrics for one scored run: a `veda_agent_citations`
@@ -605,7 +653,7 @@ pub async fn converse(
 
     // Run the turn via the shared helper (resolves agent, builds the model
     // + prompt + tool context, drives the executor loop).
-    let (_agent, result, citations, grounding) = run_agent_turn(
+    let (_agent, result, citations, grounding, cache_hit) = run_agent_turn(
         &state,
         &tenant,
         user.as_deref(),
@@ -633,6 +681,14 @@ pub async fn converse(
             content: m.content.clone(),
         });
     }
+    // A cache hit produces no `new_messages` (the LLM was skipped); record
+    // the served answer as the assistant turn so the transcript is complete.
+    if cache_hit {
+        conversation.messages.push(ConversationMessage {
+            role: "assistant".to_owned(),
+            content: Some(result.response.clone()),
+        });
+    }
     conversation.steps.extend(result.steps.iter().cloned());
     store::save_conversation(&state.inner.saved_objects, &conversation).await;
 
@@ -647,6 +703,7 @@ pub async fn converse(
         metrics: Some(result.metrics),
         citations,
         grounding,
+        cache_hit,
     }))
 }
 
@@ -687,6 +744,7 @@ async fn run_streaming_turn(
                 metrics: None,
                 citations: Vec::new(),
                 grounding: None,
+                cache_hit: false,
             };
         }
     };
@@ -704,6 +762,7 @@ async fn run_streaming_turn(
                 metrics: None,
                 citations: Vec::new(),
                 grounding: None,
+                cache_hit: false,
             };
         }
     };
@@ -714,6 +773,48 @@ async fn run_streaming_turn(
         .and_then(|ov| ov.model.clone())
         .unwrap_or_else(|| llm_cfg.model.clone());
     let provider = genai_system_for(&model_name);
+
+    // Semantic cache (opt-in): on a hit, emit the cached answer as a single
+    // `answer` delta and finish — the LLM loop is skipped. Best-effort /
+    // off-lock / fail-open (a miss runs normally). The user + assistant
+    // turns are still persisted so the transcript is complete.
+    if crate::agent::cache::should_use_cache(&agent) {
+        if let Some(hit) = crate::agent::cache::lookup(
+            state,
+            tenant,
+            &model_name,
+            input,
+            crate::agent::cache::DEFAULT_SIMILARITY_THRESHOLD,
+        )
+        .await
+        {
+            metrics::counter!("veda_llm_cache_hits_total", "model" => model_name.clone())
+                .increment(1);
+            let _ = event_tx
+                .send(executor::StreamEvent::AnswerDelta { text: hit.response.clone() })
+                .await;
+            conversation.messages.push(ConversationMessage {
+                role: "user".to_owned(),
+                content: Some(input.to_owned()),
+            });
+            conversation.messages.push(ConversationMessage {
+                role: "assistant".to_owned(),
+                content: Some(hit.response.clone()),
+            });
+            store::save_conversation(&state.inner.saved_objects, conversation).await;
+            return StreamDonePayload {
+                conversation_id: user_facing_cid,
+                response: hit.response,
+                metrics: Some(RunMetrics::default()),
+                citations: Vec::new(),
+                grounding: None,
+                cache_hit: true,
+            };
+        }
+        metrics::counter!("veda_llm_cache_misses_total", "model" => model_name.clone())
+            .increment(1);
+    }
+
     let client = build_client(llm_cfg, &agent);
 
     // System prompt + optional memory recall (mirrors run_agent_turn).
@@ -825,6 +926,15 @@ async fn run_streaming_turn(
         }
     }
 
+    // Cache write-back (mirrors run_agent_turn): store on a clean run.
+    if crate::agent::cache::should_use_cache(&agent)
+        && !result.hit_limit_or_error
+        && !result.response.trim().is_empty()
+    {
+        let ts = crate::advisor::engine::now_ms().max(0);
+        crate::agent::cache::store(state, tenant, &model_name, input, &result.response, ts).await;
+    }
+
     // Persist the conversation exactly like /converse.
     conversation.messages.push(ConversationMessage {
         role: "user".to_owned(),
@@ -845,6 +955,7 @@ async fn run_streaming_turn(
         metrics: Some(result.metrics),
         citations,
         grounding,
+        cache_hit: false,
     }
 }
 
@@ -861,6 +972,10 @@ struct StreamDonePayload {
     citations: Vec<Citation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     grounding: Option<Grounding>,
+    /// `true` when this answer was served from the semantic cache (the LLM
+    /// loop was skipped). Defaults to `false`.
+    #[serde(default)]
+    cache_hit: bool,
 }
 
 /// `POST /v1/agents/{id}/converse/stream` — the streaming twin of
@@ -1014,6 +1129,7 @@ async fn emit_done(
         metrics: None,
         citations: Vec::new(),
         grounding: None,
+        cache_hit: false,
     });
     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
     let event = Event::default().event("done").data(data);
@@ -1188,6 +1304,7 @@ mod tests {
             metrics: None,
             citations,
             grounding: Some(g),
+            cache_hit: false,
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["citations"][0]["chunk_id"], "id-1");
@@ -1212,6 +1329,7 @@ mod tests {
             metrics: None,
             citations,
             grounding,
+            cache_hit: false,
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert!(v.get("citations").is_none(), "empty citations skipped: {v}");

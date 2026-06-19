@@ -629,7 +629,7 @@ impl IncidentDrafter for OpsAgentDrafter<'_> {
         )
         .await
         {
-            Ok((_agent, result, _citations, _grounding)) => Some(result.response),
+            Ok((_agent, result, _citations, _grounding, _cache_hit)) => Some(result.response),
             Err(_) => None,
         }
     }

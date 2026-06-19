@@ -141,7 +141,7 @@ pub async fn message_send(
     // A2A does not persist a Veda conversation, so no conversation id is
     // threaded into agent memory here.
     match run_agent_turn(&state, &tenant, user.as_deref(), &agent_id, &[], &input, None).await {
-        Ok((_agent, result, citations, grounding)) => {
+        Ok((_agent, result, citations, grounding, _cache_hit)) => {
             let message = serde_json::json!({
                 "role": "agent",
                 "parts": [ { "kind": "text", "text": result.response } ],
