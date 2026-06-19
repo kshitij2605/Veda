@@ -349,6 +349,7 @@ components:
         prompt_tokens: { type: integer }
         completion_tokens: { type: integer }
         total_tokens: { type: integer }
+        ttft_ms: { type: integer, nullable: true, description: "stream-only time-to-first-token in ms; null for the blocking /converse path" }
     ConverseResponse:
       type: object
       properties:
@@ -363,6 +364,20 @@ components:
           description: Citations extracted from the run's retrieval tool calls (best-effort).
           items: { $ref: '#/components/schemas/Citation' }
         grounding: { $ref: '#/components/schemas/Grounding' }
+        cache_hit: { type: boolean, description: "true when a near-duplicate prompt was served from the semantic response cache (opt-in Agent.cache; the LLM was not called and steps is 0)" }
+        guardrails: { $ref: '#/components/schemas/GuardrailReport' }
+    GuardrailReport:
+      type: object
+      description: Embedding-based safety screening of the input and output (present only when the agent has guardrails enabled).
+      properties:
+        input_verdict: { type: string, enum: [allow, flag, block], description: "verdict on the user input" }
+        output_verdict: { type: string, enum: [allow, flag, block], description: "verdict on the model output" }
+        categories:
+          type: array
+          description: "triggered categories"
+          items: { type: string, enum: [prompt_injection, jailbreak, pii, unsafe] }
+        mode: { type: string, enum: [flag, block], description: "Flag annotates; Block short-circuits the LLM with a refusal" }
+        method: { type: string, enum: [embedding, regex], description: "embedding (max-cosine to the bad-pattern set + PII regex) or regex-only when no embedder is configured" }
     Citation:
       type: object
       properties:
@@ -1144,6 +1159,69 @@ paths:
                       incident_count: { type: integer }
                       suppressed: { type: integer, description: "event_count - incident_count" }
 
+  /v1/admin/llm-traces:
+    get:
+      summary: Semantic search over the LLM trace store (admin-only).
+      description: |
+        Searches the per-tenant `_llm_traces` collection — populated when an
+        agent has tracing enabled (opt-in `Agent.trace`) — by embedding the
+        query `q` and vector-searching the stored prompt+response embeddings.
+        Each trace carries the prompt, response, tool ids, faithfulness,
+        cost (USD), cache_hit, guardrail_flagged, latency, and timestamp.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: query, name: q, required: false, schema: { type: string }, description: "semantic query over prompt+response; omitted → most recent traces" }
+        - { in: query, name: limit, required: false, schema: { type: integer }, description: "max traces to return" }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  traces:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        prompt: { type: string }
+                        response: { type: string }
+                        tool_ids: { type: array, items: { type: string } }
+                        faithfulness: { type: number, nullable: true }
+                        cost_usd: { type: number, nullable: true }
+                        cache_hit: { type: boolean }
+                        guardrail_flagged: { type: boolean }
+                        latency_ms: { type: integer }
+                        ts: { type: integer }
+                        score: { type: number, description: "cosine similarity to the query (when q is given)" }
+
+  /v1/admin/llm-traces/clusters:
+    get:
+      summary: Failure clustering over the LLM trace store (admin-only).
+      description: |
+        Clusters failing/low-quality traces in `_llm_traces` into recurring
+        failure modes by reusing the embedding categorizer (a normalized
+        fallback when no embedder is configured), so a class of bad answers
+        surfaces as one cluster rather than many individual traces.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  clusters:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        category: { type: string }
+                        representative: { type: string, description: "a representative prompt/response from the cluster" }
+                        count: { type: integer }
+
   /v1/admin/forecast:
     get:
       summary: Capacity forecasts (admin-only).
@@ -1814,6 +1892,30 @@ paths:
         - { in: path, name: id, required: true, schema: { type: string } }
       responses:
         '204': { description: removed }
+
+  /v1/conversations/{id}/feedback:
+    post:
+      summary: Submit thumbs feedback on a conversation (tenant-scoped).
+      description: |
+        Records an up/down rating (with an optional note) for a conversation
+        and increments `veda_llm_feedback_total{rating}`. Tenant-scoped; the
+        conversation must belong to the caller's tenant.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rating]
+              properties:
+                rating: { type: string, enum: [up, down] }
+                note: { type: string, nullable: true }
+      responses:
+        '204': { description: recorded }
+        '404': { description: conversation not found }
 
   /v1/a2a/{agent_id}/card:
     get:

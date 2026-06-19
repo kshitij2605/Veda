@@ -131,6 +131,15 @@ Where Elastic's AIOps is statistical and template-based over text, Veda's is **s
 
 See [documentation/2026-06-18-agentic-aiops.md](documentation/2026-06-18-agentic-aiops.md) for the full Agentic AIOps guide.
 
+### LLM Observability & Optimization
+Veda turns its vector engine into the LLM layer itself — it doesn't just *observe* LLM apps, it **optimizes and secures** them, which Elastic LLM Observability can't (no faithfulness, eval, or semantic caching).
+- **Semantic response cache** -- opt-in `Agent.cache` (default off; existing agents unchanged). Before a run the prompt is embedded and vector-searched against a per-tenant `_llm_cache` collection for a near-duplicate (cosine **≥ 0.97**); on a hit the cached response is returned **without calling the LLM** (`cache_hit:true`, **0 steps**), on a miss the agent runs and the answer is stored. Pure vector-native. Metrics `veda_llm_cache_hits_total` / `veda_llm_cache_misses_total`.
+- **Embedding-based safety guardrails** -- opt-in `Agent.guardrails` (default off). Input *and* output are screened for **prompt-injection / jailbreak / PII / unsafe** content via a PII regex plus max-cosine (**≥ 0.80**) to a curated bad-pattern embedding set, in mode **Flag** (annotate) or **Block** (short-circuit the LLM with a refusal). A `GuardrailReport` rides on the response; metrics `veda_llm_guardrail_blocked_total` / `veda_llm_guardrail_flagged_total`. Embedder-free → regex-only; fail-open (a guardrail error never fails the request).
+- **Searchable semantic LLM trace store + failure clustering** -- opt-in `Agent.trace` (default off). Each run is written to a per-tenant `_llm_traces` collection (prompt / response / tool_ids / faithfulness / cost_usd / cache_hit / guardrail_flagged / latency_ms / ts + an embedding of prompt+response). `GET /v1/admin/llm-traces?q=` does **semantic search** over traces; `GET /v1/admin/llm-traces/clusters` clusters failing traces (reusing the embedding categorizer) into recurring failure modes. A Niriksha panel renders both.
+- **TTFT + cost budgets + quality drift + feedback** -- `RunMetrics` gains `ttft_ms` (stream-only time-to-first-token; metric `veda_llm_ttft_seconds`); advisor rules `llm_cost_budget` (Medium, USD-per-window off the cost counter) and `quality_drift` (Medium, a sustained faithfulness drop via the two-window / change-point statistic over the faithfulness series); and `POST /v1/conversations/{id}/feedback { rating: up|down, note? }` (metric `veda_llm_feedback_total{rating}`).
+
+See [documentation/2026-06-19-llm-observability.md](documentation/2026-06-19-llm-observability.md) for the full LLM Observability & Optimization guide.
+
 ## Quick Start
 
 ### Docker Compose (recommended)
@@ -260,6 +269,9 @@ Veda runs in two modes; the admin REST surface differs depending on which one is
 | `GET /v1/admin/incidents` | ✓ | ✓ | Semantic incident clusters (dedup of correlated ops events); off-tick runner; now carries `draft` (veda-ops RCA), `is_novel`/`novelty_score`, and a `noise_reduction` summary |
 | `GET /v1/admin/forecast` | ✓ | ✓ | Capacity forecasts — disk-full / memory-exhaustion / recall-decay ETAs (warm-up + min-R² guarded) |
 | `GET /v1/admin/insights/{event_id}/rca` | ✓ | ✓ | Cross-signal root-cause bundle (logs + slow/errored queries + traces + resources + incident) |
+| `GET /v1/admin/llm-traces` | ✓ | ✓ | Semantic search over the `_llm_traces` store (`?q=`); prompt/response/faithfulness/cost/cache_hit/guardrail_flagged/latency/ts per trace |
+| `GET /v1/admin/llm-traces/clusters` | ✓ | ✓ | Failure clustering over LLM traces (reuses the embedding categorizer) — recurring failure modes |
+| `POST /v1/conversations/{id}/feedback` | ✓ | ✓ | Thumbs `{ rating: up\|down, note? }` on a conversation; emits `veda_llm_feedback_total{rating}`. Tenant/RLS-scoped |
 | `POST /v1/agents/{id}/converse/stream` | ✓ | ✓ | Streaming converse over SSE (reasoning/tool_call/tool_result/answer deltas + `done` w/ citations+grounding); 503 no LLM. Tenant/RLS-scoped |
 | `GET` / `POST /v1/eval-sets`, `/{id}`, `/{id}/run`, `/{id}/runs`, `/{id}/cases/from-conversation` | ✓ | ✓ | RAG/agent eval harness + production-trace flywheel (recall@k/faithfulness/relevancy/pass_rate); 503 no LLM. Tenant/RLS-scoped |
 | `GET /v1/admin/nodes` | ✓ (1 node) | ✓ (N nodes) | `mode` field reports which path is active |
