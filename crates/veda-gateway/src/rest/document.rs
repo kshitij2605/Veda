@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
 use tracing::instrument;
-use veda_core::chunking::{chunk_markdown, ChunkingStrategy};
+use veda_core::chunking::ChunkingStrategy;
 use veda_core::embedding::Modality;
 use veda_core::embedding_client::EmbeddingClient;
 use veda_core::record::{FieldValue, Record};
@@ -491,20 +491,15 @@ async fn process_single_file(
         }
     }
 
-    // Chunk markdown using the configured strategy.
-    let text_chunks = chunk_markdown(&markdown_content, chunking_strategy);
-
     // Count tables (simple heuristic: lines with | pipes).
     let tables_extracted = markdown_content
         .lines()
         .filter(|l| l.starts_with('|') && l.ends_with('|') && l.contains("---"))
         .count();
 
-    // Build Record objects and insert them into the collection.
     let shard_count = schema.shard_count();
     let has_content_field = schema.get_field("content").is_some();
     let has_source_file_field = schema.get_field("source_file").is_some();
-    let has_chunk_index_field = schema.get_field("chunk_index").is_some();
     let has_image_blob_field = schema.get_field("image_blob").is_some();
 
     let mut inserted_ids: Vec<String> = Vec::new();
@@ -523,192 +518,97 @@ async fn process_single_file(
         )
     };
 
-    // Discover vector fields and find embedding models for auto-embedding.
-    // If document has images, use the multimodal model for ALL embeddings (unified vector space).
-    let registry = state.inner.embedding_registry.read().await;
-    let has_images = !images.is_empty();
+    // Text chunks go through the shared markdown-ingest pipeline (chunk ->
+    // embed text vector fields + SPLADE -> insert -> seal -> rebuild). The
+    // OCR-specific image handling stays below.
+    let source_meta = super::ingest_common::SourceMeta {
+        source_file: Some(file_name.to_owned()),
+        ..Default::default()
+    };
+    let text_result = super::ingest_common::ingest_markdown(
+        state,
+        collection_name,
+        schema,
+        &markdown_content,
+        &source_meta,
+        chunking_strategy,
+    )
+    .await
+    .map_err(|(status, msg)| {
+        (
+            status,
+            Json(OcrErrorResponse {
+                error: OcrError {
+                    code: "INSERT_FAILED".to_owned(),
+                    message: msg,
+                    suggestion: "Check collection schema and server logs.".to_owned(),
+                },
+            }),
+        )
+    })?;
+    let pages = text_result.chunks_inserted.max(1);
+    for (record_id, text) in &text_result.chunks {
+        let preview = if text.chars().count() > 100 {
+            let end = text.char_indices().nth(100).map(|(i, _)| i).unwrap_or(text.len());
+            format!("{}...", &text[..end])
+        } else {
+            text.clone()
+        };
+        response_chunks.push(ChunkSummary {
+            id: record_id.clone(),
+            chunk_type: "text".to_owned(),
+            preview: preview.trim().to_owned(),
+        });
+        inserted_ids.push(record_id.clone());
+    }
 
-    // Pick the model: if images present, use multimodal model for everything.
-    let multimodal_models = registry.find_by_modality(Modality::Image);
-    let text_only_models = registry.find_by_modality(Modality::Text);
-
-    let mut text_embed_targets: Vec<(String, EmbeddingClient)> = Vec::new();
+    // Discover image embedding targets for the image-insert path. Image
+    // vector fields are fed by the multimodal model (auto_embed-declared
+    // image/video/audio fields, or name-heuristic "image" fields).
     let mut image_embed_targets: Vec<(String, EmbeddingClient)> = Vec::new();
-    // Sparse-vector fields with `auto_embed.modality = text` get
-    // routed through the SPLADE client at insert time. Just collect
-    // the field names here; the lookup of source-text-per-record
-    // happens inside the chunk loop below.
-    let mut sparse_text_targets: Vec<(String, String)> = Vec::new(); // (target_field, source_field)
-
-    for field_def in schema.fields() {
-        if let FieldType::Vector { auto_embed, .. } = field_def.field_type() {
-            let field_name = field_def.name();
-
-            // Prefer the per-field auto_embed config when set. Each vector
-            // field declares which modality of embedder feeds it, so a
-            // mixed text+image schema works correctly. Falls back to the
-            // legacy name-based heuristic when the schema doesn't set it.
-            if let Some(cfg) = auto_embed {
-                use veda_core::types::AutoEmbedModality;
-                let modality = match cfg.modality {
-                    AutoEmbedModality::Text => Modality::Text,
-                    AutoEmbedModality::Image => Modality::Image,
-                    AutoEmbedModality::Video => Modality::Video,
-                    AutoEmbedModality::Audio => Modality::Audio,
-                };
-                let models = registry.find_by_modality(modality);
-                if models.is_empty() {
+    {
+        let registry = state.inner.embedding_registry.read().await;
+        let multimodal_models = registry.find_by_modality(Modality::Image);
+        for field_def in schema.fields() {
+            if let FieldType::Vector { auto_embed, .. } = field_def.field_type() {
+                let field_name = field_def.name();
+                if let Some(cfg) = auto_embed {
+                    use veda_core::types::AutoEmbedModality;
+                    let modality = match cfg.modality {
+                        AutoEmbedModality::Text => Modality::Text,
+                        AutoEmbedModality::Image => Modality::Image,
+                        AutoEmbedModality::Video => Modality::Video,
+                        AutoEmbedModality::Audio => Modality::Audio,
+                    };
+                    if !matches!(cfg.modality, AutoEmbedModality::Text) {
+                        let models = registry.find_by_modality(modality);
+                        if !models.is_empty() {
+                            image_embed_targets.push((
+                                field_name.to_owned(),
+                                EmbeddingClient::new(models[0].clone()),
+                            ));
+                        }
+                    }
                     continue;
                 }
-                match cfg.modality {
-                    AutoEmbedModality::Text => text_embed_targets.push((
+                let lower = field_name.to_lowercase();
+                let is_image_field = lower.contains("image") && !lower.contains("text");
+                if is_image_field && !multimodal_models.is_empty() {
+                    image_embed_targets.push((
                         field_name.to_owned(),
-                        EmbeddingClient::new(models[0].clone()),
-                    )),
-                    _ => image_embed_targets.push((
-                        field_name.to_owned(),
-                        EmbeddingClient::new(models[0].clone()),
-                    )),
-                }
-                continue;
-            }
-
-            let lower = field_name.to_lowercase();
-            // Image bucket: names containing "image" (and not also "text").
-            let is_image_field = lower.contains("image") && !lower.contains("text");
-            // Text bucket: anything else that's a vector field.
-            let is_text_field = !is_image_field;
-
-            if is_text_field {
-                // Pick text-only model by default. The previous "swap to
-                // multimodal whenever ANY image is in the doc" behaviour
-                // broke mixed schemas — keep text fields text. If the
-                // operator wants multimodal embeds for the text field,
-                // they set auto_embed on it explicitly.
-                let models = if has_images && text_only_models.is_empty() {
-                    &multimodal_models
-                } else {
-                    &text_only_models
-                };
-                if !models.is_empty() {
-                    text_embed_targets.push((
-                        field_name.to_owned(),
-                        EmbeddingClient::new(models[0].clone()),
+                        EmbeddingClient::new(multimodal_models[0].clone()),
                     ));
                 }
             }
-
-            if is_image_field && !multimodal_models.is_empty() {
-                image_embed_targets.push((
-                    field_name.to_owned(),
-                    EmbeddingClient::new(multimodal_models[0].clone()),
-                ));
-            }
-        }
-        // Sparse-vector field with `auto_embed.modality = text` → SPLADE.
-        if let FieldType::SparseVector { auto_embed: Some(cfg), .. } = field_def.field_type() {
-            use veda_core::types::AutoEmbedModality;
-            if matches!(cfg.modality, AutoEmbedModality::Text) {
-                sparse_text_targets
-                    .push((field_def.name().to_owned(), cfg.source.clone()));
-            }
         }
     }
-    drop(registry);
 
-    // Insert text chunks.
+    // Insert image records.
     {
         let mut managers = state.inner.segment_managers.write().await;
         let shard_map = managers.get_mut(collection_name).ok_or_else(|| {
             ocr_err("no segment managers for collection".into())
         })?;
-
-        for chunk in &text_chunks {
-            let mut record = Record::new();
-            if has_content_field {
-                record.set("content", FieldValue::String(chunk.text.clone()));
-            }
-            if has_source_file_field {
-                record.set("source_file", FieldValue::String(file_name.to_owned()));
-            }
-            if has_chunk_index_field {
-                record.set("chunk_index", FieldValue::Int32(chunk.index as i32));
-            }
-
-            // Embed text content into vector fields.
-            for (target_field, client) in &text_embed_targets {
-                match client.embed_text(&chunk.text).await {
-                    Ok(vector) => {
-                        record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
-                    }
-                    Err(e) => {
-                        tracing::warn!(field = %target_field, error = %e, "text embedding failed, skipping vector field");
-                    }
-                }
-            }
-
-            // Route the same text through SPLADE for any sparse_vector
-            // targets that opted into auto_embed{modality: text}. The
-            // chunk content is what feeds the encoder regardless of
-            // the `source` field name in the schema — this is the
-            // document path, not free-form embed-insert. We still
-            // honour source when it refers to a populated record
-            // field (e.g. blob_ref strings), but default to chunk.text.
-            if !sparse_text_targets.is_empty() {
-                let splade_guard = state.inner.splade_client.read().await;
-                if let Some(splade) = splade_guard.as_ref() {
-                    for (target_field, source_field) in &sparse_text_targets {
-                        let input = match record.get(source_field) {
-                            Some(FieldValue::String(s)) => s.clone(),
-                            _ => chunk.text.clone(),
-                        };
-                        match splade.encode(&input) {
-                            Ok(enc) => {
-                                if let Ok(sv) = veda_core::sparse::SparseVec::new(
-                                    enc.indices,
-                                    enc.values,
-                                ) {
-                                    record.set(
-                                        target_field,
-                                        FieldValue::SparseVector(sv),
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(field = %target_field, error = %e, "splade encoding failed, skipping sparse field");
-                            }
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        target_count = sparse_text_targets.len(),
-                        "sparse_vector field requested SPLADE auto_embed but VEDA_SPLADE_ENDPOINT is unset"
-                    );
-                }
-            }
-
-            let record_id = record.id().to_string();
-            let shard_id =
-                veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
-
-            let sm = shard_map.get_mut(&shard_id).ok_or_else(|| {
-                ocr_err(format!("shard {shard_id} not found"))
-            })?;
-            sm.insert(record).map_err(|e| ocr_err(format!("insert failed: {e}")))?;
-
-            let preview = if chunk.text.chars().count() > 100 {
-                let end = chunk.text.char_indices().nth(100).map(|(i, _)| i).unwrap_or(chunk.text.len());
-                format!("{}...", &chunk.text[..end])
-            } else {
-                chunk.text.clone()
-            };
-            response_chunks.push(ChunkSummary {
-                id: record_id.clone(),
-                chunk_type: "text".to_owned(),
-                preview: preview.trim().to_owned(),
-            });
-            inserted_ids.push(record_id);
-        }
 
         // Get blob store for storing extracted images.
         let blob_store = state.inner.blob_store.read().await.clone();
@@ -780,8 +680,6 @@ async fn process_single_file(
             }),
         )
     })?;
-
-    let pages = text_chunks.len().max(1);
 
     Ok(ProcessDocumentResponse {
         status: "processed".to_owned(),
