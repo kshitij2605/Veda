@@ -249,8 +249,9 @@ before it, the cache never hit):
   sweeper auto-purges expired traces, and `search`/`cluster` exclude expired records (via
   `lookup_record_at` / `is_expired_at`), so prompts/responses auto-expire for regulated data.
 - **Cache threshold + TTL.** The 0.97 cosine threshold trades recall (fewer hits) for safety
-  (no wrong-answer reuse); it is fixed today and should become tunable, and cached entries have
-  no TTL yet — a stale answer can be served until the entry is overwritten.
+  (no wrong-answer reuse); it is fixed today and should become tunable. Cached entries carry a
+  TTL (`DEFAULT_TTL_MS`, 24h) — an entry whose `expires_at` has passed is treated as a miss — so
+  a stale answer can be served only within that window before re-generation.
 - **Guardrails are embedding-similarity + regex, not a trained classifier.** Max-cosine to a
   curated bad-pattern set catches paraphrased attacks the curated set covers, but it is not a
   fine-tuned safety model — novel attack phrasings outside the set, and adversarial evasion, are
