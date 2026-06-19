@@ -13,6 +13,7 @@ import {
   Waypoints,
   BadgeCheck,
   Radar,
+  Globe,
 } from 'lucide-react'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
@@ -116,5 +117,12 @@ export const FEATURES: Feature[] = [
     title: 'AIOps: forecasting + incident correlation',
     blurb:
       'Veda forecasts disk-full, memory, and recall-decay ETAs, detects sustained change-points, and semantically clusters related alerts into single incidents — flagging unprecedented ones — while an AI agent drafts the root cause from a cross-signal bundle (logs + queries + traces + resources). Predictive, causal, vector-native AIOps a metrics store without an embedder can’t do.',
+  },
+  {
+    icon: Globe,
+    accent: 'var(--color-node-1)',
+    title: 'Self-hosted web RAG',
+    blurb:
+      'Crawl the open web straight into a collection (crawl4ai → clean markdown → chunk → embed) and give agents web_search + fetch_url tools to search → fetch → ground over live pages — all on open-source, self-hosted services. No external API, no data leaving your trust boundary.',
   },
 ]

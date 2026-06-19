@@ -82,7 +82,18 @@ curl -X POST http://localhost:6340/v1/admin/jobs \
 |---|---|---|
 | `POST` | `/v1/collections/{name}/process-document` | OCR → chunk → embed → insert one file (multipart `file`) |
 | `POST` | `/v1/collections/{name}/process-documents` | Batch variant (multipart `files`) |
+| `POST` | `/v1/collections/{name}/ingest-url` | Crawl a URL → clean markdown → chunk → embed → insert (`{ url\|urls, deep_crawl?, max_pages?, chunker?, ttl_secs? }`); see [Web Connectors](/docs/web-connectors); `503` if crawl4ai unconfigured |
 | `POST` | `/v1/chunk/preview` | Preview how text would be chunked under a strategy |
+
+## Connectors
+
+Admin-only web data-source connectors (declarative, persisted, re-runnable). See [Web Connectors](/docs/web-connectors#connectors-framework).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET/POST` | `/v1/admin/connectors` | List / create a connector (`{ kind: "web", name, config, enabled }`; `id` server-assigned if omitted) |
+| `GET/PUT/DELETE` | `/v1/admin/connectors/{id}` | Read / update / delete a connector |
+| `POST` | `/v1/admin/connectors/{id}/run` | Run now — crawl the connector's URLs into its target collection (`503` if crawl4ai unconfigured) |
 
 ## Embedding & models
 

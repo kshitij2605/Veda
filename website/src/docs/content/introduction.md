@@ -12,6 +12,7 @@ Most vector databases just store vectors: you bring your own embedding services,
 - **Multi-vector fusion** — RRF, WeightedSum, and Intersection strategies for cross-modal retrieval in a single API call.
 - **Agents & MCP** — a built-in agentic layer and an MCP server, so any MCP client (Claude Desktop, Cursor, VS Code) gets cross-modal retrieval over your data, secured by JWT auth and row-level security — with answer [citations + faithfulness scoring](/docs/rag-aiops#faithfulness-citations) because Veda owns the retriever.
 - **Built-in document intelligence** — FlashParse OCR integration plus seven chunking strategies turn raw documents into searchable vectors with zero external tooling.
+- **Self-hosted web RAG** — [crawl the open web](/docs/web-connectors) into a collection and let agents `search → fetch → ground` over live pages, on open-source self-hosted services (crawl4ai + searxng) — no external API, no data leaving your trust boundary.
 - **SQL-like filters** — combine vector search with structured metadata predicates.
 - **Blob storage** — store the raw files alongside their embeddings via MinIO or any S3-compatible backend.
 - **Lightweight by default** — three mandatory services (Veda, MinIO, NATS); `docker compose up` and you have a vector database in under 30 seconds.
@@ -23,7 +24,7 @@ Veda also ships a distributed data plane (per-shard append-only logs with quorum
 ## How these docs are organized
 
 - **Getting started** — [Quick start](/docs/quickstart) gets a cluster running and serving queries in minutes; [Installation & config](/docs/installation) covers building from source, cluster modes, and configuration.
-- **Core concepts** — [Collections & fields](/docs/collections), [Indexes](/docs/indexes), [Search & fusion](/docs/search), the [Document pipeline](/docs/document-pipeline), and [Agents & MCP](/docs/agents-mcp).
+- **Core concepts** — [Collections & fields](/docs/collections), [Indexes](/docs/indexes), [Search & fusion](/docs/search), the [Document pipeline](/docs/document-pipeline), [Agents & MCP](/docs/agents-mcp), and [Web Connectors](/docs/web-connectors).
 - **Reference** — the [REST API](/docs/rest-api), the [Python SDK](/docs/python-sdk), [Observability](/docs/observability), [APM & Performance](/docs/apm-observability), [AIOps](/docs/aiops) (and its deep dives: the [Ops Advisor](/docs/ops-advisor), [Log Insights](/docs/log-insights), [Node Resource Signals](/docs/resource-signals), [Service Reliability](/docs/service-reliability), and [RAG & AIOps Intelligence](/docs/rag-aiops)).
 
 ## License

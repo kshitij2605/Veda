@@ -6,6 +6,7 @@ import indexes from './content/indexes.md?raw'
 import search from './content/search.md?raw'
 import documentPipeline from './content/document-pipeline.md?raw'
 import agentsMcp from './content/agents-mcp.md?raw'
+import webConnectors from './content/web-connectors.md?raw'
 import restApi from './content/rest-api.md?raw'
 import pythonSdk from './content/python-sdk.md?raw'
 import observability from './content/observability.md?raw'
@@ -45,6 +46,7 @@ export const DOCS: DocGroup[] = [
       { slug: 'search', title: 'Search & fusion', md: search },
       { slug: 'document-pipeline', title: 'Document pipeline', md: documentPipeline },
       { slug: 'agents-mcp', title: 'Agents & MCP', md: agentsMcp },
+      { slug: 'web-connectors', title: 'Web Connectors', md: webConnectors },
     ],
   },
   {

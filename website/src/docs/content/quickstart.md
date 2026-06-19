@@ -33,6 +33,9 @@ docker compose --profile ocr up
 
 # With full OCR + VLM image captioning (~48GB+ VRAM)
 docker compose --profile ocr --profile ocr-vlm up
+
+# With self-hosted web crawl + meta-search (crawl4ai + searxng)
+docker compose --profile web up
 ```
 
 | Profile | Services | GPU VRAM | Purpose |
@@ -40,6 +43,7 @@ docker compose --profile ocr --profile ocr-vlm up
 | `embedding` | HuggingFace TEI + Multimodal Embedding (vLLM) | CPU + ~10GB | Text embedding (BGE-M3) + multimodal embedding (Qwen3-VL) |
 | `ocr` | FlashParse + GLM-OCR | ~8GB | Text/table/formula OCR from documents |
 | `ocr-vlm` | VLM (Qwen3.5-35B-A3B) | ~48GB | Image captioning and classification (use with `ocr`) |
+| `web` | crawl4ai + searxng | CPU | Self-hosted web crawl + meta-search for [web connectors & agentic web search](/docs/web-connectors) |
 | `monitoring` | OTel Collector, Prometheus, Mimir, Tempo, Loki, Grafana | CPU | Metrics, tracing, and log aggregation |
 
 ## Authenticate
