@@ -63,6 +63,8 @@ curl -X POST http://localhost:6340/v1/agent-tools/search/execute \
 
 > The `search` `mode` of `dense`/`auto` execute today; `sparse`/`hybrid`/`colpali` return a clear `invalid_args` until their query encoders are wired in. Cross-modal **image** queries require the multimodal embedder (`MULTIMODAL_EMBEDDING_*`) to be configured.
 
+> **Web tools (opt-in).** The catalog also includes `web_search` and `fetch_url` for [agentic web search](/docs/web-connectors#agentic-web-search), plus the `veda-ops` triage tools. Web access is a trust decision, so the two web tools are **excluded from the default `veda-agent`** — the catalog holds 15 built-ins but the default agent resolves to 13. The built-in **`veda-web`** agent has them whitelisted.
+
 ## Custom agents
 
 An agent is a saved object you can create, update, and delete:
