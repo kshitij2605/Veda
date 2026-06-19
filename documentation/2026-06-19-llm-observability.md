@@ -104,6 +104,12 @@ A Niriksha panel renders both. This is the trace store Elastic's LLM Observabili
 *vector-native*: you search traces by meaning and cluster failures by meaning, on the same
 engine that stores them.
 
+Trace records also carry a **retention TTL** so prompts/responses don't persist forever: each
+trace sets the reserved `_expires_at` field to `ts + VEDA_LLM_TRACE_TTL_SECS` (default **30
+days**), the TTL sweeper auto-purges expired traces, and `search`/`cluster` already exclude
+expired records (via `lookup_record_at` / `is_expired_at`) — so a regulated deployment gets
+bounded retention without bookkeeping.
+
 ---
 
 ## 4. TTFT + cost budgets + quality drift + feedback
@@ -152,6 +158,13 @@ The fix is a shared helper, `agent/index.rs::insert_and_index`, used by all thre
 every store, and the lookup filter was corrected from `==` to `=`. A searchability regression
 test was added (red → green) to lock it in.
 
+**Update (follow-up, RESOLVED):** the per-write seal+rebuild this fix introduced has since been
+replaced by **live-growing search** — see the perf follow-up in §8. Stores now `insert_only`
+into the growing segment (no per-write seal/rebuild; the growing segment seals on the normal
+size threshold), and lookups call `search_live_growing` to brute-force the bounded live growing
+segment and **merge** those results with the sealed-executor results. Fresh entries are
+searchable immediately, with **zero per-write rebuild**.
+
 Note: this same bug had silently shipped on `main` since the RAG/AIOps cycle, so **agent-memory
 was also broken in production** until this fix — the tests had mocked the store path, so they
 never exercised the seal-and-search round-trip. The new test now does. (See the perf follow-up
@@ -197,8 +210,15 @@ in §8: seal-and-rebuild on *every* store is a real per-write cost.)
 | `guardrails` | Enables embedding+regex input/output safety screening (mode Flag\|Block) |
 | `trace` | Enables writing each run to the searchable `_llm_traces` store |
 
-(There are no dedicated env knobs for cache/guardrails/trace — they are per-agent flags. The
-cost-budget threshold is configured like any advisor rule via `/v1/admin/insights/rules`.)
+Cache/guardrails/trace are per-agent flags; the cost-budget threshold is configured like any
+advisor rule via `/v1/admin/insights/rules`. The one dedicated env knob is the trace-store
+retention TTL:
+
+### Env
+
+| Variable | Default | Notes |
+|---|---|---|
+| `VEDA_LLM_TRACE_TTL_SECS` | `2592000` (30d) | Retention TTL for the `_llm_traces` store — each trace's reserved `_expires_at` = `ts + this`; the TTL sweeper auto-purges expired traces and `search`/`cluster` exclude them |
 
 ---
 
@@ -222,9 +242,12 @@ before it, the cache never hit):
 ## 8. Limitations & follow-ups
 
 - **The cache and trace store persist prompts and responses.** Both are **opt-in**, written to
-  **per-tenant** collections, and **tenant/RLS-scoped** on read — but they do retain raw
-  prompt/response text, so enabling them is a privacy decision. The trace store should grow a
-  retention/TTL knob for regulated data.
+  **per-tenant** collections, and **tenant/RLS-scoped** on read — so enabling them remains a
+  privacy decision, but the trace store no longer retains text indefinitely: it **gained a
+  retention TTL** (**RESOLVED**, follow-up `6caf0fe`) — each trace
+  sets the reserved `_expires_at` = `ts + VEDA_LLM_TRACE_TTL_SECS` (default **30 days**), the TTL
+  sweeper auto-purges expired traces, and `search`/`cluster` exclude expired records (via
+  `lookup_record_at` / `is_expired_at`), so prompts/responses auto-expire for regulated data.
 - **Cache threshold + TTL.** The 0.97 cosine threshold trades recall (fewer hits) for safety
   (no wrong-answer reuse); it is fixed today and should become tunable, and cached entries have
   no TTL yet — a stale answer can be served until the entry is overwritten.
@@ -233,12 +256,16 @@ before it, the cache never hit):
   fine-tuned safety model — novel attack phrasings outside the set, and adversarial evasion, are
   out of reach. The default mode is **Flag** (observe before you block) precisely because this
   is a heuristic, not a verdict.
-- **`insert_and_index` seals + rebuilds executors on every store — a per-write cost.** The §5
-  fix makes stored vectors searchable by sealing the growing segment and rebuilding the
-  executors on **every** cache/memory/trace write. That is correct but expensive for
-  high-volume cache/trace traffic (many tiny sealed segments + a rebuild each time); it should
-  be **batched / periodic** rather than per-write (a performance follow-up), and **compaction**
-  needs to merge the resulting many small segments.
+- **Per-write seal + rebuild on every store — RESOLVED via live-growing search** (follow-up
+  `891d6c7`). The §5 fix made stored vectors searchable by sealing the growing segment and
+  rebuilding the executors on **every** cache/memory/trace write — correct, but O(collection)
+  and expensive for high-volume traffic (many tiny sealed segments + a rebuild each time). The
+  follow-up removes the per-write seal/rebuild entirely: stores now `insert_only` into the
+  growing segment (which seals on the normal size threshold), and lookups call
+  `search_live_growing` to brute-force the **bounded** live growing segment and **merge** with
+  the sealed-executor results. Fresh entries are searchable immediately with **zero per-write
+  rebuild**. Live-validated: a repeated prompt still returns `cache_hit:true`, and 15 distinct
+  stores produced **0 sealed segments** (was ~15).
 - **Guardrails / cache / trace need an embedder.** All three are vector-native, so without an
   embedder the cache and trace search are inert and guardrails fall back to **regex-only**
   (PII still fires; semantic paraphrase detection does not). A CPU embedder (BGE-M3) is fine —
