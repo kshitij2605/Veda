@@ -5,7 +5,8 @@
 //! default agent), and the built-in `veda-web` agent's whitelist.
 
 use serde_json::{json, Value};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
 use veda_gateway::agent::catalog::{ToolCatalog, ToolContext};
@@ -180,6 +181,60 @@ async fn fetch_url_tool_dispatches_and_returns_markdown() {
     assert_eq!(out.content["title"], "Veda");
     assert!(out.content["markdown"].as_str().unwrap().contains("multimodal vector database"));
     assert_eq!(out.content["truncated"], false);
+}
+
+#[tokio::test]
+async fn fetch_url_tool_ssrf_blocked_without_crawling() {
+    // crawl4ai is configured and counts hits; a private target URL must be
+    // blocked by the SSRF guard with a clean `{ blocked: true }` outcome
+    // (not a hard error) and the crawl server must never be contacted.
+    use axum::extract::State as AxState;
+    use axum::routing::post;
+    use axum::Router;
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    async fn crawl(AxState(hits): AxState<Arc<AtomicUsize>>) -> axum::Json<Value> {
+        hits.fetch_add(1, Ordering::SeqCst);
+        axum::Json(json!({ "results": [{ "url": "x", "markdown": "# x" }] }))
+    }
+    let router = Router::new()
+        .route("/crawl", post(crawl))
+        .with_state(hits.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let crawl_url = format!("http://{}", listener.local_addr().unwrap());
+    let _h = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = AppState::new(tmp.path());
+    let tenant = TenantId::default_tenant();
+    let ctx = ToolContext::new(&state, &tenant);
+    let cat = ToolCatalog::new();
+
+    let _guard = WEB_ENV_LOCK.lock().unwrap();
+    // SAFETY: serialized on WEB_ENV_LOCK.
+    unsafe {
+        std::env::set_var("VEDA_CRAWL4AI_ENDPOINT", &crawl_url);
+    }
+    let out = cat
+        .dispatch(
+            &ctx,
+            "fetch_url",
+            json!({ "url": "http://169.254.169.254/latest/meta-data/" }),
+        )
+        .await;
+    unsafe {
+        std::env::remove_var("VEDA_CRAWL4AI_ENDPOINT");
+    }
+    drop(_guard);
+
+    assert!(!out.is_error, "blocked URL should be a clean outcome: {:?}", out.content);
+    assert_eq!(out.content["blocked"], true);
+    assert_eq!(out.content["code"], "URL_BLOCKED_PRIVATE");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "crawl4ai must NOT be contacted for a blocked URL"
+    );
 }
 
 #[tokio::test]

@@ -20,6 +20,7 @@
 use crate::agent::catalog::{ToolContext, ToolOutcome, ToolSpec};
 use crate::rest::crawl4ai::Crawl4aiClient;
 use crate::rest::searxng::SearxngClient;
+use crate::rest::url_guard::check_url_allowed;
 
 /// Default number of search results when `limit` is omitted.
 const DEFAULT_SEARCH_LIMIT: usize = 5;
@@ -109,6 +110,17 @@ pub async fn fetch_url(_ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolO
     let Some(url) = args["url"].as_str().filter(|s| !s.trim().is_empty()) else {
         return ToolOutcome::invalid_args("url is required");
     };
+
+    // SSRF guard: reject internal/private/non-http(s) URLs BEFORE fetching.
+    // Returns a clean `{ blocked: true, reason }` outcome (not a hard
+    // error) so the agent can explain rather than crash the turn.
+    if let Err(e) = check_url_allowed(url) {
+        return ToolOutcome::ok(serde_json::json!({
+            "blocked": true,
+            "reason": e.to_string(),
+            "code": e.code(),
+        }));
+    }
 
     let Some(client) = Crawl4aiClient::from_env() else {
         return not_configured(

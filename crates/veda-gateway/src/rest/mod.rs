@@ -53,6 +53,7 @@ pub mod state;
 pub mod synthetics;
 pub mod time_parse;
 pub mod txn;
+pub mod url_guard;
 
 /// Ops-advisor admin routes, gated by an extra `require_admin` route
 /// layer (the shared auth middleware in `build_router` still runs first,
