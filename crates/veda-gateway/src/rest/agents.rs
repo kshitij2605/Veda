@@ -45,7 +45,7 @@ use crate::agent::catalog::{ToolContext, ToolErrorKind, ToolSpec};
 use crate::agent::executor::{self, DEFAULT_MAX_STEPS};
 use crate::agent::grounding::{self, Citation, Grounding};
 use crate::agent::model::{
-    default_agent, Agent, AgentTool, Conversation, ConversationMessage, ConverseRequest,
+    default_agent, Agent, AgentStep, AgentTool, Conversation, ConversationMessage, ConverseRequest,
     ConverseResponse,
 };
 use crate::agent::store;
@@ -601,7 +601,80 @@ pub(crate) async fn run_agent_turn(
     )
     .await;
 
+    // 12. LLM trace store (opt-in). Persist this completed (non-cache-hit)
+    //     run as an embedded, searchable trace AFTER the response +
+    //     guardrails are finalized. Best-effort / off-lock / fail-open; a
+    //     store failure NEVER fails the turn. Skipped entirely (and thus
+    //     byte-identical to today) when trace==false. We don't store error /
+    //     step-limit fallbacks (no useful run to search/cluster).
+    if crate::agent::trace_store::should_store_trace(&agent) && !result.hit_limit_or_error {
+        let fields = build_trace_fields(
+            input,
+            &result,
+            &model_name,
+            grounding.as_ref(),
+            report.as_ref(),
+            false,
+        );
+        crate::agent::trace_store::store_trace(state, tenant, fields).await;
+    }
+
     Ok((agent, result, citations, grounding, false, report))
+}
+
+/// Assemble the per-run [`TraceFields`](crate::agent::trace_store::TraceFields)
+/// from a finished run's signals. Pure (no I/O): comma-joins the tool ids
+/// from the steps, maps the optional faithfulness to the `-1` sentinel when
+/// unscored, computes the estimated cost from token counts + the model
+/// price, and records whether any guardrail flagged the turn.
+fn build_trace_fields(
+    input: &str,
+    result: &RunResult,
+    model_name: &str,
+    grounding: Option<&Grounding>,
+    report: Option<&crate::agent::guardrails::GuardrailReport>,
+    cache_hit: bool,
+) -> crate::agent::trace_store::TraceFields {
+    let tool_ids = tool_ids_from_steps(&result.steps);
+    let faithfulness = grounding
+        .and_then(|g| g.faithfulness)
+        .unwrap_or(crate::agent::trace_store::FAITHFULNESS_NONE);
+    let cost_usd = match veda_core::metrics::model_price(model_name) {
+        Some(price) => veda_core::metrics::token_cost_usd(
+            result.metrics.prompt_tokens,
+            result.metrics.completion_tokens,
+            price,
+        ),
+        None => 0.0,
+    };
+    let guardrail_flagged = report
+        .map(|r| r.input.flagged || r.output.flagged)
+        .unwrap_or(false);
+    crate::agent::trace_store::TraceFields {
+        prompt: input.to_owned(),
+        response: result.response.clone(),
+        tool_ids,
+        faithfulness,
+        cost_usd,
+        cache_hit,
+        guardrail_flagged,
+        latency_ms: result.metrics.total_ms,
+        ts: crate::advisor::engine::now_ms().max(0),
+    }
+}
+
+/// Comma-join the distinct tool ids invoked across a run's steps, in first-
+/// seen order. Empty string when no tools were called.
+fn tool_ids_from_steps(steps: &[AgentStep]) -> String {
+    let mut ids: Vec<&str> = Vec::new();
+    for s in steps {
+        if let AgentStep::ToolCall { tool_id, .. } = s {
+            if !ids.contains(&tool_id.as_str()) {
+                ids.push(tool_id.as_str());
+            }
+        }
+    }
+    ids.join(",")
 }
 
 /// Run the OUTPUT guardrail on `response` and assemble the [`GuardrailReport`]

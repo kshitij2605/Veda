@@ -54,6 +54,15 @@ pub struct Agent {
     /// and behave byte-identically).
     #[serde(default)]
     pub guardrails: bool,
+    /// Opt-in searchable LLM trace store. When `true`, each completed
+    /// (non-cache-hit) turn is persisted as an embedded record into the
+    /// tenant's `_llm_traces` collection so runs can be semantically
+    /// searched + clustered into failure groups. Persists prompts +
+    /// responses, so it is off by default (privacy). Defaults to `false`
+    /// (serde-default → existing agents are unchanged and behave
+    /// byte-identically).
+    #[serde(default)]
+    pub trace: bool,
 }
 
 /// The default, always-available agent used when a converse request
@@ -74,6 +83,7 @@ provided tools to ground your answers in real data; be concise and cite what you
         memory: false,
         cache: false,
         guardrails: false,
+        trace: false,
     }
 }
 
@@ -108,6 +118,7 @@ be specific and brief."
         memory: false,
         cache: false,
         guardrails: false,
+        trace: false,
     }
 }
 
