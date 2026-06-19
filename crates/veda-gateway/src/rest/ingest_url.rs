@@ -20,6 +20,7 @@ use super::crawl4ai::Crawl4aiClient;
 use super::document::parse_chunking_strategy;
 use super::ingest_common::{ingest_markdown, SourceMeta};
 use super::state::AppState;
+use super::url_guard::check_url_allowed;
 use crate::tenant::{self, Tenant};
 use veda_core::chunking::ChunkingStrategy;
 use veda_core::schema::CollectionSchema;
@@ -90,6 +91,24 @@ fn err(status: StatusCode, code: &str, message: String) -> (StatusCode, Json<Ing
     )
 }
 
+/// Default server cap on pages crawled for a deep crawl. The requested
+/// `max_pages` is clamped to `min(requested, cap)`. Overridable via the
+/// `VEDA_WEB_MAX_PAGES` env var.
+const MAX_PAGES_CAP: u32 = 50;
+
+/// Resolve the effective page cap from `VEDA_WEB_MAX_PAGES` (falling back
+/// to [`MAX_PAGES_CAP`]) and clamp the caller's request to it. `None`
+/// (no explicit request) is clamped to the cap so a deep crawl never
+/// exceeds it even when the caller omitted `max_pages`.
+fn clamp_max_pages(requested: Option<u32>) -> Option<u32> {
+    let cap = std::env::var("VEDA_WEB_MAX_PAGES")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(MAX_PAGES_CAP);
+    Some(requested.unwrap_or(cap).min(cap))
+}
+
 /// Outcome of a crawl -> ingest run, shared by the `/ingest-url` handler
 /// and the connector `/run` action.
 #[derive(Debug, Default)]
@@ -134,6 +153,24 @@ pub async fn crawl_and_ingest(
             message: "Provide a 'url' string or a non-empty 'urls' array.".to_owned(),
         });
     }
+
+    // SSRF guard: validate every seed URL BEFORE contacting crawl4ai, so a
+    // blocked (internal/private) URL is rejected with a clean error and
+    // never fetched. Defense-in-depth alongside running crawl4ai in a
+    // network-isolated container.
+    for url in urls {
+        check_url_allowed(url).map_err(|e| CrawlIngestError {
+            status: StatusCode::FORBIDDEN,
+            code: e.code(),
+            message: e.to_string(),
+        })?;
+    }
+
+    // Server-enforced page cap for deep crawls: clamp the requested
+    // `max_pages` to `MAX_PAGES_CAP` (overridable via VEDA_WEB_MAX_PAGES) so
+    // a request cannot drive an unbounded crawl regardless of what the
+    // caller asked for.
+    let max_pages = clamp_max_pages(max_pages);
 
     // crawl4ai is opt-in. Unset endpoint -> clean 503, no panic.
     let client = Crawl4aiClient::from_env().ok_or_else(|| CrawlIngestError {
@@ -255,4 +292,26 @@ pub async fn ingest_url(
             per_url: outcome.per_url,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamps_excessive_request_to_default_cap() {
+        // No VEDA_WEB_MAX_PAGES override → cap is MAX_PAGES_CAP (50).
+        // A wildly large request is clamped down to the cap.
+        assert_eq!(clamp_max_pages(Some(1000)), Some(MAX_PAGES_CAP));
+    }
+
+    #[test]
+    fn keeps_request_below_cap() {
+        assert_eq!(clamp_max_pages(Some(5)), Some(5));
+    }
+
+    #[test]
+    fn defaults_unspecified_to_cap() {
+        assert_eq!(clamp_max_pages(None), Some(MAX_PAGES_CAP));
+    }
 }

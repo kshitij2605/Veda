@@ -10,7 +10,8 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
 use veda_core::embedding::{EmbeddingModelConfig, Modality};
@@ -68,6 +69,33 @@ async fn start_mock_crawl4ai() -> (String, tokio::task::JoinHandle<()>) {
     let url = format!("http://{addr}");
     let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     (url, handle)
+}
+
+/// A mock crawl4ai server that counts how many `POST /crawl` it receives,
+/// so a wiring test can assert the SSRF guard short-circuits BEFORE any
+/// crawl is attempted (hit count stays 0).
+async fn start_counting_crawl4ai() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    use axum::extract::State as AxState;
+    use axum::routing::post;
+    use axum::Router;
+
+    let hits = Arc::new(AtomicUsize::new(0));
+
+    async fn crawl(AxState(hits): AxState<Arc<AtomicUsize>>) -> axum::Json<Value> {
+        hits.fetch_add(1, Ordering::SeqCst);
+        axum::Json(json!({
+            "results": [{ "url": "https://example.com/doc", "markdown": "# x\n\nbody", "metadata": { "title": "X" } }]
+        }))
+    }
+
+    let router = Router::new()
+        .route("/crawl", post(crawl))
+        .with_state(hits.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+    let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (url, hits, handle)
 }
 
 fn client() -> Client {
@@ -181,4 +209,43 @@ async fn test_ingest_url_not_configured_returns_503() {
 
     assert_eq!(status, 503, "expected 503 when crawl4ai unset: {body}");
     assert_eq!(body["error"]["code"], "CRAWL_SERVICE_UNAVAILABLE");
+}
+
+#[tokio::test]
+async fn test_ingest_url_ssrf_blocked_returns_403_without_crawling() {
+    // The mock crawl4ai is fully configured and counts hits; the SSRF
+    // guard must reject the private target URL and short-circuit so the
+    // crawl server is NEVER contacted.
+    let (crawl_url, hits, _crawl_handle) = start_counting_crawl4ai().await;
+    let (base, _tmp) = start_gateway().await;
+    create_web_collection(&base, "web_col_ssrf").await;
+
+    let _guard = CRAWL_ENV_LOCK.lock().unwrap();
+    // SAFETY: serialized on CRAWL_ENV_LOCK.
+    unsafe {
+        std::env::set_var("VEDA_CRAWL4AI_ENDPOINT", &crawl_url);
+    }
+
+    let resp = client()
+        .post(format!("{base}/v1/collections/web_col_ssrf/ingest-url"))
+        .json(&json!({ "url": "http://169.254.169.254/latest/meta-data/" }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+
+    unsafe {
+        std::env::remove_var("VEDA_CRAWL4AI_ENDPOINT");
+    }
+    drop(_guard);
+
+    assert_eq!(status, 403, "expected 403 for blocked SSRF URL: {body}");
+    assert_eq!(body["error"]["code"], "URL_BLOCKED_PRIVATE");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "crawl4ai must NOT be contacted for a blocked URL"
+    );
 }
