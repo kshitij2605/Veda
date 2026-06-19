@@ -14,6 +14,7 @@ pub mod memory;
 pub mod model;
 pub mod store;
 pub mod tools;
+pub mod trace_store;
 
 #[cfg(test)]
 mod tests {
@@ -43,6 +44,7 @@ mod tests {
             memory: false,
             cache: false,
             guardrails: false,
+            trace: false,
         };
 
         save_agent(&store, &agent).await;
@@ -149,6 +151,7 @@ mod tests {
                 memory: false,
                 cache: false,
                 guardrails: false,
+                trace: false,
             },
         )
         .await;

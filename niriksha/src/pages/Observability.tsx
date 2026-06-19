@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import {
   Activity,
   AlertCircle,
@@ -25,6 +26,12 @@ import {
   applyReindex,
   type IndexAdvisorRow,
 } from '../api/indexAdvisor'
+import {
+  searchLlmTraces,
+  fetchLlmTraceClusters,
+  type TraceHit,
+  type TraceCluster,
+} from '../api/llmTraces'
 import { Button, CopyButton, Skeleton } from '../components/primitives'
 import {
   useSavedObjects,
@@ -134,6 +141,7 @@ export function Observability() {
             <CollectionTable snapshots={snapshots} />
             <RawMetricsTable latest={latest} />
             <EvalDriftPanel />
+            <LlmTracesPanel />
             <CorrelationsPanel />
             <IndexAdvisorPanel />
             <DependenciesPanel />
@@ -466,6 +474,215 @@ function EvalDriftPanel() {
         </table>
       </div>
     </section>
+  )
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   LLM traces — searchable semantic trace store + failure clustering from
+   GET /v1/admin/llm-traces[ /clusters]. A NL search box surfaces relevant
+   past converse runs (with faithfulness / cost / cache / guardrail badges);
+   a failure-clusters list groups low-faithfulness runs by semantic
+   similarity. Both are empty-safe (no traces → nothing rendered).
+   ──────────────────────────────────────────────────────────────────── */
+
+/** Faithfulness below this counts as a "failure" for the clusters view. */
+const FAILURE_FAITHFULNESS_MAX = 0.6
+
+function LlmTracesPanel() {
+  const [query, setQuery] = useState('')
+  const [hits, setHits] = useState<TraceHit[] | null>(null)
+  const [searching, setSearching] = useState(false)
+  const [clusters, setClusters] = useState<TraceCluster[] | null>(null)
+
+  // Failure clusters load once on mount (best-effort; empty when no traces).
+  useEffect(() => {
+    let alive = true
+    fetchLlmTraceClusters({ limit: 100, faithfulness_max: FAILURE_FAITHFULNESS_MAX })
+      .then(({ data }) => {
+        if (alive) setClusters(data?.clusters ?? [])
+      })
+      .catch(() => {
+        if (alive) setClusters([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const runSearch = async (e: FormEvent) => {
+    e.preventDefault()
+    const q = query.trim()
+    if (!q) return
+    setSearching(true)
+    try {
+      const { data } = await searchLlmTraces({ q, limit: 20 })
+      setHits(data?.hits ?? [])
+    } catch {
+      setHits([])
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  const hasClusters = (clusters?.length ?? 0) > 0
+  const hasSearched = hits !== null
+
+  return (
+    <section>
+      <header className="mb-2">
+        <h2 className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)]">
+          LLM traces
+          <span className="ml-2 font-mono normal-case tracking-normal text-[var(--color-text-muted)]">
+            (semantic search + failure clusters)
+          </span>
+        </h2>
+      </header>
+
+      <form onSubmit={runSearch} className="flex items-center gap-2 mb-3">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search past runs in natural language…"
+          className="flex-1 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-1.5 text-[12px] text-[var(--color-text)] placeholder:text-[var(--color-text-subtle)] focus:outline-none focus:border-[var(--color-accent)]"
+        />
+        <Button type="submit" disabled={searching || !query.trim()}>
+          {searching ? 'Searching…' : 'Search'}
+        </Button>
+      </form>
+
+      {hasSearched && hits!.length === 0 && (
+        <div className="text-[12px] text-[var(--color-text-subtle)] mb-3">
+          No matching traces. Enable an agent&apos;s trace store and run a few
+          turns to populate this.
+        </div>
+      )}
+
+      {hasSearched && hits!.length > 0 && (
+        <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] overflow-hidden mb-3">
+          <table className="w-full text-[12px] tabular-nums">
+            <thead className="bg-[var(--color-bg-elevated)] text-[10.5px] uppercase tracking-[0.06em] text-[var(--color-text-subtle)]">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium">Prompt</th>
+                <th className="px-3 py-2 text-right font-medium">Faithfulness</th>
+                <th className="px-3 py-2 text-right font-medium">Cost</th>
+                <th className="px-3 py-2 text-right font-medium">Latency</th>
+                <th className="px-3 py-2 text-left font-medium">Flags</th>
+                <th className="px-3 py-2 text-right font-medium">Score</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--color-border)]">
+              {hits!.map((h, i) => (
+                <tr key={i} className="hover:bg-[var(--color-bg-hover)] align-top">
+                  <td className="px-3 py-1.5 text-[var(--color-text)] max-w-[360px]">
+                    <div className="truncate" title={h.prompt}>
+                      {h.prompt || '—'}
+                    </div>
+                    <div
+                      className="truncate text-[var(--color-text-subtle)]"
+                      title={h.response}
+                    >
+                      {h.response}
+                    </div>
+                  </td>
+                  <td
+                    className={cn(
+                      'px-3 py-1.5 text-right font-mono',
+                      h.faithfulness >= 0 &&
+                        h.faithfulness < FAILURE_FAITHFULNESS_MAX &&
+                        'text-[var(--color-error)]',
+                    )}
+                  >
+                    {h.faithfulness < 0 ? '—' : h.faithfulness.toFixed(2)}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-[var(--color-text-muted)]">
+                    {h.cost_usd > 0 ? `$${h.cost_usd.toFixed(4)}` : '—'}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-[var(--color-text-muted)]">
+                    {Math.round(h.latency_ms)}ms
+                  </td>
+                  <td className="px-3 py-1.5">
+                    <div className="flex flex-wrap gap-1">
+                      {h.cache_hit && <Badge tone="muted">cache</Badge>}
+                      {h.guardrail_flagged && (
+                        <Badge tone="error">guardrail</Badge>
+                      )}
+                      {h.tool_ids && <Badge tone="muted">{h.tool_ids}</Badge>}
+                    </div>
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-[var(--color-text-muted)]">
+                    {h.score.toFixed(3)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {hasClusters && (
+        <div>
+          <h3 className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--color-text-subtle)] mb-2">
+            Failure clusters
+            <span className="ml-2 font-mono normal-case tracking-normal text-[var(--color-text-muted)]">
+              (faithfulness &lt; {FAILURE_FAITHFULNESS_MAX})
+            </span>
+          </h3>
+          <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] overflow-hidden">
+            <table className="w-full text-[12px] tabular-nums">
+              <thead className="bg-[var(--color-bg-elevated)] text-[10.5px] uppercase tracking-[0.06em] text-[var(--color-text-subtle)]">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium">Representative</th>
+                  <th className="px-3 py-2 text-right font-medium">Size</th>
+                  <th className="px-3 py-2 text-right font-medium">Avg faithfulness</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--color-border)]">
+                {clusters!.map((c, i) => (
+                  <tr key={i} className="hover:bg-[var(--color-bg-hover)]">
+                    <td className="px-3 py-1.5 text-[var(--color-text)] max-w-[420px]">
+                      <div className="truncate" title={c.representative}>
+                        {c.representative || '—'}
+                      </div>
+                    </td>
+                    <td className="px-3 py-1.5 text-right font-mono text-[var(--color-text-muted)]">
+                      {c.size}
+                    </td>
+                    <td className="px-3 py-1.5 text-right font-mono text-[var(--color-error)]">
+                      {c.avg_faithfulness < 0
+                        ? '—'
+                        : c.avg_faithfulness.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
+/** Tiny inline badge used by the LLM-traces panel. */
+function Badge({
+  children,
+  tone,
+}: {
+  children: ReactNode
+  tone: 'muted' | 'error'
+}) {
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center rounded-[var(--radius-sm)] px-1.5 py-0.5 text-[10px] font-mono',
+        tone === 'error'
+          ? 'bg-[color-mix(in_oklch,var(--color-error)_12%,transparent)] text-[var(--color-error)]'
+          : 'bg-[var(--color-bg-elevated)] text-[var(--color-text-muted)]',
+      )}
+    >
+      {children}
+    </span>
   )
 }
 

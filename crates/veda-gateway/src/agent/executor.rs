@@ -897,6 +897,7 @@ mod tests {
             memory: false,
             cache: false,
             guardrails: false,
+            trace: false,
         }
     }
 

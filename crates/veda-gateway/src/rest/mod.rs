@@ -28,6 +28,7 @@ pub mod ingest_logs;
 pub mod insights;
 pub mod jobs;
 pub mod llm;
+pub mod llm_traces;
 pub mod log_rate_analysis;
 pub mod logs;
 pub mod mcp;
@@ -196,6 +197,18 @@ fn log_rate_analysis_router() -> Router<state::AppState> {
 fn incidents_router() -> Router<state::AppState> {
     Router::new()
         .route("/v1/admin/incidents", get(incidents::list_incidents))
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// Searchable semantic LLM trace store admin routes, gated by an extra
+/// `require_admin` route layer (same pattern as [`incidents_router`]).
+fn llm_traces_router() -> Router<state::AppState> {
+    Router::new()
+        .route("/v1/admin/llm-traces", get(llm_traces::search_traces))
+        .route(
+            "/v1/admin/llm-traces/clusters",
+            get(llm_traces::cluster_traces),
+        )
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
@@ -462,7 +475,9 @@ pub fn build_router(app_state: state::AppState) -> Router {
         // Semantic spike root-cause attribution — admin-only (extra require_admin).
         .merge(log_rate_analysis_router())
         // Semantic incident correlation — admin-only (extra require_admin).
-        .merge(incidents_router());
+        .merge(incidents_router())
+        // Searchable semantic LLM trace store — admin-only (extra require_admin).
+        .merge(llm_traces_router());
 
     // On-demand CPU profiling — admin-only, only present under the
     // `profiling` cargo feature (no route, no `pprof` dep otherwise).
