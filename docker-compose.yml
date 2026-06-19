@@ -69,6 +69,11 @@ services:
       # VEDA_CRAWL4AI_ENDPOINT=http://crawl4ai:11235 (e.g. in .env).
       VEDA_CRAWL4AI_ENDPOINT: ${VEDA_CRAWL4AI_ENDPOINT:-}
       VEDA_CRAWL4AI_TOKEN: ${VEDA_CRAWL4AI_TOKEN:-}
+      # Agentic web search (searxng). Unset by default = the web_search
+      # agent tool returns "not configured" cleanly. Enable with the same
+      # --profile web, then set VEDA_SEARXNG_ENDPOINT=http://searxng:8080.
+      VEDA_SEARXNG_ENDPOINT: ${VEDA_SEARXNG_ENDPOINT:-}
+      VEDA_SEARXNG_TOKEN: ${VEDA_SEARXNG_TOKEN:-}
       VEDA_BLOB_BACKEND: minio
       VEDA_BLOB_ENDPOINT: http://minio:9000
       VEDA_BLOB_BUCKET: veda-blobs
@@ -92,8 +97,8 @@ services:
       VEDA_NODE_ADDRESS: ${VEDA_NODE_ADDRESS:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-veda}
-      NO_PROXY: localhost,127.0.0.1,minio,nats,embedding,multimodal-embedding,flashparse,vlm,glm-ocr,crawl4ai
-      no_proxy: localhost,127.0.0.1,minio,nats,embedding,multimodal-embedding,flashparse,vlm,glm-ocr,crawl4ai
+      NO_PROXY: localhost,127.0.0.1,minio,nats,embedding,multimodal-embedding,flashparse,vlm,glm-ocr,crawl4ai,searxng
+      no_proxy: localhost,127.0.0.1,minio,nats,embedding,multimodal-embedding,flashparse,vlm,glm-ocr,crawl4ai,searxng
     depends_on:
       minio:
         condition: service_healthy
@@ -214,6 +219,36 @@ services:
     shm_size: "1gb"
     healthcheck:
       test: ["CMD", "curl", "--noproxy", "*", "-f", "http://localhost:11235/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # searxng powers the `web_search` agent tool: a privacy-respecting
+  # metasearch instance queried via its JSON API. Opt-in alongside
+  # crawl4ai under the same --profile web; the core `veda` service leaves
+  # VEDA_SEARXNG_ENDPOINT empty until you run this and point Veda at it:
+  #
+  #   docker compose --profile web up -d searxng
+  #   VEDA_SEARXNG_ENDPOINT=http://searxng:8080 docker compose up -d veda
+  #
+  # The JSON API (`/search?format=json`) is enabled by the mounted
+  # config/searxng/settings.yml, which sets `search.formats: [html, json]`
+  # (the stock image ships HTML-only).
+  searxng:
+    profiles: ["web"]
+    image: searxng/searxng:latest
+    ports:
+      - "8888:8080"
+    environment:
+      # Public base URL searxng advertises; harmless for internal use.
+      SEARXNG_BASE_URL: ${VEDA_SEARXNG_ENDPOINT:-http://searxng:8080}
+      NO_PROXY: localhost,127.0.0.1,minio,nats,veda
+      no_proxy: localhost,127.0.0.1,minio,nats,veda
+    volumes:
+      # Mount our minimal settings (JSON format enabled) read-only.
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-proxy", "-q", "-O", "/dev/null", "http://localhost:8080/healthz"]
       interval: 15s
       timeout: 5s
       retries: 5

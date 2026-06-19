@@ -182,11 +182,13 @@ async fn test_tool_catalog_returns_builtins() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let body: Value = resp.json().await.unwrap();
     let tools = body["tools"].as_array().unwrap();
-    // Mirrors ToolCatalog's builtin count (13 incl. correlate_incident).
-    assert_eq!(tools.len(), 13);
+    // Mirrors ToolCatalog's builtin count (15 incl. the opt-in web tools).
+    assert_eq!(tools.len(), 15);
     let ids: Vec<&str> = tools.iter().map(|t| t["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&"search"));
     assert!(ids.contains(&"list_collections"));
+    assert!(ids.contains(&"web_search"));
+    assert!(ids.contains(&"fetch_url"));
     // Each spec carries an input_schema.
     assert!(tools[0]["input_schema"].is_object());
 }

@@ -37,6 +37,7 @@ async fn resolve_agent(
     match crate::agent::store::get_agent(&state.inner.saved_objects, &scoped).await {
         Some(a) => Some(a),
         None if agent_id == "veda-agent" => Some(default_agent()),
+        None if agent_id == "veda-web" => Some(crate::agent::model::default_web_agent()),
         None => None,
     }
 }

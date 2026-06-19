@@ -122,6 +122,36 @@ be specific and brief."
     }
 }
 
+/// The built-in web-research agent, reachable via the well-known
+/// `veda-web` id. Always available; held in memory only (mirrors
+/// [`default_agent`] / [`default_ops_agent`]). Its whitelist is the
+/// opt-in web tools (`web_search`, `fetch_url`) plus read-only `search`
+/// over the user's own collections — so it can ground answers on both
+/// the live web and Veda data. Web access is granted here explicitly,
+/// never to the default agent.
+pub fn default_web_agent() -> Agent {
+    Agent {
+        id: "veda-web".to_owned(),
+        name: "Veda Web".to_owned(),
+        description: "Web-research assistant that searches and reads the live web to ground its answers.".to_owned(),
+        instructions: "You are Veda's web-research assistant. Use web_search to find relevant \
+sources, then fetch_url to read the most promising ones before answering. You may also use \
+search to ground answers in the user's own collections. Always cite the URLs you used; if a \
+web tool reports it is not configured, say so plainly instead of guessing."
+            .to_owned(),
+        tool_ids: vec![
+            "web_search".to_owned(),
+            "fetch_url".to_owned(),
+            "search".to_owned(),
+        ],
+        model: None,
+        memory: false,
+        cache: false,
+        guardrails: false,
+        trace: false,
+    }
+}
+
 /// A user-defined custom tool. `kind` + opaque `config` are interpreted
 /// by the tool catalog in a later task; this is just the stored shape.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -356,6 +386,24 @@ mod tests {
         a.cache = true;
         let back: Agent = serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap();
         assert!(back.cache);
+    }
+
+    #[test]
+    fn default_web_agent_whitelists_web_tools_and_search() {
+        let a = default_web_agent();
+        assert_eq!(a.id, "veda-web");
+        assert!(a.tool_ids.contains(&"web_search".to_owned()));
+        assert!(a.tool_ids.contains(&"fetch_url".to_owned()));
+        assert!(a.tool_ids.contains(&"search".to_owned()));
+    }
+
+    #[test]
+    fn default_agent_does_not_whitelist_web_tools() {
+        // The default agent's empty whitelist means "all non-opt-in
+        // builtins"; it must never name the web tools explicitly either.
+        let a = default_agent();
+        assert!(!a.tool_ids.contains(&"web_search".to_owned()));
+        assert!(!a.tool_ids.contains(&"fetch_url".to_owned()));
     }
 
     #[test]
