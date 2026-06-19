@@ -15,6 +15,7 @@ pub mod aggregate;
 pub mod changepoint;
 pub mod chunk_preview;
 pub mod collections;
+pub mod connectors;
 pub mod correlations;
 pub mod crawl4ai;
 pub mod depmap;
@@ -121,6 +122,27 @@ fn synthetics_router() -> Router<state::AppState> {
         .route(
             "/v1/admin/synthetics/{id}/results",
             get(synthetics::get_synthetic_results),
+        )
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
+/// Data-source connectors admin routes, gated by an extra `require_admin`
+/// route layer (same pattern as [`synthetics_router`]). Tenant-scoped.
+fn connectors_router() -> Router<state::AppState> {
+    Router::new()
+        .route(
+            "/v1/admin/connectors",
+            get(connectors::list_connectors).post(connectors::create_connector),
+        )
+        .route(
+            "/v1/admin/connectors/{id}",
+            get(connectors::get_connector)
+                .put(connectors::put_connector)
+                .delete(connectors::delete_connector),
+        )
+        .route(
+            "/v1/admin/connectors/{id}/run",
+            post(connectors::run_connector),
         )
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
@@ -473,6 +495,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .merge(slos_router())
         // Synthetic self-check probes — admin-only (extra require_admin).
         .merge(synthetics_router())
+        // Data-source connectors — admin-only (extra require_admin).
+        .merge(connectors_router())
         // Log Insights — admin-only (extra require_admin route layer).
         .merge(logs_router())
         // Node resources — admin-only (extra require_admin route layer).
