@@ -46,12 +46,16 @@ async fn test_a2a_agent_card_default_agent() {
     assert_eq!(card["capabilities"]["pushNotifications"], false);
     assert_eq!(card["url"], "/v1/a2a/veda-agent");
 
-    // Default agent has an empty tool whitelist → all 13 builtins as skills.
+    // Default agent has an empty tool whitelist → all non-opt-in builtins
+    // as skills (13: the opt-in web tools are excluded from "all").
     let skills = card["skills"].as_array().unwrap();
     assert_eq!(skills.len(), 13);
     let ids: Vec<&str> = skills.iter().map(|s| s["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&"search"));
     assert!(ids.contains(&"aggregate"));
+    // Web tools are opt-in: never on the default agent's card.
+    assert!(!ids.contains(&"web_search"));
+    assert!(!ids.contains(&"fetch_url"));
     // Each skill carries a name + description + tags.
     assert!(skills[0]["name"].as_str().is_some());
     assert!(skills[0]["description"].as_str().is_some());

@@ -341,7 +341,8 @@ pub(crate) async fn run_agent_turn(
         Some(a) => a,
         None if agent_id == "veda-agent" => default_agent(),
         None if agent_id == "veda-ops" => crate::agent::model::default_ops_agent(),
-        None => return Err(AgentTurnError::NotFound(agent_id.to_owned())),
+        None if agent_id == "veda-web" => crate::agent::model::default_web_agent(),
+        None =>return Err(AgentTurnError::NotFound(agent_id.to_owned())),
     };
 
     // 3. Build the model honoring any per-agent override. Capture the
@@ -946,7 +947,8 @@ async fn run_streaming_turn(
         Some(a) => a,
         None if agent_id == "veda-agent" => default_agent(),
         None if agent_id == "veda-ops" => crate::agent::model::default_ops_agent(),
-        None => {
+        None if agent_id == "veda-web" => crate::agent::model::default_web_agent(),
+        None =>{
             return StreamDonePayload {
                 conversation_id: user_facing_cid,
                 response: format!("agent '{agent_id}' not found"),

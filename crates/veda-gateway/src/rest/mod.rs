@@ -46,6 +46,7 @@ pub mod resources;
 pub mod route;
 pub mod saved_objects;
 pub mod search;
+pub mod searxng;
 pub mod slos;
 pub mod state;
 pub mod synthetics;

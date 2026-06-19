@@ -26,6 +26,15 @@ use crate::rest::state::AppState;
 
 use super::tools::builtins;
 
+/// Builtins that are **excluded** from the "empty whitelist == all"
+/// expansion in [`ToolCatalog::specs_for`]. They are still real builtins
+/// (present in [`ToolCatalog::builtin_specs`] and dispatchable), but an
+/// agent must opt in to them explicitly by listing the id in its
+/// `tool_ids` whitelist. The web tools reach the public internet, so
+/// access is granted per-agent (see the built-in `veda-web` agent)
+/// rather than handed to every default agent.
+pub const OPT_IN_BUILTINS: &[&str] = &["web_search", "fetch_url"];
+
 /// A single tool's identity, human-readable docs, and JSON-Schema
 /// description of its arguments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -201,11 +210,17 @@ impl ToolCatalog {
     }
 
     /// Subset of builtins selected by id. An **empty** whitelist
-    /// returns *all* builtins (the documented "no restriction" case);
-    /// unknown ids are silently skipped.
+    /// returns *all* builtins **except** the opt-in ones
+    /// ([`OPT_IN_BUILTINS`], e.g. the web tools) — those must be named
+    /// explicitly. Unknown ids are silently skipped.
     pub fn specs_for(&self, whitelist: &[String]) -> Vec<ToolSpec> {
         if whitelist.is_empty() {
-            return self.builtins.clone();
+            return self
+                .builtins
+                .iter()
+                .filter(|s| !OPT_IN_BUILTINS.contains(&s.id.as_str()))
+                .cloned()
+                .collect();
         }
         self.builtins
             .iter()
@@ -236,6 +251,8 @@ impl ToolCatalog {
             "get_resources" => super::tools::ops::get_resources(ctx, args).await,
             "get_slo_status" => super::tools::ops::get_slo_status(ctx, args).await,
             "correlate_incident" => super::tools::ops::correlate_incident(ctx, args).await,
+            "web_search" => super::tools::web::web_search(ctx, args).await,
+            "fetch_url" => super::tools::web::fetch_url(ctx, args).await,
             other => ToolOutcome::error(format!("unknown tool: {other}")),
         }
     }
@@ -294,9 +311,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_specs_count_is_thirteen() {
+    fn builtin_specs_count_is_fifteen() {
         let cat = ToolCatalog::new();
-        assert_eq!(cat.builtin_specs().len(), 13);
+        assert_eq!(cat.builtin_specs().len(), 15);
         let ids: Vec<&str> = cat.builtin_specs().iter().map(|s| s.id.as_str()).collect();
         for expected in [
             "list_collections",
@@ -312,15 +329,36 @@ mod tests {
             "get_resources",
             "get_slo_status",
             "correlate_incident",
+            "web_search",
+            "fetch_url",
         ] {
             assert!(ids.contains(&expected), "missing builtin {expected}");
         }
     }
 
     #[test]
-    fn specs_for_empty_whitelist_returns_all() {
+    fn specs_for_empty_whitelist_returns_all_non_opt_in() {
         let cat = ToolCatalog::new();
-        assert_eq!(cat.specs_for(&[]).len(), 13);
+        // Empty whitelist == all builtins EXCEPT the opt-in web tools.
+        let specs = cat.specs_for(&[]);
+        assert_eq!(specs.len(), 13);
+        let ids: Vec<&str> = specs.iter().map(|s| s.id.as_str()).collect();
+        assert!(!ids.contains(&"web_search"), "web_search must be opt-in");
+        assert!(!ids.contains(&"fetch_url"), "fetch_url must be opt-in");
+    }
+
+    #[test]
+    fn specs_for_can_opt_in_to_web_tools() {
+        let cat = ToolCatalog::new();
+        let subset = cat.specs_for(&[
+            "search".to_owned(),
+            "web_search".to_owned(),
+            "fetch_url".to_owned(),
+        ]);
+        let ids: Vec<&str> = subset.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(subset.len(), 3);
+        assert!(ids.contains(&"web_search"));
+        assert!(ids.contains(&"fetch_url"));
     }
 
     #[test]
@@ -390,6 +428,8 @@ mod tests {
             "get_logs",
             "get_resources",
             "get_slo_status",
+            "web_search",
+            "fetch_url",
         ] {
             let spec = cat.builtin_specs().iter().find(|s| s.id == id).unwrap();
             assert!(spec.read_only, "{id} should be read_only");
@@ -408,6 +448,37 @@ mod tests {
         let out = cat.dispatch(&ctx, "does_not_exist", serde_json::json!({})).await;
         assert!(out.is_error);
         assert!(out.content["error"].as_str().unwrap().contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_web_search_missing_query_is_invalid_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = crate::tenant::TenantId::default_tenant();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat_dispatch(&ctx, "web_search", serde_json::json!({})).await;
+        assert!(out.is_error);
+        assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
+    }
+
+    #[tokio::test]
+    async fn dispatch_fetch_url_missing_url_is_invalid_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = crate::tenant::TenantId::default_tenant();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat_dispatch(&ctx, "fetch_url", serde_json::json!({})).await;
+        assert!(out.is_error);
+        assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
+    }
+
+    /// Helper: dispatch against a fresh catalog.
+    async fn cat_dispatch(
+        ctx: &ToolContext<'_>,
+        tool_id: &str,
+        args: serde_json::Value,
+    ) -> ToolOutcome {
+        ToolCatalog::new().dispatch(ctx, tool_id, args).await
     }
 
     #[tokio::test]

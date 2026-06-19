@@ -166,6 +166,7 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
         },
     ];
     specs.extend(super::ops::ops_specs());
+    specs.extend(super::web::web_specs());
     specs
 }
 

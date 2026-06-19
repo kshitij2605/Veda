@@ -1,0 +1,20 @@
+# Minimal searxng settings for Veda's agentic web search.
+#
+# Inherits the image defaults (engines, UI, etc.) via use_default_settings
+# and overrides only what Veda needs: the JSON output format that the
+# `web_search` agent tool consumes (GET /search?q=...&format=json), and a
+# server secret. Mounted read-only at /etc/searxng/settings.yml by the
+# `searxng` service under `docker compose --profile web`.
+use_default_settings: true
+
+server:
+  # Override via the VEDA_SEARXNG_SECRET build/run env if you expose this.
+  secret_key: "veda-searxng-change-me"
+  limiter: false
+
+search:
+  # Enable the JSON API alongside HTML (stock image ships HTML-only, so
+  # format=json would otherwise return a 403).
+  formats:
+    - html
+    - json
