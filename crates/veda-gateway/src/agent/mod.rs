@@ -9,6 +9,7 @@ pub mod cache;
 pub mod catalog;
 pub mod executor;
 pub mod grounding;
+pub mod guardrails;
 pub mod memory;
 pub mod model;
 pub mod store;
@@ -41,6 +42,7 @@ mod tests {
             }),
             memory: false,
             cache: false,
+            guardrails: false,
         };
 
         save_agent(&store, &agent).await;
@@ -146,6 +148,7 @@ mod tests {
                 model: None,
                 memory: false,
                 cache: false,
+                guardrails: false,
             },
         )
         .await;

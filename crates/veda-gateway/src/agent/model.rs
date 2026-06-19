@@ -46,6 +46,14 @@ pub struct Agent {
     /// byte-identically).
     #[serde(default)]
     pub cache: bool,
+    /// Opt-in embedding-based safety guardrails. When `true`, each turn's
+    /// input (before the cache lookup) and output (fresh or cached) are
+    /// screened for prompt-injection / jailbreak / unsafe content +
+    /// PII; flagged turns are annotated, and in Block mode blocked.
+    /// Defaults to `false` (serde-default → existing agents are unchanged
+    /// and behave byte-identically).
+    #[serde(default)]
+    pub guardrails: bool,
 }
 
 /// The default, always-available agent used when a converse request
@@ -65,6 +73,7 @@ provided tools to ground your answers in real data; be concise and cite what you
         model: None,
         memory: false,
         cache: false,
+        guardrails: false,
     }
 }
 
@@ -98,6 +107,7 @@ be specific and brief."
         model: None,
         memory: false,
         cache: false,
+        guardrails: false,
     }
 }
 
@@ -209,6 +219,11 @@ pub struct ConverseResponse {
     /// serde-back-compat: defaults to `false` for existing payloads.
     #[serde(default)]
     pub cache_hit: bool,
+    /// Safety-guardrail verdicts for this turn's input + output, present only
+    /// when the agent has guardrails enabled. Additive + serde-back-compat:
+    /// omitted (defaults to `None`) when guardrails are off or absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardrails: Option<crate::agent::guardrails::GuardrailReport>,
 }
 
 #[cfg(test)]
@@ -325,6 +340,7 @@ mod tests {
             citations: Vec::new(),
             grounding: None,
             cache_hit: true,
+            guardrails: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["cache_hit"], true, "cache_hit must serialize: {v}");
@@ -344,6 +360,7 @@ mod tests {
             citations: Vec::new(),
             grounding: None,
             cache_hit: false,
+            guardrails: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("metrics").is_none(), "metrics should be skipped: {v}");

@@ -5071,6 +5071,7 @@ dependencies = [
  "opentelemetry",
  "pprof",
  "protobuf",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
