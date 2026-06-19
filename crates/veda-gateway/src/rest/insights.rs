@@ -573,7 +573,7 @@ pub async fn triage_event(
     let tenant = TenantId::default_tenant();
     // Triage runs a one-off agent turn without a persisted conversation, so
     // no conversation id is threaded into agent memory.
-    let (_agent, result, citations, grounding, _cache_hit) =
+    let (_agent, result, citations, grounding, _cache_hit, _guardrails) =
         run_agent_turn(&state, &tenant, None, "veda-ops", &[], &prompt, None)
         .await
         .map_err(|e| match e {

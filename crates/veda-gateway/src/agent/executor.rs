@@ -896,6 +896,7 @@ mod tests {
             model: None,
             memory: false,
             cache: false,
+            guardrails: false,
         }
     }
 

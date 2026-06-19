@@ -312,7 +312,18 @@ pub(crate) async fn run_agent_turn(
     history: &[ConversationMessage],
     input: &str,
     conversation_id: Option<&str>,
-) -> Result<(Agent, RunResult, Vec<Citation>, Option<Grounding>, bool), AgentTurnError> {
+) -> Result<
+    (
+        Agent,
+        RunResult,
+        Vec<Citation>,
+        Option<Grounding>,
+        bool,
+        Option<crate::agent::guardrails::GuardrailReport>,
+    ),
+    AgentTurnError,
+> {
+    use crate::agent::guardrails::{self, GuardrailAction, GuardrailMode, GuardrailReport};
     // 1. LLM must be configured.
     let llm_cfg = state
         .inner
@@ -344,6 +355,47 @@ pub(crate) async fn run_agent_turn(
     // from the model name where possible, else fall back to `openai`.
     let provider = genai_system_for(&model_name);
 
+    // 3a. Input safety guardrail (opt-in). BEFORE the cache lookup and any
+    //     LLM call: screen the user input for prompt-injection / jailbreak /
+    //     unsafe content + PII. In Block mode a flagged input short-circuits
+    //     with a safe refusal — NO LLM, NO cache serve. In Flag mode the
+    //     verdict is attached and the turn proceeds. Best-effort / off-lock /
+    //     fail-open (regex always applies); skipped entirely (byte-identical
+    //     to today) when guardrails==false.
+    let guard_mode = guardrails::mode_for(&agent);
+    let input_verdict = guardrails::check_text(
+        state,
+        input,
+        guard_mode,
+        guardrails::DEFAULT_THRESHOLD,
+    )
+    .await;
+    if guard_mode != GuardrailMode::Off
+        && input_verdict.action == GuardrailAction::Block
+    {
+        metrics::counter!("veda_llm_guardrail_blocked_total", "model" => model_name.clone())
+            .increment(1);
+        let result = RunResult {
+            response: guardrails::REFUSAL_MESSAGE.to_owned(),
+            steps: Vec::new(),
+            new_messages: Vec::new(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            hit_limit_or_error: false,
+            metrics: RunMetrics::default(),
+        };
+        let report = GuardrailReport {
+            input: input_verdict,
+            output: guardrails::GuardrailVerdict::allow(),
+        };
+        return Ok((agent, result, Vec::new(), None, false, Some(report)));
+    }
+    if input_verdict.flagged {
+        metrics::counter!("veda_llm_guardrail_flagged_total", "model" => model_name.clone())
+            .increment(1);
+    }
+
     // 3b. Semantic response cache (opt-in). BEFORE building the client or
     //     running the loop: if the agent opted in, look up a near-duplicate
     //     prompt and, on a hit, return the cached response WITHOUT calling
@@ -362,7 +414,7 @@ pub(crate) async fn run_agent_turn(
         {
             metrics::counter!("veda_llm_cache_hits_total", "model" => model_name.clone())
                 .increment(1);
-            let result = RunResult {
+            let mut result = RunResult {
                 response: hit.response,
                 steps: Vec::new(),
                 new_messages: Vec::new(),
@@ -372,7 +424,17 @@ pub(crate) async fn run_agent_turn(
                 hit_limit_or_error: false,
                 metrics: RunMetrics::default(),
             };
-            return Ok((agent, result, Vec::new(), None, true));
+            // Output guardrail on the cached response (fresh-or-cached, before
+            // returning). Block → redact to the refusal; Flag → annotate only.
+            let report = finalize_output_guardrail(
+                state,
+                &model_name,
+                guard_mode,
+                input_verdict,
+                &mut result.response,
+            )
+            .await;
+            return Ok((agent, result, Vec::new(), None, true, report));
         }
         metrics::counter!("veda_llm_cache_misses_total", "model" => model_name.clone())
             .increment(1);
@@ -419,7 +481,7 @@ pub(crate) async fn run_agent_turn(
         "gen_ai.operation.name" = gen_ai::OP_INVOKE_AGENT,
         "gen_ai.agent.name" = %agent.name,
     );
-    let result = executor::run(
+    let mut result = executor::run(
         &client,
         &state.inner.tool_catalog,
         &ctx,
@@ -526,7 +588,53 @@ pub(crate) async fn run_agent_turn(
         crate::agent::cache::store(state, tenant, &model_name, input, &result.response, ts).await;
     }
 
-    Ok((agent, result, citations, grounding, false))
+    // 11. Output safety guardrail (opt-in) on the FINAL response, after the
+    //     cache write-back (so the real answer is cached) but before
+    //     returning. Block → redact to the refusal; Flag → annotate only.
+    //     Best-effort / off-lock / fail-open; no-op when guardrails==false.
+    let report = finalize_output_guardrail(
+        state,
+        &model_name,
+        guard_mode,
+        input_verdict,
+        &mut result.response,
+    )
+    .await;
+
+    Ok((agent, result, citations, grounding, false, report))
+}
+
+/// Run the OUTPUT guardrail on `response` and assemble the [`GuardrailReport`]
+/// pairing the already-computed `input_verdict` with the fresh output verdict.
+/// Mutates `response` to the safe refusal when the output verdict resolves to
+/// [`GuardrailAction::Block`]. Returns `None` when guardrails are off (so the
+/// path is byte-identical to today). Emits the blocked/flagged metrics.
+/// Best-effort / off-lock / fail-open (regex always applies).
+async fn finalize_output_guardrail(
+    state: &AppState,
+    model_name: &str,
+    mode: crate::agent::guardrails::GuardrailMode,
+    input_verdict: crate::agent::guardrails::GuardrailVerdict,
+    response: &mut String,
+) -> Option<crate::agent::guardrails::GuardrailReport> {
+    use crate::agent::guardrails::{self, GuardrailAction, GuardrailMode, GuardrailReport};
+    if mode == GuardrailMode::Off {
+        return None;
+    }
+    let output_verdict =
+        guardrails::check_text(state, response, mode, guardrails::DEFAULT_THRESHOLD).await;
+    if output_verdict.action == GuardrailAction::Block {
+        metrics::counter!("veda_llm_guardrail_blocked_total", "model" => model_name.to_owned())
+            .increment(1);
+        *response = guardrails::REFUSAL_MESSAGE.to_owned();
+    } else if output_verdict.flagged {
+        metrics::counter!("veda_llm_guardrail_flagged_total", "model" => model_name.to_owned())
+            .increment(1);
+    }
+    Some(GuardrailReport {
+        input: input_verdict,
+        output: output_verdict,
+    })
 }
 
 /// Emit grounding metrics for one scored run: a `veda_agent_citations`
@@ -653,7 +761,7 @@ pub async fn converse(
 
     // Run the turn via the shared helper (resolves agent, builds the model
     // + prompt + tool context, drives the executor loop).
-    let (_agent, result, citations, grounding, cache_hit) = run_agent_turn(
+    let (_agent, result, citations, grounding, cache_hit, guardrails) = run_agent_turn(
         &state,
         &tenant,
         user.as_deref(),
@@ -681,9 +789,10 @@ pub async fn converse(
             content: m.content.clone(),
         });
     }
-    // A cache hit produces no `new_messages` (the LLM was skipped); record
-    // the served answer as the assistant turn so the transcript is complete.
-    if cache_hit {
+    // A cache hit (or a guardrail-blocked input) produces no `new_messages`
+    // (the LLM was skipped); record the served answer / refusal as the
+    // assistant turn so the transcript is complete.
+    if result.new_messages.is_empty() && !result.response.trim().is_empty() {
         conversation.messages.push(ConversationMessage {
             role: "assistant".to_owned(),
             content: Some(result.response.clone()),
@@ -704,6 +813,7 @@ pub async fn converse(
         citations,
         grounding,
         cache_hit,
+        guardrails,
     }))
 }
 
@@ -773,6 +883,48 @@ async fn run_streaming_turn(
         .and_then(|ov| ov.model.clone())
         .unwrap_or_else(|| llm_cfg.model.clone());
     let provider = genai_system_for(&model_name);
+
+    // Input safety guardrail (opt-in), BEFORE the cache lookup / LLM loop.
+    // In Block mode a flagged input short-circuits: emit the safe refusal as
+    // a single `answer` delta and finish (no LLM, no cache serve). Flag mode
+    // proceeds (the blocking helper attaches the verdict; the stream done
+    // payload mirrors today's shape). Best-effort / off-lock / fail-open;
+    // no-op when guardrails==false.
+    let guard_mode = crate::agent::guardrails::mode_for(&agent);
+    if guard_mode == crate::agent::guardrails::GuardrailMode::Block {
+        let v = crate::agent::guardrails::check_text(
+            state,
+            input,
+            guard_mode,
+            crate::agent::guardrails::DEFAULT_THRESHOLD,
+        )
+        .await;
+        if v.action == crate::agent::guardrails::GuardrailAction::Block {
+            metrics::counter!("veda_llm_guardrail_blocked_total", "model" => model_name.clone())
+                .increment(1);
+            let refusal = crate::agent::guardrails::REFUSAL_MESSAGE.to_owned();
+            let _ = event_tx
+                .send(executor::StreamEvent::AnswerDelta { text: refusal.clone() })
+                .await;
+            conversation.messages.push(ConversationMessage {
+                role: "user".to_owned(),
+                content: Some(input.to_owned()),
+            });
+            conversation.messages.push(ConversationMessage {
+                role: "assistant".to_owned(),
+                content: Some(refusal.clone()),
+            });
+            store::save_conversation(&state.inner.saved_objects, conversation).await;
+            return StreamDonePayload {
+                conversation_id: user_facing_cid,
+                response: refusal,
+                metrics: Some(RunMetrics::default()),
+                citations: Vec::new(),
+                grounding: None,
+                cache_hit: false,
+            };
+        }
+    }
 
     // Semantic cache (opt-in): on a hit, emit the cached answer as a single
     // `answer` delta and finish — the LLM loop is skipped. Best-effort /
@@ -1305,6 +1457,7 @@ mod tests {
             citations,
             grounding: Some(g),
             cache_hit: false,
+            guardrails: None,
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["citations"][0]["chunk_id"], "id-1");
@@ -1330,6 +1483,7 @@ mod tests {
             citations,
             grounding,
             cache_hit: false,
+            guardrails: None,
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert!(v.get("citations").is_none(), "empty citations skipped: {v}");

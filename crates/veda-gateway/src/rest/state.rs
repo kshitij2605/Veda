@@ -252,6 +252,13 @@ pub struct AppStateInner {
     /// `log_buffer` + `embedding_registry` on demand via
     /// `GET /v1/admin/logs/categories`.
     pub log_categorizer: Arc<LogCategorizer>,
+    /// Lazily-embedded cache of the safety-guardrail bad-pattern set
+    /// (Phase 2). `None` until the first guardrail check with a configured
+    /// text embedder; then holds the `(category, pattern, embedding)`
+    /// triples so each check is one embed + N cosines. Best-effort — stays
+    /// `None` when nothing can embed text.
+    pub guardrail_patterns:
+        tokio::sync::Mutex<Option<crate::agent::guardrails::EmbeddedPatterns>>,
 }
 
 /// Build a swappable TSO + the matching `dyn Tso` handle that
@@ -323,6 +330,7 @@ impl AppState {
                 advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
                 log_buffer: Arc::new(LogBuffer::with_default_capacity()),
                 log_categorizer: Arc::new(LogCategorizer::new()),
+                guardrail_patterns: tokio::sync::Mutex::new(None),
             }),
         }
     }
@@ -391,6 +399,7 @@ impl AppState {
                 advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
                 log_buffer: Arc::new(LogBuffer::with_default_capacity()),
                 log_categorizer: Arc::new(LogCategorizer::new()),
+                guardrail_patterns: tokio::sync::Mutex::new(None),
             }),
         }
     }
@@ -440,6 +449,7 @@ impl AppState {
                 advisor: Arc::new(crate::advisor::AdvisorState::load(data_dir)),
                 log_buffer: Arc::new(LogBuffer::with_default_capacity()),
                 log_categorizer: Arc::new(LogCategorizer::new()),
+                guardrail_patterns: tokio::sync::Mutex::new(None),
             }),
         }
     }
