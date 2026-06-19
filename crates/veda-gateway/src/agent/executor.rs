@@ -895,6 +895,7 @@ mod tests {
             tool_ids,
             model: None,
             memory: false,
+            cache: false,
         }
     }
 

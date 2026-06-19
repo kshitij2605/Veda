@@ -5,6 +5,7 @@
 //! `SavedObjectStore`. The tool catalog ([`catalog`]) and executor
 //! ([`executor`]) build on top; the REST surface is added in a later task.
 
+pub mod cache;
 pub mod catalog;
 pub mod executor;
 pub mod grounding;
@@ -39,6 +40,7 @@ mod tests {
                 model: Some("Qwen3.5".to_owned()),
             }),
             memory: false,
+            cache: false,
         };
 
         save_agent(&store, &agent).await;
@@ -143,6 +145,7 @@ mod tests {
                 tool_ids: vec![],
                 model: None,
                 memory: false,
+                cache: false,
             },
         )
         .await;
