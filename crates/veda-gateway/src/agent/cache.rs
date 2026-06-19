@@ -260,7 +260,10 @@ pub async fn lookup(
 
     // Filter to this model so a hit is never served from a different
     // model's answer. The model name is operator-controlled config.
-    let filter = format!("{MODEL_FIELD} == \"{model}\"");
+    // NB: the filter grammar's equality operator is a single `=` (see
+    // veda-query FilterParser); `==` fails to parse and would silently
+    // turn every lookup into a miss.
+    let filter = format!("{MODEL_FIELD} = \"{model}\"");
     let request = VectorSearchRequest {
         field: EMBEDDING_FIELD.to_owned(),
         query_vector: vector,
@@ -333,6 +336,29 @@ pub async fn store(
             return;
         }
     };
+
+    store_embedded(state, tenant, model, prompt, response, ts, embedding).await;
+}
+
+/// Insert one already-embedded cache entry and make it **immediately
+/// searchable**. Ensures the collection, parses the record, inserts it into
+/// the routed shard, then seals the growing segment and rebuilds the
+/// collection's query executor — the same seal + executor-rebuild the
+/// gateway `embed_insert` path performs. Without that final step the record
+/// only lives in the live segment manager's growing segment, which the
+/// executor (a separate manager built from disk) never sees, so a vector
+/// search misses it. Best-effort: any failure is logged at debug and
+/// swallowed. The vector is supplied explicitly so this is unit-testable
+/// without a live embedder.
+async fn store_embedded(
+    state: &AppState,
+    tenant: &TenantId,
+    model: &str,
+    prompt: &str,
+    response: &str,
+    ts: i64,
+    embedding: Vec<f32>,
+) {
     let dimension = embedding.len() as u32;
 
     let Some(scoped) = ensure_cache_collection(state, tenant, dimension).await else {
@@ -357,19 +383,7 @@ pub async fn store(
         }
     };
 
-    let mut managers = state.inner.segment_managers.write().await;
-    let Some(shard_map) = managers.get_mut(&scoped) else {
-        return;
-    };
-    let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
-        &record.id(),
-        schema.shard_count(),
-    );
-    if let Some(sm) = shard_map.get_mut(&shard_id) {
-        if let Err(e) = sm.insert(record) {
-            tracing::debug!(error = %e, "llm cache: insert failed; skipping store");
-        }
-    }
+    crate::agent::index::insert_and_index(state, &scoped, &schema, record, "llm cache").await;
 }
 
 /// Current wall-clock time in epoch milliseconds.
@@ -517,6 +531,60 @@ mod tests {
         assert!(
             !schemas.contains_key(&scoped),
             "store must not create the cache collection when it cannot embed",
+        );
+    }
+
+    // ── Searchability regression test (the missing test) ────────────────
+    //
+    // This is the test that would have caught the shipped bug: a stored
+    // cache entry must be findable by a vector search for its own embedding
+    // *immediately* after store. It supplies the embedding directly (no live
+    // embedder needed) via the `store_embedded` seam, then runs the exact
+    // same executor search `lookup` uses and asserts the record is returned.
+    // Before the seal + executor-rebuild fix this search returned 0 hits.
+    #[tokio::test]
+    async fn stored_entry_is_immediately_searchable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = TenantId::default_tenant();
+        let model = "test-model";
+        let embedding = vec![1.0f32, 0.0, 0.0, 0.0];
+
+        store_embedded(
+            &state,
+            &tenant,
+            model,
+            "what index does veda use?",
+            "Veda uses HNSW.",
+            1_000,
+            embedding.clone(),
+        )
+        .await;
+
+        let scoped = tenant::scope(&tenant, CACHE_COLLECTION);
+        assert!(
+            state.inner.schemas.read().await.contains_key(&scoped),
+            "store_embedded must create the cache collection"
+        );
+
+        // Run the same executor search `lookup` performs.
+        let request = VectorSearchRequest {
+            field: EMBEDDING_FIELD.to_owned(),
+            query_vector: embedding,
+            k: 1,
+            metric: DistanceMetric::Cosine,
+            filter: Some(format!("{MODEL_FIELD} = \"{model}\"")),
+            filter_expr: None,
+            truncate_to: None,
+            read_ts: None,
+        };
+        let executors = state.inner.query_executors.read().await;
+        let executor = executors.get(&scoped).expect("executor exists for cache collection");
+        let (response, _) = executor.search(&request).expect("search runs");
+        assert_eq!(
+            response.results.len(),
+            1,
+            "the stored cache entry must be returned by a vector search for its own embedding"
         );
     }
 

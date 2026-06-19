@@ -10,6 +10,7 @@ pub mod catalog;
 pub mod executor;
 pub mod grounding;
 pub mod guardrails;
+pub mod index;
 pub mod memory;
 pub mod model;
 pub mod store;

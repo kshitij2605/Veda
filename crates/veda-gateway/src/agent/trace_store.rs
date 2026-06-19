@@ -273,6 +273,23 @@ pub async fn store_trace(state: &AppState, tenant: &TenantId, fields: TraceField
             return;
         }
     };
+
+    store_trace_embedded(state, tenant, fields, embedding).await;
+}
+
+/// Persist one already-embedded trace and make it **immediately
+/// searchable**. Ensures the collection, parses the record, then inserts it
+/// via the shared seal + executor-rebuild path so a subsequent semantic
+/// trace search finds it (a bare `SegmentManager::insert` would leave it
+/// only in the growing segment the executor never sees). Best-effort. The
+/// vector is supplied explicitly so this is unit-testable without a live
+/// embedder.
+async fn store_trace_embedded(
+    state: &AppState,
+    tenant: &TenantId,
+    fields: TraceFields,
+    embedding: Vec<f32>,
+) {
     let dimension = embedding.len() as u32;
 
     let Some(scoped) = ensure_trace_collection(state, tenant, dimension).await else {
@@ -296,19 +313,7 @@ pub async fn store_trace(state: &AppState, tenant: &TenantId, fields: TraceField
         }
     };
 
-    let mut managers = state.inner.segment_managers.write().await;
-    let Some(shard_map) = managers.get_mut(&scoped) else {
-        return;
-    };
-    let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
-        &record.id(),
-        schema.shard_count(),
-    );
-    if let Some(sm) = shard_map.get_mut(&shard_id) {
-        if let Err(e) = sm.insert(record) {
-            tracing::debug!(error = %e, "llm trace: insert failed; skipping store");
-        }
-    }
+    crate::agent::index::insert_and_index(state, &scoped, &schema, record, "llm trace").await;
 }
 
 /// Semantic search over the tenant's traces. Embeds `query` off-lock,
@@ -693,6 +698,42 @@ mod tests {
         assert!(clusters.is_empty(), "no collection → empty, never an error");
         let clusters = cluster_traces(&state, &tenant, DEFAULT_LIMIT, Some(0.5)).await;
         assert!(clusters.is_empty());
+    }
+
+    // Searchability regression: a stored trace must be returned by a
+    // semantic search for its own embedding immediately after store.
+    // Supplies the vector via the `store_trace_embedded` seam (no live
+    // embedder). Before the seal + executor-rebuild fix this returned 0.
+    #[tokio::test]
+    async fn stored_trace_is_immediately_searchable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = TenantId::default_tenant();
+        let embedding = vec![0.0f32, 0.0, 1.0, 0.0];
+
+        store_trace_embedded(&state, &tenant, fields(), embedding.clone()).await;
+
+        let scoped = tenant::scope(&tenant, TRACE_COLLECTION);
+        assert!(state.inner.schemas.read().await.contains_key(&scoped));
+
+        let request = VectorSearchRequest {
+            field: EMBEDDING_FIELD.to_owned(),
+            query_vector: embedding,
+            k: DEFAULT_LIMIT,
+            metric: DistanceMetric::Cosine,
+            filter: None,
+            filter_expr: None,
+            truncate_to: None,
+            read_ts: None,
+        };
+        let executors = state.inner.query_executors.read().await;
+        let executor = executors.get(&scoped).expect("executor exists");
+        let (response, _) = executor.search(&request).expect("search runs");
+        assert_eq!(
+            response.results.len(),
+            1,
+            "the stored trace must be returned by a semantic search for its own embedding"
+        );
     }
 
     #[tokio::test]
