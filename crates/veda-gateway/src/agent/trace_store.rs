@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use veda_core::embedding::Modality;
 use veda_core::embedding_client::EmbeddingClient;
-use veda_core::record::Record;
+use veda_core::record::{EXPIRES_AT_FIELD, Record};
 use veda_core::schema::{CollectionSchema, FieldDefinition};
 use veda_core::types::{AutoEmbedConfig, AutoEmbedModality, DistanceMetric, FieldType};
 use veda_query::search::VectorSearchRequest;
@@ -78,6 +78,27 @@ pub const MAX_LIMIT: usize = 500;
 /// Default cosine threshold for failure clustering (mirrors the log
 /// categorizer's embedding-path default).
 pub const DEFAULT_CLUSTER_THRESHOLD: f32 = 0.82;
+
+/// Default trace retention: 30 days, in SECONDS. Persisted prompts/responses
+/// auto-expire after this so the trace store does not keep them indefinitely
+/// (privacy). Mirrors the cache's TTL posture; the cache uses ms (24h), while
+/// traces use the reserved `_expires_at` field which is epoch SECONDS.
+pub const DEFAULT_TRACE_TTL_SECS: i64 = 30 * 24 * 60 * 60; // 2_592_000
+
+/// Environment override for the trace retention TTL, in seconds.
+const TRACE_TTL_ENV: &str = "VEDA_LLM_TRACE_TTL_SECS";
+
+/// Resolve the configured trace TTL in seconds: `VEDA_LLM_TRACE_TTL_SECS`
+/// when set to a parseable positive integer, else [`DEFAULT_TRACE_TTL_SECS`].
+/// A value of `0` or an unparseable value falls back to the default (TTL is
+/// always on — there is no "never expires" for stored prompts/responses).
+fn trace_ttl_secs() -> i64 {
+    std::env::var(TRACE_TTL_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_TRACE_TTL_SECS)
+}
 
 /// One trace returned from a semantic search.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -151,6 +172,11 @@ pub fn trace_schema(scoped_name: &str, dimension: u32) -> Result<CollectionSchem
         )
         .add_field(FieldDefinition::new(LATENCY_MS_FIELD, FieldType::Float64))
         .add_field(FieldDefinition::new(TS_FIELD, FieldType::Int64).with_filterable(true))
+        // Reserved per-record TTL (epoch SECONDS). Declared so the raw-map
+        // value survives `parse_record_public` (which only keeps schema
+        // fields); honored by `lookup_record_at` (search) + `is_expired_at`
+        // (cluster) + the TTL sweeper, so expired traces auto-purge.
+        .add_field(FieldDefinition::new(EXPIRES_AT_FIELD, FieldType::Int64).with_filterable(true))
         .add_field(FieldDefinition::new(EMBED_SRC_FIELD, FieldType::String))
         .add_field(
             FieldDefinition::vector(EMBEDDING_FIELD, dimension, DistanceMetric::Cosine)
@@ -179,8 +205,12 @@ pub struct TraceFields {
 
 /// Build the JSON record map for one trace (the shape passed to
 /// `parse_record_public`). Pure — the `embedding` is supplied explicitly.
+/// `ttl_secs` stamps the reserved `_expires_at` (epoch SECONDS) at
+/// `ts/1000 + ttl_secs` so the trace auto-expires (privacy retention). `ts`
+/// is epoch MILLISECONDS, while `_expires_at` is epoch SECONDS.
 fn trace_record_map(
     f: &TraceFields,
+    ttl_secs: i64,
     embedding: Vec<f32>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let num = |x: f64| {
@@ -201,6 +231,12 @@ fn trace_record_map(
     );
     m.insert(LATENCY_MS_FIELD.to_owned(), num(f.latency_ms));
     m.insert(TS_FIELD.to_owned(), serde_json::Value::Number(f.ts.into()));
+    // Reserved TTL field is epoch SECONDS; trace `ts` is epoch MILLISECONDS.
+    let expires_at_secs = (f.ts / 1000).saturating_add(ttl_secs);
+    m.insert(
+        EXPIRES_AT_FIELD.to_owned(),
+        serde_json::Value::Number(expires_at_secs.into()),
+    );
     m.insert(
         EMBED_SRC_FIELD.to_owned(),
         serde_json::Value::String(embed_source(&f.prompt, &f.response)),
@@ -304,7 +340,7 @@ async fn store_trace_embedded(
             None => return,
         }
     };
-    let raw = trace_record_map(&fields, embedding);
+    let raw = trace_record_map(&fields, trace_ttl_secs(), embedding);
     let record = match crate::rest::records::parse_record_public(&raw, &schema) {
         Ok(r) => r,
         Err(e) => {
@@ -628,6 +664,10 @@ mod tests {
         assert!(schema.get_field(CACHE_HIT_FIELD).unwrap().filterable());
         assert!(schema.get_field(GUARDRAIL_FLAGGED_FIELD).unwrap().filterable());
         assert!(schema.get_field(TS_FIELD).unwrap().filterable());
+        assert!(
+            schema.get_field(EXPIRES_AT_FIELD).unwrap().filterable(),
+            "_expires_at must be present + filterable for the TTL sweeper"
+        );
         let vec_field = schema.get_field(EMBEDDING_FIELD).expect("embedding field");
         match vec_field.field_type() {
             FieldType::Vector { dimension, auto_embed, .. } => {
@@ -642,7 +682,7 @@ mod tests {
     fn trace_record_map_round_trips_through_schema() {
         let dim = 4u32;
         let schema = trace_schema("t1::_llm_traces", dim).expect("schema builds");
-        let raw = trace_record_map(&fields(), vec![0.1, 0.2, 0.3, 0.4]);
+        let raw = trace_record_map(&fields(), DEFAULT_TRACE_TTL_SECS, vec![0.1, 0.2, 0.3, 0.4]);
         let rec = crate::rest::records::parse_record_public(&raw, &schema).expect("record parses");
         assert_eq!(string_field(&rec, PROMPT_FIELD), "what index does veda use?");
         assert_eq!(string_field(&rec, RESPONSE_FIELD), "Veda uses HNSW.");
@@ -653,6 +693,12 @@ mod tests {
         assert!(!bool_field(&rec, GUARDRAIL_FLAGGED_FIELD));
         assert!((float_field(&rec, LATENCY_MS_FIELD) - 1234.5).abs() < 1e-6);
         assert_eq!(int_field(&rec, TS_FIELD), 1_700_000_000_000);
+        // The reserved TTL field is stamped at ts(secs) + ttl, in SECONDS.
+        assert_eq!(
+            int_field(&rec, EXPIRES_AT_FIELD),
+            1_700_000_000_000 / 1000 + DEFAULT_TRACE_TTL_SECS,
+            "_expires_at must be ts(secs) + ttl_secs"
+        );
         // The hidden embed source joins prompt + response.
         assert_eq!(
             string_field(&rec, EMBED_SRC_FIELD),
@@ -777,6 +823,137 @@ mod tests {
         let growing_total: u32 = shard_map.values().map(|sm| sm.growing_segment().count()).sum();
         assert_eq!(sealed_total, 0, "storing {N} traces must not seal per write (got {sealed_total})");
         assert_eq!(growing_total as usize, N, "all {N} traces must live in the growing segment");
+    }
+
+    // ── Retention TTL (privacy) ─────────────────────────────────────────
+
+    // The env override is honored when set to a positive integer; an unset /
+    // zero / unparseable value falls back to the 30-day default. Serialized
+    // because it mutates a process-global env var.
+    #[test]
+    fn trace_ttl_secs_reads_env_with_default_fallback() {
+        // Default when unset.
+        unsafe { std::env::remove_var(TRACE_TTL_ENV) };
+        assert_eq!(trace_ttl_secs(), DEFAULT_TRACE_TTL_SECS);
+        assert_eq!(DEFAULT_TRACE_TTL_SECS, 2_592_000, "default is 30 days");
+
+        // Positive override is honored.
+        unsafe { std::env::set_var(TRACE_TTL_ENV, "3600") };
+        assert_eq!(trace_ttl_secs(), 3600);
+
+        // Zero / unparseable / negative fall back to the default (TTL is
+        // always on for stored prompts/responses).
+        unsafe { std::env::set_var(TRACE_TTL_ENV, "0") };
+        assert_eq!(trace_ttl_secs(), DEFAULT_TRACE_TTL_SECS);
+        unsafe { std::env::set_var(TRACE_TTL_ENV, "nonsense") };
+        assert_eq!(trace_ttl_secs(), DEFAULT_TRACE_TTL_SECS);
+
+        unsafe { std::env::remove_var(TRACE_TTL_ENV) };
+    }
+
+    // An expired trace (its `_expires_at` already in the past) is excluded
+    // from BOTH read paths — the `search_traces` hydration (`lookup_record_at`)
+    // and the `cluster_traces` enumeration (`recent_traces` / `is_expired_at`)
+    // — while a fresh trace (long TTL) is included. The vectors are supplied
+    // via the `store_trace_embedded` seam, with the `_expires_at` stamped by a
+    // negative effective TTL so it lands in the past without a live embedder.
+    #[tokio::test]
+    async fn expired_trace_excluded_from_search_and_cluster() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = TenantId::default_tenant();
+
+        let now_secs = now_ms() / 1000;
+
+        // Store an EXPIRED trace directly: build the raw map with an
+        // `_expires_at` already in the past, then insert via the same parse +
+        // insert_only path `store_trace_embedded` uses.
+        let scoped = tenant::scope(&tenant, TRACE_COLLECTION);
+        let mut expired = fields();
+        expired.prompt = "expired prompt".to_owned();
+        expired.response = "expired response".to_owned();
+        // ts far in the past so ts/1000 + ttl < now even with a large ttl.
+        expired.ts = 1_000; // ~1970, 1 second past epoch (ms)
+
+        let fresh_embedding = vec![0.0f32, 0.0, 1.0, 0.0];
+        // Seed the collection + a FRESH trace via the normal seam (its
+        // _expires_at = ts/1000 + 30d, well in the future).
+        let mut fresh = fields();
+        fresh.prompt = "fresh prompt".to_owned();
+        fresh.response = "fresh response".to_owned();
+        fresh.ts = now_secs.saturating_mul(1000); // ~now (ms)
+        store_trace_embedded(&state, &tenant, fresh, fresh_embedding.clone()).await;
+        assert!(state.inner.schemas.read().await.contains_key(&scoped));
+
+        // Now insert the EXPIRED trace with an explicit past `_expires_at`.
+        let schema = state.inner.schemas.read().await.get(&scoped).cloned().unwrap();
+        // ttl small enough that ts(secs=1) + ttl is still in the past.
+        let raw = trace_record_map(&expired, 10, vec![1.0f32, 0.0, 0.0, 0.0]);
+        // Sanity: the stamped expiry is in the past.
+        assert!(
+            matches!(raw.get(EXPIRES_AT_FIELD), Some(serde_json::Value::Number(_))),
+        );
+        let record = crate::rest::records::parse_record_public(&raw, &schema).unwrap();
+        assert!(
+            record.is_expired_at(now_secs),
+            "the seeded expired trace must read as expired at now"
+        );
+        crate::agent::index::insert_only(&state, &scoped, &schema, record, "test").await;
+
+        // recent_traces (the cluster_traces enumeration) must drop the expired
+        // trace and keep the fresh one.
+        let recent = recent_traces(&state, &scoped, MAX_LIMIT).await;
+        let prompts: Vec<&str> = recent.iter().map(|t| t.prompt.as_str()).collect();
+        assert!(
+            prompts.contains(&"fresh prompt"),
+            "fresh trace must be enumerated; got {prompts:?}"
+        );
+        assert!(
+            !prompts.contains(&"expired prompt"),
+            "expired trace must be excluded from recent_traces; got {prompts:?}"
+        );
+
+        // The search hydration path (`lookup_record_at`) must also drop the
+        // expired record: a vector search for the expired record's own
+        // embedding returns it as a candidate id, but hydration filters it out
+        // by `_expires_at`, so it never becomes a TraceHit.
+        let request = VectorSearchRequest {
+            field: EMBEDDING_FIELD.to_owned(),
+            query_vector: vec![1.0f32, 0.0, 0.0, 0.0],
+            k: MAX_LIMIT,
+            metric: DistanceMetric::Cosine,
+            filter: None,
+            filter_expr: None,
+            truncate_to: None,
+            read_ts: None,
+        };
+        let sealed = {
+            let executors = state.inner.query_executors.read().await;
+            let executor = executors.get(&scoped).expect("executor exists");
+            executor.search(&request).expect("search runs").0.results
+        };
+        let growing = super::super::index::search_live_growing(&state, &scoped, &request).await;
+        let merged = super::super::index::merge_top_k(sealed, growing, request.k);
+        let now_secs2 = now_ms() / 1000;
+        let managers = state.inner.segment_managers.read().await;
+        let shard_map = managers.get(&scoped).unwrap();
+        let hydrated: Vec<String> = merged
+            .iter()
+            .filter_map(|r| {
+                shard_map
+                    .values()
+                    .find_map(|sm| sm.lookup_record_at(r.id, now_secs2))
+            })
+            .map(|rec| string_field(&rec, PROMPT_FIELD))
+            .collect();
+        assert!(
+            !hydrated.contains(&"expired prompt".to_owned()),
+            "expired trace must be filtered out by lookup_record_at; got {hydrated:?}"
+        );
+        assert!(
+            hydrated.contains(&"fresh prompt".to_owned()),
+            "fresh trace must survive hydration; got {hydrated:?}"
+        );
     }
 
     #[tokio::test]
