@@ -64,6 +64,11 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
       VEDA_FLASHPARSE_ENDPOINT: ${VEDA_FLASHPARSE_ENDPOINT:-http://flashparse:8000}
+      # Web ingestion (crawl4ai). Unset by default = /ingest-url returns
+      # 503 cleanly. Enable with: docker compose --profile web up, then set
+      # VEDA_CRAWL4AI_ENDPOINT=http://crawl4ai:11235 (e.g. in .env).
+      VEDA_CRAWL4AI_ENDPOINT: ${VEDA_CRAWL4AI_ENDPOINT:-}
+      VEDA_CRAWL4AI_TOKEN: ${VEDA_CRAWL4AI_TOKEN:-}
       VEDA_BLOB_BACKEND: minio
       VEDA_BLOB_ENDPOINT: http://minio:9000
       VEDA_BLOB_BUCKET: veda-blobs
@@ -87,8 +92,8 @@ services:
       VEDA_NODE_ADDRESS: ${VEDA_NODE_ADDRESS:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-veda}
-      NO_PROXY: localhost,127.0.0.1,minio,nats,embedding,multimodal-embedding,flashparse,vlm,glm-ocr
-      no_proxy: localhost,127.0.0.1,minio,nats,embedding,multimodal-embedding,flashparse,vlm,glm-ocr
+      NO_PROXY: localhost,127.0.0.1,minio,nats,embedding,multimodal-embedding,flashparse,vlm,glm-ocr,crawl4ai
+      no_proxy: localhost,127.0.0.1,minio,nats,embedding,multimodal-embedding,flashparse,vlm,glm-ocr,crawl4ai
     depends_on:
       minio:
         condition: service_healthy
@@ -183,6 +188,33 @@ services:
     healthcheck:
       test: ["CMD", "curl", "--noproxy", "*", "-f", "http://localhost:8000/health"]
       interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Web ingestion (optional, enabled with --profile web) ---
+  #
+  # crawl4ai turns a URL into clean markdown for the /v1/collections/{name}/
+  # ingest-url connector. Opt-in: the core `veda` service leaves
+  # VEDA_CRAWL4AI_ENDPOINT empty, so /ingest-url returns 503 until you run
+  # this profile and point Veda at it:
+  #
+  #   docker compose --profile web up -d crawl4ai
+  #   VEDA_CRAWL4AI_ENDPOINT=http://crawl4ai:11235 docker compose up -d veda
+  crawl4ai:
+    profiles: ["web"]
+    image: unclecode/crawl4ai:latest
+    ports:
+      - "11235:11235"
+    environment:
+      # Optional shared-secret; mirror it into VEDA_CRAWL4AI_TOKEN on `veda`.
+      CRAWL4AI_API_TOKEN: ${VEDA_CRAWL4AI_TOKEN:-}
+      NO_PROXY: localhost,127.0.0.1,minio,nats,veda
+      no_proxy: localhost,127.0.0.1,minio,nats,veda
+    # crawl4ai launches headless Chromium, which needs a larger /dev/shm.
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "-f", "http://localhost:11235/health"]
+      interval: 15s
       timeout: 5s
       retries: 5
 

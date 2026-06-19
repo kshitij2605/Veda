@@ -16,8 +16,11 @@ pub mod changepoint;
 pub mod chunk_preview;
 pub mod collections;
 pub mod correlations;
+pub mod crawl4ai;
 pub mod depmap;
 pub mod document;
+pub mod ingest_common;
+pub mod ingest_url;
 pub mod embed;
 pub mod embed_insert;
 pub mod evaluate;
@@ -454,6 +457,13 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/collections/{name}/process-documents",
             post(document::process_documents_batch),
+        )
+        // Web ingestion (crawl4ai) — crawl URL(s) -> markdown -> chunk/embed/
+        // insert. Tenant/RLS-scoped like process-document; opt-in (503 when
+        // VEDA_CRAWL4AI_ENDPOINT is unset).
+        .route(
+            "/v1/collections/{name}/ingest-url",
+            post(ingest_url::ingest_url),
         )
         // Ops advisor ("Insights") — admin-only (extra require_admin
         // route layer on top of the shared auth middleware below).
