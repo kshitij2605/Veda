@@ -313,7 +313,7 @@ async fn store_trace_embedded(
         }
     };
 
-    crate::agent::index::insert_and_index(state, &scoped, &schema, record, "llm trace").await;
+    crate::agent::index::insert_only(state, &scoped, &schema, record, "llm trace").await;
 }
 
 /// Semantic search over the tenant's traces. Embeds `query` off-lock,
@@ -373,6 +373,16 @@ pub async fn search_traces(
         }
     };
     drop(executors);
+
+    // The executor only sees sealed segments. Merge in the live growing
+    // segment (where a just-stored trace lives until it seals) so a fresh
+    // trace is searchable immediately, with no per-write seal/rebuild.
+    let growing = super::index::search_live_growing(state, &scoped, &request).await;
+    let merged = super::index::merge_top_k(response.results, growing, request.k);
+    let response = veda_query::search::SearchResponse {
+        results: merged,
+        total_candidates: 0,
+    };
 
     let now_secs = now_ms() / 1000;
     let managers = state.inner.segment_managers.read().await;
@@ -726,14 +736,47 @@ mod tests {
             truncate_to: None,
             read_ts: None,
         };
-        let executors = state.inner.query_executors.read().await;
-        let executor = executors.get(&scoped).expect("executor exists");
-        let (response, _) = executor.search(&request).expect("search runs");
+        let sealed = {
+            let executors = state.inner.query_executors.read().await;
+            let executor = executors.get(&scoped).expect("executor exists");
+            executor.search(&request).expect("search runs").0.results
+        };
+        let growing = super::super::index::search_live_growing(&state, &scoped, &request).await;
+        let results = super::super::index::merge_top_k(sealed, growing, request.k);
         assert_eq!(
-            response.results.len(),
+            results.len(),
             1,
             "the stored trace must be returned by a semantic search for its own embedding"
         );
+    }
+
+    // Bounded-cost regression: storing N distinct traces must NOT seal a
+    // segment per write (no O(n)-per-write rebuild). All traces land in the
+    // live growing segment; nothing seals until the size threshold.
+    #[tokio::test]
+    async fn storing_many_traces_does_not_explode_sealed_segments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = TenantId::default_tenant();
+
+        const N: usize = 30;
+        for i in 0..N {
+            let mut embedding = vec![0.0f32; 8];
+            embedding[i % 8] = 1.0 + i as f32;
+            let mut f = fields();
+            f.prompt = format!("prompt {i}");
+            f.response = format!("response {i}");
+            f.ts = 1_700_000_000_000 + i as i64;
+            store_trace_embedded(&state, &tenant, f, embedding).await;
+        }
+
+        let scoped = tenant::scope(&tenant, TRACE_COLLECTION);
+        let managers = state.inner.segment_managers.read().await;
+        let shard_map = managers.get(&scoped).expect("trace collection exists");
+        let sealed_total: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
+        let growing_total: u32 = shard_map.values().map(|sm| sm.growing_segment().count()).sum();
+        assert_eq!(sealed_total, 0, "storing {N} traces must not seal per write (got {sealed_total})");
+        assert_eq!(growing_total as usize, N, "all {N} traces must live in the growing segment");
     }
 
     #[tokio::test]
