@@ -246,6 +246,16 @@ pub async fn retrieve_memory(
     };
     drop(executors);
 
+    // The executor only sees sealed segments. Merge in the live growing
+    // segment (where a just-written turn lives until it seals) so a fresh
+    // turn is recallable immediately, with no per-write seal/rebuild.
+    let growing = super::index::search_live_growing(state, &scoped, &request).await;
+    let merged = super::index::merge_top_k(response.results, growing, request.k);
+    let response = veda_query::search::SearchResponse {
+        results: merged,
+        total_candidates: 0,
+    };
+
     // Hydrate stored fields via an O(1)-per-hit record lookup, mirroring
     // the `search` builtin.
     let now_secs = std::time::SystemTime::now()
@@ -387,7 +397,7 @@ async fn write_turn_embedded(
         }
     };
 
-    crate::agent::index::insert_and_index(state, &scoped, &schema, record, "agent memory").await;
+    crate::agent::index::insert_only(state, &scoped, &schema, record, "agent memory").await;
 }
 
 #[cfg(test)]
@@ -533,14 +543,48 @@ mod tests {
             truncate_to: None,
             read_ts: None,
         };
-        let executors = state.inner.query_executors.read().await;
-        let executor = executors.get(&scoped).expect("executor exists");
-        let (response, _) = executor.search(&request).expect("search runs");
+        let sealed = {
+            let executors = state.inner.query_executors.read().await;
+            let executor = executors.get(&scoped).expect("executor exists");
+            executor.search(&request).expect("search runs").0.results
+        };
+        let growing = super::super::index::search_live_growing(&state, &scoped, &request).await;
+        let results = super::super::index::merge_top_k(sealed, growing, request.k);
         assert_eq!(
-            response.results.len(),
+            results.len(),
             1,
             "the written memory turn must be returned by a vector recall for its own embedding"
         );
+    }
+
+    // Bounded-cost regression: writing N distinct turns must NOT seal a
+    // segment per write (no O(n)-per-write rebuild). All turns land in the
+    // live growing segment; nothing seals until the size threshold.
+    #[tokio::test]
+    async fn writing_many_turns_does_not_explode_sealed_segments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = TenantId::default_tenant();
+        let agent_id = "ag-1";
+
+        const N: usize = 30;
+        for i in 0..N {
+            let mut embedding = vec![0.0f32; 8];
+            embedding[i % 8] = 1.0 + i as f32;
+            write_turn_embedded(
+                &state, &tenant, agent_id, "conv-1", "user",
+                &format!("turn {i}"), 1 + i as i64, embedding,
+            )
+            .await;
+        }
+
+        let scoped = tenant::scope(&tenant, MEMORY_COLLECTION);
+        let managers = state.inner.segment_managers.read().await;
+        let shard_map = managers.get(&scoped).expect("memory collection exists");
+        let sealed_total: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
+        let growing_total: u32 = shard_map.values().map(|sm| sm.growing_segment().count()).sum();
+        assert_eq!(sealed_total, 0, "writing {N} turns must not seal per write (got {sealed_total})");
+        assert_eq!(growing_total as usize, N, "all {N} turns must live in the growing segment");
     }
 
     #[tokio::test]

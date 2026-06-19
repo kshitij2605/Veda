@@ -286,7 +286,13 @@ pub async fn lookup(
     };
     drop(executors);
 
-    let top = response.results.first()?;
+    // The executor only sees sealed segments. Merge in the live growing
+    // segment (where a just-stored entry lives until it seals) so a fresh
+    // entry is found immediately, without any per-write seal/rebuild.
+    let growing = super::index::search_live_growing(state, &scoped, &request).await;
+    let results = super::index::merge_top_k(response.results, growing, request.k);
+
+    let top = results.first()?;
     let now_ms = now_ms();
     let now_secs = now_ms / 1000;
 
@@ -383,7 +389,7 @@ async fn store_embedded(
         }
     };
 
-    crate::agent::index::insert_and_index(state, &scoped, &schema, record, "llm cache").await;
+    crate::agent::index::insert_only(state, &scoped, &schema, record, "llm cache").await;
 }
 
 /// Current wall-clock time in epoch milliseconds.
@@ -539,9 +545,11 @@ mod tests {
     // This is the test that would have caught the shipped bug: a stored
     // cache entry must be findable by a vector search for its own embedding
     // *immediately* after store. It supplies the embedding directly (no live
-    // embedder needed) via the `store_embedded` seam, then runs the exact
-    // same executor search `lookup` uses and asserts the record is returned.
-    // Before the seal + executor-rebuild fix this search returned 0 hits.
+    // embedder needed) via the `store_embedded` seam, then runs the same
+    // executor + live-growing merge `lookup` uses and asserts the record is
+    // returned. The fresh entry lives in the live growing segment (the
+    // executor is sealed-only), so the live-growing search is what surfaces
+    // it — with NO per-write seal/rebuild.
     #[tokio::test]
     async fn stored_entry_is_immediately_searchable() {
         let tmp = tempfile::tempdir().unwrap();
@@ -567,7 +575,7 @@ mod tests {
             "store_embedded must create the cache collection"
         );
 
-        // Run the same executor search `lookup` performs.
+        // Run the same executor + live-growing merge `lookup` performs.
         let request = VectorSearchRequest {
             field: EMBEDDING_FIELD.to_owned(),
             query_vector: embedding,
@@ -578,13 +586,62 @@ mod tests {
             truncate_to: None,
             read_ts: None,
         };
-        let executors = state.inner.query_executors.read().await;
-        let executor = executors.get(&scoped).expect("executor exists for cache collection");
-        let (response, _) = executor.search(&request).expect("search runs");
+        let sealed = {
+            let executors = state.inner.query_executors.read().await;
+            let executor = executors.get(&scoped).expect("executor exists for cache collection");
+            executor.search(&request).expect("search runs").0.results
+        };
+        let growing = super::super::index::search_live_growing(&state, &scoped, &request).await;
+        let results = super::super::index::merge_top_k(sealed, growing, request.k);
         assert_eq!(
-            response.results.len(),
+            results.len(),
             1,
             "the stored cache entry must be returned by a vector search for its own embedding"
+        );
+    }
+
+    // Bounded-cost regression: storing N distinct entries must NOT produce N
+    // sealed segments and must NOT trigger a per-write seal/rebuild. With the
+    // O(n)-per-write seal+rebuild removed, every store lands in the growing
+    // segment and nothing seals until the size threshold — so the sealed
+    // segment count stays 0 for these tiny records. This is the test that
+    // pins the perf fix.
+    #[tokio::test]
+    async fn storing_many_entries_does_not_explode_sealed_segments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        let tenant = TenantId::default_tenant();
+        let model = "test-model";
+
+        const N: usize = 30;
+        for i in 0..N {
+            // Distinct unit vectors so each is a separate entry.
+            let mut embedding = vec![0.0f32; 8];
+            embedding[i % 8] = 1.0 + i as f32; // distinct directions/magnitudes
+            store_embedded(
+                &state,
+                &tenant,
+                model,
+                &format!("prompt number {i}"),
+                &format!("response number {i}"),
+                1_000 + i as i64,
+                embedding,
+            )
+            .await;
+        }
+
+        let scoped = tenant::scope(&tenant, CACHE_COLLECTION);
+        let managers = state.inner.segment_managers.read().await;
+        let shard_map = managers.get(&scoped).expect("cache collection exists");
+        let sealed_total: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
+        let growing_total: u32 = shard_map.values().map(|sm| sm.growing_segment().count()).sum();
+        assert_eq!(
+            sealed_total, 0,
+            "storing {N} tiny entries must not seal a segment per write (got {sealed_total} sealed)"
+        );
+        assert_eq!(
+            growing_total as usize, N,
+            "all {N} entries must live in the live growing segment"
         );
     }
 
