@@ -172,6 +172,19 @@ pub struct ConversationMessage {
     pub content: Option<String>,
 }
 
+/// A single piece of user feedback on a conversation — a thumbs up/down
+/// plus an optional free-text note and a capture timestamp (epoch ms).
+/// Feeds the eval flywheel later.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Feedback {
+    /// `"up"` or `"down"`.
+    pub rating: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Capture time, epoch milliseconds.
+    pub ts: u64,
+}
+
 /// A conversation with an agent: the visible message history plus the
 /// full trace of steps taken across turns.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -184,6 +197,10 @@ pub struct Conversation {
     pub messages: Vec<ConversationMessage>,
     #[serde(default)]
     pub steps: Vec<AgentStep>,
+    /// User feedback collected on this conversation (newest appended).
+    /// Additive + serde-back-compat: defaults to empty for old payloads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback: Vec<Feedback>,
 }
 
 /// An attachment carried on a converse request (e.g. an image to caption

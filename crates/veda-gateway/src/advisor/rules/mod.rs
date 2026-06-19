@@ -1151,6 +1151,117 @@ impl Rule for ChangePointDetected {
     }
 }
 
+/// Number of most-recent faithfulness samples that form one side of the
+/// [`QualityDrift`] two-window comparison. The engine attaches twice this
+/// many samples (baseline + recent) to `snap.faithfulness_recent`.
+pub const QUALITY_DRIFT_WINDOW: usize = 10;
+
+/// LLM spend over the snapshot window exceeds a configured USD budget.
+///
+/// Reads the cumulative `veda_llm_cost_usd_total` counter (micro-USD; see
+/// [`veda_core::metrics::cost_micro_usd`]). Like [`HighErrorRate`], it uses
+/// the history's per-second rate between the previous and current snapshot,
+/// then scales it back to the window's wall-clock span to get the dollars
+/// spent in this window. Fires when that exceeds `usd_per_window`.
+struct LlmCostBudget;
+impl Rule for LlmCostBudget {
+    fn id(&self) -> &'static str {
+        "llm_cost_budget"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn check(&self, snap: &OpsSnapshot, history: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        // Default budget: 1.0 USD per snapshot window. Operators retune via
+        // RuleConfig thresholds `{"usd_per_window": x}`.
+        let budget_usd = threshold_f64(cfg, "usd_per_window", 1.0);
+        // Per-second micro-USD rate; `None` on cold start / missing counter /
+        // counter reset → skip cleanly.
+        let Some(micro_per_sec) = history.rate("veda_llm_cost_usd_total", snap) else {
+            return Vec::new();
+        };
+        // Wall-clock span of this window (prev → now), in seconds.
+        let window_secs = match history.latest() {
+            Some(prev) => ((snap.taken_at_ms - prev.taken_at_ms) as f64 / 1000.0).max(0.0),
+            None => return Vec::new(),
+        };
+        if window_secs <= 0.0 {
+            return Vec::new();
+        }
+        // micro-USD over the window → USD.
+        let window_usd = micro_per_sec * window_secs / 1_000_000.0;
+        if window_usd > budget_usd {
+            return vec![RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Global,
+                severity: self.default_severity(),
+                title: "LLM cost over budget".into(),
+                detail: format!(
+                    "LLM spend was ${:.4} over the last {:.0}s (budget ${:.4} per window).",
+                    window_usd, window_secs, budget_usd
+                ),
+                recommendation: "Review agent usage and model choice: enable the semantic response cache, cap max steps, or route to a cheaper model. Inspect per-model spend via veda_llm_cost_usd_total.".into(),
+                runbook: Some("GET /v1/admin/metrics".into()),
+                remediation: RemediationAction::None,
+            }];
+        }
+        Vec::new()
+    }
+}
+
+/// Sustained DOWNWARD shift in recent grounding faithfulness vs an earlier
+/// baseline — an online quality-drift signal for the agent's answers.
+///
+/// Uses the `snap.faithfulness_recent` series (oldest-first) the engine
+/// attaches from the `FaithfulnessResults` store. A simple two-window mean
+/// comparison: the earlier half is the baseline, the latest
+/// [`QUALITY_DRIFT_WINDOW`] samples are "recent". Fires when the recent mean
+/// drops below the baseline mean by at least `min_drop` (absolute, on the
+/// 0..1 faithfulness scale). Skips cleanly on too few samples (warm-up) or
+/// when no faithfulness was produced (no embedder/LLM → empty series).
+struct QualityDrift;
+impl Rule for QualityDrift {
+    fn id(&self) -> &'static str {
+        "quality_drift"
+    }
+    fn default_severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn check(&self, snap: &OpsSnapshot, _h: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+        // Minimum absolute drop in mean faithfulness to flag (default 0.15).
+        let min_drop = threshold_f64(cfg, "min_drop", 0.15);
+        let series = &snap.faithfulness_recent;
+        let recent_n = QUALITY_DRIFT_WINDOW.min(series.len());
+        // Warm-up: need a full recent window AND at least one baseline sample.
+        if series.len() < QUALITY_DRIFT_WINDOW + 1 || recent_n == 0 {
+            return Vec::new();
+        }
+        let split = series.len() - recent_n;
+        let baseline = &series[..split];
+        let recent = &series[split..];
+        let mean = |xs: &[f64]| -> f64 { xs.iter().sum::<f64>() / xs.len() as f64 };
+        let base_mean = mean(baseline);
+        let recent_mean = mean(recent);
+        let drop = base_mean - recent_mean;
+        if drop >= min_drop {
+            return vec![RuleHit {
+                rule_id: self.id().into(),
+                scope: Scope::Global,
+                severity: self.default_severity(),
+                title: "Answer quality drift".into(),
+                detail: format!(
+                    "Mean grounding faithfulness fell from {:.2} (baseline, {} samples) to {:.2} (recent {} samples), a drop of {:.2} (threshold {:.2}).",
+                    base_mean, baseline.len(), recent_mean, recent.len(), drop, min_drop
+                ),
+                recommendation: "Investigate retrieval quality and prompt/model changes: check recent index/recall health, embedding-service status, and whether a model or instruction change preceded the drop.".into(),
+                runbook: Some("GET /v1/admin/metrics; GET /v1/admin/change-points".into()),
+                remediation: RemediationAction::None,
+            }];
+        }
+        Vec::new()
+    }
+}
+
 /// The built-in rule catalog.
 pub fn catalog() -> Vec<Box<dyn Rule>> {
     vec![
@@ -1181,6 +1292,8 @@ pub fn catalog() -> Vec<Box<dyn Rule>> {
         Box::new(MemoryGrowthForecast),
         Box::new(RecallDecayForecast),
         Box::new(ChangePointDetected),
+        Box::new(LlmCostBudget),
+        Box::new(QualityDrift),
     ]
 }
 
@@ -1277,6 +1390,7 @@ mod tests {
             index_health: Vec::new(),
             forecasts: Vec::new(),
             change_points: Vec::new(),
+            faithfulness_recent: Vec::new(),
         }
     }
 
@@ -1394,6 +1508,90 @@ mod tests {
         now.counters.insert("veda_errors_total".into(), 50.0);
         let hits = HighErrorRate.check(&now, &empty_history(), &RuleConfig::default());
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn llm_cost_budget_fires_over_budget() {
+        // prev: 0 micro-USD @ t=0; now: 2_000_000 micro-USD (=$2) @ t=10s.
+        // window spend = $2 > default $1 budget → fire.
+        let mut prev = base_snapshot();
+        prev.taken_at_ms = 0;
+        prev.counters.insert("veda_llm_cost_usd_total".into(), 0.0);
+
+        let mut now = base_snapshot();
+        now.taken_at_ms = 10_000;
+        now.counters.insert("veda_llm_cost_usd_total".into(), 2_000_000.0);
+
+        let mut hist = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+        hist.push(prev);
+
+        let hits = LlmCostBudget.check(&now, &hist, &RuleConfig::default());
+        assert_eq!(hits.len(), 1, "should fire over budget");
+        assert_eq!(hits[0].rule_id, "llm_cost_budget");
+        assert_eq!(hits[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn llm_cost_budget_silent_when_under_budget() {
+        // $0.10 over the window < $1 budget → no fire.
+        let mut prev = base_snapshot();
+        prev.taken_at_ms = 0;
+        prev.counters.insert("veda_llm_cost_usd_total".into(), 0.0);
+        let mut now = base_snapshot();
+        now.taken_at_ms = 10_000;
+        now.counters.insert("veda_llm_cost_usd_total".into(), 100_000.0); // $0.10
+        let mut hist = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+        hist.push(prev);
+        assert!(LlmCostBudget.check(&now, &hist, &RuleConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn llm_cost_budget_skips_without_counter_or_history() {
+        // No cost counter at all → skip (even with a previous snapshot).
+        let mut prev = base_snapshot();
+        prev.taken_at_ms = 0;
+        let mut now = base_snapshot();
+        now.taken_at_ms = 10_000;
+        let mut hist = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
+        hist.push(prev);
+        assert!(LlmCostBudget.check(&now, &hist, &RuleConfig::default()).is_empty());
+
+        // Counter present but no history (cold start) → skip.
+        let mut now2 = base_snapshot();
+        now2.counters.insert("veda_llm_cost_usd_total".into(), 5_000_000.0);
+        assert!(LlmCostBudget.check(&now2, &empty_history(), &RuleConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn quality_drift_fires_on_sustained_drop() {
+        // 11 baseline @ ~0.9 then 10 recent @ ~0.5 → drop ~0.4 > 0.15.
+        let mut snap = base_snapshot();
+        let mut series: Vec<f64> = vec![0.9; QUALITY_DRIFT_WINDOW + 1];
+        series.extend(std::iter::repeat(0.5).take(QUALITY_DRIFT_WINDOW));
+        snap.faithfulness_recent = series;
+        let hits = QualityDrift.check(&snap, &empty_history(), &RuleConfig::default());
+        assert_eq!(hits.len(), 1, "should fire on a sustained quality drop");
+        assert_eq!(hits[0].rule_id, "quality_drift");
+        assert_eq!(hits[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn quality_drift_silent_on_stable_series() {
+        let mut snap = base_snapshot();
+        snap.faithfulness_recent = vec![0.85; QUALITY_DRIFT_WINDOW * 2 + 1];
+        assert!(QualityDrift.check(&snap, &empty_history(), &RuleConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn quality_drift_warmup_suppresses_short_series() {
+        let mut snap = base_snapshot();
+        // Fewer than QUALITY_DRIFT_WINDOW + 1 samples → warm-up, no fire,
+        // even though the few present samples drop sharply.
+        snap.faithfulness_recent = vec![0.9, 0.9, 0.1, 0.1];
+        assert!(QualityDrift.check(&snap, &empty_history(), &RuleConfig::default()).is_empty());
+        // Empty series (no faithfulness produced) → skip.
+        let snap2 = base_snapshot();
+        assert!(QualityDrift.check(&snap2, &empty_history(), &RuleConfig::default()).is_empty());
     }
 
     #[test]

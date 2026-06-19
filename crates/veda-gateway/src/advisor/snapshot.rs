@@ -30,6 +30,9 @@ const TRACKED_COUNTERS: &[&str] = &[
     "veda_errors_total",
     "veda_records_total",
     "veda_segments_total",
+    // LLM spend (micro-USD) + tokens, for the cost-budget advisor rule.
+    "veda_llm_cost_usd_total",
+    "veda_llm_tokens_total",
 ];
 /// Default ring-buffer capacity (~240 snapshots; e.g. 20 minutes at
 /// one snapshot / 5s, or 4 hours at one / minute).
@@ -198,6 +201,12 @@ pub struct OpsSnapshot {
     /// history) before reconcile. Default empty.
     #[serde(default)]
     pub change_points: Vec<crate::advisor::changepoint::ChangePoint>,
+    /// Recent grounding-faithfulness scores (oldest-first), for the
+    /// `quality_drift` rule. NOT populated by [`collect`]; the advisor
+    /// engine fills it each tick from the `FaithfulnessResults` store
+    /// before reconcile. Default empty; `#[serde(default)]`.
+    #[serde(default)]
+    pub faithfulness_recent: Vec<f64>,
 }
 
 /// Collect a live snapshot from `state`. `now_ms` is injected so
@@ -372,6 +381,7 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
         index_health,
         forecasts: Vec::new(),
         change_points: Vec::new(),
+        faithfulness_recent: Vec::new(),
     }
 }
 
@@ -1142,6 +1152,7 @@ veda_records_total 7
             index_health: Vec::new(),
             forecasts: Vec::new(),
             change_points: Vec::new(),
+            faithfulness_recent: Vec::new(),
         }
     }
 

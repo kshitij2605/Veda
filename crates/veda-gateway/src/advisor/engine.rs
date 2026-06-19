@@ -593,6 +593,15 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
         );
         snap.change_points = change_points.clone();
         history.set_latest_change_points(change_points);
+        // Faithfulness drift series: the most-recent grounding scores
+        // (oldest-first), attached so the `quality_drift` rule can flag a
+        // sustained downward shift. Brief lock, no network. Attach only to
+        // the reconcile snapshot (the in-history copy needn't carry it).
+        {
+            let results = advisor.faithfulness_results.lock().await;
+            snap.faithfulness_recent =
+                results.recent(crate::advisor::rules::QUALITY_DRIFT_WINDOW * 2);
+        }
         let mut events = advisor.events.lock().await;
         reconcile_hits(
             &snap,
@@ -717,6 +726,7 @@ mod tests {
             index_health: Vec::new(),
             forecasts: Vec::new(),
             change_points: Vec::new(),
+            faithfulness_recent: Vec::new(),
         }
     }
 

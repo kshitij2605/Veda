@@ -118,6 +118,7 @@ mod tests {
                     duration_ms: None,
                 },
             ],
+            feedback: Vec::new(),
         };
 
         save_conversation(&store, &conv).await;
@@ -174,6 +175,7 @@ mod tests {
                 title: None,
                 messages: vec![],
                 steps: vec![],
+                feedback: Vec::new(),
             },
         )
         .await;

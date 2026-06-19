@@ -297,3 +297,26 @@ async fn test_conversation_get_list_delete() {
     let resp = client().delete(format!("{base}/v1/conversations/nope")).send().await.unwrap();
     assert_eq!(resp.status(), 204);
 }
+
+#[tokio::test]
+async fn test_feedback_unknown_conversation_404_and_bad_rating_400() {
+    let (base, _tmp) = start_test_server().await;
+
+    // Feedback on a missing conversation → 404 (route is wired).
+    let resp = client()
+        .post(format!("{base}/v1/conversations/nope/feedback"))
+        .json(&json!({ "rating": "up" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    // Invalid rating → 400 (validation runs before the lookup).
+    let resp = client()
+        .post(format!("{base}/v1/conversations/whatever/feedback"))
+        .json(&json!({ "rating": "sideways" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}

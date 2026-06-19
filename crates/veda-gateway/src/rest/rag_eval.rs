@@ -950,6 +950,7 @@ mod tests {
                     duration_ms: None,
                 },
             ],
+            feedback: Vec::new(),
         };
         let turn = extract_turn(&conv).expect("turn present");
         assert_eq!(turn.query, "what index does veda use?");
@@ -965,6 +966,7 @@ mod tests {
             title: None,
             messages: vec![],
             steps: vec![],
+            feedback: Vec::new(),
         };
         assert!(extract_turn(&conv).is_none());
     }

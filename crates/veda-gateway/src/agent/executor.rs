@@ -76,6 +76,11 @@ pub struct RunMetrics {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Time-to-first-token in milliseconds: ms from run-start to the FIRST
+    /// `AnswerDelta` emitted. Only set on the streaming path (`run_streaming`);
+    /// the blocking `run` leaves it `None`. Additive + serde-back-compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<f64>,
 }
 
 /// Outcome of an [`run`] invocation.
@@ -327,11 +332,41 @@ async fn run_core<M: ChatModel>(
     model_name: &str,
     event_tx: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
 ) -> RunResult {
+    // Wall-clock start of the whole loop. Declared here (before `emit`) so
+    // the closure can stamp time-to-first-token off it.
+    let run_start = std::time::Instant::now();
+    // First-AnswerDelta timestamp (ms from `run_start`), encoded as f64 bits
+    // in an atomic with `u64::MAX` as the "unset" sentinel. An atomic (not a
+    // `Cell`) so the `emit` closure / `run_core` future stay `Send` — the
+    // streaming run is spawned via `tokio::spawn`. Set once on the streaming
+    // path; left unset on the blocking path (no sink → never written).
+    const TTFT_UNSET: u64 = u64::MAX;
+    let ttft_bits = std::sync::atomic::AtomicU64::new(TTFT_UNSET);
+
     // Best-effort emit: a closed receiver (client disconnected) never fails
     // the run — events are advisory, the RunResult is authoritative.
     let emit = |ev: StreamEvent| {
+        use std::sync::atomic::Ordering;
+        // Record TTFT on the FIRST answer fragment (streaming path only —
+        // `event_tx: None` is the blocking path, which leaves `ttft_ms` None).
+        if event_tx.is_some()
+            && matches!(ev, StreamEvent::AnswerDelta { .. })
+            && ttft_bits.load(Ordering::Relaxed) == TTFT_UNSET
+        {
+            let ms = run_start.elapsed().as_secs_f64() * 1000.0;
+            ttft_bits.store(ms.to_bits(), Ordering::Relaxed);
+        }
         if let Some(tx) = &event_tx {
             let _ = tx.try_send(ev);
+        }
+    };
+    // Read the recorded TTFT back as `Option<f64>` (None when never set).
+    let ttft_ms = || {
+        let bits = ttft_bits.load(std::sync::atomic::Ordering::Relaxed);
+        if bits == TTFT_UNSET {
+            None
+        } else {
+            Some(f64::from_bits(bits))
         }
     };
 
@@ -362,9 +397,8 @@ async fn run_core<M: ChatModel>(
     let mut completion_tokens = 0u32;
     let mut total_tokens = 0u32;
 
-    // APM timing accumulators. `run_start` measures the whole loop;
-    // `llm_ms` / `tool_ms` sum per-call latencies.
-    let run_start = std::time::Instant::now();
+    // APM timing accumulators. `run_start` (declared above) measures the
+    // whole loop; `llm_ms` / `tool_ms` sum per-call latencies.
     let mut llm_ms = 0f64;
     let mut tool_ms = 0f64;
     let mut step_calls = 0u32;
@@ -380,6 +414,7 @@ async fn run_core<M: ChatModel>(
                 prompt_tokens,
                 completion_tokens,
                 total_tokens,
+                ttft_ms: ttft_ms(),
             }
         };
     }
@@ -1172,6 +1207,62 @@ mod tests {
             durations.iter().any(|d| d.is_some()),
             "a dispatched tool-result should carry duration_ms"
         );
+
+        // The blocking path never streams an answer → no TTFT.
+        assert!(m.ttft_ms.is_none(), "blocking run must leave ttft_ms None");
+    }
+
+    #[tokio::test]
+    async fn streaming_run_records_positive_ttft() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_state(tmp.path(), "docs").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let agent = test_agent(vec!["list_collections".to_owned()]);
+
+        // [tool_call → final]: the final answer is streamed → ≥1 AnswerDelta.
+        let model = FakeModel::scripted(vec![
+            completion_with_call(
+                Some("Checking."),
+                tool_call("call_1", "list_collections", "{}"),
+            ),
+            final_completion("Done."),
+        ]);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+        let result = run_streaming(
+            &model, &cat, &ctx, &agent, "sys", &[], "what collections?", DEFAULT_MAX_STEPS,
+            "openai", "test-model", tx,
+        )
+        .await;
+        // Drain so the channel doesn't hold anything (sender already dropped).
+        while rx.try_recv().is_ok() {}
+
+        let ttft = result.metrics.ttft_ms.expect("streaming run must record ttft_ms");
+        assert!(ttft > 0.0, "ttft_ms should be > 0, got {ttft}");
+        // TTFT precedes the final answer, so it can't exceed the whole run.
+        assert!(
+            ttft <= result.metrics.total_ms + 5.0,
+            "ttft_ms ({ttft}) should be <= total_ms ({}) + slack",
+            result.metrics.total_ms
+        );
+    }
+
+    #[tokio::test]
+    async fn blocking_run_leaves_ttft_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_state(tmp.path(), "docs").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let agent = test_agent(vec!["list_collections".to_owned()]);
+
+        let model = FakeModel::scripted(vec![final_completion("Immediate answer.")]);
+        let result = run(
+            &model, &cat, &ctx, &agent, "sys", &[], "hi", DEFAULT_MAX_STEPS,
+            "openai", "test-model",
+        )
+        .await;
+        assert!(result.metrics.ttft_ms.is_none(), "blocking run must leave ttft_ms None");
     }
 
     #[tokio::test]

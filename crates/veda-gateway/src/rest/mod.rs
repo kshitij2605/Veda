@@ -423,6 +423,10 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/conversations/{id}",
             get(agents::get_conversation).delete(agents::delete_conversation),
         )
+        .route(
+            "/v1/conversations/{id}/feedback",
+            post(agents::submit_feedback),
+        )
         // RAG/agent eval harness + production-trace flywheel. Tenant/RLS-
         // scoped like /converse (not admin-only): eval runs under the
         // caller's identity.
