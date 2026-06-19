@@ -35,6 +35,18 @@ components:
       type: object
       properties:
         error: { type: string }
+    Connector:
+      type: object
+      description: |
+        A data-source connector. The web tools (`web_search` / `fetch_url`)
+        live in the agent tool catalog and are not REST paths.
+      required: [kind, name]
+      properties:
+        id: { type: string, description: "optional on create → server assigns conn-{uuid}" }
+        kind: { type: string, enum: [web, websearch] }
+        name: { type: string }
+        config: { type: object, description: "kind-specific config (e.g. urls, collection, deep_crawl, max_pages for web)" }
+        enabled: { type: boolean }
     HealthResponse:
       type: object
       properties:
@@ -1221,6 +1233,144 @@ paths:
                         category: { type: string }
                         representative: { type: string, description: "a representative prompt/response from the cluster" }
                         count: { type: integer }
+
+  /v1/collections/{name}/ingest-url:
+    post:
+      summary: Ingest one or more web URLs into a collection via crawl4ai (tenant-scoped).
+      description: |
+        Crawls the given URL(s) through the configured crawl4ai service
+        (`POST {VEDA_CRAWL4AI_ENDPOINT}/crawl` → clean markdown) and runs the
+        shared chunk → embed → insert path (`ingest_markdown`, the same path
+        `process-document` uses). Inserted records carry `source_url`, `title`,
+        and `chunk_index`. Opt-in and **tenant/RLS-scoped**: returns **503**
+        when crawl4ai is unconfigured (endpoint unset). `deep_crawl` follows
+        in-domain links up to `max_pages`.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: name, required: true, schema: { type: string }, description: collection name }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "Provide exactly one of `url` or `urls`."
+              properties:
+                url: { type: string, description: "a single URL to crawl" }
+                urls: { type: array, items: { type: string }, description: "multiple URLs to crawl" }
+                deep_crawl: { type: boolean, description: "follow in-domain links (bounded by max_pages)" }
+                max_pages: { type: integer, description: "cap on pages fetched during a deep crawl" }
+                chunker: { type: string, description: "override chunking strategy (else the collection default)" }
+                ttl_secs: { type: integer, description: "optional record TTL → reserved `_expires_at`" }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pages: { type: integer, description: "URLs/pages crawled" }
+                  chunks: { type: integer, description: "chunks inserted" }
+                  records: { type: integer, description: "records inserted" }
+        '404': { description: collection not found }
+        '503': { description: crawl4ai not configured (VEDA_CRAWL4AI_ENDPOINT unset) }
+
+  /v1/admin/connectors:
+    get:
+      summary: List data-source connectors (admin-only, tenant-scoped).
+      description: |
+        Connectors are persisted via SavedObjects and scoped to the caller's
+        tenant. A connector is `{ id, kind: web|websearch, name, config,
+        enabled }`.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connectors:
+                    type: array
+                    items: { $ref: '#/components/schemas/Connector' }
+    post:
+      summary: Create a data-source connector (admin-only).
+      description: |
+        Creates a connector. `id` is optional on create — when omitted the
+        server assigns `conn-{uuid}`.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Connector' }
+      responses:
+        '200':
+          description: created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Connector' }
+        '400': { description: bad request }
+
+  /v1/admin/connectors/{id}:
+    get:
+      summary: Get a connector by id (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Connector' }
+        '404': { description: connector not found }
+    put:
+      summary: Update a connector (admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Connector' }
+      responses:
+        '200': { description: updated }
+        '404': { description: connector not found }
+    delete:
+      summary: Delete a connector (admin-only, idempotent).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '204': { description: removed }
+
+  /v1/admin/connectors/{id}/run:
+    post:
+      summary: Run a connector now (admin-only).
+      description: |
+        Runs the connector once. A `web` connector crawls its configured URLs
+        into its target collection (reusing the `crawl_and_ingest` path behind
+        `/ingest-url`). Returns **503** when crawl4ai is unconfigured.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pages: { type: integer }
+                  chunks: { type: integer }
+                  records: { type: integer }
+        '404': { description: connector not found }
+        '503': { description: crawl4ai not configured }
 
   /v1/admin/forecast:
     get:

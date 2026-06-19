@@ -140,6 +140,15 @@ Veda turns its vector engine into the LLM layer itself — it doesn't just *obse
 
 See [documentation/2026-06-19-llm-observability.md](documentation/2026-06-19-llm-observability.md) for the full LLM Observability & Optimization guide.
 
+### Web Connectors & Agentic Web Search
+The in-lane, differentiating answer to Elastic's data-source connectors: rather than chasing 30+ SaaS connectors, Veda does **web-native RAG ingestion + agentic web search** over open-source, self-hosted services (crawl4ai + searxng) — privacy-respecting, **no external API**. Both services are **opt-in** (endpoints unset → clean "not configured"/503, no behavior change).
+- **Web ingestion (crawl4ai)** -- `POST /v1/collections/{name}/ingest-url { url|urls, deep_crawl?, max_pages?, chunker?, ttl_secs? }` crawls a page (or a bounded deep crawl) via a `Crawl4aiClient` (`POST {VEDA_CRAWL4AI_ENDPOINT}/crawl` → clean markdown), then runs the shared **`ingest_markdown`** path (chunk → embed → insert) that `process-document` was refactored to reuse (no OCR regression). Records carry `source_url` / `title` / `chunk_index`. Tenant/RLS-scoped; **503** when crawl4ai is unconfigured.
+- **Agentic web search (searxng)** -- two opt-in agent ToolCatalog tools — `web_search { query, limit }` (searxng results via `GET {VEDA_SEARXNG_ENDPOINT}/search?format=json`) and `fetch_url { url }` (crawl4ai markdown, truncated) — let an agent **search → fetch → ground** over the live web. A built-in **`veda-web`** agent whitelists `web_search` + `fetch_url` + `search`; the web tools are **excluded from the default `veda-agent`** (the catalog has 15 builtins, the default agent resolves to 13).
+- **Connectors framework + Niriksha page** -- `Connector { id, kind: web|websearch, name, config, enabled }` persisted via SavedObjects (tenant-scoped). CRUD `GET`/`POST /v1/admin/connectors`, `GET`/`PUT`/`DELETE /v1/admin/connectors/{id}`, and `POST /v1/admin/connectors/{id}/run` (a Web connector crawls its configured URLs into its target collection). Niriksha `Settings.tsx` gained a **Data Source Connectors** CRUD section ("Crawl now").
+- **Deployment** -- a new `docker compose --profile web` brings up `crawl4ai` (`unclecode/crawl4ai`) and `searxng` (`searxng/searxng`); `VEDA_CRAWL4AI_ENDPOINT` / `VEDA_SEARXNG_ENDPOINT` (default empty). License posture: crawl4ai is **Apache-2.0**; searxng is **AGPL-3.0** but is only HTTP-clienteed as a separate, self-hosted service — its network-copyleft binds modifications to searxng itself, not an API client, so there is no contamination of Veda's Apache-2.0.
+
+See [documentation/2026-06-19-web-connectors.md](documentation/2026-06-19-web-connectors.md) for the full Web Connectors & Agentic Web Search guide.
+
 ## Quick Start
 
 ### Docker Compose (recommended)
@@ -274,6 +283,8 @@ Veda runs in two modes; the admin REST surface differs depending on which one is
 | `POST /v1/conversations/{id}/feedback` | ✓ | ✓ | Thumbs `{ rating: up\|down, note? }` on a conversation; emits `veda_llm_feedback_total{rating}`. Tenant/RLS-scoped |
 | `POST /v1/agents/{id}/converse/stream` | ✓ | ✓ | Streaming converse over SSE (reasoning/tool_call/tool_result/answer deltas + `done` w/ citations+grounding); 503 no LLM. Tenant/RLS-scoped |
 | `GET` / `POST /v1/eval-sets`, `/{id}`, `/{id}/run`, `/{id}/runs`, `/{id}/cases/from-conversation` | ✓ | ✓ | RAG/agent eval harness + production-trace flywheel (recall@k/faithfulness/relevancy/pass_rate); 503 no LLM. Tenant/RLS-scoped |
+| `POST /v1/collections/{name}/ingest-url` | ✓ | ✓ | Web ingestion via crawl4ai — `{ url\|urls, deep_crawl?, max_pages?, chunker?, ttl_secs? }` → crawl → markdown → chunk/embed/insert (records carry `source_url`/`title`/`chunk_index`); 503 if crawl4ai unconfigured. Tenant/RLS-scoped |
+| `GET` / `POST /v1/admin/connectors`, `GET`/`PUT`/`DELETE /v1/admin/connectors/{id}`, `POST /v1/admin/connectors/{id}/run` | ✓ | ✓ | Connectors framework — `Connector { id, kind: web\|websearch, name, config, enabled }` (SavedObjects, tenant-scoped); `run` crawls a Web connector's URLs into its target collection. Admin-only |
 | `GET /v1/admin/nodes` | ✓ (1 node) | ✓ (N nodes) | `mode` field reports which path is active |
 | `GET /v1/admin/region_topology` | ✓ (returns `{topology:null}`) | ✓ | Read works even without `_meta` |
 | `PUT /v1/admin/region_topology` | ✗ 503 | ✓ | Mutates `_meta::shard_ensembles` |
