@@ -250,6 +250,43 @@ fn pprof_router() -> Router<state::AppState> {
         .route_layer(middleware::from_fn(rbac::require_admin))
 }
 
+/// PLAT-2: core operator/admin routes, gated by a `require_admin`
+/// route layer (same pattern as [`insights_router`] et al.). Mounted
+/// into the protected router below.
+fn core_admin_router() -> Router<state::AppState> {
+    Router::new()
+        .route("/v1/admin/nodes", get(admin::list_nodes))
+        .route("/v1/admin/metrics", get(admin::metrics))
+        .route(
+            "/v1/admin/region_topology",
+            get(admin::get_region_topology).put(admin::put_region_topology),
+        )
+        .route(
+            "/v1/admin/region_topology/promote",
+            post(admin::promote_region),
+        )
+        .route(
+            "/v1/admin/replica/safe_ts",
+            get(admin::get_replica_safe_ts).post(admin::set_replica_safe_ts),
+        )
+        .route("/v1/admin/cluster/join", post(admin::cluster_join))
+        .route(
+            "/v1/admin/cluster/nodes/{id}",
+            delete(admin::cluster_remove),
+        )
+        .route("/v1/admin/cluster/noop", post(admin::cluster_noop))
+        .route(
+            "/v1/admin/collections/{name}/mvcc_checkpoint",
+            post(admin::mvcc_checkpoint),
+        )
+        .route(
+            "/v1/admin/jobs",
+            get(jobs::list_jobs).post(jobs::create_job),
+        )
+        .route("/v1/admin/jobs/{name}", delete(jobs::delete_job))
+        .route_layer(middleware::from_fn(rbac::require_admin))
+}
+
 /// Build the complete REST API router.
 pub fn build_router(app_state: state::AppState) -> Router {
     // Public routes — no auth required.
@@ -260,45 +297,6 @@ pub fn build_router(app_state: state::AppState) -> Router {
 
     // Protected routes — auth middleware applied when auth_enabled=true.
     let protected = Router::new()
-        // Admin
-        .route("/v1/admin/nodes", get(admin::list_nodes))
-        .route("/v1/admin/metrics", get(admin::metrics))
-        // Phase H: cross-region topology + operator-driven promote.
-        .route(
-            "/v1/admin/region_topology",
-            get(admin::get_region_topology).put(admin::put_region_topology),
-        )
-        .route(
-            "/v1/admin/region_topology/promote",
-            post(admin::promote_region),
-        )
-        // Phase H: cross-region reader-gating watermark.
-        .route(
-            "/v1/admin/replica/safe_ts",
-            get(admin::get_replica_safe_ts).post(admin::set_replica_safe_ts),
-        )
-        // Raft membership API (Phase 6).
-        .route("/v1/admin/cluster/join", post(admin::cluster_join))
-        .route(
-            "/v1/admin/cluster/nodes/{id}",
-            delete(admin::cluster_remove),
-        )
-        // Submit a Noop command — drives the Raft log for test
-        // harnesses (snapshot soak, load gen).
-        .route("/v1/admin/cluster/noop", post(admin::cluster_noop))
-        // GAP-3 (2026-05-21): trigger an MVCC WAL checkpoint
-        // (atomic snapshot + WAL truncate) for a collection.
-        // Per-shard fan-out; no-op on shards without MVCC.
-        .route(
-            "/v1/admin/collections/{name}/mvcc_checkpoint",
-            post(admin::mvcc_checkpoint),
-        )
-        // Cron-style scheduled jobs (admin-only).
-        .route(
-            "/v1/admin/jobs",
-            get(jobs::list_jobs).post(jobs::create_job),
-        )
-        .route("/v1/admin/jobs/{name}", delete(jobs::delete_job))
         // Collections
         .route("/v1/collections", post(collections::create_collection))
         .route("/v1/collections", get(collections::list_collections))
@@ -500,7 +498,16 @@ pub fn build_router(app_state: state::AppState) -> Router {
         // Semantic incident correlation — admin-only (extra require_admin).
         .merge(incidents_router())
         // Searchable semantic LLM trace store — admin-only (extra require_admin).
-        .merge(llm_traces_router());
+        .merge(llm_traces_router())
+        // PLAT-2 (2026-06-21): core admin routes (nodes / metrics /
+        // region topology / replica watermark / raft membership /
+        // mvcc checkpoint / scheduled jobs). Previously added to
+        // `protected` with only the shared auth middleware, so any
+        // AUTHENTICATED user (even a Viewer) could reach them. Now
+        // behind a `require_admin` route layer like the other admin
+        // sub-routers. (Auth-disabled deployments still pass: with
+        // no Claims in extensions, `require_role` is a no-op.)
+        .merge(core_admin_router());
 
     // On-demand CPU profiling — admin-only, only present under the
     // `profiling` cargo feature (no route, no `pprof` dep otherwise).
