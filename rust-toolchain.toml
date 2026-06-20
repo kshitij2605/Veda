@@ -1,0 +1,9 @@
+# Pinned toolchain — the single source of truth for which Rust the project
+# builds and lints against. A `stable` bump silently adding deny-level clippy
+# lints broke CI twice; pinning makes the lint/format set deterministic so
+# what passes locally matches CI exactly. Bump this deliberately (and re-run
+# clippy/fmt) when adopting a newer Rust. CI's workflow pins the same version.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
