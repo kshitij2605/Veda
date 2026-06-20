@@ -11,7 +11,11 @@ Data-source connectors are one of Elastic's headline integration stories — 30-
 
 RAG over the web needs *clean* content — boilerplate-stripped, readable markdown, not raw HTML. `crawl4ai` (Apache-2.0) does exactly that: give it a URL, get back clean markdown. Veda adds a thin async client and a single ingestion endpoint.
 
-`Crawl4aiClient` is an async `reqwest` client that calls `POST {VEDA_CRAWL4AI_ENDPOINT}/crawl` and returns clean markdown (plus the page title). It is **opt-in** — when `VEDA_CRAWL4AI_ENDPOINT` is unset the client is `None`, and the endpoints that need it return **503** rather than changing behavior.
+`Crawl4aiClient` is an async `reqwest` client that calls **`POST {VEDA_CRAWL4AI_ENDPOINT}/md`** (single `url` + `f:"fit"` → clean, boilerplate-stripped markdown) and returns clean markdown (plus the page title). It is **opt-in** — when `VEDA_CRAWL4AI_ENDPOINT` is unset the client is `None`, and the endpoints that need it return **503** rather than changing behavior.
+
+> **crawl4ai endpoint:** the real crawl4ai REST API is `POST /md`, not `/crawl` (which does not exist — an early client bug targeting `/crawl` 500'd at routing before any crawl ran). Recursive/deep crawl uses crawl4ai's async `/crawl/job` endpoint, which is a documented follow-up; today `deep_crawl` / `max_pages` are accepted but each URL is fetched per-URL via `/md`.
+
+> **Exposing crawl4ai requires `VEDA_CRAWL4AI_TOKEN`.** The crawl4ai container binds **loopback-only** unless `CRAWL4AI_API_TOKEN` is set — once it is, the container binds all interfaces **and** requires that token as a bearer on every request. The compose wires `CRAWL4AI_API_TOKEN: ${VEDA_CRAWL4AI_TOKEN:-}` (the same value Veda sends as its bearer to crawl4ai), so you **must set `VEDA_CRAWL4AI_TOKEN`** to use crawl4ai at all: without it crawl4ai is unreachable from Veda even when the container reports "healthy". Set it on **both** the `crawl4ai` service and the `veda` service.
 
 `POST /v1/collections/{name}/ingest-url` takes `{ url | urls, deep_crawl?, max_pages?, chunker?, ttl_secs? }`:
 
@@ -68,12 +72,19 @@ This brings up two containers:
 - **`crawl4ai`** (`unclecode/crawl4ai`) — page → clean markdown crawler; and
 - **`searxng`** (`searxng/searxng`) — meta-search aggregator, configured for **JSON output via a mounted `settings.yml`**.
 
-The `veda` service is wired with `VEDA_CRAWL4AI_ENDPOINT` / `VEDA_SEARXNG_ENDPOINT` (plus optional auth tokens), **default empty** — so a default `docker compose up` (without `--profile web`) is unchanged and the web features cleanly report "not configured"/503. Bring up the profile, set the endpoints, and ingestion + the web tools light up.
+The `veda` service is wired with `VEDA_CRAWL4AI_ENDPOINT` / `VEDA_SEARXNG_ENDPOINT` (plus `VEDA_CRAWL4AI_TOKEN`), **default empty** — so a default `docker compose up` (without `--profile web`) is unchanged and the web features cleanly report "not configured"/503. Bring up the profile, set the endpoints **and `VEDA_CRAWL4AI_TOKEN`** (see §1 — crawl4ai is unreachable without it), and ingestion + the web tools light up.
+
+**SSRF URL guard (default-secure).** Every user-provided URL — on `ingest-url`, the connector `run` path, and the `fetch_url` agent tool — is run through a guard **before any crawl**. The guard **resolves the host and checks the RESOLVED IP** (so it is DNS-rebinding-safe, not a string match on the hostname) and **rejects private/internal/reserved addresses by default**: loopback, RFC1918, link-local (including the `169.254.169.254` cloud-metadata address), and IPv6 ULA. A blocked URL returns **403 `URL_BLOCKED_PRIVATE`** (or, for the `fetch_url` tool, a `{blocked:true}` tool result) **without crawling**. Tune it with host-suffix `VEDA_WEB_ALLOWLIST` / `VEDA_WEB_BLOCKLIST`, or open the guard entirely with `VEDA_WEB_ALLOW_PRIVATE=1` (an escape hatch for trusted internal networks). Deep-crawl `max_pages` is independently clamped to a server cap (`MAX_PAGES_CAP=50`, env `VEDA_WEB_MAX_PAGES`).
 
 | Variable | Default | Notes |
 |---|---|---|
 | `VEDA_CRAWL4AI_ENDPOINT` | *(empty)* | crawl4ai base URL; unset → `ingest-url` / `fetch_url` / connector `run` return 503 |
 | `VEDA_SEARXNG_ENDPOINT` | *(empty)* | searxng base URL; unset → `web_search` is unavailable |
+| `VEDA_CRAWL4AI_TOKEN` | *(empty)* | crawl4ai bearer (also `CRAWL4AI_API_TOKEN` on the crawl4ai container); **required** — crawl4ai binds loopback-only and is unreachable from Veda when unset |
+| `VEDA_WEB_ALLOWLIST` | *(empty)* | host-suffix allowlist for the SSRF guard (comma-separated) |
+| `VEDA_WEB_BLOCKLIST` | *(empty)* | host-suffix blocklist for the SSRF guard (comma-separated) |
+| `VEDA_WEB_ALLOW_PRIVATE` | `0` | `1` disables the private/internal-address SSRF guard (escape hatch for trusted networks) |
+| `VEDA_WEB_MAX_PAGES` | `50` | server cap on deep-crawl `max_pages` (`MAX_PAGES_CAP`); requested values are clamped to this |
 
 ---
 
@@ -95,8 +106,16 @@ The two services have different licenses, and the boundary matters:
 
 ## 7. Limitations & follow-ups
 
-- **Live validation needs the services.** As above — the mock tests don't substitute for a real crawl4ai/searxng run; that requires `--profile web` and is not in CI.
-- **SSRF / arbitrary-URL fetch — admin/authenticated trust boundary, allowlist is a follow-up.** `ingest-url` and the `fetch_url` tool fetch **arbitrary user-provided URLs**, which is a classic SSRF surface (internal addresses, cloud metadata endpoints, etc.). Today this is mitigated by the endpoints being **admin/authenticated and tenant-scoped** within a **self-hosted trust boundary** — the operator controls who can call them. A **URL allowlist / private-range denylist** is a sensible follow-up before exposing these to lower-trust callers.
+- **SSRF / arbitrary-URL fetch — guarded by default (v0.4.1, DONE).** `ingest-url`, the connector `run` path, and the `fetch_url` tool fetch **arbitrary user-provided URLs**, a classic SSRF surface (internal addresses, cloud metadata, etc.). This is now **default-secure**: a guard resolves the host and checks the RESOLVED IP (DNS-rebinding-safe) and **rejects loopback / RFC1918 / link-local (incl. `169.254.169.254`) / IPv6 ULA**, returning **403 `URL_BLOCKED_PRIVATE`** (or a `{blocked:true}` tool result) without crawling — tunable via `VEDA_WEB_ALLOWLIST` / `VEDA_WEB_BLOCKLIST` / `VEDA_WEB_ALLOW_PRIVATE`. The v0.4.0 "allowlist is a follow-up" gap is closed.
+- **Deep/recursive crawl via `/crawl/job` is the next follow-up.** Today each URL is fetched per-URL via crawl4ai's `POST /md`; `deep_crawl` / `max_pages` are accepted (and `max_pages` is capped at **50**, env `VEDA_WEB_MAX_PAGES`) but true in-domain recursive crawling uses crawl4ai's async `/crawl/job` endpoint, which is not yet wired — that is the next follow-up.
 - **Full SaaS connectors are deliberately out of scope.** This is web-native RAG, not a SharePoint/Confluence/Salesforce connector catalog. Matching Elastic's 30+ SaaS connectors is an intentional non-goal — Veda's bet is depth on the open web over breadth of proprietary SaaS sources.
-- **Deep crawl is bounded by `max_pages`.** `deep_crawl` follows in-domain links only up to `max_pages`; it is not a full-site spider, by design, to bound cost and avoid runaway crawls.
 - **searxng must be configured for JSON output.** The `web_search` tool depends on searxng's JSON format, enabled via the mounted `settings.yml` in the compose profile; a searxng instance without JSON output enabled will not work.
+
+### Live-container e2e (2026-06-20)
+
+Brought up `docker compose --profile web` (real `unclecode/crawl4ai` + `searxng/searxng`) and ran Veda against them. Honest results:
+
+- **searxng `web_search` — WORKS live.** The `veda-web` agent called `web_search` and returned a grounded answer from live searxng results (8 real results federated from Google/Bing/etc.).
+- **SSRF guard — WORKS live.** `ingest-url` of `http://169.254.169.254/latest/meta-data/` and `http://127.0.0.1/...` both returned **403 `URL_BLOCKED_PRIVATE`** without crawling.
+- **crawl4ai `/md` — reached live.** After setting `VEDA_CRAWL4AI_TOKEN`, Veda reached crawl4ai and it launched headless Chromium and attempted to navigate the target (`_crawl_web` / `Page.goto` in the crawl4ai logs), proving the `/md` fix is correct — the old `/crawl` 500'd at routing before any crawl.
+- **Live external crawl could NOT complete on this host — an environment limitation, not a Veda bug.** crawl4ai's headless **Chromium cannot egress through this test host's corporate proxy** (`net::ERR_CONNECTION_CLOSED`, "Proxy direct failed"): the container's HTTP clients go through the proxy, but Chromium tries a direct connection. On a normal-egress network (or with crawl4ai's browser configured for the proxy) ingestion works; the Veda side — endpoint, auth, SSRF, chunk/embed/insert — is correct and mock-tested, including a real-insert path.
