@@ -157,7 +157,7 @@ pub async fn list_slow_queries(
     .await
     .unwrap_or_default();
 
-    slow_queries.sort_by(|a, b| b.took_ms.cmp(&a.took_ms));
+    slow_queries.sort_by_key(|b| std::cmp::Reverse(b.took_ms));
     slow_queries.truncate(limit);
     Json(SlowQueriesResponse { slow_queries })
 }
