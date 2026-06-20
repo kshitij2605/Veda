@@ -38,6 +38,59 @@ pub const LLM_TTFT_SECONDS: &str = "veda_llm_ttft_seconds";
 /// Counter of user feedback on agent conversations, labelled
 /// `rating="up"|"down"`.
 pub const LLM_FEEDBACK_TOTAL: &str = "veda_llm_feedback_total";
+/// Counter of semantic-cache hits, labelled `model`.
+pub const LLM_CACHE_HITS_TOTAL: &str = "veda_llm_cache_hits_total";
+/// Counter of semantic-cache misses, labelled `model`.
+pub const LLM_CACHE_MISSES_TOTAL: &str = "veda_llm_cache_misses_total";
+
+/// Pre-register (describe + zero-init) the LLM / agent observability metrics
+/// so they appear in `/v1/admin/metrics` from startup, *before* any converse
+/// traffic — instead of materialising only on first emit.
+///
+/// Why this exists (GAP-A): the cost / cache counters only ever emitted on a
+/// specific branch (cost requires a *priced* model — a local unpriced model
+/// emits nothing; cache counters require a cache hit/miss). So under normal
+/// traffic against a local model the series were simply absent, which reads
+/// as "broken" on a dashboard. Zero-initialising the counters here makes them
+/// render as `<name> 0` immediately; the real per-`model` series accumulate
+/// on top as traffic flows.
+///
+/// `describe_*` attaches HELP/TYPE metadata; the `metrics` Prometheus exporter
+/// only renders a series once a value has been emitted, so the counters are
+/// also incremented by 0. Histograms (TTFT, run duration) are described only —
+/// a histogram with no observations has no series to render until first
+/// recorded, which is acceptable (they fire on every run / streaming run).
+///
+/// Idempotent and cheap; call once after the recorder is installed.
+pub fn pre_register_llm_metrics() {
+    metrics::describe_counter!(
+        LLM_TOKENS_TOTAL,
+        "LLM tokens processed, labelled type=input|output and model"
+    );
+    metrics::describe_counter!(
+        LLM_COST_USD_TOTAL,
+        "Estimated LLM spend in micro-USD (1e-6 USD), labelled model"
+    );
+    metrics::describe_counter!(LLM_CACHE_HITS_TOTAL, "Semantic-cache hits, labelled model");
+    metrics::describe_counter!(
+        LLM_CACHE_MISSES_TOTAL,
+        "Semantic-cache misses, labelled model"
+    );
+    metrics::describe_histogram!(
+        LLM_TTFT_SECONDS,
+        "Time-to-first-token in seconds (streaming path), labelled model"
+    );
+    metrics::describe_histogram!(
+        AGENT_RUN_DURATION,
+        "End-to-end agent run wall-clock duration in seconds, labelled model"
+    );
+
+    // Zero-init the counters so they render immediately (label-less base
+    // series; per-model series accumulate on top as traffic flows).
+    metrics::counter!(LLM_COST_USD_TOTAL).increment(0);
+    metrics::counter!(LLM_CACHE_HITS_TOTAL).increment(0);
+    metrics::counter!(LLM_CACHE_MISSES_TOTAL).increment(0);
+}
 
 /// Built-in fallback price table: USD per 1,000 tokens, `(input, output)`.
 /// Deliberately tiny — covers a few common OpenAI-compatible models. Any
@@ -97,6 +150,20 @@ mod tests {
     // Env-mutating tests share a process; serialise via a mutex so the
     // VEDA_LLM_PRICES var doesn't race across parallel test threads.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn pre_register_runs_with_no_recorder() {
+        // With no global recorder installed the macros are no-ops; this must
+        // not panic. The "renders at 0" behaviour is asserted against the
+        // Prometheus exporter in veda-gateway (which has that dev-dep).
+        pre_register_llm_metrics();
+    }
+
+    #[test]
+    fn cache_counter_names_are_stable() {
+        assert_eq!(LLM_CACHE_HITS_TOTAL, "veda_llm_cache_hits_total");
+        assert_eq!(LLM_CACHE_MISSES_TOTAL, "veda_llm_cache_misses_total");
+    }
 
     #[test]
     fn default_price_table_known_model() {

@@ -1,5 +1,33 @@
 use veda_gateway::server::{ServerConfig, start_server};
 
+/// Parse a `.env` file body into the `(key, value)` pairs that should be
+/// applied to the process environment, **skipping any key that already has a
+/// value** per the `existing` predicate.
+///
+/// This makes the `.env` loader *non-overriding*: an explicitly-exported
+/// environment variable always wins over a `.env` line for the same key. Blank
+/// lines and `#` comments are ignored, and a value may itself contain `=`
+/// (only the first `=` separates key from value), so `KEY=val=with=eq` keeps
+/// the full `val=with=eq`. Pure (the caller decides what "already present"
+/// means) and directly unit-testable.
+fn env_pairs_to_set(contents: &str, existing: impl Fn(&str) -> bool) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            if key.is_empty() || existing(key) {
+                continue;
+            }
+            pairs.push((key.to_owned(), value.trim().to_owned()));
+        }
+    }
+    pairs
+}
+
 /// Map the standard OTel sampler env vars onto an `opentelemetry_sdk` `Sampler`.
 ///
 /// `name` is `OTEL_TRACES_SAMPLER`, `arg` is `OTEL_TRACES_SAMPLER_ARG`.
@@ -28,17 +56,13 @@ fn resolve_sampler(name: Option<String>, arg: Option<String>) -> opentelemetry_s
 
 #[tokio::main]
 async fn main() {
-    // Load .env file if present.
+    // Load .env file if present. Already-set environment variables take
+    // precedence — an explicit `EMBEDDING_ENDPOINT=...` is never clobbered by
+    // a `.env` line (see `env_pairs_to_set`).
     if let Ok(contents) = std::fs::read_to_string(".env") {
-        for line in contents.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once('=') {
-                // SAFETY: called before any threads are spawned.
-                unsafe { std::env::set_var(key.trim(), value.trim()) };
-            }
+        for (key, value) in env_pairs_to_set(&contents, |k| std::env::var(k).is_ok()) {
+            // SAFETY: called before any threads are spawned.
+            unsafe { std::env::set_var(&key, &value) };
         }
     }
 
@@ -241,6 +265,58 @@ mod sampler_tests {
         assert_eq!(
             dbg(Some("traceidratio"), Some("garbage")),
             "TraceIdRatioBased(1.0)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod env_loader_tests {
+    use super::env_pairs_to_set;
+    use std::collections::HashSet;
+
+    /// An `existing` predicate backed by a fixed set of already-present keys.
+    fn present(keys: &[&str]) -> impl Fn(&str) -> bool {
+        let set: HashSet<String> = keys.iter().map(|k| (*k).to_owned()).collect();
+        move |k: &str| set.contains(k)
+    }
+
+    #[test]
+    fn skips_keys_already_in_env() {
+        // EMBEDDING_ENDPOINT is already set → it must NOT be returned, so the
+        // explicit value wins (the footgun this fix closes).
+        let body = "EMBEDDING_ENDPOINT=http://from-dot-env\nNEW_KEY=new_value\n";
+        let pairs = env_pairs_to_set(body, present(&["EMBEDDING_ENDPOINT"]));
+        assert_eq!(pairs, vec![("NEW_KEY".to_owned(), "new_value".to_owned())]);
+    }
+
+    #[test]
+    fn returns_new_keys() {
+        let body = "FOO=bar";
+        let pairs = env_pairs_to_set(body, present(&[]));
+        assert_eq!(pairs, vec![("FOO".to_owned(), "bar".to_owned())]);
+    }
+
+    #[test]
+    fn ignores_comments_and_blank_lines() {
+        let body = "# a comment\n\n   \n# another\nKEY=val\n";
+        let pairs = env_pairs_to_set(body, present(&[]));
+        assert_eq!(pairs, vec![("KEY".to_owned(), "val".to_owned())]);
+    }
+
+    #[test]
+    fn value_with_equals_keeps_full_value() {
+        let body = "KEY=val=with=eq";
+        let pairs = env_pairs_to_set(body, present(&[]));
+        assert_eq!(pairs, vec![("KEY".to_owned(), "val=with=eq".to_owned())]);
+    }
+
+    #[test]
+    fn trims_key_and_value_whitespace() {
+        let body = "  SPACED_KEY  =  spaced value  ";
+        let pairs = env_pairs_to_set(body, present(&[]));
+        assert_eq!(
+            pairs,
+            vec![("SPACED_KEY".to_owned(), "spaced value".to_owned())]
         );
     }
 }

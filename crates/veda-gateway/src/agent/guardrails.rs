@@ -38,10 +38,16 @@ use crate::logs::categorize::cosine;
 use crate::rest::state::AppState;
 
 /// Default cosine-similarity threshold for the semantic layer. A match at or
-/// above this against a bad-pattern embedding flags that category. Chosen
-/// moderately high so only clearly-related text is flagged (false positives
-/// here block / annotate a legitimate turn).
-pub const DEFAULT_THRESHOLD: f32 = 0.80;
+/// above this against a bad-pattern embedding flags that category.
+///
+/// Re-calibrated 2026-06-21 from 0.80 → 0.65 for the jina-omni embedder's
+/// cosine scale: paraphrased prompt-injection / jailbreak attacks score only
+/// ~0.56–0.73 against the seed patterns, so the old 0.80 never fired in Flag
+/// (detect-only) mode. 0.65 catches the bulk of the paraphrase band while
+/// staying above generic on-topic text. The strongest observed similarity is
+/// always surfaced as `GuardrailVerdict.score` (even when below threshold) so
+/// near-misses are observable on a dashboard regardless of the cutoff.
+pub const DEFAULT_THRESHOLD: f32 = 0.65;
 
 /// What a flagged span was classified as.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -92,7 +98,11 @@ pub struct GuardrailVerdict {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<GuardrailCategory>,
     /// The match strength: cosine similarity in `[0,1]` for the semantic
-    /// layer, or `1.0` for a regex/PII hit. `0.0` when not flagged.
+    /// layer, or `1.0` for a regex/PII hit. When the semantic layer ran but
+    /// did NOT flag, this still carries the strongest observed similarity
+    /// (a sub-threshold near-miss) so detection is observable on a dashboard.
+    /// `0.0` only when no semantic comparison happened (off / empty / no
+    /// embedder).
     pub score: f64,
     /// The action this verdict resolves to (driven by the mode).
     pub action: GuardrailAction,
@@ -369,7 +379,14 @@ pub async fn check_text(
             matched: Some(pat.to_owned()),
         }
     } else {
-        GuardrailVerdict::allow()
+        // Not flagged — but surface the strongest observed similarity so a
+        // sub-threshold near-miss is still observable (the patterns set is
+        // non-empty, so `best_sim` was assigned a real cosine here).
+        let score = if best.is_some() { best_sim as f64 } else { 0.0 };
+        GuardrailVerdict {
+            score,
+            ..GuardrailVerdict::allow()
+        }
     }
 }
 
@@ -418,6 +435,17 @@ mod tests {
         assert!(max_sim_flags(0.95, 0.80));
         assert!(!max_sim_flags(0.79, 0.80));
         assert!(!max_sim_flags(0.0, 0.80));
+    }
+
+    #[test]
+    fn default_threshold_recalibrated_for_jina_omni() {
+        // Re-calibrated 0.80 → 0.65 so the jina-omni paraphrase band
+        // (~0.56–0.73) flags at the upper end instead of never firing.
+        assert_eq!(DEFAULT_THRESHOLD, 0.65);
+        // A typical paraphrased-attack score now flags at the default.
+        assert!(max_sim_flags(0.70, DEFAULT_THRESHOLD));
+        // Generic on-topic text well below the band still does not.
+        assert!(!max_sim_flags(0.40, DEFAULT_THRESHOLD));
     }
 
     #[test]
