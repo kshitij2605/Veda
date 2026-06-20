@@ -249,13 +249,18 @@ pub async fn call_reranker(
         .or_else(|| std::env::var("RERANK_MODEL").ok())
         .unwrap_or_else(|| "rerank-2".to_owned());
 
-    let url = format!("{}/v1/rerank", endpoint.trim_end_matches('/'));
     let client = reqwest::Client::new();
+    // Body carries BOTH the Cohere/Voyage key (`documents`) and the
+    // TEI / HuggingFace text-embeddings-inference key (`texts`) so the
+    // same request works against either flavour of reranker. Unknown
+    // keys are ignored by both.
     let mut body = serde_json::json!({
         "model": model,
         "query": query,
         "documents": documents,
+        "texts": documents,
         "top_k": top_k,
+        "return_documents": false,
     });
     if let Some(inst) = instruction
         && !inst.is_empty()
@@ -267,52 +272,87 @@ pub async fn call_reranker(
         );
     }
 
-    let mut trace_headers = reqwest::header::HeaderMap::new();
-    veda_core::trace_propagation::inject_current_context(&mut trace_headers);
-    let mut req_builder = client
-        .post(&url)
-        .headers(trace_headers)
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(30));
-    if !api_key.is_empty() {
-        req_builder = req_builder.bearer_auth(&api_key);
+    // Try the Cohere/Voyage path (`/v1/rerank`) first, then fall back to
+    // the TEI path (`/rerank`) when the former 404s. TEI rerankers
+    // (e.g. ruri-v3-reranker) only serve `/rerank`.
+    let base = endpoint.trim_end_matches('/');
+    let mut last_err: Option<(StatusCode, String)> = None;
+    let mut parsed: Option<Vec<(usize, f32)>> = None;
+    for url in [format!("{base}/v1/rerank"), format!("{base}/rerank")] {
+        let mut trace_headers = reqwest::header::HeaderMap::new();
+        veda_core::trace_propagation::inject_current_context(&mut trace_headers);
+        let mut req_builder = client
+            .post(&url)
+            .headers(trace_headers)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(30));
+        if !api_key.is_empty() {
+            req_builder = req_builder.bearer_auth(&api_key);
+        }
+        let resp = match req_builder.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some((StatusCode::BAD_GATEWAY, format!("rerank request failed: {e}")));
+                continue;
+            }
+        };
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let rbody = resp.text().await.unwrap_or_default();
+            // 404 on the first (Cohere) path → try the TEI path.
+            last_err = Some((
+                StatusCode::BAD_GATEWAY,
+                format!("reranker returned {status}: {rbody}"),
+            ));
+            continue;
+        }
+        let json: serde_json::Value = match resp.json().await {
+            Ok(j) => j,
+            Err(e) => {
+                last_err =
+                    Some((StatusCode::BAD_GATEWAY, format!("rerank response parse failed: {e}")));
+                continue;
+            }
+        };
+        match parse_rerank_response(&json) {
+            Some(v) => {
+                parsed = Some(v);
+                break;
+            }
+            None => {
+                last_err = Some((
+                    StatusCode::BAD_GATEWAY,
+                    "rerank response missing 'data'/array of {index,score}".into(),
+                ));
+            }
+        }
     }
-    let resp = req_builder.send().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: format!("rerank request failed: {e}"),
-            }),
-        )
-    })?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: format!("reranker returned {status}: {body}"),
-            }),
-        ));
-    }
-    let json: serde_json::Value = resp.json().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: format!("rerank response parse failed: {e}"),
-            }),
-        )
-    })?;
+    let mut out = match parsed {
+        Some(v) => v,
+        None => {
+            let (status, msg) = last_err
+                .unwrap_or((StatusCode::BAD_GATEWAY, "rerank failed".into()));
+            return Err((status, Json(ErrorResponse { error: msg })));
+        }
+    };
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out.truncate(top_k);
+    Ok(out)
+}
 
-    let arr = json["data"].as_array().ok_or_else(|| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: "rerank response missing 'data' array".into(),
-            }),
-        )
-    })?;
-    let mut out: Vec<(usize, f32)> = arr
+/// Parse a rerank response into `(original_index, score)` pairs,
+/// tolerating both common reranker response shapes:
+///   - Cohere/Voyage: `{ "data": [ { "index": i, "relevance_score": s }, ... ] }`
+///     (also accepts `results` as the array key and `score` as the score key).
+///   - TEI / text-embeddings-inference: a bare array
+///     `[ { "index": i, "score": s }, ... ]`.
+/// Returns `None` when neither shape matches.
+fn parse_rerank_response(json: &serde_json::Value) -> Option<Vec<(usize, f32)>> {
+    let arr = json
+        .as_array()
+        .or_else(|| json["data"].as_array())
+        .or_else(|| json["results"].as_array())?;
+    let out: Vec<(usize, f32)> = arr
         .iter()
         .filter_map(|entry| {
             let idx = entry["index"].as_u64()? as usize;
@@ -322,7 +362,50 @@ pub async fn call_reranker(
             Some((idx, score))
         })
         .collect();
-    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    out.truncate(top_k);
-    Ok(out)
+    if out.is_empty() { None } else { Some(out) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_rerank_response;
+
+    #[test]
+    fn parses_cohere_data_shape() {
+        let j = serde_json::json!({
+            "data": [
+                {"index": 0, "relevance_score": 0.9},
+                {"index": 1, "relevance_score": 0.1}
+            ]
+        });
+        let out = parse_rerank_response(&j).expect("cohere shape");
+        assert_eq!(out, vec![(0, 0.9), (1, 0.1)]);
+    }
+
+    #[test]
+    fn parses_tei_bare_array_shape() {
+        // ruri-v3-reranker / HF text-embeddings-inference shape.
+        let j = serde_json::json!([
+            {"index": 0, "score": 0.0067712096},
+            {"index": 1, "score": 0.00019716943}
+        ]);
+        let out = parse_rerank_response(&j).expect("tei shape");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, 0);
+        assert!((out[0].1 - 0.0067712096).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parses_results_array_key() {
+        let j = serde_json::json!({
+            "results": [ {"index": 2, "score": 0.5} ]
+        });
+        let out = parse_rerank_response(&j).expect("results key");
+        assert_eq!(out, vec![(2, 0.5)]);
+    }
+
+    #[test]
+    fn rejects_unknown_shape() {
+        let j = serde_json::json!({"unexpected": true});
+        assert!(parse_rerank_response(&j).is_none());
+    }
 }
