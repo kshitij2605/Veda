@@ -292,7 +292,10 @@ pub async fn call_reranker(
         let resp = match req_builder.send().await {
             Ok(r) => r,
             Err(e) => {
-                last_err = Some((StatusCode::BAD_GATEWAY, format!("rerank request failed: {e}")));
+                last_err = Some((
+                    StatusCode::BAD_GATEWAY,
+                    format!("rerank request failed: {e}"),
+                ));
                 continue;
             }
         };
@@ -309,8 +312,10 @@ pub async fn call_reranker(
         let json: serde_json::Value = match resp.json().await {
             Ok(j) => j,
             Err(e) => {
-                last_err =
-                    Some((StatusCode::BAD_GATEWAY, format!("rerank response parse failed: {e}")));
+                last_err = Some((
+                    StatusCode::BAD_GATEWAY,
+                    format!("rerank response parse failed: {e}"),
+                ));
                 continue;
             }
         };
@@ -330,8 +335,8 @@ pub async fn call_reranker(
     let mut out = match parsed {
         Some(v) => v,
         None => {
-            let (status, msg) = last_err
-                .unwrap_or((StatusCode::BAD_GATEWAY, "rerank failed".into()));
+            let (status, msg) =
+                last_err.unwrap_or((StatusCode::BAD_GATEWAY, "rerank failed".into()));
             return Err((status, Json(ErrorResponse { error: msg })));
         }
     };
@@ -346,6 +351,7 @@ pub async fn call_reranker(
 ///     (also accepts `results` as the array key and `score` as the score key).
 ///   - TEI / text-embeddings-inference: a bare array
 ///     `[ { "index": i, "score": s }, ... ]`.
+///
 /// Returns `None` when neither shape matches.
 fn parse_rerank_response(json: &serde_json::Value) -> Option<Vec<(usize, f32)>> {
     let arr = json
