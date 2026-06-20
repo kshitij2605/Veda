@@ -11,6 +11,7 @@ import restApi from './content/rest-api.md?raw'
 import pythonSdk from './content/python-sdk.md?raw'
 import observability from './content/observability.md?raw'
 import apmObservability from './content/apm-observability.md?raw'
+import llmObservability from './content/llm-observability.md?raw'
 import aiops from './content/aiops.md?raw'
 import opsAdvisor from './content/ops-advisor.md?raw'
 import logInsights from './content/log-insights.md?raw'
@@ -56,6 +57,7 @@ export const DOCS: DocGroup[] = [
       { slug: 'python-sdk', title: 'Python SDK', md: pythonSdk },
       { slug: 'observability', title: 'Observability', md: observability },
       { slug: 'apm-observability', title: 'APM & Performance', md: apmObservability },
+      { slug: 'llm-observability', title: 'LLM Observability', md: llmObservability },
       { slug: 'aiops', title: 'AIOps', md: aiops },
       { slug: 'ops-advisor', title: 'Ops Advisor', md: opsAdvisor },
       { slug: 'log-insights', title: 'Log Insights', md: logInsights },

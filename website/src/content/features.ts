@@ -14,6 +14,7 @@ import {
   BadgeCheck,
   Radar,
   Globe,
+  DatabaseZap,
 } from 'lucide-react'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
@@ -74,7 +75,7 @@ export const FEATURES: Feature[] = [
     accent: 'var(--color-node-2)',
     title: 'Observability + built-in AutoOps',
     blurb:
-      'Metrics, traces, and logs out of the box — Prometheus, Tempo, Loki, Grafana — plus an Ops Advisor that detects issues across 34 rules (latency, disk, CPU, error & log anomalies, SLO burn-rate, recall drift, capacity forecasts, change-points), explains the root cause, alerts Slack/PagerDuty, and can auto-remediate.',
+      'Metrics, traces, and logs out of the box — Prometheus, Tempo, Loki, Grafana — plus an Ops Advisor that detects issues across 36 rules (latency, disk, CPU, error & log anomalies, SLO burn-rate, recall drift, capacity forecasts, change-points, LLM cost & quality), explains the root cause, alerts Slack/PagerDuty, and can auto-remediate.',
   },
   {
     icon: Shield,
@@ -124,5 +125,12 @@ export const FEATURES: Feature[] = [
     title: 'Self-hosted web RAG',
     blurb:
       'Crawl the open web straight into a collection (crawl4ai → clean markdown → chunk → embed) and give agents web_search + fetch_url tools to search → fetch → ground over live pages — all on open-source, self-hosted services. No external API, no data leaving your trust boundary.',
+  },
+  {
+    icon: DatabaseZap,
+    accent: 'var(--color-node-3)',
+    title: 'Semantic LLM cache & guardrails',
+    blurb:
+      'Veda turns its vector engine into the LLM layer: a near-duplicate prompt is served from a semantic cache with no LLM call, an unsafe prompt is blocked by embedding-similarity guardrails, and every run lands in a trace store you search and cluster by meaning — observe, optimize, and secure in one engine.',
   },
 ]
