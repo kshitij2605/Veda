@@ -1548,6 +1548,32 @@ mod tests {
         );
     }
 
+    /// GAP-A: pre-registering the LLM metrics makes the cost / cache-hit /
+    /// cache-miss counters render at 0 *before* any converse traffic — so a
+    /// local (unpriced, no-cache) deployment still shows the series instead
+    /// of an empty `/metrics`.
+    #[test]
+    fn pre_register_exports_cost_and_cache_counters_at_zero() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            veda_core::metrics::pre_register_llm_metrics();
+        });
+        let out = handle.render();
+        assert!(
+            out.contains("veda_llm_cost_usd_total"),
+            "cost counter must export at 0:\n{out}"
+        );
+        assert!(
+            out.contains("veda_llm_cache_hits_total"),
+            "cache-hits counter must export at 0:\n{out}"
+        );
+        assert!(
+            out.contains("veda_llm_cache_misses_total"),
+            "cache-misses counter must export at 0:\n{out}"
+        );
+    }
+
     // ── Conversation feedback capture ────────────────────────────────────
 
     use crate::agent::model::Conversation;

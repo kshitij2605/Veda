@@ -24,6 +24,11 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
         .install_recorder()
         .expect("failed to install Prometheus recorder");
 
+    // Pre-register LLM/agent observability metrics so the cost / cache-hit /
+    // cache-miss counters export at 0 from startup instead of materialising
+    // only on first emit (GAP-A).
+    veda_core::metrics::pre_register_llm_metrics();
+
     let app_state = AppState::with_prometheus_and_log_buffer(
         &config.data_dir,
         prometheus_handle,

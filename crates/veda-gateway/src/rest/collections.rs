@@ -75,8 +75,9 @@ pub struct CreateCollectionRequest {
     /// or nothing does.
     #[serde(default)]
     pub seed_records: Option<Vec<serde_json::Map<String, serde_json::Value>>>,
-    /// Per-collection Row-Level Security. When set, non-Admin users
-    /// can only read/write records where . Admin users bypass the filter entirely.
+    /// Per-collection Row-Level Security. When set, non-Admin users can only
+    /// read/write records where this metadata field equals their own user id
+    /// (the JWT `sub` claim). Admin users bypass the filter entirely.
     #[serde(default)]
     pub rls_owner_field: Option<String>,
 }
