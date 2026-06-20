@@ -96,6 +96,13 @@ impl EmbeddingClient {
                 }),
                 "Represent the given video.",
             ),
+            Modality::Audio => (
+                serde_json::json!({
+                    "type": "audio_url",
+                    "audio_url": { "url": format!("data:audio/wav;base64,{b64}") }
+                }),
+                "Represent the given audio.",
+            ),
             Modality::Pdf => {
                 return Err(VedaError::Storage(
                     "PDF modality cannot be embedded directly; use OCR to extract text/images first".into(),
@@ -287,7 +294,7 @@ mod tests {
             name: "test-vlm".to_string(),
             endpoint: "http://mock:8000".to_string(),
             api_key: String::new(),
-            supported_modalities: vec![Modality::Image, Modality::Video],
+            supported_modalities: vec![Modality::Image, Modality::Video, Modality::Audio],
             output_dimension: 128,
             max_input_size_bytes: 10 * 1024 * 1024,
             timeout_seconds: 30,
@@ -325,6 +332,41 @@ mod tests {
         let b64_part = url.strip_prefix("data:image/jpeg;base64,").unwrap();
         let decoded = BASE64_STANDARD.decode(b64_part).unwrap();
         assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_build_multimodal_payload_audio() {
+        let client = EmbeddingClient::new(mock_config());
+        let data = b"fake-audio-bytes";
+        let payload = client
+            .build_multimodal_payload(data, Modality::Audio)
+            .unwrap();
+
+        // Verify content contains audio_url + text instruction
+        let content = payload["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "audio_url");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "Represent the given audio.");
+
+        let url = content[0]["audio_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:audio/wav;base64,"));
+
+        // Verify base64 round-trips correctly
+        let b64_part = url.strip_prefix("data:audio/wav;base64,").unwrap();
+        let decoded = BASE64_STANDARD.decode(b64_part).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_build_multimodal_payload_pdf_errors() {
+        let mut cfg = mock_config();
+        cfg.supported_modalities.push(Modality::Pdf);
+        let client = EmbeddingClient::new(cfg);
+        let err = client
+            .build_multimodal_payload(b"x", Modality::Pdf)
+            .unwrap_err();
+        assert!(matches!(err, VedaError::Storage(_)));
     }
 
     #[tokio::test]
