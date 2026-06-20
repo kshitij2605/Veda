@@ -107,13 +107,7 @@ impl History {
         Arc::new(Self::default())
     }
 
-    pub async fn record(
-        &self,
-        client_id: usize,
-        op: OpKind,
-        outcome: OpOutcome,
-        started: Instant,
-    ) {
+    pub async fn record(&self, client_id: usize, op: OpKind, outcome: OpOutcome, started: Instant) {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         let now_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -146,9 +140,8 @@ impl History {
         let inv = self.invocations.lock().await;
         let mut buf = String::new();
         for i in inv.iter() {
-            let line = serde_json::to_string(i).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-            })?;
+            let line = serde_json::to_string(i)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             buf.push_str(&line);
             buf.push('\n');
         }
@@ -179,8 +172,15 @@ impl History {
         let mut events: Vec<EllEvent<'_>> = Vec::with_capacity(inv.len() * 2);
         for (idx, i) in inv.iter().enumerate() {
             let key = match &i.op {
-                OpKind::Insert { collection, record_id, .. }
-                | OpKind::Read { collection, record_id } => {
+                OpKind::Insert {
+                    collection,
+                    record_id,
+                    ..
+                }
+                | OpKind::Read {
+                    collection,
+                    record_id,
+                } => {
                     format!("{collection}/{record_id}")
                 }
             };
@@ -229,9 +229,8 @@ impl History {
         }
         events.sort_by_key(|e| (e.time, e.index));
         for e in &events {
-            let line = serde_json::to_string(e).map_err(|err| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, err)
-            })?;
+            let line = serde_json::to_string(e)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
             buf.push_str(&line);
             buf.push('\n');
         }
@@ -280,14 +279,23 @@ pub struct Violation {
 /// the Inserts that completed before it. See module docs for
 /// the precise model.
 pub fn check_history(history: &[Invocation]) -> CheckReport {
-    let mut report = CheckReport::default();
-    report.total_invocations = history.len();
+    let mut report = CheckReport {
+        total_invocations: history.len(),
+        ..Default::default()
+    };
     // Build, for each (collection, record_id), the list of
     // successful Insert invocations sorted by end_ns.
     let mut inserts: HashMap<(String, String), Vec<&Invocation>> = HashMap::new();
     for inv in history {
         match (&inv.op, &inv.outcome) {
-            (OpKind::Insert { collection, record_id, .. }, OpOutcome::Ok(_)) => {
+            (
+                OpKind::Insert {
+                    collection,
+                    record_id,
+                    ..
+                },
+                OpOutcome::Ok(_),
+            ) => {
                 report.successful_inserts += 1;
                 inserts
                     .entry((collection.clone(), record_id.clone()))
@@ -300,7 +308,6 @@ pub fn check_history(history: &[Invocation]) -> CheckReport {
             (_, OpOutcome::Err(_)) | (_, OpOutcome::Timeout) => {
                 report.failed_invocations += 1;
             }
-            _ => {}
         }
     }
     // Sort each per-key insert list by end_ns so we can binary
@@ -314,8 +321,16 @@ pub fn check_history(history: &[Invocation]) -> CheckReport {
     // Read's start_ns. The Read MUST observe a payload from
     // one of those (or None if no Insert had even started).
     for inv in history {
-        let OpKind::Read { collection, record_id } = &inv.op else { continue };
-        let OpOutcome::Ok(observed) = &inv.outcome else { continue };
+        let OpKind::Read {
+            collection,
+            record_id,
+        } = &inv.op
+        else {
+            continue;
+        };
+        let OpOutcome::Ok(observed) = &inv.outcome else {
+            continue;
+        };
         let key = (collection.clone(), record_id.clone());
         let none_inserts: Vec<&Invocation> = Vec::new();
         let ins_list = inserts.get(&key).unwrap_or(&none_inserts);
@@ -397,13 +412,7 @@ pub fn check_history(history: &[Invocation]) -> CheckReport {
 mod tests {
     use super::*;
 
-    fn inv(
-        seq: u64,
-        start_ns: u128,
-        end_ns: u128,
-        op: OpKind,
-        outcome: OpOutcome,
-    ) -> Invocation {
+    fn inv(seq: u64, start_ns: u128, end_ns: u128, op: OpKind, outcome: OpOutcome) -> Invocation {
         Invocation {
             seq,
             start_ns,
@@ -419,13 +428,24 @@ mod tests {
     fn happy_path_no_violations() {
         let h = vec![
             inv(
-                0, 100, 200,
-                OpKind::Insert { collection: "c".into(), record_id: "1".into(), payload: "v1".into() },
+                0,
+                100,
+                200,
+                OpKind::Insert {
+                    collection: "c".into(),
+                    record_id: "1".into(),
+                    payload: "v1".into(),
+                },
                 OpOutcome::Ok(None),
             ),
             inv(
-                1, 300, 400,
-                OpKind::Read { collection: "c".into(), record_id: "1".into() },
+                1,
+                300,
+                400,
+                OpKind::Read {
+                    collection: "c".into(),
+                    record_id: "1".into(),
+                },
                 OpOutcome::Ok(Some("v1".into())),
             ),
         ];
@@ -439,13 +459,24 @@ mod tests {
     fn stale_read_caught() {
         let h = vec![
             inv(
-                0, 100, 200,
-                OpKind::Insert { collection: "c".into(), record_id: "1".into(), payload: "v1".into() },
+                0,
+                100,
+                200,
+                OpKind::Insert {
+                    collection: "c".into(),
+                    record_id: "1".into(),
+                    payload: "v1".into(),
+                },
                 OpOutcome::Ok(None),
             ),
             inv(
-                1, 300, 400,
-                OpKind::Read { collection: "c".into(), record_id: "1".into() },
+                1,
+                300,
+                400,
+                OpKind::Read {
+                    collection: "c".into(),
+                    record_id: "1".into(),
+                },
                 OpOutcome::Ok(None), // wrongly returned None
             ),
         ];
@@ -458,13 +489,24 @@ mod tests {
     fn payload_mismatch_caught() {
         let h = vec![
             inv(
-                0, 100, 200,
-                OpKind::Insert { collection: "c".into(), record_id: "1".into(), payload: "v1".into() },
+                0,
+                100,
+                200,
+                OpKind::Insert {
+                    collection: "c".into(),
+                    record_id: "1".into(),
+                    payload: "v1".into(),
+                },
                 OpOutcome::Ok(None),
             ),
             inv(
-                1, 300, 400,
-                OpKind::Read { collection: "c".into(), record_id: "1".into() },
+                1,
+                300,
+                400,
+                OpKind::Read {
+                    collection: "c".into(),
+                    record_id: "1".into(),
+                },
                 OpOutcome::Ok(Some("v_wrong".into())),
             ),
         ];
@@ -544,19 +586,36 @@ mod tests {
         let h = vec![
             // Two overlapping inserts.
             inv(
-                0, 100, 200,
-                OpKind::Insert { collection: "c".into(), record_id: "1".into(), payload: "v1".into() },
+                0,
+                100,
+                200,
+                OpKind::Insert {
+                    collection: "c".into(),
+                    record_id: "1".into(),
+                    payload: "v1".into(),
+                },
                 OpOutcome::Ok(None),
             ),
             inv(
-                1, 150, 250,
-                OpKind::Insert { collection: "c".into(), record_id: "1".into(), payload: "v2".into() },
+                1,
+                150,
+                250,
+                OpKind::Insert {
+                    collection: "c".into(),
+                    record_id: "1".into(),
+                    payload: "v2".into(),
+                },
                 OpOutcome::Ok(None),
             ),
             // Read overlapping the second insert: may see either value.
             inv(
-                2, 220, 280,
-                OpKind::Read { collection: "c".into(), record_id: "1".into() },
+                2,
+                220,
+                280,
+                OpKind::Read {
+                    collection: "c".into(),
+                    record_id: "1".into(),
+                },
                 OpOutcome::Ok(Some("v2".into())),
             ),
         ];

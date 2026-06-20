@@ -6,12 +6,30 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilterExpr {
     // Comparison operators
-    Eq { field: String, value: FilterValue },
-    Ne { field: String, value: FilterValue },
-    Gt { field: String, value: FilterValue },
-    Gte { field: String, value: FilterValue },
-    Lt { field: String, value: FilterValue },
-    Lte { field: String, value: FilterValue },
+    Eq {
+        field: String,
+        value: FilterValue,
+    },
+    Ne {
+        field: String,
+        value: FilterValue,
+    },
+    Gt {
+        field: String,
+        value: FilterValue,
+    },
+    Gte {
+        field: String,
+        value: FilterValue,
+    },
+    Lt {
+        field: String,
+        value: FilterValue,
+    },
+    Lte {
+        field: String,
+        value: FilterValue,
+    },
 
     // Range
     Between {
@@ -27,12 +45,22 @@ pub enum FilterExpr {
     },
 
     // String operations
-    Contains { field: String, value: String },
-    StartsWith { field: String, value: String },
+    Contains {
+        field: String,
+        value: String,
+    },
+    StartsWith {
+        field: String,
+        value: String,
+    },
 
     // Null checks
-    IsNull { field: String },
-    IsNotNull { field: String },
+    IsNull {
+        field: String,
+    },
+    IsNotNull {
+        field: String,
+    },
 
     // Logical operators
     And(Box<FilterExpr>, Box<FilterExpr>),

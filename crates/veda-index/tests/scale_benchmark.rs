@@ -44,7 +44,12 @@ struct Sq8BenchIndex {
 
 impl Sq8BenchIndex {
     fn new(metric: DistanceMetric) -> Self {
-        Self { quantizer: ScalarQuantizer::new(), metric, n: 0, dim: 0 }
+        Self {
+            quantizer: ScalarQuantizer::new(),
+            metric,
+            n: 0,
+            dim: 0,
+        }
     }
 }
 
@@ -58,19 +63,42 @@ impl VectorIndex for Sq8BenchIndex {
 
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
         let mut scores: Vec<(u32, f32)> = (0..self.n)
-            .map(|i| (i as u32, self.quantizer.estimate_distance(query, i, self.metric)))
+            .map(|i| {
+                (
+                    i as u32,
+                    self.quantizer.estimate_distance(query, i, self.metric),
+                )
+            })
             .collect();
         scores.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(scores.into_iter().take(k).map(|(id, distance)| SearchResult { id, distance }).collect())
+        Ok(scores
+            .into_iter()
+            .take(k)
+            .map(|(id, distance)| SearchResult { id, distance })
+            .collect())
     }
 
-    fn insert(&mut self, _id: u32, _vector: &[f32]) -> Result<()> { unimplemented!() }
-    fn delete(&mut self, _id: u32) -> Result<()> { unimplemented!() }
-    fn len(&self) -> usize { self.n }
-    fn save(&self, _path: &Path) -> Result<()> { unimplemented!() }
-    fn load(_path: &Path, _metric: DistanceMetric, _dimension: u32) -> Result<Self> { unimplemented!() }
-    fn metric(&self) -> DistanceMetric { self.metric }
-    fn dimension(&self) -> u32 { self.dim }
+    fn insert(&mut self, _id: u32, _vector: &[f32]) -> Result<()> {
+        unimplemented!()
+    }
+    fn delete(&mut self, _id: u32) -> Result<()> {
+        unimplemented!()
+    }
+    fn len(&self) -> usize {
+        self.n
+    }
+    fn save(&self, _path: &Path) -> Result<()> {
+        unimplemented!()
+    }
+    fn load(_path: &Path, _metric: DistanceMetric, _dimension: u32) -> Result<Self> {
+        unimplemented!()
+    }
+    fn metric(&self) -> DistanceMetric {
+        self.metric
+    }
+    fn dimension(&self) -> u32 {
+        self.dim
+    }
 }
 
 /// SQ4 per-dim: throwaway 4-bit per-dimension scalar quantizer prototype.
@@ -90,12 +118,19 @@ struct Sq4PerDimBenchIndex {
 
 impl Sq4PerDimBenchIndex {
     fn new(metric: DistanceMetric) -> Self {
-        Self { mins: Vec::new(), maxs: Vec::new(), codes: Vec::new(), metric, n: 0, dim: 0 }
+        Self {
+            mins: Vec::new(),
+            maxs: Vec::new(),
+            codes: Vec::new(),
+            metric,
+            n: 0,
+            dim: 0,
+        }
     }
 
     fn encode_vec(&self, v: &[f32]) -> Vec<u8> {
         let dim = v.len();
-        let packed_len = (dim + 1) / 2;
+        let packed_len = dim.div_ceil(2);
         let mut out = vec![0u8; packed_len];
         for (d, &val) in v.iter().enumerate() {
             let range = self.maxs[d] - self.mins[d];
@@ -107,9 +142,9 @@ impl Sq4PerDimBenchIndex {
             };
             let byte_idx = d / 2;
             if d % 2 == 0 {
-                out[byte_idx] |= nibble;        // low nibble
+                out[byte_idx] |= nibble; // low nibble
             } else {
-                out[byte_idx] |= nibble << 4;   // high nibble
+                out[byte_idx] |= nibble << 4; // high nibble
             }
         }
         out
@@ -136,7 +171,9 @@ impl Sq4PerDimBenchIndex {
 
 impl VectorIndex for Sq4PerDimBenchIndex {
     fn build(&mut self, vectors: &[&[f32]]) -> Result<()> {
-        if vectors.is_empty() { return Ok(()); }
+        if vectors.is_empty() {
+            return Ok(());
+        }
         let dim = vectors[0].len();
         self.dim = dim as u32;
         self.n = vectors.len();
@@ -146,8 +183,12 @@ impl VectorIndex for Sq4PerDimBenchIndex {
         self.maxs = vec![f32::MIN; dim];
         for v in vectors {
             for (d, &val) in v.iter().enumerate() {
-                if val < self.mins[d] { self.mins[d] = val; }
-                if val > self.maxs[d] { self.maxs[d] = val; }
+                if val < self.mins[d] {
+                    self.mins[d] = val;
+                }
+                if val > self.maxs[d] {
+                    self.maxs[d] = val;
+                }
             }
         }
 
@@ -157,24 +198,46 @@ impl VectorIndex for Sq4PerDimBenchIndex {
     }
 
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
-        let mut scores: Vec<(u32, f32)> = self.codes.iter().enumerate()
+        let mut scores: Vec<(u32, f32)> = self
+            .codes
+            .iter()
+            .enumerate()
             .map(|(i, code)| {
                 let reconstructed = self.decode_vec(code);
-                let dist = veda_index::distance::compute_distance(query, &reconstructed, self.metric);
+                let dist =
+                    veda_index::distance::compute_distance(query, &reconstructed, self.metric);
                 (i as u32, dist)
             })
             .collect();
         scores.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(scores.into_iter().take(k).map(|(id, distance)| SearchResult { id, distance }).collect())
+        Ok(scores
+            .into_iter()
+            .take(k)
+            .map(|(id, distance)| SearchResult { id, distance })
+            .collect())
     }
 
-    fn insert(&mut self, _id: u32, _vector: &[f32]) -> Result<()> { unimplemented!() }
-    fn delete(&mut self, _id: u32) -> Result<()> { unimplemented!() }
-    fn len(&self) -> usize { self.n }
-    fn save(&self, _path: &Path) -> Result<()> { unimplemented!() }
-    fn load(_path: &Path, _metric: DistanceMetric, _dimension: u32) -> Result<Self> { unimplemented!() }
-    fn metric(&self) -> DistanceMetric { self.metric }
-    fn dimension(&self) -> u32 { self.dim }
+    fn insert(&mut self, _id: u32, _vector: &[f32]) -> Result<()> {
+        unimplemented!()
+    }
+    fn delete(&mut self, _id: u32) -> Result<()> {
+        unimplemented!()
+    }
+    fn len(&self) -> usize {
+        self.n
+    }
+    fn save(&self, _path: &Path) -> Result<()> {
+        unimplemented!()
+    }
+    fn load(_path: &Path, _metric: DistanceMetric, _dimension: u32) -> Result<Self> {
+        unimplemented!()
+    }
+    fn metric(&self) -> DistanceMetric {
+        self.metric
+    }
+    fn dimension(&self) -> u32 {
+        self.dim
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,13 +245,26 @@ impl VectorIndex for Sq4PerDimBenchIndex {
 // ---------------------------------------------------------------------------
 
 fn run_scalar_diag(label: &str, corpus: Vec<Vec<f32>>, dim: usize) {
-    eprintln!("\n=== scalar_diag: {label} n={} dim={dim} ===", corpus.len());
+    eprintln!(
+        "\n=== scalar_diag: {label} n={} dim={dim} ===",
+        corpus.len()
+    );
     let refs: Vec<&[f32]> = corpus.iter().map(|v| v.as_slice()).collect();
     let mut truth = FlatIndex::new(DistanceMetric::Cosine, dim as u32);
     truth.build(&refs).unwrap();
-    let queries: Vec<&Vec<f32>> = (0..QUERIES).map(|i| &corpus[(i * 7919) % corpus.len()]).collect();
-    let truths: Vec<HashSet<u32>> = queries.iter()
-        .map(|q| truth.search(q, K).unwrap().into_iter().map(|h| h.id).collect())
+    let queries: Vec<&Vec<f32>> = (0..QUERIES)
+        .map(|i| &corpus[(i * 7919) % corpus.len()])
+        .collect();
+    let truths: Vec<HashSet<u32>> = queries
+        .iter()
+        .map(|q| {
+            truth
+                .search(q, K)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.id)
+                .collect()
+        })
         .collect();
 
     print_row("flat(truth)", corpus.len(), 0.0, &truth, &queries, &truths);
@@ -202,8 +278,15 @@ fn run_scalar_diag(label: &str, corpus: Vec<Vec<f32>>, dim: usize) {
     // SQ4 per-dim (4-bit per-dim): bytes/vec = ceil(dim/2)
     let mut sq4 = Sq4PerDimBenchIndex::new(DistanceMetric::Cosine);
     sq4.build(&refs).unwrap();
-    print_row("sq4-perdim(4b/dim)", corpus.len(), 0.0, &sq4, &queries, &truths);
-    eprintln!("    bytes/vec = {}", (dim + 1) / 2);
+    print_row(
+        "sq4-perdim(4b/dim)",
+        corpus.len(),
+        0.0,
+        &sq4,
+        &queries,
+        &truths,
+    );
+    eprintln!("    bytes/vec = {}", dim.div_ceil(2));
 }
 
 #[test]
@@ -244,7 +327,9 @@ fn make_corpus(n: usize, dim: usize) -> Vec<Vec<f32>> {
 /// distributions (unlike `make_corpus`'s isotropic uniform vectors).
 fn make_anisotropic_corpus(n: usize, dim: usize, rank: usize) -> Vec<Vec<f32>> {
     // Fixed random basis (rank x dim), seeded.
-    let basis: Vec<Vec<f32>> = (0..rank).map(|r| vec_of(1_000_000 + r as u32, dim)).collect();
+    let basis: Vec<Vec<f32>> = (0..rank)
+        .map(|r| vec_of(1_000_000 + r as u32, dim))
+        .collect();
     (0..n)
         .map(|i| {
             // Per-vector coefficients over the basis (heavy-tailed: first
@@ -265,7 +350,9 @@ fn make_anisotropic_corpus(n: usize, dim: usize, rank: usize) -> Vec<Vec<f32>> {
             // L2 normalize (cosine space)
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
             if norm > 1e-9 {
-                for x in &mut v { *x /= norm; }
+                for x in &mut v {
+                    *x /= norm;
+                }
             }
             v
         })
@@ -279,7 +366,11 @@ fn percentile(mut sorted: Vec<f64>, p: f64) -> f64 {
 }
 
 fn recall_at_k(index_ids: &[u32], truth_ids: &HashSet<u32>) -> f64 {
-    let hit = index_ids.iter().take(K).filter(|id| truth_ids.contains(id)).count();
+    let hit = index_ids
+        .iter()
+        .take(K)
+        .filter(|id| truth_ids.contains(id))
+        .count();
     hit as f64 / K as f64
 }
 
@@ -312,7 +403,14 @@ fn run_scale(label: &str, n: usize, dim: usize) {
         .collect();
 
     // Print the truth row first (latency = 100% recall by construction).
-    print_row("flat (truth)", n, truth_build_ms, &truth_idx, &queries, &truths);
+    print_row(
+        "flat (truth)",
+        n,
+        truth_build_ms,
+        &truth_idx,
+        &queries,
+        &truths,
+    );
 
     // HNSW.
     let t0 = Instant::now();
@@ -381,7 +479,14 @@ fn run_rabitq_family(label: &str, n: usize, dim: usize) {
     let queries: Vec<&Vec<f32>> = (0..QUERIES).map(|i| &corpus[(i * 7919) % n]).collect();
     let truths: Vec<HashSet<u32>> = queries
         .iter()
-        .map(|q| truth_idx.search(q, K).unwrap().into_iter().map(|h| h.id).collect())
+        .map(|q| {
+            truth_idx
+                .search(q, K)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.id)
+                .collect()
+        })
         .collect();
 
     let raw_mb = (n * dim * 4) as f64 / (1024.0 * 1024.0);
@@ -392,17 +497,38 @@ fn run_rabitq_family(label: &str, n: usize, dim: usize) {
     let t0 = Instant::now();
     let mut rabitq = RaBitQIndex::new(DistanceMetric::Cosine);
     rabitq.build(&refs).unwrap();
-    print_row("rabitq", n, t0.elapsed().as_secs_f64() * 1000.0, &rabitq, &queries, &truths);
+    print_row(
+        "rabitq",
+        n,
+        t0.elapsed().as_secs_f64() * 1000.0,
+        &rabitq,
+        &queries,
+        &truths,
+    );
 
     let t0 = Instant::now();
     let mut rerank = RaBitQRerankIndex::new(DistanceMetric::Cosine);
     rerank.build(&refs).unwrap();
-    print_row("rabitq+rerank", n, t0.elapsed().as_secs_f64() * 1000.0, &rerank, &queries, &truths);
+    print_row(
+        "rabitq+rerank",
+        n,
+        t0.elapsed().as_secs_f64() * 1000.0,
+        &rerank,
+        &queries,
+        &truths,
+    );
 
     let t0 = Instant::now();
     let mut ext = RaBitQExtRerankIndex::new(DistanceMetric::Cosine);
     ext.build(&refs).unwrap();
-    print_row("rabitq+extrerank", n, t0.elapsed().as_secs_f64() * 1000.0, &ext, &queries, &truths);
+    print_row(
+        "rabitq+extrerank",
+        n,
+        t0.elapsed().as_secs_f64() * 1000.0,
+        &ext,
+        &queries,
+        &truths,
+    );
 }
 
 #[test]
@@ -441,7 +567,7 @@ fn scale_1m_dim_768() {
 fn analytical_bytes_per_vec(label: &str, dim: usize) -> f64 {
     // 1-bit coarse = dim/8; raw-f32 rerank = dim*4; 4-bit ext rerank = dim*0.5
     match label {
-        "rabitq" => (dim as f64) / 8.0 + 4.0,                 // codes + norm
+        "rabitq" => (dim as f64) / 8.0 + 4.0, // codes + norm
         "rabitq+rerank" => (dim as f64) / 8.0 + (dim as f64) * 4.0, // + raw f32
         l if l.starts_with("extrerank") => (dim as f64) / 8.0 + (dim as f64) * 0.5, // + 4-bit
         _ => 0.0,
@@ -456,23 +582,41 @@ fn run_anisotropic_ab(n: usize, dim: usize, rank: usize) {
     let mut truth = FlatIndex::new(DistanceMetric::Cosine, dim as u32);
     truth.build(&refs).unwrap();
     let queries: Vec<&Vec<f32>> = (0..QUERIES).map(|i| &corpus[(i * 7919) % n]).collect();
-    let truths: Vec<std::collections::HashSet<u32>> = queries.iter()
-        .map(|q| truth.search(q, K).unwrap().into_iter().map(|h| h.id).collect()).collect();
+    let truths: Vec<std::collections::HashSet<u32>> = queries
+        .iter()
+        .map(|q| {
+            truth
+                .search(q, K)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.id)
+                .collect()
+        })
+        .collect();
 
     let mut rerank = RaBitQRerankIndex::new(DistanceMetric::Cosine);
     rerank.build(&refs).unwrap();
     print_row("rabitq+rerank", n, 0.0, &rerank, &queries, &truths);
-    eprintln!("    bytes/vec ≈ {:.0}", analytical_bytes_per_vec("rabitq+rerank", dim));
+    eprintln!(
+        "    bytes/vec ≈ {:.0}",
+        analytical_bytes_per_vec("rabitq+rerank", dim)
+    );
 
     let mut ext_default = RaBitQExtRerankIndex::new(DistanceMetric::Cosine);
     ext_default.build(&refs).unwrap();
     print_row("extrerank-default", n, 0.0, &ext_default, &queries, &truths);
-    eprintln!("    bytes/vec ≈ {:.0}", analytical_bytes_per_vec("extrerank", dim));
+    eprintln!(
+        "    bytes/vec ≈ {:.0}",
+        analytical_bytes_per_vec("extrerank", dim)
+    );
 
     let mut ext_rot = RaBitQExtRerankIndex::new_with_rotation(DistanceMetric::Cosine);
     ext_rot.build(&refs).unwrap();
     print_row("extrerank-rotation", n, 0.0, &ext_rot, &queries, &truths);
-    eprintln!("    bytes/vec ≈ {:.0}", analytical_bytes_per_vec("extrerank", dim));
+    eprintln!(
+        "    bytes/vec ≈ {:.0}",
+        analytical_bytes_per_vec("extrerank", dim)
+    );
 }
 
 #[test]
@@ -494,7 +638,14 @@ fn sq_recall_targets_1536() {
     let queries: Vec<&Vec<f32>> = (0..QUERIES).map(|i| &corpus[(i * 7919) % n]).collect();
     let truths: Vec<std::collections::HashSet<u32>> = queries
         .iter()
-        .map(|q| truth.search(q, K).unwrap().into_iter().map(|h| h.id).collect())
+        .map(|q| {
+            truth
+                .search(q, K)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.id)
+                .collect()
+        })
         .collect();
 
     // Helper: compute mean recall@K over all queries for a given index.

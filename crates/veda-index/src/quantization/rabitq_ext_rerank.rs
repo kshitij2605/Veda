@@ -256,8 +256,8 @@ mod tests {
         (0..n)
             .map(|i| {
                 let mut v = vec![0.0_f32; dim];
-                for d in 0..dim {
-                    v[d] = ((i + d) as f32 * 0.07).sin();
+                for (d, slot) in v.iter_mut().enumerate() {
+                    *slot = ((i + d) as f32 * 0.07).sin();
                 }
                 v
             })
@@ -312,8 +312,7 @@ mod tests {
         idx.build(&refs).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         idx.save(tmp.path()).unwrap();
-        let loaded =
-            RaBitQExtRerankIndex::load(tmp.path(), DistanceMetric::Euclidean, 4).unwrap();
+        let loaded = RaBitQExtRerankIndex::load(tmp.path(), DistanceMetric::Euclidean, 4).unwrap();
         assert_eq!(loaded.len(), 10);
         assert_eq!(loaded.dimension(), 4);
         assert_eq!(loaded.metric(), DistanceMetric::Euclidean);
@@ -349,23 +348,17 @@ mod tests {
 
         // Collect search results for several probe vectors before saving.
         let probes: Vec<&[f32]> = vectors[0..5].iter().map(|v| v.as_slice()).collect();
-        let before: Vec<Vec<SearchResult>> = probes
-            .iter()
-            .map(|q| idx.search(q, 5).unwrap())
-            .collect();
+        let before: Vec<Vec<SearchResult>> =
+            probes.iter().map(|q| idx.search(q, 5).unwrap()).collect();
 
         // Save → reload via the VectorIndex::save / VectorIndex::load API
         // (directory-based: coarse.q + rerank.q + manifest.bin).
         let tmp = tempfile::tempdir().unwrap();
         idx.save(tmp.path()).unwrap();
-        let loaded =
-            RaBitQExtRerankIndex::load(tmp.path(), DistanceMetric::Cosine, 64).unwrap();
+        let loaded = RaBitQExtRerankIndex::load(tmp.path(), DistanceMetric::Cosine, 64).unwrap();
 
         // Reloaded index must still carry rotation + codebook.
-        assert!(
-            loaded.rerank.has_rotation(),
-            "rotation must survive reload"
-        );
+        assert!(loaded.rerank.has_rotation(), "rotation must survive reload");
         assert!(
             loaded.rerank.has_optimized_codebook(),
             "Lloyd-Max codebook must survive reload"
@@ -380,10 +373,7 @@ mod tests {
                 "result count changed after reload for probe {i}"
             );
             for (b, a) in before[i].iter().zip(after.iter()) {
-                assert_eq!(
-                    b.id, a.id,
-                    "result id mismatch after reload for probe {i}"
-                );
+                assert_eq!(b.id, a.id, "result id mismatch after reload for probe {i}");
                 assert!(
                     (b.distance - a.distance).abs() < 1e-6,
                     "distance changed after reload for probe {i}: before={} after={}",

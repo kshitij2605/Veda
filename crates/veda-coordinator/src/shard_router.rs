@@ -171,7 +171,7 @@ impl ShardRouter {
     }
 
     /// Select one replica from the active list based on the configured strategy.
-    fn select_replica<'a>(&self, active: &[( u64, &'a String)]) -> (u64, &'a String) {
+    fn select_replica<'a>(&self, active: &[(u64, &'a String)]) -> (u64, &'a String) {
         match self.replica_selection {
             ReplicaSelection::First => active[0],
             ReplicaSelection::RoundRobin => {

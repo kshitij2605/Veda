@@ -32,7 +32,7 @@ use veda_core::embedding_client::EmbeddingClient;
 
 use crate::advisor::event::{OpsEvent, Severity};
 use crate::advisor::notify::Notifier;
-use crate::advisor::rca::{correlate_incident, RcaBundle};
+use crate::advisor::rca::{RcaBundle, correlate_incident};
 use crate::logs::categorize::cosine;
 use crate::rest::insights::rca_summary;
 use crate::rest::state::AppState;
@@ -244,6 +244,7 @@ fn cluster_by_embedding(events: &[OpsEvent], embs: &[Vec<f32>], threshold: f32) 
                 let acc = &mut accs[i];
                 // Running-mean centroid update.
                 let n = acc.count as f32;
+                #[allow(clippy::needless_range_loop)]
                 for k in 0..acc.centroid.len().min(emb.len()) {
                     acc.centroid[k] = (acc.centroid[k] * n + emb[k]) / (n + 1.0);
                 }
@@ -270,20 +271,15 @@ fn cluster_by_rule_scope(events: &[OpsEvent]) -> Vec<Accum> {
             }
         }
     }
-    order
-        .into_iter()
-        .filter_map(|k| map.remove(&k))
-        .collect()
+    order.into_iter().filter_map(|k| map.remove(&k)).collect()
 }
 
 /// Sort incidents most-urgent-first (severity desc, then count desc, then
 /// id for determinism) while keeping the parallel `embeddings` vector
 /// aligned by incident.
 fn sort_incidents_with_embeddings(incidents: &mut Vec<Incident>, embeddings: &mut Vec<Vec<f32>>) {
-    let mut paired: Vec<(Incident, Vec<f32>)> = incidents
-        .drain(..)
-        .zip(embeddings.drain(..))
-        .collect();
+    let mut paired: Vec<(Incident, Vec<f32>)> =
+        incidents.drain(..).zip(embeddings.drain(..)).collect();
     paired.sort_by(|a, b| {
         b.0.max_severity
             .cmp(&a.0.max_severity)
@@ -558,10 +554,11 @@ impl IncidentStore {
 
     /// Persist to `path` as pretty JSON. Failure is logged, not surfaced.
     pub fn save(&self, path: &Path) {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            let _ = std::fs::create_dir_all(parent);
         }
         match serde_json::to_vec_pretty(self) {
             Ok(bytes) => {
@@ -625,11 +622,19 @@ impl IncidentDrafter for OpsAgentDrafter<'_> {
     async fn draft(&self, prompt: &str) -> Option<String> {
         let tenant = crate::tenant::TenantId::default_tenant();
         match crate::rest::agents::run_agent_turn(
-            self.state, &tenant, None, "veda-ops", &[], prompt, None,
+            self.state,
+            &tenant,
+            None,
+            "veda-ops",
+            &[],
+            prompt,
+            None,
         )
         .await
         {
-            Ok((_agent, result, _citations, _grounding, _cache_hit, _guardrails)) => Some(result.response),
+            Ok((_agent, result, _citations, _grounding, _cache_hit, _guardrails)) => {
+                Some(result.response)
+            }
             Err(_) => None,
         }
     }
@@ -804,7 +809,9 @@ pub async fn run_incident_correlation_with<D: IncidentDrafter>(state: &AppState,
     let notifier = Notifier::new(channels);
     for inc in incidents.iter().filter(|i| new_ids.contains(&i.id)) {
         let ev = incident_notification_event(inc);
-        notifier.notify_transitions(std::slice::from_ref(&ev), &[]).await;
+        notifier
+            .notify_transitions(std::slice::from_ref(&ev), &[])
+            .await;
     }
 
     // 5. Record + mark notified + append NEW incidents' embeddings to the
@@ -868,9 +875,27 @@ mod tests {
         // Two differently-worded "disk full" events with near-identical
         // embeddings → ONE incident; a distinct event stays separate.
         let events = vec![
-            ev("disk_a", Scope::Node("n1".into()), Severity::Medium, "Disk almost full on n1", 100),
-            ev("disk_b", Scope::Node("n2".into()), Severity::High, "Low free space on node n2", 200),
-            ev("latency", Scope::Global, Severity::Low, "Query latency elevated", 300),
+            ev(
+                "disk_a",
+                Scope::Node("n1".into()),
+                Severity::Medium,
+                "Disk almost full on n1",
+                100,
+            ),
+            ev(
+                "disk_b",
+                Scope::Node("n2".into()),
+                Severity::High,
+                "Low free space on node n2",
+                200,
+            ),
+            ev(
+                "latency",
+                Scope::Global,
+                Severity::Low,
+                "Query latency elevated",
+                300,
+            ),
         ];
         let embs = vec![
             vec![1.0, 0.0, 0.0],
@@ -878,9 +903,16 @@ mod tests {
             vec![0.0, 1.0, 0.0],   // orthogonal → separate
         ];
         let incidents = cluster_incidents(&events, Some(&embs), 0.9);
-        assert_eq!(incidents.len(), 2, "expected 2 incidents, got {incidents:?}");
+        assert_eq!(
+            incidents.len(),
+            2,
+            "expected 2 incidents, got {incidents:?}"
+        );
 
-        let disk = incidents.iter().find(|i| i.count == 2).expect("a 2-member incident");
+        let disk = incidents
+            .iter()
+            .find(|i| i.count == 2)
+            .expect("a 2-member incident");
         assert_eq!(disk.count, 2);
         assert_eq!(disk.member_event_ids.len(), 2);
         // Representative is the highest-severity member (the High n2 event).
@@ -892,7 +924,10 @@ mod tests {
         assert!(disk.rule_ids.contains(&"disk_a".to_owned()));
         assert!(disk.rule_ids.contains(&"disk_b".to_owned()));
 
-        let solo = incidents.iter().find(|i| i.count == 1).expect("a 1-member incident");
+        let solo = incidents
+            .iter()
+            .find(|i| i.count == 1)
+            .expect("a 1-member incident");
         assert_eq!(solo.representative, "Query latency elevated");
     }
 
@@ -912,14 +947,35 @@ mod tests {
         // No embeddings → group by (rule_id, scope.key()). Same rule on the
         // same scope (a recurring alert) collapses; different scope splits.
         let events = vec![
-            ev("compaction_backlog", Scope::Collection("docs".into()), Severity::Medium, "Compaction backlog on docs", 10),
-            ev("compaction_backlog", Scope::Collection("docs".into()), Severity::High, "Compaction backlog on docs (worse)", 20),
-            ev("compaction_backlog", Scope::Collection("imgs".into()), Severity::Low, "Compaction backlog on imgs", 30),
+            ev(
+                "compaction_backlog",
+                Scope::Collection("docs".into()),
+                Severity::Medium,
+                "Compaction backlog on docs",
+                10,
+            ),
+            ev(
+                "compaction_backlog",
+                Scope::Collection("docs".into()),
+                Severity::High,
+                "Compaction backlog on docs (worse)",
+                20,
+            ),
+            ev(
+                "compaction_backlog",
+                Scope::Collection("imgs".into()),
+                Severity::Low,
+                "Compaction backlog on imgs",
+                30,
+            ),
         ];
         let incidents = cluster_incidents(&events, None, DEFAULT_THRESHOLD);
         assert_eq!(incidents.len(), 2, "docs collapses, imgs separate");
 
-        let docs = incidents.iter().find(|i| i.count == 2).expect("docs incident");
+        let docs = incidents
+            .iter()
+            .find(|i| i.count == 2)
+            .expect("docs incident");
         assert_eq!(docs.count, 2);
         assert_eq!(docs.max_severity, Severity::High);
         assert_eq!(docs.first_seen_ms, 10);
@@ -928,7 +984,10 @@ mod tests {
         // High event wins outright.
         assert_eq!(docs.representative, "Compaction backlog on docs (worse)");
 
-        let imgs = incidents.iter().find(|i| i.count == 1).expect("imgs incident");
+        let imgs = incidents
+            .iter()
+            .find(|i| i.count == 1)
+            .expect("imgs incident");
         assert_eq!(imgs.representative, "Compaction backlog on imgs");
     }
 
@@ -936,8 +995,20 @@ mod tests {
     fn representative_breaks_severity_ties_by_earliest() {
         // Two equal-severity members → earliest opened is representative.
         let events = vec![
-            ev("a", Scope::Node("n1".into()), Severity::High, "later opened", 500),
-            ev("b", Scope::Node("n2".into()), Severity::High, "earlier opened", 100),
+            ev(
+                "a",
+                Scope::Node("n1".into()),
+                Severity::High,
+                "later opened",
+                500,
+            ),
+            ev(
+                "b",
+                Scope::Node("n2".into()),
+                Severity::High,
+                "earlier opened",
+                100,
+            ),
         ];
         let embs = vec![vec![1.0, 0.0], vec![1.0, 0.0]];
         let incidents = cluster_incidents(&events, Some(&embs), 0.5);
@@ -1011,7 +1082,11 @@ mod tests {
     #[test]
     fn store_load_missing_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(IncidentStore::load(&dir.path().join("nope.json")).latest().is_empty());
+        assert!(
+            IncidentStore::load(&dir.path().join("nope.json"))
+                .latest()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1143,7 +1218,11 @@ mod tests {
             store.latest()[0].draft.as_deref(),
             Some("Root cause: error spike. Step: inspect logs.")
         );
-        assert_eq!(drafter.call_count(), 1, "the one new incident is drafted once");
+        assert_eq!(
+            drafter.call_count(),
+            1,
+            "the one new incident is drafted once"
+        );
     }
 
     #[tokio::test]
@@ -1189,7 +1268,10 @@ mod tests {
         let ev = incident_notification_event(&inc);
         assert!(ev.title.contains("5 alerts → 1 incident"));
         assert!(ev.title.contains("errors spiking"));
-        assert!(ev.detail.contains("Draft root-cause: Root cause: error spike."));
+        assert!(
+            ev.detail
+                .contains("Draft root-cause: Root cause: error spike.")
+        );
         // dedup_key is the incident id → one PagerDuty/webhook identity.
         assert_eq!(ev.id, "inc_x");
         assert_eq!(ev.severity, Severity::High);
@@ -1241,14 +1323,16 @@ mod tests {
         rx.recv_timeout(std::time::Duration::from_secs(5))
             .expect("exactly one incident notification");
         assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
             "only one notification on the first pass"
         );
 
         // Second pass: same incident → NOT re-notified (deduped).
         run_incident_correlation_with(&state, &drafter).await;
         assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(500)).is_err(),
+            rx.recv_timeout(std::time::Duration::from_millis(500))
+                .is_err(),
             "stable incident must not be re-notified"
         );
 
@@ -1267,7 +1351,10 @@ mod tests {
         let current = vec![0.0, 0.0, 1.0];
         let (is_novel, score) = score_novelty(&current, &history, NOVELTY_THRESHOLD);
         assert!(is_novel, "orthogonal embedding must be novel");
-        assert!((score - 1.0).abs() < 1e-6, "score should be ~1.0, got {score}");
+        assert!(
+            (score - 1.0).abs() < 1e-6,
+            "score should be ~1.0, got {score}"
+        );
     }
 
     #[test]
@@ -1278,7 +1365,10 @@ mod tests {
         let current = vec![0.999, 0.01, 0.0];
         let (is_novel, score) = score_novelty(&current, &history, NOVELTY_THRESHOLD);
         assert!(!is_novel, "near-duplicate embedding must not be novel");
-        assert!(score < NOVELTY_THRESHOLD, "score {score} should be below threshold");
+        assert!(
+            score < NOVELTY_THRESHOLD,
+            "score {score} should be below threshold"
+        );
     }
 
     #[test]
@@ -1340,7 +1430,10 @@ mod tests {
         let (incidents, centroids) = cluster_incidents_with_embeddings(&events, Some(&embs), 0.82);
         assert_eq!(incidents.len(), 2);
         assert_eq!(centroids.len(), 2);
-        assert!(centroids.iter().all(|c| c.len() == 2), "centroids carry the embedding dim");
+        assert!(
+            centroids.iter().all(|c| c.len() == 2),
+            "centroids carry the embedding dim"
+        );
     }
 
     #[test]
@@ -1412,7 +1505,10 @@ mod tests {
         let embs = vec![vec![]]; // fallback path — no embedding
         annotate_novelty(&mut incidents, &embs, &history, NOVELTY_THRESHOLD);
         assert!(!incidents[0].is_novel);
-        assert!(incidents[0].novelty_score.is_none(), "no score without an embedding");
+        assert!(
+            incidents[0].novelty_score.is_none(),
+            "no score without an embedding"
+        );
     }
 
     #[test]
@@ -1423,10 +1519,17 @@ mod tests {
         inc.is_novel = true;
         inc.novelty_score = Some(0.93);
         let ev = incident_notification_event(&inc);
-        assert!(ev.title.contains("UNPRECEDENTED"), "title flags unprecedented");
+        assert!(
+            ev.title.contains("UNPRECEDENTED"),
+            "title flags unprecedented"
+        );
         assert!(ev.detail.contains("UNPRECEDENTED pattern"));
         assert!(ev.detail.contains("0.93"), "novelty score surfaced");
-        assert_eq!(ev.severity, Severity::High, "novel incident escalated to High");
+        assert_eq!(
+            ev.severity,
+            Severity::High,
+            "novel incident escalated to High"
+        );
     }
 
     #[test]
@@ -1436,6 +1539,10 @@ mod tests {
         let ev = incident_notification_event(&inc);
         assert!(!ev.title.contains("UNPRECEDENTED"));
         assert!(!ev.detail.contains("UNPRECEDENTED"));
-        assert_eq!(ev.severity, Severity::Medium, "non-novel keeps its severity");
+        assert_eq!(
+            ev.severity,
+            Severity::Medium,
+            "non-novel keeps its severity"
+        );
     }
 }

@@ -22,8 +22,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::hlc::{Hlc, HlcClock};
 use crate::Ts;
+use crate::hlc::{Hlc, HlcClock};
 
 #[derive(Debug, Error)]
 pub enum TsoError {
@@ -77,7 +77,9 @@ pub struct LocalTso {
 
 impl LocalTso {
     pub fn new() -> Self {
-        Self { clock: Arc::new(HlcClock::new()) }
+        Self {
+            clock: Arc::new(HlcClock::new()),
+        }
     }
 
     pub fn with_clock(clock: Arc<HlcClock>) -> Self {
@@ -103,7 +105,10 @@ impl Tso for LocalTso {
         // to ensure the clock's internal `last` is >= range.end,
         // so the next allocate() can't overlap.
         if n == 0 {
-            return Ok(TsRange { start: self.clock.now(), count: 0 });
+            return Ok(TsRange {
+                start: self.clock.now(),
+                count: 0,
+            });
         }
         let start = self.clock.now();
         // Walk the clock forward n-1 times so the next now() is

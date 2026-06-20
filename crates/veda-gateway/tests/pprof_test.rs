@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::auth::Role;
@@ -38,8 +38,14 @@ async fn start_server() -> (String, tempfile::TempDir) {
 async fn start_auth_server() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let mut users = HashMap::new();
-    users.insert("admin".to_owned(), UserRecord::with_password("admin", Role::Admin));
-    users.insert("viewer".to_owned(), UserRecord::with_password("viewer", Role::Viewer));
+    users.insert(
+        "admin".to_owned(),
+        UserRecord::with_password("admin", Role::Admin),
+    );
+    users.insert(
+        "viewer".to_owned(),
+        UserRecord::with_password("viewer", Role::Viewer),
+    );
     let app_state = AppState::with_auth_and_users(tmp.path(), "test-jwt-secret", users);
     let router = build_router(app_state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -72,7 +78,9 @@ fn spin_for(secs: u64) -> tokio::task::JoinHandle<()> {
         let mut x: u64 = 0;
         while std::time::Instant::now() < deadline {
             // busy work the profiler can sample
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             std::hint::black_box(x);
         }
     })
@@ -85,7 +93,9 @@ async fn flamegraph_returns_svg() {
     let c = Client::new();
     let _spin = spin_for(2);
     let r = c
-        .get(format!("{base}/v1/admin/pprof?seconds=1&frequency=200&format=flamegraph"))
+        .get(format!(
+            "{base}/v1/admin/pprof?seconds=1&frequency=200&format=flamegraph"
+        ))
         .send()
         .await
         .unwrap();
@@ -100,7 +110,11 @@ async fn flamegraph_returns_svg() {
     let body = r.text().await.unwrap();
     assert!(!body.is_empty(), "flamegraph body is empty");
     // Tolerate a small/near-empty flamegraph — just assert it's a valid SVG.
-    assert!(body.contains("<svg"), "body is not an SVG document: {}", &body[..body.len().min(200)]);
+    assert!(
+        body.contains("<svg"),
+        "body is not an SVG document: {}",
+        &body[..body.len().min(200)]
+    );
 }
 
 #[tokio::test]
@@ -174,5 +188,9 @@ async fn concurrent_profiles_conflict() {
 
     let mut statuses = [s1, s2];
     statuses.sort_unstable();
-    assert_eq!(statuses, [200, 409], "expected one 200 and one 409, got {statuses:?}");
+    assert_eq!(
+        statuses,
+        [200, 409],
+        "expected one 200 and one 409, got {statuses:?}"
+    );
 }

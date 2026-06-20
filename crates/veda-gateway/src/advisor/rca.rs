@@ -243,7 +243,14 @@ pub async fn correlate_incident(state: &AppState, event_id: &str) -> Option<RcaB
             .open_events()
             .into_iter()
             .find(|e| e.id == event_id)
-            .or_else(|| store.history().iter().rev().find(|e| e.id == event_id).cloned())
+            .or_else(|| {
+                store
+                    .history()
+                    .iter()
+                    .rev()
+                    .find(|e| e.id == event_id)
+                    .cloned()
+            })
     }?;
 
     let window_ms = DEFAULT_WINDOW_MS;
@@ -296,12 +303,7 @@ pub async fn correlate_incident(state: &AppState, event_id: &str) -> Option<RcaB
     };
 
     Some(correlate(
-        &event,
-        &logs,
-        &queries,
-        &snapshots,
-        &incidents,
-        window_ms,
+        &event, &logs, &queries, &snapshots, &incidents, window_ms,
     ))
 }
 
@@ -311,9 +313,7 @@ use crate::rest::state::AppState;
 mod tests {
     use super::*;
     use crate::advisor::event::{EventStatus, RemediationAction, Scope, Severity};
-    use crate::advisor::snapshot::{
-        GlobalSnapshot, HealthSnapshot, NodeSnapshot, QuerySnapshot,
-    };
+    use crate::advisor::snapshot::{GlobalSnapshot, HealthSnapshot, NodeSnapshot, QuerySnapshot};
     use std::collections::HashMap;
 
     fn event(id_rule: &str, opened: i64) -> OpsEvent {
@@ -459,13 +459,18 @@ mod tests {
 
         // Only WARN/ERROR in-window logs (2 of 4).
         assert_eq!(b.logs.len(), 2, "{:?}", b.logs);
-        assert!(b.logs.iter().all(|l| l.level == "ERROR" || l.level == "WARN"));
+        assert!(
+            b.logs
+                .iter()
+                .all(|l| l.level == "ERROR" || l.level == "WARN")
+        );
         // Only slow/errored in-window queries (2 of 4).
         assert_eq!(b.slow_queries.len(), 2, "{:?}", b.slow_queries);
-        assert!(b
-            .slow_queries
-            .iter()
-            .all(|q| q.status == "error" || q.took_ms >= SLOW_QUERY_MS));
+        assert!(
+            b.slow_queries
+                .iter()
+                .all(|q| q.status == "error" || q.took_ms >= SLOW_QUERY_MS)
+        );
     }
 
     #[test]
@@ -502,10 +507,7 @@ mod tests {
     #[test]
     fn related_incident_is_matched_by_member_id() {
         let ev = event("high_error_rate", 10_000);
-        let incidents = vec![
-            incident(&["other:global"]),
-            incident(&[&ev.id, "x:global"]),
-        ];
+        let incidents = vec![incident(&["other:global"]), incident(&[&ev.id, "x:global"])];
         let b = correlate(&ev, &[], &[], &[], &incidents, DEFAULT_WINDOW_MS);
         let inc = b.related_incident.expect("a related incident");
         assert_eq!(inc.id, "inc_1");

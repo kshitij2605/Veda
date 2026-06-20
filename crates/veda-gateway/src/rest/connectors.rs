@@ -2,10 +2,10 @@
 //!
 //! A connector is a persisted, manageable data source. Two kinds today:
 //!   * `Web`        — a set of seed URLs crawled (via crawl4ai) into a
-//!                    target collection. Has a `/run` "crawl now" action.
+//!     target collection. Has a `/run` "crawl now" action.
 //!   * `WebSearch`  — a lightweight marker that agentic web search is
-//!                    enabled for this tenant; the actual tool is the
-//!                    Phase-2 `web_search` agent tool. No `/run` action.
+//!     enabled for this tenant; the actual tool is the
+//!     Phase-2 `web_search` agent tool. No `/run` action.
 //!
 //! Admin-only, mirroring [`crate::rest::slos`]: registered under the
 //! protected router with an extra `rbac::require_admin` route layer.
@@ -21,9 +21,9 @@
 //!   DELETE /v1/admin/connectors/{id}      — delete one
 //!   POST   /v1/admin/connectors/{id}/run  — crawl a Web connector now
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use super::collections::ErrorResponse;
@@ -184,7 +184,12 @@ pub async fn get_connector(
     let scoped = tenant::scope(&tenant, &id);
     let mut c = get_scoped(&state.inner.saved_objects, &scoped)
         .await
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("no connector with id '{id}'")))?;
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("no connector with id '{id}'"),
+            )
+        })?;
     c.id = id;
     Ok(Json(c))
 }
@@ -200,7 +205,12 @@ pub async fn put_connector(
     let scoped = tenant::scope(&tenant, &id);
     let existing = get_scoped(&state.inner.saved_objects, &scoped)
         .await
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("no connector with id '{id}'")))?;
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("no connector with id '{id}'"),
+            )
+        })?;
     c.created_at = existing.created_at;
     c.updated_at = now_ms();
     c.id = scoped;
@@ -255,7 +265,12 @@ pub async fn run_connector(
     let scoped = tenant::scope(&tenant, &id);
     let connector = get_scoped(&state.inner.saved_objects, &scoped)
         .await
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("no connector with id '{id}'")))?;
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("no connector with id '{id}'"),
+            )
+        })?;
 
     if connector.kind != ConnectorKind::Web {
         return Err(err(
@@ -296,7 +311,8 @@ pub async fn run_connector(
         })?
     };
 
-    let strategy = parse_chunking_strategy(cfg.chunker.as_deref(), cfg.chunk_size, cfg.chunk_overlap);
+    let strategy =
+        parse_chunking_strategy(cfg.chunker.as_deref(), cfg.chunk_size, cfg.chunk_overlap);
     let expires_at = cfg.ttl_secs.map(|ttl| now_ms() / 1000 + ttl as i64);
 
     let outcome = crawl_and_ingest(

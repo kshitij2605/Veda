@@ -85,8 +85,7 @@ impl VectorIndex for RaBitQRerankIndex {
                 (id, d)
             })
             .collect();
-        reranked
-            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        reranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         reranked.truncate(k);
         Ok(reranked
             .into_iter()
@@ -118,8 +117,7 @@ impl VectorIndex for RaBitQRerankIndex {
                 (id, d)
             })
             .collect();
-        reranked
-            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        reranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         reranked.truncate(k);
         Ok(reranked
             .into_iter()
@@ -175,7 +173,9 @@ impl VectorIndex for RaBitQRerankIndex {
         let quantizer = RaBitQuantizer::load(&path.join("rabitq.bin"))?;
         let raw_bytes = std::fs::read(path.join("raw.bin"))?;
         if raw_bytes.len() < 16 {
-            return Err(VedaError::Storage("rabitq_rerank: raw.bin truncated".into()));
+            return Err(VedaError::Storage(
+                "rabitq_rerank: raw.bin truncated".into(),
+            ));
         }
         let row_count = u64::from_le_bytes(raw_bytes[0..8].try_into().unwrap()) as usize;
         let dim = u64::from_le_bytes(raw_bytes[8..16].try_into().unwrap()) as usize;
@@ -185,7 +185,9 @@ impl VectorIndex for RaBitQRerankIndex {
             let start = 16 + i * stride;
             let end = start + stride;
             if end > raw_bytes.len() {
-                return Err(VedaError::Storage("rabitq_rerank: raw.bin truncated row".into()));
+                return Err(VedaError::Storage(
+                    "rabitq_rerank: raw.bin truncated row".into(),
+                ));
             }
             let mut row = Vec::with_capacity(dim);
             for j in 0..dim {
@@ -265,7 +267,7 @@ mod tests {
 
         let mut bare_hits = 0;
         let mut rerank_hits = 0;
-        for i in 0..n as u32 {
+        for i in 0..n {
             let q = vecs[i as usize].clone();
             if bare.search(&q, 1).unwrap().first().map(|h| h.id) == Some(i) {
                 bare_hits += 1;

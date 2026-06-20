@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -161,31 +161,22 @@ impl NatsWal {
     /// Publish a WAL entry. Returns the NATS-assigned stream sequence.
     pub async fn append(&self, entry: WalEntry) -> Result<u64> {
         let subject = Self::subject_for(&entry);
-        let payload = bincode::serialize(&entry).map_err(|e| {
-            veda_core::error::VedaError::Storage(format!("wal serialise: {e}"))
-        })?;
+        let payload = bincode::serialize(&entry)
+            .map_err(|e| veda_core::error::VedaError::Storage(format!("wal serialise: {e}")))?;
         let ack = self
             .client
             .publish(subject, payload.into())
             .await
-            .map_err(|e| {
-                veda_core::error::VedaError::Storage(format!("nats publish failed: {e}"))
-            })?
+            .map_err(|e| veda_core::error::VedaError::Storage(format!("nats publish failed: {e}")))?
             .await
-            .map_err(|e| {
-                veda_core::error::VedaError::Storage(format!("nats ack failed: {e}"))
-            })?;
+            .map_err(|e| veda_core::error::VedaError::Storage(format!("nats ack failed: {e}")))?;
         Ok(ack.sequence)
     }
 
     /// Read up to `max_entries` entries with sequence >= `seq`. Drains a
     /// short-lived ephemeral consumer so callers can use this for recovery
     /// or replay.
-    pub async fn read_from(
-        &self,
-        seq: u64,
-        max_entries: usize,
-    ) -> Result<Vec<(u64, WalEntry)>> {
+    pub async fn read_from(&self, seq: u64, max_entries: usize) -> Result<Vec<(u64, WalEntry)>> {
         use futures::StreamExt;
 
         let stream = self
@@ -204,27 +195,22 @@ impl NatsWal {
                 ..Default::default()
             })
             .await
-            .map_err(|e| {
-                veda_core::error::VedaError::Storage(format!("nats consumer: {e}"))
-            })?;
+            .map_err(|e| veda_core::error::VedaError::Storage(format!("nats consumer: {e}")))?;
 
         let mut messages = consumer
             .fetch()
             .max_messages(max_entries)
             .messages()
             .await
-            .map_err(|e| {
-                veda_core::error::VedaError::Storage(format!("nats fetch: {e}"))
-            })?;
+            .map_err(|e| veda_core::error::VedaError::Storage(format!("nats fetch: {e}")))?;
 
         let mut out = Vec::with_capacity(max_entries);
         while let Some(m) = messages.next().await {
-            let m = m.map_err(|e| {
-                veda_core::error::VedaError::Storage(format!("nats msg: {e}"))
-            })?;
-            let info = m.info().map_err(|e| {
-                veda_core::error::VedaError::Storage(format!("nats info: {e}"))
-            })?;
+            let m =
+                m.map_err(|e| veda_core::error::VedaError::Storage(format!("nats msg: {e}")))?;
+            let info = m
+                .info()
+                .map_err(|e| veda_core::error::VedaError::Storage(format!("nats info: {e}")))?;
             let entry: WalEntry = bincode::deserialize(&m.payload).map_err(|e| {
                 veda_core::error::VedaError::Storage(format!("wal deserialise: {e}"))
             })?;
@@ -243,9 +229,10 @@ impl NatsWal {
             .map_err(|e| {
                 veda_core::error::VedaError::Storage(format!("nats stream lookup: {e}"))
             })?;
-        let info = stream.info().await.map_err(|e| {
-            veda_core::error::VedaError::Storage(format!("nats stream info: {e}"))
-        })?;
+        let info = stream
+            .info()
+            .await
+            .map_err(|e| veda_core::error::VedaError::Storage(format!("nats stream info: {e}")))?;
         Ok(info.state.last_sequence)
     }
 
@@ -262,9 +249,7 @@ impl NatsWal {
             .purge()
             .sequence(seq + 1)
             .await
-            .map_err(|e| {
-                veda_core::error::VedaError::Storage(format!("nats purge: {e}"))
-            })?;
+            .map_err(|e| veda_core::error::VedaError::Storage(format!("nats purge: {e}")))?;
         Ok(())
     }
 }

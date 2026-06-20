@@ -1,7 +1,7 @@
+use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::{delete, get, post};
-use axum::Router;
 use tower_http::trace::TraceLayer;
 
 use crate::auth;
@@ -20,15 +20,15 @@ pub mod correlations;
 pub mod crawl4ai;
 pub mod depmap;
 pub mod document;
-pub mod ingest_common;
-pub mod ingest_url;
 pub mod embed;
 pub mod embed_insert;
 pub mod evaluate;
 pub mod forecast;
 pub mod incidents;
 pub mod index_advisor;
+pub mod ingest_common;
 pub mod ingest_logs;
+pub mod ingest_url;
 pub mod insights;
 pub mod jobs;
 pub mod llm;
@@ -277,20 +277,14 @@ pub fn build_router(app_state: state::AppState) -> Router {
             get(admin::get_replica_safe_ts).post(admin::set_replica_safe_ts),
         )
         // Raft membership API (Phase 6).
-        .route(
-            "/v1/admin/cluster/join",
-            post(admin::cluster_join),
-        )
+        .route("/v1/admin/cluster/join", post(admin::cluster_join))
         .route(
             "/v1/admin/cluster/nodes/{id}",
             delete(admin::cluster_remove),
         )
         // Submit a Noop command — drives the Raft log for test
         // harnesses (snapshot soak, load gen).
-        .route(
-            "/v1/admin/cluster/noop",
-            post(admin::cluster_noop),
-        )
+        .route("/v1/admin/cluster/noop", post(admin::cluster_noop))
         // GAP-3 (2026-05-21): trigger an MVCC WAL checkpoint
         // (atomic snapshot + WAL truncate) for a collection.
         // Per-shard fan-out; no-op on shards without MVCC.
@@ -303,10 +297,7 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/admin/jobs",
             get(jobs::list_jobs).post(jobs::create_job),
         )
-        .route(
-            "/v1/admin/jobs/{name}",
-            delete(jobs::delete_job),
-        )
+        .route("/v1/admin/jobs/{name}", delete(jobs::delete_job))
         // Collections
         .route("/v1/collections", post(collections::create_collection))
         .route("/v1/collections", get(collections::list_collections))
@@ -332,10 +323,7 @@ pub fn build_router(app_state: state::AppState) -> Router {
         // Search
         .route("/v1/collections/{name}/search", post(search::search))
         // Coverage rollup over the per-collection query log
-        .route(
-            "/v1/collections/{name}/coverage",
-            get(query_log::coverage),
-        )
+        .route("/v1/collections/{name}/coverage", get(query_log::coverage))
         // One-shot text/image -> vector for the playground composer
         .route("/v1/embed", post(embed::embed))
         // LLM chat-completion proxy (cluster labels / NL→DSL / failure classifier)
@@ -353,8 +341,7 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route("/v1/saved_objects", get(saved_objects::list))
         .route(
             "/v1/saved_objects/{id}",
-            axum::routing::put(saved_objects::upsert)
-                .delete(saved_objects::delete),
+            axum::routing::put(saved_objects::upsert).delete(saved_objects::delete),
         )
         // Records
         .route("/v1/collections/{name}/insert", post(records::insert))
@@ -378,10 +365,7 @@ pub fn build_router(app_state: state::AppState) -> Router {
             get(records::list_records).delete(records::delete_records),
         )
         // Data quality / duplicate evaluation
-        .route(
-            "/v1/collections/{name}/evaluate",
-            get(evaluate::evaluate),
-        )
+        .route("/v1/collections/{name}/evaluate", get(evaluate::evaluate))
         // Analytics aggregations (Feature E)
         .route(
             "/v1/collections/{name}/aggregate",
@@ -396,10 +380,7 @@ pub fn build_router(app_state: state::AppState) -> Router {
             get(aggregate::field_stats),
         )
         // Cross-encoder rerank
-        .route(
-            "/v1/collections/{name}/rerank",
-            post(rerank::rerank),
-        )
+        .route("/v1/collections/{name}/rerank", post(rerank::rerank))
         // Model Context Protocol (MCP) for AI agents — Streamable HTTP
         // transport: POST carries a JSON-RPC message; GET (server->client
         // SSE) is unsupported (stateless) and returns 405.
@@ -438,14 +419,8 @@ pub fn build_router(app_state: state::AppState) -> Router {
                 .put(agents::put_tool)
                 .delete(agents::delete_tool),
         )
-        .route(
-            "/v1/agent-tools/{id}/execute",
-            post(agents::execute_tool),
-        )
-        .route(
-            "/v1/conversations",
-            get(agents::list_conversations),
-        )
+        .route("/v1/agent-tools/{id}/execute", post(agents::execute_tool))
+        .route("/v1/conversations", get(agents::list_conversations))
         .route(
             "/v1/conversations/{id}",
             get(agents::get_conversation).delete(agents::delete_conversation),
@@ -536,7 +511,9 @@ pub fn build_router(app_state: state::AppState) -> Router {
 
     public
         .merge(protected)
-        .layer(axum::middleware::from_fn(metrics_middleware::request_metrics))
+        .layer(axum::middleware::from_fn(
+            metrics_middleware::request_metrics,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(256 * 1024 * 1024)) // 256MB max body
         .with_state(app_state)

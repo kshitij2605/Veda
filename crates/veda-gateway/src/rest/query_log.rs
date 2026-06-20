@@ -16,9 +16,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use super::state::AppState;
@@ -106,11 +106,7 @@ fn log_path(data_dir: &std::path::Path, collection: &str) -> PathBuf {
 }
 
 /// Best-effort append. Never panics; logs on error.
-pub fn append_blocking(
-    data_dir: &std::path::Path,
-    collection: &str,
-    entry: &QueryLogEntry,
-) {
+pub fn append_blocking(data_dir: &std::path::Path, collection: &str, entry: &QueryLogEntry) {
     let path = log_path(data_dir, collection);
     if let Some(parent) = path.parent()
         && !parent.exists()
@@ -124,11 +120,7 @@ pub fn append_blocking(
             return;
         }
     };
-    match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
+    match OpenOptions::new().create(true).append(true).open(&path) {
         Ok(mut f) => {
             if let Err(e) = writeln!(f, "{line}") {
                 tracing::warn!(error = %e, path = %path.display(), "query_log: write failed");
@@ -314,8 +306,7 @@ pub async fn coverage(
 
     let total_queries = entries.len() as u64;
 
-    let mut counts: std::collections::HashMap<String, u64> =
-        std::collections::HashMap::new();
+    let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for e in &entries {
         for id in &e.doc_ids {
             *counts.entry(id.clone()).or_insert(0) += 1;

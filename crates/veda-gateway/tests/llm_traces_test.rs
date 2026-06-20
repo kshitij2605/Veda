@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::auth::Role;
@@ -29,8 +29,14 @@ async fn start_server() -> (String, tempfile::TempDir) {
 async fn start_auth_server() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let mut users = HashMap::new();
-    users.insert("admin".to_owned(), UserRecord::with_password("admin", Role::Admin));
-    users.insert("viewer".to_owned(), UserRecord::with_password("viewer", Role::Viewer));
+    users.insert(
+        "admin".to_owned(),
+        UserRecord::with_password("admin", Role::Admin),
+    );
+    users.insert(
+        "viewer".to_owned(),
+        UserRecord::with_password("viewer", Role::Viewer),
+    );
     let app_state = AppState::with_auth_and_users(tmp.path(), "test-jwt-secret", users);
     let router = build_router(app_state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -62,7 +68,9 @@ async fn search_empty_on_fresh_server() {
     // With no `_llm_traces` collection / embedder, the search is empty but
     // returns 200 with the documented shape.
     let r = c
-        .get(format!("{base}/v1/admin/llm-traces?q=why+did+the+answer+fail"))
+        .get(format!(
+            "{base}/v1/admin/llm-traces?q=why+did+the+answer+fail"
+        ))
         .send()
         .await
         .unwrap();
@@ -91,7 +99,9 @@ async fn clusters_empty_on_fresh_server() {
     let (base, _tmp) = start_server().await;
     let c = Client::new();
     let r = c
-        .get(format!("{base}/v1/admin/llm-traces/clusters?limit=20&faithfulness_max=0.5"))
+        .get(format!(
+            "{base}/v1/admin/llm-traces/clusters?limit=20&faithfulness_max=0.5"
+        ))
         .send()
         .await
         .unwrap();
@@ -122,7 +132,12 @@ async fn llm_traces_search_requires_admin_role() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "admin must be allowed: {:?}", r.text().await);
+    assert_eq!(
+        r.status(),
+        200,
+        "admin must be allowed: {:?}",
+        r.text().await
+    );
 }
 
 #[tokio::test]
@@ -146,5 +161,10 @@ async fn llm_traces_clusters_requires_admin_role() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "admin must be allowed: {:?}", r.text().await);
+    assert_eq!(
+        r.status(),
+        200,
+        "admin must be allowed: {:?}",
+        r.text().await
+    );
 }

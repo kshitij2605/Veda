@@ -17,9 +17,9 @@
 
 use std::time::Instant;
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -58,9 +58,9 @@ pub async fn embed(
     let (modality, input): (Modality, EmbedInput) = match (&req.text, &req.image_b64) {
         (Some(t), None) if !t.is_empty() => (Modality::Text, EmbedInput::Text(t.clone())),
         (None, Some(b)) if !b.is_empty() => {
-            let bytes = BASE64_STANDARD.decode(b).map_err(|e| {
-                bad_request(format!("invalid base64 in image_b64: {e}"))
-            })?;
+            let bytes = BASE64_STANDARD
+                .decode(b)
+                .map_err(|e| bad_request(format!("invalid base64 in image_b64: {e}")))?;
             (Modality::Image, EmbedInput::Bytes(bytes))
         }
         (Some(_), Some(_)) => {

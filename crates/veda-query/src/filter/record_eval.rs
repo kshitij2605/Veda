@@ -59,10 +59,7 @@ fn resolve_field<'a>(record: &'a Record, field: &str) -> Option<std::borrow::Cow
                 return None;
             };
             // Build a JSON Pointer from the tail: "user.tier" → "/user/tier"
-            let pointer: String = tail
-                .split('.')
-                .map(|seg| format!("/{seg}"))
-                .collect();
+            let pointer: String = tail.split('.').map(|seg| format!("/{seg}")).collect();
             let leaf = json_val.pointer(&pointer)?;
             // Coerce the JSON leaf to a FieldValue.
             let coerced = match leaf {
@@ -110,12 +107,8 @@ fn match_field_value(fv: &FieldValue, value: &FilterValue) -> bool {
             (*n as f64 - *v as f64).abs() < f64::EPSILON
         }
         (FieldValue::Float64(n), FilterValue::Int(v)) => (*n - *v as f64).abs() < f64::EPSILON,
-        (FieldValue::Int32(n), FilterValue::Float(v)) => {
-            (*n as f64 - *v).abs() < f64::EPSILON
-        }
-        (FieldValue::Int64(n), FilterValue::Float(v)) => {
-            (*n as f64 - *v).abs() < f64::EPSILON
-        }
+        (FieldValue::Int32(n), FilterValue::Float(v)) => (*n as f64 - *v).abs() < f64::EPSILON,
+        (FieldValue::Int64(n), FilterValue::Float(v)) => (*n as f64 - *v).abs() < f64::EPSILON,
         (FieldValue::Bool(b), FilterValue::Bool(v)) => *b == *v,
         _ => false,
     }
@@ -351,10 +344,7 @@ mod tests {
     #[test]
     fn json_path_missing_is_false_not_error() {
         let mut r = Record::new();
-        r.set(
-            "meta",
-            FieldValue::Json(serde_json::json!({"user": {}})),
-        );
+        r.set("meta", FieldValue::Json(serde_json::json!({"user": {}})));
         // absent path → no match, no panic
         assert!(!evaluate_record(
             &FilterParser::parse(r#"meta.user.tier = "gold""#).unwrap(),

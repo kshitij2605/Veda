@@ -8,7 +8,7 @@
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::build_router;
@@ -59,11 +59,18 @@ async fn mvcc_checkpoint_collection_without_mvcc_returns_zero_checkpoints() {
     assert_eq!(r.status(), 201);
 
     let r = c
-        .post(format!("{base}/v1/admin/collections/no_mvcc/mvcc_checkpoint"))
+        .post(format!(
+            "{base}/v1/admin/collections/no_mvcc/mvcc_checkpoint"
+        ))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "ckpt on no-mvcc should still 200: {:?}", r.text().await);
+    assert_eq!(
+        r.status(),
+        200,
+        "ckpt on no-mvcc should still 200: {:?}",
+        r.text().await
+    );
     let body: Value = r.json().await.unwrap();
     assert_eq!(body["collection"], json!("no_mvcc"));
     // 2 shards, 0 checkpointed (MVCC not on), 0 entries.
@@ -114,7 +121,9 @@ async fn mvcc_checkpoint_runs_on_use_mvcc_collection() {
     assert_eq!(r.status(), 201);
 
     let r = c
-        .post(format!("{base}/v1/admin/collections/mvcc_ckpt/mvcc_checkpoint"))
+        .post(format!(
+            "{base}/v1/admin/collections/mvcc_ckpt/mvcc_checkpoint"
+        ))
         .send()
         .await
         .unwrap();

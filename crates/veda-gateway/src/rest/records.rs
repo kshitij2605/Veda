@@ -1,8 +1,8 @@
 use std::time::Instant;
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 use uuid::Uuid;
@@ -19,9 +19,9 @@ use veda_storage::blob_store::ArcBlobStore;
 
 use super::collections::ErrorResponse;
 use super::state::AppState;
-use crate::tenant::{self, Tenant};
 use crate::auth::Claims;
 use crate::rls;
+use crate::tenant::{self, Tenant};
 
 // ── Request / Response types ─────────────────────────────────────────────
 
@@ -121,10 +121,16 @@ async fn insert_impl_rls(
     // Look up schema to check for rls_owner_field.
     let rls_field = {
         let schemas = state.inner.schemas.read().await;
-        schemas.get(&name).and_then(|s| s.rls_owner_field().map(str::to_owned))
+        schemas
+            .get(&name)
+            .and_then(|s| s.rls_owner_field().map(str::to_owned))
     };
     if let Some(ref owner_field) = rls_field {
-        let dummy_admin = Claims { sub: String::new(), role: crate::auth::Role::Admin, exp: u64::MAX };
+        let dummy_admin = Claims {
+            sub: String::new(),
+            role: crate::auth::Role::Admin,
+            exp: u64::MAX,
+        };
         let c = claims.as_ref().unwrap_or(&dummy_admin);
         for raw in req.records.iter_mut() {
             rls::enforce_owner_on_insert(raw, owner_field, c)?;
@@ -137,7 +143,7 @@ pub(crate) async fn insert_impl(
     state: AppState,
     name: String,
     txn_id: Option<String>,
-    mut req: InsertRequest,
+    req: InsertRequest,
 ) -> Result<(StatusCode, Json<InsertResponse>), (StatusCode, Json<ErrorResponse>)> {
     let start = Instant::now();
     let schema = {
@@ -189,23 +195,21 @@ pub(crate) async fn insert_impl(
     let mut inserted_ids: Vec<String> = Vec::new();
 
     for raw in &req.records {
-        let mut record = parse_record(raw, &schema).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
+        let mut record = parse_record(raw, &schema)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
 
         if !schema.blob_fields().is_empty() {
             let blob_manager = BlobManager::new(Box::new(ArcBlobStore(blob_store.clone())), &name);
-            blob_manager.process_insert(&mut record, &schema).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("blob processing failed: {e}"),
-                    }),
-                )
-            })?;
+            blob_manager
+                .process_insert(&mut record, &schema)
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("blob processing failed: {e}"),
+                        }),
+                    )
+                })?;
         }
 
         // Jump consistent hash for stable routing across shard-count changes.
@@ -292,11 +296,15 @@ pub(crate) async fn insert_impl(
                 .clone()
         };
         tokio::spawn(async move {
-            if lock.compare_exchange(
-                false, true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            ).is_err() {
+            if lock
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_err()
+            {
                 return; // another compaction is already running
             }
             struct CompactGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -312,7 +320,8 @@ pub(crate) async fn insert_impl(
                 let config = veda_storage::compaction::CompactionConfig::default();
                 let mut managers = bg_state.inner.segment_managers.write().await;
                 if let Some(shard_map) = managers.get_mut(&bg_name) {
-                    metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => bg_display.clone()).set(1.0);
+                    metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => bg_display.clone())
+                        .set(1.0);
                     for sm in shard_map.values_mut() {
                         let compact_start = Instant::now();
                         match sm.compact_if_needed(&config) {
@@ -327,28 +336,34 @@ pub(crate) async fn insert_impl(
                             }
                         }
                     }
-                    let total_segments: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
-                    metrics::gauge!(m::SEGMENTS_TOTAL, "collection" => bg_display.clone()).set(total_segments as f64);
-                    metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => bg_display.clone()).set(0.0);
+                    let total_segments: usize = shard_map
+                        .values()
+                        .map(|sm| sm.sealed_segments().len())
+                        .sum();
+                    metrics::gauge!(m::SEGMENTS_TOTAL, "collection" => bg_display.clone())
+                        .set(total_segments as f64);
+                    metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => bg_display.clone())
+                        .set(0.0);
                 }
             }
 
             // Rebuild indexes
-            metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => bg_display.clone()).set(1.0);
+            metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => bg_display.clone())
+                .set(1.0);
             let rebuild_start = Instant::now();
             if let Err(e) = rebuild_executors(&bg_state, &bg_name).await {
                 tracing::warn!(error = ?e, "background index rebuild failed");
             }
             metrics::histogram!(m::INDEX_BUILD_DURATION, "collection" => bg_display.clone(), "index_type" => "rebuild")
                 .record(rebuild_start.elapsed().as_secs_f64());
-            metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => bg_display.clone()).set(0.0);
+            metrics::gauge!(m::INDEX_REBUILD_IN_PROGRESS, "collection" => bg_display.clone())
+                .set(0.0);
         });
     }
 
     metrics::histogram!(m::INSERT_DURATION, "collection" => display.clone())
         .record(start.elapsed().as_secs_f64());
-    metrics::counter!(m::INSERT_TOTAL, "collection" => display.clone())
-        .increment(inserted as u64);
+    metrics::counter!(m::INSERT_TOTAL, "collection" => display.clone()).increment(inserted as u64);
 
     // Update record count gauge from segment managers.
     {
@@ -388,12 +403,18 @@ pub async fn list_records(
                 }),
             ));
         }
-        schemas.get(&name).and_then(|s| s.rls_owner_field().map(str::to_owned))
+        schemas
+            .get(&name)
+            .and_then(|s| s.rls_owner_field().map(str::to_owned))
     };
     // For RLS: compute the owner value to filter by (None = admin/no-rls = no filter)
     let rls_owner: Option<String> = rls_field.as_deref().and_then(|_| {
         claims.as_ref().and_then(|c| {
-            if rls::is_admin(c) { None } else { Some(c.sub.clone()) }
+            if rls::is_admin(c) {
+                None
+            } else {
+                Some(c.sub.clone())
+            }
         })
     });
 
@@ -547,10 +568,16 @@ pub async fn get_record(
                 }),
             ));
         }
-        let field = schemas.get(&name).and_then(|s| s.rls_owner_field().map(str::to_owned));
+        let field = schemas
+            .get(&name)
+            .and_then(|s| s.rls_owner_field().map(str::to_owned));
         let owner: Option<String> = field.as_deref().and_then(|_| {
             claims.as_ref().and_then(|c| {
-                if rls::is_admin(c) { None } else { Some(c.sub.clone()) }
+                if rls::is_admin(c) {
+                    None
+                } else {
+                    Some(c.sub.clone())
+                }
             })
         });
         (field, owner)
@@ -574,12 +601,8 @@ pub async fn get_record(
     let mvcc_active = shard_map.values().any(|sm| sm.has_mvcc());
     if mvcc_active {
         let read_ts: u128 = match q.at.as_deref() {
-            Some(s) => super::time_parse::parse_read_ts(s).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse { error: e }),
-                )
-            })?,
+            Some(s) => super::time_parse::parse_read_ts(s)
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?,
             None => {
                 let hlc = state.inner.tso.now().await.unwrap_or_default();
                 ((hlc.physical_ns as u128) << 32) | (hlc.logical as u128)
@@ -607,8 +630,8 @@ pub async fn get_record(
                 continue;
             }
             if let Some(bytes) = sm.read_at_ts(&record_id, read_ts) {
-                let rec: veda_core::record::Record = serde_json::from_slice(&bytes)
-                    .map_err(|e| {
+                let rec: veda_core::record::Record =
+                    serde_json::from_slice(&bytes).map_err(|e| {
                         (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(ErrorResponse {
@@ -642,14 +665,20 @@ pub async fn get_record(
                 && !gs.is_deleted(doc_id)
             {
                 if !record_passes_rls_owner(rec, rls_field.as_deref(), rls_owner.as_deref()) {
-                    return Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
-                        error: format!("record '{record_id}' not found"),
-                    })));
+                    return Err((
+                        StatusCode::NOT_FOUND,
+                        Json(ErrorResponse {
+                            error: format!("record '{record_id}' not found"),
+                        }),
+                    ));
                 }
                 if rec.is_expired_at(now_secs_get) {
-                    return Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
-                        error: format!("record not found"),
-                    })));
+                    return Err((
+                        StatusCode::NOT_FOUND,
+                        Json(ErrorResponse {
+                            error: "record not found".to_string(),
+                        }),
+                    ));
                 }
                 return Ok(Json(record_to_response(rec)));
             }
@@ -665,14 +694,20 @@ pub async fn get_record(
                     && rec.id() == record_id
                 {
                     if !record_passes_rls_owner(&rec, rls_field.as_deref(), rls_owner.as_deref()) {
-                        return Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
-                            error: format!("record '{record_id}' not found"),
-                        })));
+                        return Err((
+                            StatusCode::NOT_FOUND,
+                            Json(ErrorResponse {
+                                error: format!("record '{record_id}' not found"),
+                            }),
+                        ));
                     }
                     if rec.is_expired_at(now_secs_get) {
-                        return Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
-                            error: format!("record not found"),
-                        })));
+                        return Err((
+                            StatusCode::NOT_FOUND,
+                            Json(ErrorResponse {
+                                error: "record not found".to_string(),
+                            }),
+                        ));
                     }
                     return Ok(Json(record_to_response(&rec)));
                 }
@@ -788,12 +823,8 @@ async fn insert_via_log(
         })?;
         let mut applied_ids = Vec::with_capacity(req.records.len());
         for raw in req.records.iter() {
-            let record = parse_record_public(raw, &schema).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse { error: e }),
-                )
-            })?;
+            let record = parse_record_public(raw, &schema)
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
             let rid = record.id().to_string();
             let payload = bytes::Bytes::from(serde_json::to_vec(&record).map_err(|e| {
                 (
@@ -835,40 +866,36 @@ async fn insert_via_log(
     })?;
 
     for raw in req.records.iter() {
-        let record = parse_record_public(raw, &schema).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
+        let record = parse_record_public(raw, &schema)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
         let rid = record.id().to_string();
-        let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
-            &record.id(),
-            shard_count,
-        );
+        let shard_id =
+            veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
 
         // (1) Acquire commit_ts from the TSO.
         let hlc = state.inner.tso.now().await.unwrap_or_default();
 
         // (2) Append to the per-shard log (durability).
-        let log = ensure_shard_log(&state, &name, shard_id).await.ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("VEDA_LOG_PRIMARY: failed to open shard log for {name}:{shard_id}"),
-                }),
-            )
-        })?;
-        let payload = bytes::Bytes::from(
-            serde_json::to_vec(&record).map_err(|e| {
+        let log = ensure_shard_log(&state, &name, shard_id)
+            .await
+            .ok_or_else(|| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
-                        error: format!("serialize record: {e}"),
+                        error: format!(
+                            "VEDA_LOG_PRIMARY: failed to open shard log for {name}:{shard_id}"
+                        ),
                     }),
                 )
-            })?,
-        );
+            })?;
+        let payload = bytes::Bytes::from(serde_json::to_vec(&record).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("serialize record: {e}"),
+                }),
+            )
+        })?);
         let key = bytes::Bytes::from(record.id().as_bytes().to_vec());
         log.append_one(hlc, 0, key, veda_log::LogOp::Put, payload)
             .map_err(|e| {
@@ -949,7 +976,11 @@ async fn ensure_shard_log(
     scoped_collection: &str,
     shard_id: u32,
 ) -> Option<std::sync::Arc<veda_log::ShardLog>> {
-    match state.inner.shard_logs.get_or_open(scoped_collection, shard_id) {
+    match state
+        .inner
+        .shard_logs
+        .get_or_open(scoped_collection, shard_id)
+    {
         Ok(log) => Some(log),
         Err(e) => {
             tracing::warn!(
@@ -1005,9 +1036,7 @@ fn json_to_field_value(
 ) -> Result<FieldValue, String> {
     match field_type {
         FieldType::Vector { .. } => {
-            let arr = value
-                .as_array()
-                .ok_or("expected array for vector field")?;
+            let arr = value.as_array().ok_or("expected array for vector field")?;
             let floats: Vec<f32> = arr
                 .iter()
                 .map(|v| {
@@ -1024,7 +1053,11 @@ fn json_to_field_value(
             let sparse = parse_sparse_value(value, *dimension)?;
             Ok(FieldValue::SparseVector(sparse))
         }
-        FieldType::MultiVector { dimension, max_vectors, .. } => {
+        FieldType::MultiVector {
+            dimension,
+            max_vectors,
+            ..
+        } => {
             let arr = value
                 .as_array()
                 .ok_or("expected array-of-arrays for multi_vector field")?;
@@ -1047,7 +1080,11 @@ fn json_to_field_value(
                 }
                 let floats: Vec<f32> = inner
                     .iter()
-                    .map(|v| v.as_f64().map(|f| f as f32).ok_or("row elements must be numbers"))
+                    .map(|v| {
+                        v.as_f64()
+                            .map(|f| f as f32)
+                            .ok_or("row elements must be numbers")
+                    })
                     .collect::<Result<_, _>>()?;
                 rows.push(floats);
             }
@@ -1084,7 +1121,9 @@ fn json_to_field_value(
         FieldType::Blob => {
             // User sends base64 data as a string; store as String so BlobManager
             // can detect it, decode it, store the bytes, and replace with BlobRef.
-            let s = value.as_str().ok_or("expected base64 string for blob field")?;
+            let s = value
+                .as_str()
+                .ok_or("expected base64 string for blob field")?;
             Ok(FieldValue::String(s.to_owned()))
         }
         FieldType::Json => Ok(FieldValue::Json(value.clone())),
@@ -1094,7 +1133,9 @@ fn json_to_field_value(
             Ok(FieldValue::Uuid(u))
         }
         FieldType::Array(inner) => {
-            let arr = value.as_array().ok_or("expected JSON array for array field")?;
+            let arr = value
+                .as_array()
+                .ok_or("expected JSON array for array field")?;
             let elems: Result<Vec<FieldValue>, String> =
                 arr.iter().map(|v| json_to_field_value(v, inner)).collect();
             Ok(FieldValue::Array(elems?))
@@ -1113,7 +1154,11 @@ fn parse_sparse_value(value: &serde_json::Value, dimension: u32) -> Result<Spars
             let val_arr = val_v.as_array().ok_or("'values' must be an array")?;
             let indices: Vec<u32> = idx_arr
                 .iter()
-                .map(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or("indices must be non-negative integers fitting in u32"))
+                .map(|v| {
+                    v.as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or("indices must be non-negative integers fitting in u32")
+                })
                 .collect::<Result<_, _>>()?;
             let values: Vec<f32> = val_arr
                 .iter()
@@ -1131,13 +1176,17 @@ fn parse_sparse_value(value: &serde_json::Value, dimension: u32) -> Result<Spars
             // term:weight object.
             let mut pairs: Vec<(u32, f32)> = Vec::with_capacity(obj.len());
             for (k, v) in obj {
-                let idx: u32 = k.parse().map_err(|_| format!("sparse vector key '{k}' must be a u32 index"))?;
+                let idx: u32 = k
+                    .parse()
+                    .map_err(|_| format!("sparse vector key '{k}' must be a u32 index"))?;
                 if idx >= dimension {
                     return Err(format!(
                         "sparse vector index {idx} out of range (dimension={dimension})"
                     ));
                 }
-                let val = v.as_f64().ok_or_else(|| format!("sparse vector value at '{k}' must be a number"))?;
+                let val = v
+                    .as_f64()
+                    .ok_or_else(|| format!("sparse vector value at '{k}' must be a number"))?;
                 pairs.push((idx, val as f32));
             }
             SparseVec::from_pairs(pairs).map_err(|e| e.to_string())
@@ -1146,7 +1195,6 @@ fn parse_sparse_value(value: &serde_json::Value, dimension: u32) -> Result<Spars
         Err("expected object for sparse_vector field".into())
     }
 }
-
 
 /// Returns true when the record passes the RLS owner check.
 /// - rls_field is None or rls_owner is None: always pass (no RLS or admin).
@@ -1193,7 +1241,9 @@ pub(crate) fn field_value_to_json(fv: &FieldValue) -> serde_json::Value {
         }),
         FieldValue::MultiVector(rows) => serde_json::Value::Array(
             rows.iter()
-                .map(|row| serde_json::Value::Array(row.iter().map(|f| serde_json::json!(*f)).collect()))
+                .map(|row| {
+                    serde_json::Value::Array(row.iter().map(|f| serde_json::json!(*f)).collect())
+                })
                 .collect(),
         ),
         FieldValue::Json(j) => j.clone(),

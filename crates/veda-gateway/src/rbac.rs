@@ -22,10 +22,7 @@ pub fn check_permission(role: Role, action: &str) -> bool {
         ),
         Role::Viewer => matches!(
             action,
-            "search"
-                | "get_record"
-                | "list_collections"
-                | "describe_collection"
+            "search" | "get_record" | "list_collections" | "describe_collection"
         ),
     }
 }
@@ -33,11 +30,7 @@ pub fn check_permission(role: Role, action: &str) -> bool {
 /// Create an axum middleware layer that enforces the required role for an action.
 ///
 /// If no Claims are present in extensions (auth disabled), the request is allowed.
-pub async fn require_role(
-    action: &str,
-    req: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
+pub async fn require_role(action: &str, req: Request, next: Next) -> Result<Response, StatusCode> {
     if let Some(claims) = req.extensions().get::<Claims>()
         && !check_permission(claims.role, action)
     {
@@ -73,10 +66,7 @@ pub async fn require_list_collections(req: Request, next: Next) -> Result<Respon
     require_role("list_collections", req, next).await
 }
 
-pub async fn require_describe_collection(
-    req: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
+pub async fn require_describe_collection(req: Request, next: Next) -> Result<Response, StatusCode> {
     require_role("describe_collection", req, next).await
 }
 

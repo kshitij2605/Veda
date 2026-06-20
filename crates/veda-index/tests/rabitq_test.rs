@@ -286,10 +286,7 @@ fn test_scalar_quantization_reconstruction_error() {
 #[test]
 fn test_scalar_quantization_encode_decode_roundtrip() {
     let mut sq = ScalarQuantizer::new();
-    let vectors: Vec<Vec<f32>> = vec![
-        vec![0.0, 0.5, 1.0, -1.0],
-        vec![-0.5, 0.25, 0.75, -0.75],
-    ];
+    let vectors: Vec<Vec<f32>> = vec![vec![0.0, 0.5, 1.0, -1.0], vec![-0.5, 0.25, 0.75, -0.75]];
     let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
     sq.train(&refs);
 

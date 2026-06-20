@@ -12,7 +12,7 @@
 //! this helper only for the text chunks.
 
 use axum::http::StatusCode;
-use veda_core::chunking::{chunk_markdown, ChunkingStrategy};
+use veda_core::chunking::{ChunkingStrategy, chunk_markdown};
 use veda_core::embedding::Modality;
 use veda_core::embedding_client::EmbeddingClient;
 use veda_core::record::{FieldValue, Record};
@@ -123,7 +123,11 @@ pub async fn ingest_markdown(
                 }
             }
         }
-        if let FieldType::SparseVector { auto_embed: Some(cfg), .. } = field_def.field_type() {
+        if let FieldType::SparseVector {
+            auto_embed: Some(cfg),
+            ..
+        } = field_def.field_type()
+        {
             use veda_core::types::AutoEmbedModality;
             if matches!(cfg.modality, AutoEmbedModality::Text) {
                 sparse_text_targets.push((field_def.name().to_owned(), cfg.source.clone()));
@@ -148,19 +152,13 @@ pub async fn ingest_markdown(
             if has_content_field {
                 record.set("content", FieldValue::String(chunk.text.clone()));
             }
-            if has_source_file_field
-                && let Some(sf) = &source_meta.source_file
-            {
+            if has_source_file_field && let Some(sf) = &source_meta.source_file {
                 record.set("source_file", FieldValue::String(sf.clone()));
             }
-            if has_source_url_field
-                && let Some(su) = &source_meta.source_url
-            {
+            if has_source_url_field && let Some(su) = &source_meta.source_url {
                 record.set("source_url", FieldValue::String(su.clone()));
             }
-            if has_title_field
-                && let Some(t) = &source_meta.title
-            {
+            if has_title_field && let Some(t) = &source_meta.title {
                 record.set("title", FieldValue::String(t.clone()));
             }
             if has_chunk_index_field {
@@ -211,22 +209,32 @@ pub async fn ingest_markdown(
             }
 
             let record_id = record.id().to_string();
-            let shard_id =
-                veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
+            let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
+                &record.id(),
+                shard_count,
+            );
             let sm = shard_map.get_mut(&shard_id).ok_or_else(|| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("shard {shard_id} not found"),
                 )
             })?;
-            sm.insert(record)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("insert failed: {e}")))?;
+            sm.insert(record).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("insert failed: {e}"),
+                )
+            })?;
             chunks_out.push((record_id, chunk.text.clone()));
         }
 
         for sm in shard_map.values_mut() {
-            sm.seal_growing()
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to seal segment: {e}")))?;
+            sm.seal_growing().map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to seal segment: {e}"),
+                )
+            })?;
         }
     }
 

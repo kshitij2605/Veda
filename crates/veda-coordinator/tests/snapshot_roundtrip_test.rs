@@ -31,10 +31,22 @@ fn snapshot_captures_and_restores_state_machine() {
     // Apply a batch of commands to a state machine.
     let mut sm = ClusterStateMachine::new();
     let entries = vec![
-        LogEntry { index: 1, command: cmd_register(1) },
-        LogEntry { index: 2, command: cmd_register(2) },
-        LogEntry { index: 3, command: cmd_create("products") },
-        LogEntry { index: 4, command: cmd_create("articles") },
+        LogEntry {
+            index: 1,
+            command: cmd_register(1),
+        },
+        LogEntry {
+            index: 2,
+            command: cmd_register(2),
+        },
+        LogEntry {
+            index: 3,
+            command: cmd_create("products"),
+        },
+        LogEntry {
+            index: 4,
+            command: cmd_create("articles"),
+        },
         LogEntry {
             index: 5,
             command: ClusterCommand::AssignShard {
@@ -88,11 +100,7 @@ fn log_store_replay_drives_state_machine_to_expected_state() {
         cmd_create("beta"),
     ] {
         let idx = leader_log.append(cmd);
-        if let Some(entry) = leader_log
-            .get_range(idx, idx + 1)
-            .into_iter()
-            .next()
-        {
+        if let Some(entry) = leader_log.get_range(idx, idx + 1).into_iter().next() {
             leader_sm.apply(entry);
         }
     }
@@ -107,6 +115,9 @@ fn log_store_replay_drives_state_machine_to_expected_state() {
         follower_sm.last_applied_index(),
         leader_sm.last_applied_index()
     );
-    assert_eq!(follower_sm.snapshot().collections, leader_sm.snapshot().collections);
+    assert_eq!(
+        follower_sm.snapshot().collections,
+        leader_sm.snapshot().collections
+    );
     assert_eq!(follower_sm.snapshot().nodes, leader_sm.snapshot().nodes);
 }

@@ -53,7 +53,10 @@ pub enum EventStatus {
 pub enum Scope {
     Global,
     Collection(String),
-    Shard { collection: String, shard: u32 },
+    Shard {
+        collection: String,
+        shard: u32,
+    },
     Node(String),
     /// A service-level objective, keyed by its id (so SLO rule events
     /// dedup per-SLO).
@@ -308,10 +311,10 @@ impl EventStore {
             open: self.open.values().cloned().collect(),
             history: self.history.iter().cloned().collect(),
         };
-        if let Some(parent) = self.path.parent() {
-            if !parent.exists() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+        if let Some(parent) = self.path.parent()
+            && !parent.exists()
+        {
+            let _ = std::fs::create_dir_all(parent);
         }
         match serde_json::to_vec_pretty(&persisted) {
             Ok(bytes) => {
@@ -345,7 +348,13 @@ impl EventStore {
         for ev in persisted.open {
             store.open.insert(ev.id.clone(), ev);
         }
-        for ev in persisted.history.into_iter().rev().take(store.history_cap).rev() {
+        for ev in persisted
+            .history
+            .into_iter()
+            .rev()
+            .take(store.history_cap)
+            .rev()
+        {
             store.history.push_back(ev);
         }
         store
@@ -376,7 +385,11 @@ mod tests {
         let mut store = EventStore::new(tmp.path());
 
         // First pass with one hit: opens an event.
-        let h = hit("compaction_backlog", Scope::Collection("docs".into()), Severity::Medium);
+        let h = hit(
+            "compaction_backlog",
+            Scope::Collection("docs".into()),
+            Severity::Medium,
+        );
         let r1 = store.reconcile(vec![h.clone()], 1000);
         assert_eq!(r1.opened.len(), 1);
         assert_eq!(r1.closed.len(), 0);
@@ -453,7 +466,11 @@ mod tests {
             1000,
         );
         store.reconcile(
-            vec![hit("open_rule", Scope::Collection("a".into()), Severity::High)],
+            vec![hit(
+                "open_rule",
+                Scope::Collection("a".into()),
+                Severity::High,
+            )],
             2000,
         );
         assert_eq!(store.open_events().len(), 1);
@@ -473,7 +490,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut store = EventStore::new(tmp.path());
         let scope = Scope::Collection("docs".into());
-        store.reconcile(vec![hit("compaction_backlog", scope.clone(), Severity::Medium)], 1000);
+        store.reconcile(
+            vec![hit("compaction_backlog", scope.clone(), Severity::Medium)],
+            1000,
+        );
         let id = "compaction_backlog:collection:docs";
 
         // Annotate the open event with a remediation outcome.
@@ -485,10 +505,7 @@ mod tests {
 
         // A subsequent reconcile refresh of the SAME open event must
         // PRESERVE the note (regression against clobbering).
-        let r = store.reconcile(
-            vec![hit("compaction_backlog", scope, Severity::High)],
-            2000,
-        );
+        let r = store.reconcile(vec![hit("compaction_backlog", scope, Severity::High)], 2000);
         assert!(r.opened.is_empty(), "refresh, not re-open");
         let after = store.open_events()[0].clone();
         assert_eq!(after.severity, Severity::High, "severity still refreshed");
@@ -524,7 +541,11 @@ mod tests {
         assert_eq!(Scope::Global.key(), "global");
         assert_eq!(Scope::Collection("c".into()).key(), "collection:c");
         assert_eq!(
-            Scope::Shard { collection: "c".into(), shard: 2 }.key(),
+            Scope::Shard {
+                collection: "c".into(),
+                shard: 2
+            }
+            .key(),
             "shard:c/2"
         );
         assert_eq!(Scope::Node("n".into()).key(), "node:n");

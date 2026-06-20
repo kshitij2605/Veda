@@ -129,9 +129,10 @@ impl<'a> FilterContext<'a> {
             ))
         })?;
 
-        let idx = self.range_indexes.get(field).ok_or_else(|| {
-            VedaError::Query(format!("no range index for field '{field}'"))
-        })?;
+        let idx = self
+            .range_indexes
+            .get(field)
+            .ok_or_else(|| VedaError::Query(format!("no range index for field '{field}'")))?;
 
         Ok(match op {
             CmpOp::Gt => idx.search_gt(f),
@@ -149,19 +150,16 @@ impl<'a> FilterContext<'a> {
         high: &FilterValue,
     ) -> Result<RoaringBitmap> {
         let lo = low.as_f64().ok_or_else(|| {
-            VedaError::Query(format!(
-                "BETWEEN requires numeric values, got {low:?}"
-            ))
+            VedaError::Query(format!("BETWEEN requires numeric values, got {low:?}"))
         })?;
         let hi = high.as_f64().ok_or_else(|| {
-            VedaError::Query(format!(
-                "BETWEEN requires numeric values, got {high:?}"
-            ))
+            VedaError::Query(format!("BETWEEN requires numeric values, got {high:?}"))
         })?;
 
-        let idx = self.range_indexes.get(field).ok_or_else(|| {
-            VedaError::Query(format!("no range index for field '{field}'"))
-        })?;
+        let idx = self
+            .range_indexes
+            .get(field)
+            .ok_or_else(|| VedaError::Query(format!("no range index for field '{field}'")))?;
 
         Ok(idx.search_range(lo, hi))
     }
@@ -225,9 +223,7 @@ impl<'a> FilterContext<'a> {
             return Ok(idx.all_doc_ids());
         }
         if let Some(idx) = self.bitmap_indexes.get(field) {
-            return Ok(idx.search_in(
-                &idx.distinct_values(),
-            ));
+            return Ok(idx.search_in(&idx.distinct_values()));
         }
         if let Some(idx) = self.range_indexes.get(field) {
             // RangeIndex doesn't have an all_doc_ids helper, so use full range.

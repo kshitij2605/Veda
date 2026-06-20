@@ -79,8 +79,7 @@ impl LogApplier {
     /// Highest seq_id this applier has applied to its local
     /// SegmentManager.
     pub fn last_applied(&self) -> u64 {
-        self.last_applied
-            .load(std::sync::atomic::Ordering::Acquire)
+        self.last_applied.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Drain whatever the tailer can give us right now into the
@@ -153,7 +152,11 @@ impl LogApplier {
                 match self.apply_once().await {
                     Ok(0) => {}
                     Ok(n) => {
-                        tracing::debug!(applied = n, last_seq = self.last_applied(), "log_applier tick");
+                        tracing::debug!(
+                            applied = n,
+                            last_seq = self.last_applied(),
+                            "log_applier tick"
+                        );
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "log_applier apply_once failed");

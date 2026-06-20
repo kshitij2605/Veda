@@ -16,15 +16,13 @@ const CATEGORIES: &[&str] = &["electronics", "books", "clothing", "food"];
 /// Build a schema with 1 vector field (dim 64, Euclidean) + 2 scalar fields.
 fn test_schema() -> CollectionSchema {
     CollectionSchema::builder("test_collection")
-        .add_field(FieldDefinition::vector("embedding", DIM, DistanceMetric::Euclidean))
-        .add_field(
-            FieldDefinition::new("category", FieldType::String)
-                .with_filterable(true),
-        )
-        .add_field(
-            FieldDefinition::new("price", FieldType::Float64)
-                .with_filterable(true),
-        )
+        .add_field(FieldDefinition::vector(
+            "embedding",
+            DIM,
+            DistanceMetric::Euclidean,
+        ))
+        .add_field(FieldDefinition::new("category", FieldType::String).with_filterable(true))
+        .add_field(FieldDefinition::new("price", FieldType::Float64).with_filterable(true))
         .build()
         .unwrap()
 }
@@ -80,13 +78,12 @@ fn test_unfiltered_search() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
 
-    let (response, _timings) =
-        SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
+    let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     // Should return exactly 10 results.
     assert_eq!(response.results.len(), 10);
@@ -121,13 +118,12 @@ fn test_filtered_search_category() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: Some("category = 'electronics'".into()),
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
 
-    let (response, _timings) =
-        SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
+    let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     // All results must have category = 'electronics'.
     for scored in &response.results {
@@ -136,7 +132,11 @@ fn test_filtered_search_category() {
             Some(FieldValue::String(s)) => s.as_str(),
             _ => panic!("missing category"),
         };
-        assert_eq!(cat, "electronics", "doc_id={} has wrong category", scored.doc_id);
+        assert_eq!(
+            cat, "electronics",
+            "doc_id={} has wrong category",
+            scored.doc_id
+        );
     }
 
     // Should have at most 10 results.
@@ -166,13 +166,12 @@ fn test_filtered_search_range() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: Some("price BETWEEN 100 AND 200".into()),
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
 
-    let (response, _timings) =
-        SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
+    let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     for scored in &response.results {
         let record = &records[scored.doc_id as usize];
@@ -207,13 +206,12 @@ fn test_combined_filter() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: Some("category = 'electronics' AND price < 200".into()),
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
 
-    let (response, _timings) =
-        SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
+    let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     for scored in &response.results {
         let record = &records[scored.doc_id as usize];
@@ -273,7 +271,7 @@ fn test_sealed_segment_search() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -281,8 +279,7 @@ fn test_sealed_segment_search() {
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
         vec![(reader, Box::new(flat_index))];
 
-    let (response, _timings) =
-        SearchExecutor::search(&request, None, &sealed_segments).unwrap();
+    let (response, _timings) = SearchExecutor::search(&request, None, &sealed_segments).unwrap();
 
     assert_eq!(response.results.len(), 10);
 
@@ -327,7 +324,7 @@ fn test_sealed_segment_filtered_search() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: Some("category = 'books'".into()),
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -335,8 +332,7 @@ fn test_sealed_segment_filtered_search() {
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
         vec![(reader, Box::new(flat_index))];
 
-    let (response, _timings) =
-        SearchExecutor::search(&request, None, &sealed_segments).unwrap();
+    let (response, _timings) = SearchExecutor::search(&request, None, &sealed_segments).unwrap();
 
     assert!(!response.results.is_empty());
     assert!(response.results.len() <= 10);
@@ -398,7 +394,7 @@ fn test_multi_segment_merge() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -452,13 +448,12 @@ fn test_k_zero_returns_empty() {
         k: 0,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
 
-    let (response, _timings) =
-        SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
+    let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     assert!(response.results.is_empty());
 }
@@ -479,13 +474,12 @@ fn test_k_larger_than_matching() {
         k: 100,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
 
-    let (response, _timings) =
-        SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
+    let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     // Only 5 records exist, so at most 5 results.
     assert_eq!(response.results.len(), 5);
@@ -508,7 +502,7 @@ fn test_no_segments_empty_result() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -550,7 +544,7 @@ fn test_sealed_segment_range_filter() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: Some("price BETWEEN 100 AND 200".into()),
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -558,8 +552,7 @@ fn test_sealed_segment_range_filter() {
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
         vec![(reader, Box::new(flat_index))];
 
-    let (response, _timings) =
-        SearchExecutor::search(&request, None, &sealed_segments).unwrap();
+    let (response, _timings) = SearchExecutor::search(&request, None, &sealed_segments).unwrap();
 
     assert!(!response.results.is_empty());
 
@@ -592,13 +585,12 @@ fn test_filter_matches_nothing() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: Some("category = 'nonexistent'".into()),
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
 
-    let (response, _timings) =
-        SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
+    let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     assert!(response.results.is_empty());
 }
@@ -619,13 +611,12 @@ fn test_record_eval_ne_filter() {
         k: NUM_RECORDS, // get all
         metric: DistanceMetric::Euclidean,
         filter: Some("category != 'electronics'".into()),
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
 
-    let (response, _timings) =
-        SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
+    let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
 
     for scored in &response.results {
         let record = &records[scored.doc_id as usize];

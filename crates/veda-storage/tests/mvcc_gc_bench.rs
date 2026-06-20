@@ -17,11 +17,15 @@ fn gc_stress(n_keys: usize, versions_per_key: usize, safe_ts_frac: f64) {
         for v in 0..versions_per_key {
             let ts = (k * versions_per_key + v + 1) as u128;
             let val = format!("v{v}");
-            store.put_payload(key.as_bytes(), ts, Bytes::from(val.into_bytes())).unwrap();
+            store
+                .put_payload(key.as_bytes(), ts, Bytes::from(val.into_bytes()))
+                .unwrap();
         }
     }
     let insert_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    eprintln!("  inserted {total} versions ({n_keys} keys x {versions_per_key} ver) in {insert_ms:.1}ms");
+    eprintln!(
+        "  inserted {total} versions ({n_keys} keys x {versions_per_key} ver) in {insert_ms:.1}ms"
+    );
 
     let max_ts = total as u128;
     let safe = (max_ts as f64 * safe_ts_frac) as u128;
@@ -30,20 +34,26 @@ fn gc_stress(n_keys: usize, versions_per_key: usize, safe_ts_frac: f64) {
     let t1 = Instant::now();
     let dropped = store.gc();
     let gc_ms = t1.elapsed().as_secs_f64() * 1000.0;
-    let gc_rate = if gc_ms > 0.0 { dropped as f64 / (gc_ms / 1000.0) } else { 0.0 };
+    let gc_rate = if gc_ms > 0.0 {
+        dropped as f64 / (gc_ms / 1000.0)
+    } else {
+        0.0
+    };
     eprintln!("  GC: safe_ts={safe} dropped={dropped} in {gc_ms:.1}ms ({gc_rate:.0} ver/sec)");
 
     let t2 = Instant::now();
     for k in 0..n_keys {
         let key = format!("key_{k:06}");
-        let key_max_ts = ((k + 1) * versions_per_key) as u128;
         let key_min_ts = (k * versions_per_key + 1) as u128;
         if key_min_ts <= safe {
             let result = store.get_at(key.as_bytes(), safe);
             assert!(result.is_some(), "floor must be kept for key {key}");
         }
         let latest = store.get_at(key.as_bytes(), max_ts);
-        assert!(latest.is_some(), "latest version must survive GC for key {key}");
+        assert!(
+            latest.is_some(),
+            "latest version must survive GC for key {key}"
+        );
     }
     let verify_ms = t2.elapsed().as_secs_f64() * 1000.0;
     eprintln!("  verify: {n_keys} floor reads in {verify_ms:.1}ms — all correct");

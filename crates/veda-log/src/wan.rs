@@ -435,7 +435,7 @@ pub async fn promote_replica(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::{LogEntryV2, LogOp};
+    use crate::format::LogOp;
     use bytes::Bytes;
     use tempfile::TempDir;
     use veda_time::Hlc;
@@ -467,8 +467,8 @@ mod tests {
         let (_t_src, src) = fresh_log();
         append_to(&src, 50);
         let (_t_dst, dst) = fresh_log();
-        let receiver = Arc::new(LocalReceiver::new("replica-eu", 2, dst.clone()))
-            as Arc<dyn LogReceiver>;
+        let receiver =
+            Arc::new(LocalReceiver::new("replica-eu", 2, dst.clone())) as Arc<dyn LogReceiver>;
         let shipper = LogShipper::new(src.clone(), receiver.clone()).with_batch_size(10);
         // Catch up should ship all 50 entries.
         let r = shipper.catch_up(20).await.unwrap();
@@ -491,8 +491,8 @@ mod tests {
         let (_t_src, src) = fresh_log();
         append_to(&src, 20);
         let (_t_dst, dst) = fresh_log();
-        let receiver = Arc::new(LocalReceiver::new("replica", 2, dst.clone()))
-            as Arc<dyn LogReceiver>;
+        let receiver =
+            Arc::new(LocalReceiver::new("replica", 2, dst.clone())) as Arc<dyn LogReceiver>;
         let shipper = LogShipper::new(src.clone(), receiver.clone()).with_batch_size(20);
         shipper.catch_up(5).await.unwrap();
         // Reset cursor manually to simulate the crash.
@@ -515,8 +515,8 @@ mod tests {
         let (_t_src, src) = fresh_log();
         append_to(&src, 5);
         let (_t_dst, dst) = fresh_log();
-        let receiver = Arc::new(LocalReceiver::new("replica", 2, dst.clone()))
-            as Arc<dyn LogReceiver>;
+        let receiver =
+            Arc::new(LocalReceiver::new("replica", 2, dst.clone())) as Arc<dyn LogReceiver>;
         // First shipper at epoch 1 — ok.
         let s1 = LogShipper::new(src.clone(), receiver.clone());
         s1.catch_up(5).await.unwrap();
@@ -542,7 +542,10 @@ mod tests {
 
     #[tokio::test]
     async fn topology_serialises_through_json() {
-        let t = RegionTopology::new("us-east-1", vec!["eu-west-1".into(), "ap-northeast-1".into()]);
+        let t = RegionTopology::new(
+            "us-east-1",
+            vec!["eu-west-1".into(), "ap-northeast-1".into()],
+        );
         let s = serde_json::to_string(&t).unwrap();
         let back: RegionTopology = serde_json::from_str(&s).unwrap();
         assert_eq!(t, back);
@@ -556,8 +559,8 @@ mod tests {
         let (_t_src, src) = fresh_log();
         append_to(&src, 100);
         let (_t_dst, dst) = fresh_log();
-        let receiver = Arc::new(LocalReceiver::new("replica-eu", 2, dst.clone()))
-            as Arc<dyn LogReceiver>;
+        let receiver =
+            Arc::new(LocalReceiver::new("replica-eu", 2, dst.clone())) as Arc<dyn LogReceiver>;
         let shipper = LogShipper::new(src.clone(), receiver.clone()).with_batch_size(16);
         shipper.set_safe_ts(42_000).await;
 
@@ -584,8 +587,8 @@ mod tests {
         let (_t_src, src) = fresh_log();
         append_to(&src, 500);
         let (_t_dst, dst) = fresh_log();
-        let receiver = Arc::new(LocalReceiver::new("replica", 2, dst.clone()))
-            as Arc<dyn LogReceiver>;
+        let receiver =
+            Arc::new(LocalReceiver::new("replica", 2, dst.clone())) as Arc<dyn LogReceiver>;
         // Tiny batch_size + tiny max_rounds: 1 round * 1 entry
         // = 1 entry shipped, leaving 499 behind.
         let shipper = LogShipper::new(src.clone(), receiver.clone()).with_batch_size(1);
@@ -606,8 +609,8 @@ mod tests {
         let (_t_src, src) = fresh_log();
         append_to(&src, 30);
         let (_t_dst, dst) = fresh_log();
-        let receiver = Arc::new(LocalReceiver::new("replica", 2, dst.clone()))
-            as Arc<dyn LogReceiver>;
+        let receiver =
+            Arc::new(LocalReceiver::new("replica", 2, dst.clone())) as Arc<dyn LogReceiver>;
         let shipper = LogShipper::new(src.clone(), receiver.clone()).with_batch_size(8);
         shipper.catch_up(10).await.unwrap();
         assert_eq!(shipper.lag().await, 0);
@@ -641,8 +644,8 @@ mod tests {
         // every acked write is present on the replica.
         let (_t_src, src) = fresh_log();
         let (_t_dst, dst) = fresh_log();
-        let receiver = Arc::new(LocalReceiver::new("replica-eu", 2, dst.clone()))
-            as Arc<dyn LogReceiver>;
+        let receiver =
+            Arc::new(LocalReceiver::new("replica-eu", 2, dst.clone())) as Arc<dyn LogReceiver>;
         let shipper = LogShipper::new(src.clone(), receiver.clone()).with_batch_size(16);
 
         // Append in batches with interleaved ship_once calls —
@@ -701,8 +704,8 @@ mod tests {
         let (_t_src, src) = fresh_log();
         append_to(&src, 30);
         let (_t_dst, dst) = fresh_log();
-        let receiver = Arc::new(LocalReceiver::new("replica", 2, dst.clone()))
-            as Arc<dyn LogReceiver>;
+        let receiver =
+            Arc::new(LocalReceiver::new("replica", 2, dst.clone())) as Arc<dyn LogReceiver>;
         let shipper = LogShipper::new(src.clone(), receiver.clone());
         shipper.catch_up(10).await.unwrap();
         // Promote bumps the shipper's epoch; an additional

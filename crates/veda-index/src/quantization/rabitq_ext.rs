@@ -100,7 +100,9 @@ impl LloydMaxCodebook {
     pub fn train(samples: &[f32], bits: u8, max_iter: usize) -> Self {
         let n_levels = 1usize << bits;
         if samples.is_empty() || n_levels == 0 {
-            return Self { levels: vec![0.0; n_levels.max(1)] };
+            return Self {
+                levels: vec![0.0; n_levels.max(1)],
+            };
         }
         // Initialise: percentile-based uniform spacing on the
         // empirical CDF. Better starting point than min/max
@@ -177,10 +179,7 @@ impl LloydMaxCodebook {
 
     /// Decode a level index to its value.
     pub fn decode(&self, idx: u16) -> f32 {
-        self.levels
-            .get(idx as usize)
-            .copied()
-            .unwrap_or(0.0)
+        self.levels.get(idx as usize).copied().unwrap_or(0.0)
     }
 
     pub fn len(&self) -> usize {
@@ -239,11 +238,16 @@ impl HadamardRotation {
         let n_bytes = (padded as usize).div_ceil(8);
         let mut bitmap = vec![0u8; n_bytes];
         for i in 0..padded as usize {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let bit = ((state >> 33) & 1) as u8;
             bitmap[i / 8] |= bit << (i % 8);
         }
-        Self { padded_dim: padded, sign_bitmap: bitmap }
+        Self {
+            padded_dim: padded,
+            sign_bitmap: bitmap,
+        }
     }
 
     /// Returns the dimension the caller's vectors should be
@@ -412,7 +416,10 @@ impl ExtRaBitQuantizer {
         // We can't know the dim yet (it comes from `train`), so
         // stash a marker. `train` materialises the actual
         // `HadamardRotation` once dim is known.
-        self.rotation = Some(HadamardRotation { padded_dim: 0, sign_bitmap: vec![seed.to_le_bytes()[0]; 8] });
+        self.rotation = Some(HadamardRotation {
+            padded_dim: 0,
+            sign_bitmap: vec![seed.to_le_bytes()[0]; 8],
+        });
         // Encode seed in the unused-yet sign_bitmap; train()
         // rebuilds it properly.
         self.rotation.as_mut().unwrap().sign_bitmap = seed.to_le_bytes().to_vec();
@@ -424,9 +431,7 @@ impl ExtRaBitQuantizer {
     }
 
     pub fn has_rotation(&self) -> bool {
-        self.rotation
-            .as_ref()
-            .is_some_and(|r| r.padded_dim > 0)
+        self.rotation.as_ref().is_some_and(|r| r.padded_dim > 0)
     }
 
     pub fn train(&mut self, vectors: &[&[f32]]) {
@@ -629,7 +634,11 @@ impl ExtRaBitQuantizer {
         // decoded is the centered residual estimate; the stored vector
         // norm is in `self.norms[code_idx]`. For cosine/L2/dot, compute on
         // the centered space then add the centroid offset only when needed.
-        let dot: f32 = centered_query.iter().zip(&decoded).map(|(a, b)| a * b).sum();
+        let dot: f32 = centered_query
+            .iter()
+            .zip(&decoded)
+            .map(|(a, b)| a * b)
+            .sum();
         let v_norm = self.norms[code_idx];
         let decoded_norm = decoded.iter().map(|x| x * x).sum::<f32>().sqrt();
 
@@ -774,7 +783,7 @@ mod tests {
         let vectors: Vec<Vec<f32>> = (0..n)
             .map(|i| {
                 (0..dim)
-                    .map(|d| ((i as f32 * 0.13 + d as f32 * 0.07).sin()))
+                    .map(|d| (i as f32 * 0.13 + d as f32 * 0.07).sin())
                     .collect()
             })
             .collect();
@@ -787,9 +796,9 @@ mod tests {
 
         let mut q4_hits = 0;
         let mut q8_hits = 0;
-        for i in 0..n {
-            let r4 = q4.search(&vectors[i], 1, &HashSet::new());
-            let r8 = q8.search(&vectors[i], 1, &HashSet::new());
+        for (i, vec) in vectors.iter().enumerate().take(n) {
+            let r4 = q4.search(vec, 1, &HashSet::new());
+            let r8 = q8.search(vec, 1, &HashSet::new());
             if r4.first().map(|(id, _)| *id) == Some(i as u32) {
                 q4_hits += 1;
             }
@@ -854,7 +863,7 @@ mod tests {
         let vectors: Vec<Vec<f32>> = (0..n)
             .map(|i| {
                 (0..dim)
-                    .map(|d| ((i as f32 * 0.11 + d as f32 * 0.09).cos()))
+                    .map(|d| (i as f32 * 0.11 + d as f32 * 0.09).cos())
                     .collect()
             })
             .collect();
@@ -863,15 +872,14 @@ mod tests {
         let mut q_no_rot = ExtRaBitQuantizer::with_bits(DistanceMetric::Cosine, 4);
         q_no_rot.train(&refs);
 
-        let mut q_rot = ExtRaBitQuantizer::with_bits(DistanceMetric::Cosine, 4)
-            .with_rotation(1234);
+        let mut q_rot = ExtRaBitQuantizer::with_bits(DistanceMetric::Cosine, 4).with_rotation(1234);
         q_rot.train(&refs);
         assert!(q_rot.has_rotation());
 
         let (mut hits_no, mut hits_rot): (i32, i32) = (0, 0);
-        for i in 0..n {
+        for (i, vec) in vectors.iter().enumerate().take(n) {
             if q_no_rot
-                .search(&vectors[i], 1, &HashSet::new())
+                .search(vec, 1, &HashSet::new())
                 .first()
                 .map(|(id, _)| *id)
                 == Some(i as u32)
@@ -879,7 +887,7 @@ mod tests {
                 hits_no += 1;
             }
             if q_rot
-                .search(&vectors[i], 1, &HashSet::new())
+                .search(vec, 1, &HashSet::new())
                 .first()
                 .map(|(id, _)| *id)
                 == Some(i as u32)
@@ -905,8 +913,7 @@ mod tests {
         let v0 = vec![0.1f32, 0.2, 0.3, 0.4];
         let v1 = vec![0.4f32, 0.3, 0.2, 0.1];
         let refs: Vec<&[f32]> = vec![&v0, &v1];
-        let mut q =
-            ExtRaBitQuantizer::with_bits(DistanceMetric::Euclidean, 8).with_rotation(9999);
+        let mut q = ExtRaBitQuantizer::with_bits(DistanceMetric::Euclidean, 8).with_rotation(9999);
         q.train(&refs);
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("ext.q");
@@ -989,7 +996,7 @@ mod tests {
         let vectors: Vec<Vec<f32>> = (0..n)
             .map(|i| {
                 (0..dim)
-                    .map(|d| ((i as f32 * 0.11 + d as f32 * 0.07).sin()))
+                    .map(|d| (i as f32 * 0.11 + d as f32 * 0.07).sin())
                     .collect()
             })
             .collect();
@@ -1002,9 +1009,9 @@ mod tests {
         assert!(q_opt.has_optimized_codebook());
 
         let mut hits = 0;
-        for i in 0..n {
+        for (i, vec) in vectors.iter().enumerate().take(n) {
             if q_opt
-                .search(&vectors[i], 1, &HashSet::new())
+                .search(vec, 1, &HashSet::new())
                 .first()
                 .map(|(id, _)| *id)
                 == Some(i as u32)
@@ -1027,9 +1034,7 @@ mod tests {
         // supported non-byte-aligned width.
         for &bits in &[3u8, 5, 7, 9] {
             let mask: u16 = (1u16 << bits) - 1;
-            let values: Vec<u16> = (0..50)
-                .map(|i| (i * 31 + 7) as u16 & mask)
-                .collect();
+            let values: Vec<u16> = (0..50).map(|i| (i * 31 + 7) as u16 & mask).collect();
             let total_bits = values.len() * bits as usize;
             let mut out = vec![0u8; total_bits.div_ceil(8)];
             let mut byte_idx = 0;
@@ -1053,7 +1058,7 @@ mod tests {
         let vectors: Vec<Vec<f32>> = (0..n)
             .map(|i| {
                 (0..dim)
-                    .map(|d| ((i as f32 * 0.11 + d as f32 * 0.07).sin() * 100.0))
+                    .map(|d| (i as f32 * 0.11 + d as f32 * 0.07).sin() * 100.0)
                     .collect()
             })
             .collect();
@@ -1063,12 +1068,8 @@ mod tests {
         // 3-bit is coarse (8 levels) but self-search should still
         // land most of the time.
         let mut hits = 0;
-        for i in 0..n {
-            if q.search(&vectors[i], 1, &HashSet::new())
-                .first()
-                .map(|(id, _)| *id)
-                == Some(i as u32)
-            {
+        for (i, vec) in vectors.iter().enumerate().take(n) {
+            if q.search(vec, 1, &HashSet::new()).first().map(|(id, _)| *id) == Some(i as u32) {
                 hits += 1;
             }
         }
@@ -1091,7 +1092,7 @@ mod tests {
         let vectors: Vec<Vec<f32>> = (0..n)
             .map(|i| {
                 (0..dim)
-                    .map(|d| ((i as f32 * 0.13 + d as f32 * 0.09).cos()))
+                    .map(|d| (i as f32 * 0.13 + d as f32 * 0.09).cos())
                     .collect()
             })
             .collect();
@@ -1099,12 +1100,8 @@ mod tests {
         let mut q = ExtRaBitQuantizer::with_bits(DistanceMetric::Cosine, 9);
         q.train(&refs);
         let mut hits = 0;
-        for i in 0..n {
-            if q.search(&vectors[i], 1, &HashSet::new())
-                .first()
-                .map(|(id, _)| *id)
-                == Some(i as u32)
-            {
+        for (i, vec) in vectors.iter().enumerate().take(n) {
+            if q.search(vec, 1, &HashSet::new()).first().map(|(id, _)| *id) == Some(i as u32) {
                 hits += 1;
             }
         }
@@ -1137,7 +1134,7 @@ mod tests {
         // supported width.
         let dim = 32u32;
         for &bits in SUPPORTED_BITS {
-            let v: Vec<f32> = (0..dim).map(|d| (d as f32 * 0.05)).collect();
+            let v: Vec<f32> = (0..dim).map(|d| d as f32 * 0.05).collect();
             let refs: Vec<&[f32]> = vec![&v];
             let mut q = ExtRaBitQuantizer::with_bits(DistanceMetric::Cosine, bits);
             q.train(&refs);
@@ -1155,8 +1152,8 @@ mod tests {
         let v0 = vec![0.1f32, 0.2, 0.3, 0.4];
         let v1 = vec![0.4f32, 0.3, 0.2, 0.1];
         let refs: Vec<&[f32]> = vec![&v0, &v1];
-        let mut q = ExtRaBitQuantizer::with_bits(DistanceMetric::Cosine, 8)
-            .with_optimized_codebook();
+        let mut q =
+            ExtRaBitQuantizer::with_bits(DistanceMetric::Cosine, 8).with_optimized_codebook();
         q.train(&refs);
         assert!(q.has_optimized_codebook());
         let tmp = tempfile::tempdir().unwrap();

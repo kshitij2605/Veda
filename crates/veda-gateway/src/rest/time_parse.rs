@@ -33,9 +33,9 @@ pub fn parse_read_ts(s: &str) -> Result<u128, String> {
         return Ok((now_ns as u128) << 32);
     }
 
-    let rest = s.strip_prefix("now-").ok_or_else(|| {
-        format!("invalid at='{s}': expected now-<N>h, now-<N>m, or now-<N>s")
-    })?;
+    let rest = s
+        .strip_prefix("now-")
+        .ok_or_else(|| format!("invalid at='{s}': expected now-<N>h, now-<N>m, or now-<N>s"))?;
 
     let (num_str, unit_ns): (&str, u64) = if let Some(n) = rest.strip_suffix('h') {
         (n, 3_600_000_000_000)
@@ -49,9 +49,9 @@ pub fn parse_read_ts(s: &str) -> Result<u128, String> {
         ));
     };
 
-    let n: u64 = num_str.parse().map_err(|_| {
-        format!("invalid at='{s}': '{num_str}' is not a valid integer")
-    })?;
+    let n: u64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid at='{s}': '{num_str}' is not a valid integer"))?;
 
     let offset_ns = n.saturating_mul(unit_ns);
     let target_ns = now_ns.saturating_sub(offset_ns);
@@ -76,7 +76,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        assert!((wall_ns - physical) < 1_000_000_000, "should be within 1s of wall clock");
+        assert!(
+            (wall_ns - physical) < 1_000_000_000,
+            "should be within 1s of wall clock"
+        );
     }
 
     #[test]
@@ -89,8 +92,10 @@ mod tests {
             .as_nanos() as u64;
         let diff = wall_ns - physical;
         let one_hour_ns = 3_600_000_000_000u64;
-        assert!(diff > one_hour_ns - 2_000_000_000 && diff < one_hour_ns + 2_000_000_000,
-            "should be ~1h ago, got diff={diff}ns");
+        assert!(
+            diff > one_hour_ns - 2_000_000_000 && diff < one_hour_ns + 2_000_000_000,
+            "should be ~1h ago, got diff={diff}ns"
+        );
     }
 
     #[test]

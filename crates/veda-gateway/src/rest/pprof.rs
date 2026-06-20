@@ -22,7 +22,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::extract::Query;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
@@ -81,7 +81,10 @@ pub async fn pprof(Query(q): Query<PprofQuery>) -> Response {
     }
     let _release = ProfilingGuard;
 
-    let seconds = q.seconds.unwrap_or(DEFAULT_SECONDS).clamp(MIN_SECONDS, MAX_SECONDS);
+    let seconds = q
+        .seconds
+        .unwrap_or(DEFAULT_SECONDS)
+        .clamp(MIN_SECONDS, MAX_SECONDS);
     let frequency = q.frequency.unwrap_or(DEFAULT_FREQUENCY).max(1);
     let format = q.format.as_deref().unwrap_or("flamegraph");
 

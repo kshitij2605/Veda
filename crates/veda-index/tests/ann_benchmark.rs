@@ -30,10 +30,7 @@ impl Lcg {
     }
 
     fn next_f32(&mut self) -> f32 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
         ((self.state >> 32) as u32 as f32) / (u32::MAX as f32)
     }
 
@@ -57,20 +54,10 @@ fn generate_random_dataset(n: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {
 // Ground truth and recall
 // ---------------------------------------------------------------------------
 
-fn compute_ground_truth(
-    flat: &FlatIndex,
-    queries: &[Vec<f32>],
-    k: usize,
-) -> Vec<Vec<u32>> {
+fn compute_ground_truth(flat: &FlatIndex, queries: &[Vec<f32>], k: usize) -> Vec<Vec<u32>> {
     queries
         .iter()
-        .map(|q| {
-            flat.search(q, k)
-                .unwrap()
-                .iter()
-                .map(|r| r.id)
-                .collect()
-        })
+        .map(|q| flat.search(q, k).unwrap().iter().map(|r| r.id).collect())
         .collect()
 }
 
@@ -83,7 +70,11 @@ fn compute_recall(predicted: &[Vec<SearchResult>], ground_truth: &[Vec<u32>], k:
     let mut total = 0.0;
     for (pred, gt) in predicted.iter().zip(ground_truth.iter()) {
         let gt_set: HashSet<u32> = gt.iter().take(k).copied().collect();
-        let found = pred.iter().take(k).filter(|r| gt_set.contains(&r.id)).count();
+        let found = pred
+            .iter()
+            .take(k)
+            .filter(|r| gt_set.contains(&r.id))
+            .count();
         total += found as f64 / gt_set.len().max(1) as f64;
     }
     total / predicted.len() as f64
@@ -108,14 +99,8 @@ struct BenchmarkResult {
 
 fn print_header(dataset_size: usize, dimension: usize, metric: &str) {
     println!();
-    println!(
-        "\u{2554}{:\u{2550}<78}\u{2557}",
-        ""
-    );
-    println!(
-        "\u{2551} {:^76} \u{2551}",
-        "Veda ANN Benchmark Results"
-    );
+    println!("\u{2554}{:\u{2550}<78}\u{2557}", "");
+    println!("\u{2551} {:^76} \u{2551}", "Veda ANN Benchmark Results");
     println!(
         "\u{2551} {:^76} \u{2551}",
         format!(
@@ -195,6 +180,9 @@ fn benchmark_flat(
     (flat, result)
 }
 
+// Benchmark harness helper: the parameter list mirrors the knobs under test;
+// a params struct would obscure the call sites without reuse.
+#[allow(clippy::too_many_arguments)]
 fn benchmark_hnsw(
     dataset: &[Vec<f32>],
     queries: &[Vec<f32>],
@@ -346,7 +334,10 @@ fn run_benchmark(dataset_size: usize, dimension: usize) {
     let num_queries = 100;
     let dim = dimension as u32;
 
-    println!("\n  Generating dataset: {} vectors x {} dimensions...", dataset_size, dimension);
+    println!(
+        "\n  Generating dataset: {} vectors x {} dimensions...",
+        dataset_size, dimension
+    );
     let dataset = generate_random_dataset(dataset_size, dimension, 42);
     let queries = generate_random_dataset(num_queries, dimension, 12345);
 
@@ -366,7 +357,14 @@ fn run_benchmark(dataset_size: usize, dimension: usize) {
     // 3. HNSW (tuned ef_search=256)
     println!("  Building HnswIndex (ef_search=256)...");
     let hnsw_tuned_result = benchmark_hnsw(
-        &dataset, &queries, dim, metric, &gt_10, &gt_100, 256, "HNSW (tuned)",
+        &dataset,
+        &queries,
+        dim,
+        metric,
+        &gt_10,
+        &gt_100,
+        256,
+        "HNSW (tuned)",
     );
 
     // 4. DiskANN
@@ -376,9 +374,7 @@ fn run_benchmark(dataset_size: usize, dimension: usize) {
     // 5. IVF-PQ (nlist scaled to dataset size)
     let nlist = if dataset_size <= 10_000 { 64 } else { 128 };
     println!("  Building IvfPqIndex (nlist={})...", nlist);
-    let ivfpq_result = benchmark_ivfpq(
-        &dataset, &queries, dim, metric, &gt_10, &gt_100, nlist,
-    );
+    let ivfpq_result = benchmark_ivfpq(&dataset, &queries, dim, metric, &gt_10, &gt_100, nlist);
 
     // Print results table
     print_header(dataset_size, dimension, "Cosine");
@@ -400,7 +396,10 @@ fn run_quantization_benchmark() {
     let num_queries = 100;
     let metric = DistanceMetric::Cosine;
 
-    println!("\n  Generating quantization benchmark dataset: {} vectors x {} dimensions...", dataset_size, dimension);
+    println!(
+        "\n  Generating quantization benchmark dataset: {} vectors x {} dimensions...",
+        dataset_size, dimension
+    );
     let dataset = generate_random_dataset(dataset_size, dimension, 42);
     let queries = generate_random_dataset(num_queries, dimension, 12345);
     let refs: Vec<&[f32]> = dataset.iter().map(|v| v.as_slice()).collect();
@@ -498,8 +497,8 @@ fn run_quantization_benchmark() {
     let sample_count = num_queries * 100; // check first 100 vectors per query
 
     for q in &queries {
-        for i in 0..100 {
-            let exact = compute_distance(q, &dataset[i], metric);
+        for (i, vec) in dataset.iter().enumerate().take(100) {
+            let exact = compute_distance(q, vec, metric);
             let rabitq_est = rabitq.estimate_distance(q, i);
             let sq_est = sq.estimate_distance(q, i, metric);
             rabitq_total_err += (exact - rabitq_est).abs() as f64;
@@ -511,10 +510,7 @@ fn run_quantization_benchmark() {
 
     // Print quantization results
     println!();
-    println!(
-        "\u{2554}{:\u{2550}<78}\u{2557}",
-        ""
-    );
+    println!("\u{2554}{:\u{2550}<78}\u{2557}", "");
     println!(
         "\u{2551} {:^76} \u{2551}",
         "Veda Quantization Benchmark Results"

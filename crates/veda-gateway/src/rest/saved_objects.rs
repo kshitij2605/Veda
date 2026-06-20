@@ -26,9 +26,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -174,9 +174,7 @@ impl SavedObjectStore {
     }
 }
 
-pub async fn list(
-    State(state): State<AppState>,
-) -> Json<ListResponse> {
+pub async fn list(State(state): State<AppState>) -> Json<ListResponse> {
     let store = state.inner.saved_objects.clone();
     Json(ListResponse {
         objects: store.snapshot().await,
@@ -217,10 +215,7 @@ pub async fn upsert(
     Ok(Json(obj))
 }
 
-pub async fn delete(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> StatusCode {
+pub async fn delete(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
     let store = state.inner.saved_objects.clone();
     {
         let mut m = store.inner.write().await;

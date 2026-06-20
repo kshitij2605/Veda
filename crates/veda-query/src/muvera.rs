@@ -148,10 +148,7 @@ mod tests {
             vec![0.0, 1.0, 0.0, 0.0],
             vec![0.95, 0.05, 0.0, 0.0],
         ];
-        let unrelated = vec![
-            vec![0.0, 0.0, 1.0, 0.0],
-            vec![0.0, 0.0, 0.0, 1.0],
-        ];
+        let unrelated = vec![vec![0.0, 0.0, 1.0, 0.0], vec![0.0, 0.0, 0.0, 1.0]];
         let fa = enc.encode(&doc_a);
         let fb = enc.encode(&doc_b);
         let fu = enc.encode(&unrelated);
@@ -162,6 +159,9 @@ mod tests {
         };
         let sim_ab = cos(&fa, &fb);
         let sim_au = cos(&fa, &fu);
-        assert!(sim_ab > sim_au, "similar docs should be closer: ab={sim_ab} au={sim_au}");
+        assert!(
+            sim_ab > sim_au,
+            "similar docs should be closer: ab={sim_ab} au={sim_au}"
+        );
     }
 }

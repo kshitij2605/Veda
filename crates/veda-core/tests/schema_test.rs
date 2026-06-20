@@ -157,11 +157,7 @@ fn test_serde_roundtrip_field_type() {
 fn test_serde_roundtrip_schema() {
     let schema = CollectionSchema::builder("serde_test")
         .add_field(FieldDefinition::new("name", FieldType::String))
-        .add_field(FieldDefinition::vector(
-            "emb",
-            384,
-            DistanceMetric::Cosine,
-        ))
+        .add_field(FieldDefinition::vector("emb", 384, DistanceMetric::Cosine))
         .add_field(FieldDefinition::blob("data"))
         .add_field(
             FieldDefinition::new("tags", FieldType::Array(Box::new(FieldType::String)))

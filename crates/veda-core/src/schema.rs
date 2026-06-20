@@ -120,7 +120,11 @@ impl FieldDefinition {
     pub fn sparse_vector(name: impl Into<String>, dimension: u32, metric: DistanceMetric) -> Self {
         Self {
             name: name.into(),
-            field_type: FieldType::SparseVector { dimension, metric, auto_embed: None },
+            field_type: FieldType::SparseVector {
+                dimension,
+                metric,
+                auto_embed: None,
+            },
             filterable: false,
             bm25: false,
             bm25_tokenizer: None,

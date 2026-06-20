@@ -74,10 +74,7 @@ impl SparseVectorStorageReader {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (u32, &SparseVec)> {
-        self.vectors
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (i as u32, v))
+        self.vectors.iter().enumerate().map(|(i, v)| (i as u32, v))
     }
 }
 

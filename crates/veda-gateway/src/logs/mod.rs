@@ -11,7 +11,7 @@ pub mod categorize;
 pub mod layer;
 pub mod parse;
 
-pub use buffer::{LogBuffer, LogRecord, DEFAULT_CAPACITY};
+pub use buffer::{DEFAULT_CAPACITY, LogBuffer, LogRecord};
 pub use categorize::{LogCategorizer, LogCategory};
 pub use layer::CaptureLayer;
 
@@ -33,7 +33,10 @@ pub fn current_trace_ids() -> (Option<String>, Option<String>) {
     let span = cx.span();
     let sc = span.span_context();
     if sc.is_valid() {
-        (Some(sc.trace_id().to_string()), Some(sc.span_id().to_string()))
+        (
+            Some(sc.trace_id().to_string()),
+            Some(sc.span_id().to_string()),
+        )
     } else {
         (None, None)
     }

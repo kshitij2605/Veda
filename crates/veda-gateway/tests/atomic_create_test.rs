@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::build_router;
@@ -64,7 +64,9 @@ async fn create_with_seed_records_returns_201_and_seeded_count() {
 
     // List records — all 3 must be there.
     let resp = c
-        .get(format!("{base}/v1/collections/seeded_docs/records?limit=10"))
+        .get(format!(
+            "{base}/v1/collections/seeded_docs/records?limit=10"
+        ))
         .send()
         .await
         .unwrap();

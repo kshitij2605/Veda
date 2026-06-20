@@ -1,23 +1,23 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 use veda_core::metrics as m;
 use veda_core::retrieval_semconv as rsc;
 use veda_core::types::DistanceMetric;
 use veda_query::distributed::DistributedQueryExecutor;
-use veda_query::fusion::{FieldQuery, FusionStrategy, MultiVectorQuery};
 use veda_query::filter::ast::FilterExpr;
+use veda_query::fusion::{FieldQuery, FusionStrategy, MultiVectorQuery};
 use veda_query::search::{SearchTimings, VectorSearchRequest};
 
 use super::collections::ErrorResponse;
 use super::state::AppState;
-use crate::tenant::{self, Tenant};
 use crate::auth::Claims;
 use crate::rls;
+use crate::tenant::{self, Tenant};
 
 // ── Request types ────────────────────────────────────────────────────────
 
@@ -344,9 +344,10 @@ pub async fn search(
                 .as_ref()
                 .map(|axum::Extension(c)| c.sub.clone())
                 .unwrap_or_default();
-            let user_filter = req.filter.as_deref().and_then(|s| {
-                veda_query::filter::parser::FilterParser::parse(s).ok()
-            });
+            let user_filter = req
+                .filter
+                .as_deref()
+                .and_then(|s| veda_query::filter::parser::FilterParser::parse(s).ok());
             // Inject the trusted owner predicate at the AST level.
             // Never re-serialize to a string: a quote in the username would
             // break out of the string literal and bypass RLS.
@@ -447,7 +448,12 @@ async fn run_search(
     final_limit: usize,
     start: Instant,
 ) -> Result<
-    (Vec<SearchHit>, Option<ExplainTiming>, Option<HybridExplain>, u64),
+    (
+        Vec<SearchHit>,
+        Option<ExplainTiming>,
+        Option<HybridExplain>,
+        u64,
+    ),
     (StatusCode, Json<ErrorResponse>),
 > {
     // Phase F: resolve the snapshot timestamp once up front so
@@ -463,12 +469,8 @@ async fn run_search(
     };
     let effective_read_ts: Option<u128> = if mvcc_active_for_collection {
         Some(match req.at.as_deref() {
-            Some(s) => super::time_parse::parse_read_ts(s).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse { error: e }),
-                )
-            })?,
+            Some(s) => super::time_parse::parse_read_ts(s)
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?,
             None => {
                 let hlc = state.inner.tso.now().await.unwrap_or_default();
                 ((hlc.physical_ns as u128) << 32) | (hlc.logical as u128)
@@ -521,14 +523,17 @@ async fn run_search(
                     }),
                 )
             })?;
-            if let veda_core::types::FieldType::Vector { dimension, mrl_dims, .. } = field.field_type() {
+            if let veda_core::types::FieldType::Vector {
+                dimension,
+                mrl_dims,
+                ..
+            } = field.field_type()
+            {
                 if n > *dimension {
                     return Err((
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse {
-                            error: format!(
-                                "truncate_to={n} exceeds field dimension {dimension}"
-                            ),
+                            error: format!("truncate_to={n} exceeds field dimension {dimension}"),
                         }),
                     ));
                 }
@@ -554,7 +559,8 @@ async fn run_search(
             }
         }
         let metric = resolve_metric(schema, &vec_query.field);
-        let (hits, timings) = execute_single_vector(executor, vec_query, req, metric, effective_read_ts)?;
+        let (hits, timings) =
+            execute_single_vector(executor, vec_query, req, metric, effective_read_ts)?;
         if req.explain {
             let total = timings.filter_ms + timings.ann_search_ms + timings.scoring_ms;
             explain_timing = Some(ExplainTiming {
@@ -610,7 +616,8 @@ async fn run_search(
     } else if let Some(ref sparse_query) = req.query.sparse_vector {
         // Sparse-vector search.
         let metric = resolve_sparse_metric(schema, &sparse_query.field);
-        let (hits, timings) = execute_sparse_vector(executor, sparse_query, req, metric, effective_read_ts)?;
+        let (hits, timings) =
+            execute_sparse_vector(executor, sparse_query, req, metric, effective_read_ts)?;
         if req.explain {
             let total = timings.filter_ms + timings.ann_search_ms + timings.scoring_ms;
             explain_timing = Some(ExplainTiming {
@@ -646,12 +653,28 @@ async fn run_search(
         // `bm25 = true` in the schema. Runs the same tokenizer at ingest
         // and query time; no Lucene/Tantivy bundling required.
         let eff_filter = effective_filter(req);
-        execute_bm25(state, name, bm25_query, req.limit, eff_filter.as_ref(), effective_read_ts).await?
+        execute_bm25(
+            state,
+            name,
+            bm25_query,
+            req.limit,
+            eff_filter.as_ref(),
+            effective_read_ts,
+        )
+        .await?
     } else if let Some(ref phrase_query) = req.query.match_phrase {
         // Phrase / proximity search: requires the analyzed query terms to
         // appear in order with at most `slop` extra positions between them.
         let eff_filter = effective_filter(req);
-        execute_match_phrase(state, name, phrase_query, req.limit, eff_filter.as_ref(), effective_read_ts).await?
+        execute_match_phrase(
+            state,
+            name,
+            phrase_query,
+            req.limit,
+            eff_filter.as_ref(),
+            effective_read_ts,
+        )
+        .await?
     } else if let Some(ref hybrid_query) = req.query.hybrid {
         // Dense + BM25 hybrid via Reciprocal Rank Fusion. Each leg is
         // scored independently; RRF folds the rankings into one set.
@@ -727,7 +750,7 @@ async fn run_search(
 async fn apply_rerank(
     state: &AppState,
     collection: &str,
-    req: &SearchRequest,
+    _req: &SearchRequest,
     cfg: &super::rerank::RerankConfig,
     results: Vec<SearchHit>,
     final_limit: usize,
@@ -824,7 +847,14 @@ async fn populate_hit_fields(
     let vector_field_names: std::collections::HashSet<&str> = schema
         .fields()
         .iter()
-        .filter(|f| matches!(f.field_type(), FieldType::Vector { .. } | FieldType::MultiVector { .. } | FieldType::SparseVector { .. }))
+        .filter(|f| {
+            matches!(
+                f.field_type(),
+                FieldType::Vector { .. }
+                    | FieldType::MultiVector { .. }
+                    | FieldType::SparseVector { .. }
+            )
+        })
         .map(|f| f.name())
         .collect();
 
@@ -859,10 +889,7 @@ async fn populate_hit_fields(
                 // so hit.fields[k] is the unwrapped value (`"foo"`, `42`),
                 // not the tagged FieldValue variant (`{"String":"foo"}`)
                 // that serde_json::to_value produces on the enum directly.
-                map.insert(
-                    name.to_string(),
-                    super::records::field_value_to_json(value),
-                );
+                map.insert(name.to_string(), super::records::field_value_to_json(value));
             }
         }
         hit.fields = map;
@@ -1019,7 +1046,8 @@ async fn execute_bm25(
                     continue;
                 }
                 if let Ok(rec) = handle.reader.get_record(doc_id) {
-                    if filter_expr.is_some_and(|fe| !veda_query::filter::evaluate_record(fe, &rec)) {
+                    if filter_expr.is_some_and(|fe| !veda_query::filter::evaluate_record(fe, &rec))
+                    {
                         continue;
                     }
                     merged.push((rec.id(), score));
@@ -1108,7 +1136,8 @@ async fn execute_match_phrase(
                     continue;
                 }
                 if let Ok(rec) = handle.reader.get_record(doc_id) {
-                    if filter_expr.is_some_and(|fe| !veda_query::filter::evaluate_record(fe, &rec)) {
+                    if filter_expr.is_some_and(|fe| !veda_query::filter::evaluate_record(fe, &rec))
+                    {
                         continue;
                     }
                     merged.push((rec.id(), score));
@@ -1147,6 +1176,7 @@ pub struct HybridLegs {
     pub bm25_top: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_hybrid_dense_bm25(
     state: &AppState,
     collection: &str,
@@ -1165,8 +1195,15 @@ async fn execute_hybrid_dense_bm25(
     // request (req.filter / req.filter_expr). Pass the same effective
     // filter into the BM25 leg so both legs are scoped identically.
     let (dense_hits, _t) = execute_single_vector(executor, &hybrid.dense, req, metric, read_ts)?;
-    let bm25_hits =
-        execute_bm25(state, collection, &hybrid.bm25, k.max(req.limit), filter_expr, read_ts).await?;
+    let bm25_hits = execute_bm25(
+        state,
+        collection,
+        &hybrid.bm25,
+        k.max(req.limit),
+        filter_expr,
+        read_ts,
+    )
+    .await?;
 
     let dense_top: Vec<String> = dense_hits.iter().map(|h| h.id.clone()).collect();
     let bm25_top: Vec<String> = bm25_hits.iter().map(|h| h.id.clone()).collect();
@@ -1187,7 +1224,13 @@ async fn execute_hybrid_dense_bm25(
             fields: serde_json::Map::new(),
         })
         .collect();
-    Ok((hits, HybridLegs { dense_top, bm25_top }))
+    Ok((
+        hits,
+        HybridLegs {
+            dense_top,
+            bm25_top,
+        },
+    ))
 }
 
 /// Reciprocal-rank fusion.
@@ -1235,8 +1278,10 @@ fn weighted_sum_fuse(
             (h.id.clone(), sim)
         })
         .collect();
-    let bm25_raw: Vec<(String, f32)> =
-        bm25_hits.iter().map(|h| (h.id.clone(), -h.distance)).collect();
+    let bm25_raw: Vec<(String, f32)> = bm25_hits
+        .iter()
+        .map(|h| (h.id.clone(), -h.distance))
+        .collect();
 
     let mut scores: std::collections::HashMap<String, f32> =
         std::collections::HashMap::with_capacity(dense_sims.len() + bm25_raw.len());
@@ -1301,7 +1346,7 @@ fn execute_multi_vector(
                 Json(ErrorResponse {
                     error: format!("unknown fusion strategy: '{other}'"),
                 }),
-            ))
+            ));
         }
     };
 

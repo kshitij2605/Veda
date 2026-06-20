@@ -33,6 +33,7 @@
 //! - Implicit decompression of bit-packed centroids.
 //! - Two-stage candidate reduction (intersection-then-union) for
 //!   selective queries.
+//!
 //! See `research/2026-05-19-sota-audit/05-late-interaction.md`.
 //!
 //! References:
@@ -74,11 +75,7 @@ impl QuantizedCentroids {
         let mut code_norms = Vec::with_capacity(centroids.len());
         let mut scales = Vec::with_capacity(centroids.len());
         for c in centroids {
-            let max_abs = c
-                .iter()
-                .map(|x| x.abs())
-                .fold(0.0_f32, f32::max)
-                .max(1e-9);
+            let max_abs = c.iter().map(|x| x.abs()).fold(0.0_f32, f32::max).max(1e-9);
             let scale = max_abs / 127.0;
             let inv = 1.0 / scale;
             let code: Vec<i8> = c
@@ -94,19 +91,17 @@ impl QuantizedCentroids {
             code_norms.push(code_norm * scale); // pre-scaled L2 of decoded centroid
             scales.push(scale);
         }
-        Self { codes, code_norms, scales }
+        Self {
+            codes,
+            code_norms,
+            scales,
+        }
     }
 
     /// Cosine distance from a quantised query to centroid `idx`.
     /// Uses [`simd::i8_dot_product`] for the int dot — AVX2 path
     /// on x86_64, scalar fallback elsewhere.
-    fn cosine_distance(
-        &self,
-        q_codes: &[i8],
-        q_scale: f32,
-        q_norm: f32,
-        idx: usize,
-    ) -> f32 {
+    fn cosine_distance(&self, q_codes: &[i8], q_scale: f32, q_norm: f32, idx: usize) -> f32 {
         let c_codes = &self.codes[idx];
         let dot_int = simd::i8_dot_product(q_codes, c_codes);
         let dot_f = (dot_int as f32) * q_scale * self.scales[idx];
@@ -167,7 +162,11 @@ impl PlaidIndex {
             postings[idx].insert(doc_id);
         }
 
-        Self { centroids, postings, quantized: None }
+        Self {
+            centroids,
+            postings,
+            quantized: None,
+        }
     }
 
     /// Enable the int8-quantised centroid path (the WARP
@@ -271,10 +270,7 @@ impl PlaidIndex {
             union_all |= s;
         }
         for doc_id in union_all.iter() {
-            let count = per_row_sets
-                .iter()
-                .filter(|s| s.contains(doc_id))
-                .count() as u32;
+            let count = per_row_sets.iter().filter(|s| s.contains(doc_id)).count() as u32;
             if count >= min_quorum {
                 out.insert(doc_id);
             }
@@ -491,7 +487,10 @@ mod tests {
         // With probe = K, every posting list is included; every
         // doc that's in any posting list must be in the result.
         for d in 0..20u32 {
-            assert!(cand.contains(d), "doc {d} missing from full-probe candidates");
+            assert!(
+                cand.contains(d),
+                "doc {d} missing from full-probe candidates"
+            );
         }
     }
 
@@ -507,10 +506,7 @@ mod tests {
             .collect();
         let refs: Vec<(u32, &Vec<Vec<f32>>)> = docs.iter().map(|(i, v)| (*i, v)).collect();
         let p = PlaidIndex::build(refs.into_iter());
-        let q = vec![
-            vec![0.0_f32, 1.0, 0.0, 0.0],
-            vec![0.5_f32, 0.5, 0.0, 0.0],
-        ];
+        let q = vec![vec![0.0_f32, 1.0, 0.0, 0.0], vec![0.5_f32, 0.5, 0.0, 0.0]];
         assert_eq!(p.candidates(&q, 4), p.candidates_with_quorum(&q, 4, 1));
     }
 
@@ -630,9 +626,8 @@ mod tests {
     /// rows).
     #[test]
     fn warp_two_stage_quorum_above_q_is_empty() {
-        let docs: Vec<(u32, Vec<Vec<f32>>)> = (0..10u32)
-            .map(|i| (i, vec![vec![i as f32; 4]]))
-            .collect();
+        let docs: Vec<(u32, Vec<Vec<f32>>)> =
+            (0..10u32).map(|i| (i, vec![vec![i as f32; 4]])).collect();
         let refs: Vec<(u32, &Vec<Vec<f32>>)> = docs.iter().map(|(i, v)| (*i, v)).collect();
         let p = PlaidIndex::build(refs.into_iter());
         let q = vec![vec![0.5_f32; 4], vec![1.5_f32; 4]];

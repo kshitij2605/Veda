@@ -263,8 +263,18 @@ pub fn compute_change_points(
     let ts: Vec<f64> = history.series(|s| s.taken_at_ms as f64 / 1000.0);
 
     // disk_used_pct (Option) — drop snapshots missing the signal.
-    let disk = paired(&ts, &history.series(|s| s.disk_used_pct.unwrap_or(f64::NAN)));
-    push_named(&mut out, "disk_used_pct", None, &disk, min_points, min_magnitude);
+    let disk = paired(
+        &ts,
+        &history.series(|s| s.disk_used_pct.unwrap_or(f64::NAN)),
+    );
+    push_named(
+        &mut out,
+        "disk_used_pct",
+        None,
+        &disk,
+        min_points,
+        min_magnitude,
+    );
 
     // rss_bytes (Option).
     let rss = paired(
@@ -275,7 +285,14 @@ pub fn compute_change_points(
 
     // query p95 (always present on the snapshot; 0 when no queries).
     let p95 = paired(&ts, &history.series(|s| s.query.p95_ms));
-    push_named(&mut out, "query_p95_ms", None, &p95, min_points, min_magnitude);
+    push_named(
+        &mut out,
+        "query_p95_ms",
+        None,
+        &p95,
+        min_points,
+        min_magnitude,
+    );
 
     // error_log_count (per-window ERROR count — a sustained error-rate
     // proxy; the counter-rate isn't a stable per-snapshot series here).
@@ -353,8 +370,8 @@ fn paired(ts: &[f64], values: &[f64]) -> Vec<(f64, f64)> {
 mod tests {
     use super::*;
     use crate::advisor::snapshot::{
-        GlobalSnapshot, HealthSnapshot, OpsSnapshot, QuerySnapshot, SnapshotHistory,
-        DEFAULT_HISTORY_CAP,
+        DEFAULT_HISTORY_CAP, GlobalSnapshot, HealthSnapshot, OpsSnapshot, QuerySnapshot,
+        SnapshotHistory,
     };
     use std::collections::HashMap;
 
@@ -368,7 +385,10 @@ mod tests {
     fn empty_snapshot(taken_at_ms: i64) -> OpsSnapshot {
         OpsSnapshot {
             taken_at_ms,
-            global: GlobalSnapshot { active_collections: 0, total_records: 0 },
+            global: GlobalSnapshot {
+                active_collections: 0,
+                total_records: 0,
+            },
             collections: Vec::new(),
             nodes: Vec::new(),
             replica_safe_ts: None,

@@ -11,7 +11,7 @@
 //! (deterministic, not SystemTime::now()).
 
 use tempfile::TempDir;
-use veda_core::record::{FieldValue, Record, EXPIRES_AT_FIELD};
+use veda_core::record::{EXPIRES_AT_FIELD, FieldValue, Record};
 use veda_core::schema::{CollectionSchema, FieldDefinition};
 use veda_core::types::{DistanceMetric, FieldType};
 use veda_core::vector::DenseVector;
@@ -69,7 +69,10 @@ fn no_expires_field_always_visible() {
 
     // Far future now — record still visible.
     let result = mgr.lookup_record_at(id, i64::MAX);
-    assert!(result.is_some(), "record without TTL must always be visible");
+    assert!(
+        result.is_some(),
+        "record without TTL must always be visible"
+    );
 }
 
 /// A record with _expires_at in the FUTURE is visible.

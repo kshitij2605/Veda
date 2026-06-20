@@ -381,10 +381,11 @@ async fn probe_embed(state: &AppState, text: &str) -> Result<(), String> {
 
 /// Write `value` to `path` as pretty JSON; failure is logged, not surfaced.
 fn write_json<T: Serialize>(path: &Path, value: &T, label: &str) {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            let _ = std::fs::create_dir_all(parent);
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        let _ = std::fs::create_dir_all(parent);
     }
     match serde_json::to_vec_pretty(value) {
         Ok(bytes) => {

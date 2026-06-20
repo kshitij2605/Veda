@@ -112,10 +112,7 @@ pub struct RecallSample {
 /// denominator, not `exact.len()`, so a short exact set — corpus smaller
 /// than k — does not inflate recall). Queries with an empty exact set are
 /// skipped. Returns `None` when no query contributed.
-pub fn mean_recall_at_k(
-    per_query: &[(Vec<uuid::Uuid>, Vec<uuid::Uuid>)],
-    k: usize,
-) -> Option<f64> {
+pub fn mean_recall_at_k(per_query: &[(Vec<uuid::Uuid>, Vec<uuid::Uuid>)], k: usize) -> Option<f64> {
     if k == 0 {
         return None;
     }
@@ -133,11 +130,7 @@ pub fn mean_recall_at_k(
         sum += hits as f64 / denom;
         n += 1;
     }
-    if n == 0 {
-        None
-    } else {
-        Some(sum / n as f64)
-    }
+    if n == 0 { None } else { Some(sum / n as f64) }
 }
 
 /// Probe one collection's proxy recall@k. Returns `None` (a clean skip)
@@ -191,14 +184,13 @@ pub async fn probe_recall(
                 if gs.is_deleted(doc_id) {
                     continue;
                 }
-                if let Some(rec) = gs.get_record(doc_id) {
-                    if let Some(FieldValue::Vector(v)) = rec.get(&field_name) {
-                        if v.as_slice().len() == dim {
-                            corpus.push((rec.id(), v.as_slice().to_vec()));
-                            if corpus.len() >= corpus_cap {
-                                break 'gather;
-                            }
-                        }
+                if let Some(rec) = gs.get_record(doc_id)
+                    && let Some(FieldValue::Vector(v)) = rec.get(&field_name)
+                    && v.as_slice().len() == dim
+                {
+                    corpus.push((rec.id(), v.as_slice().to_vec()));
+                    if corpus.len() >= corpus_cap {
+                        break 'gather;
                     }
                 }
             }
@@ -207,14 +199,13 @@ pub async fn probe_recall(
                     if handle.reader.delete_bitmap().is_deleted(doc_id) {
                         continue;
                     }
-                    if let Ok(rec) = handle.reader.get_record(doc_id) {
-                        if let Some(FieldValue::Vector(v)) = rec.get(&field_name) {
-                            if v.as_slice().len() == dim {
-                                corpus.push((rec.id(), v.as_slice().to_vec()));
-                                if corpus.len() >= corpus_cap {
-                                    break 'gather;
-                                }
-                            }
+                    if let Ok(rec) = handle.reader.get_record(doc_id)
+                        && let Some(FieldValue::Vector(v)) = rec.get(&field_name)
+                        && v.as_slice().len() == dim
+                    {
+                        corpus.push((rec.id(), v.as_slice().to_vec()));
+                        if corpus.len() >= corpus_cap {
+                            break 'gather;
                         }
                     }
                 }
@@ -260,9 +251,7 @@ pub async fn probe_recall(
                 read_ts: None,
             };
             let ann_ids = match executor.search(&request) {
-                Ok((resp, _timings)) => {
-                    resp.results.into_iter().map(|r| r.id).collect::<Vec<_>>()
-                }
+                Ok((resp, _timings)) => resp.results.into_iter().map(|r| r.id).collect::<Vec<_>>(),
                 Err(_) => Vec::new(),
             };
 
@@ -296,7 +285,12 @@ fn exact_top_k(
 ) -> Vec<uuid::Uuid> {
     let mut scored: Vec<(f32, uuid::Uuid)> = corpus
         .iter()
-        .map(|(id, v)| (veda_index::distance::compute_distance(query, v, metric), *id))
+        .map(|(id, v)| {
+            (
+                veda_index::distance::compute_distance(query, v, metric),
+                *id,
+            )
+        })
         .collect();
     scored.sort_by(|a, b| {
         a.0.partial_cmp(&b.0)
@@ -396,10 +390,11 @@ impl RecallResults {
 
     /// Persist to `path` as pretty JSON. Failure is logged, not surfaced.
     pub fn save(&self, path: &Path) {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            let _ = std::fs::create_dir_all(parent);
         }
         match serde_json::to_vec_pretty(self) {
             Ok(bytes) => {
@@ -690,8 +685,7 @@ mod tests {
     fn vec_schema(scoped: &str, index_type: IndexType) -> CollectionSchema {
         CollectionSchema::builder(scoped)
             .add_field(
-                FieldDefinition::vector("v", 8, DistanceMetric::Cosine)
-                    .with_index_type(index_type),
+                FieldDefinition::vector("v", 8, DistanceMetric::Cosine).with_index_type(index_type),
             )
             .shard_count(1)
             .build()
@@ -766,7 +760,11 @@ mod tests {
         let state = AppState::new(tmp.path());
         // Fewer than MIN_RECORDS → skip cleanly.
         let scoped = seed_flat_collection(&state, "tiny", MIN_RECORDS - 1).await;
-        assert!(probe_recall(&state, &scoped, 10, 10, 50_000).await.is_none());
+        assert!(
+            probe_recall(&state, &scoped, 10, 10, 50_000)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

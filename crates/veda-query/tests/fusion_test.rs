@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use uuid::Uuid;
-use veda_query::fusion::{fuse_results, FusedResult, FusionStrategy};
+use veda_query::fusion::{FusedResult, FusionStrategy, fuse_results};
 use veda_query::search::ScoredRecord;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -65,12 +65,7 @@ fn test_rrf_three_fields_overlap() {
         ("audio_embed".to_string(), field_c),
     ];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Rrf { k: 60 },
-        &[],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::Rrf { k: 60 }, &[], 10);
 
     // Verify basic properties.
     assert_eq!(results.len(), 10);
@@ -105,12 +100,7 @@ fn test_rrf_limit_works() {
 
     let field_results = vec![("embed".to_string(), field_a)];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Rrf { k: 60 },
-        &[],
-        5,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::Rrf { k: 60 }, &[], 5);
 
     assert_eq!(results.len(), 5);
     assert_sorted_descending(&results);
@@ -127,17 +117,9 @@ fn test_rrf_score_computation() {
     let field_0 = vec![record(id_a, 0.1), record(id_b, 0.2)];
     let field_1 = vec![record(id_b, 0.1), record(id_a, 0.2)];
 
-    let field_results = vec![
-        ("f0".to_string(), field_0),
-        ("f1".to_string(), field_1),
-    ];
+    let field_results = vec![("f0".to_string(), field_0), ("f1".to_string(), field_1)];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Rrf { k: 60 },
-        &[],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::Rrf { k: 60 }, &[], 10);
 
     // Both should have the same score: 1/(60+1) + 1/(60+2) = 1/61 + 1/62
     let expected = 1.0_f32 / 61.0 + 1.0 / 62.0;
@@ -158,30 +140,17 @@ fn test_weighted_sum_two_fields() {
     let id3 = Uuid::new_v4();
 
     // Field 0 (weight 0.7): id1 is best (distance 0.1), id2 middle (0.5), id3 worst (1.0)
-    let field_0 = vec![
-        record(id1, 0.1),
-        record(id2, 0.5),
-        record(id3, 1.0),
-    ];
+    let field_0 = vec![record(id1, 0.1), record(id2, 0.5), record(id3, 1.0)];
 
     // Field 1 (weight 0.3): id3 is best (0.1), id2 middle (0.5), id1 worst (1.0)
-    let field_1 = vec![
-        record(id3, 0.1),
-        record(id2, 0.5),
-        record(id1, 1.0),
-    ];
+    let field_1 = vec![record(id3, 0.1), record(id2, 0.5), record(id1, 1.0)];
 
     let field_results = vec![
         ("text".to_string(), field_0),
         ("image".to_string(), field_1),
     ];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::WeightedSum,
-        &[0.7, 0.3],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::WeightedSum, &[0.7, 0.3], 10);
 
     assert_eq!(results.len(), 3);
     assert_sorted_descending(&results);
@@ -199,7 +168,11 @@ fn test_weighted_sum_two_fields() {
     //          = 0.7 * (1.0 - 4/9) + 0.3 * (1.0 - 4/9)
     //          = (0.7 + 0.3) * (5/9) = 5/9 ~ 0.5556
     assert_eq!(results[0].id, id1, "id1 should be ranked first");
-    assert!((results[0].score - 0.7).abs() < 1e-5, "Expected ~0.7, got {}", results[0].score);
+    assert!(
+        (results[0].score - 0.7).abs() < 1e-5,
+        "Expected ~0.7, got {}",
+        results[0].score
+    );
 }
 
 #[test]
@@ -219,23 +192,19 @@ fn test_weighted_sum_all_scores_positive() {
         .map(|(i, &id)| record(id, i as f32 * 0.3))
         .collect();
 
-    let field_results = vec![
-        ("f0".to_string(), field_0),
-        ("f1".to_string(), field_1),
-    ];
+    let field_results = vec![("f0".to_string(), field_0), ("f1".to_string(), field_1)];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::WeightedSum,
-        &[0.6, 0.4],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::WeightedSum, &[0.6, 0.4], 10);
 
     assert_eq!(results.len(), 10);
     assert_sorted_descending(&results);
 
     for r in &results {
-        assert!(r.score >= 0.0, "Score should be non-negative, got {}", r.score);
+        assert!(
+            r.score >= 0.0,
+            "Score should be non-negative, got {}",
+            r.score
+        );
     }
 }
 
@@ -248,28 +217,17 @@ fn test_weighted_sum_higher_weight_dominates() {
     let id_image_best = Uuid::new_v4();
 
     // Field 0 (weight 0.9): text_best at dist 0.0, image_best at dist 1.0
-    let field_0 = vec![
-        record(id_text_best, 0.0),
-        record(id_image_best, 1.0),
-    ];
+    let field_0 = vec![record(id_text_best, 0.0), record(id_image_best, 1.0)];
 
     // Field 1 (weight 0.1): image_best at dist 0.0, text_best at dist 1.0
-    let field_1 = vec![
-        record(id_image_best, 0.0),
-        record(id_text_best, 1.0),
-    ];
+    let field_1 = vec![record(id_image_best, 0.0), record(id_text_best, 1.0)];
 
     let field_results = vec![
         ("text".to_string(), field_0),
         ("image".to_string(), field_1),
     ];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::WeightedSum,
-        &[0.9, 0.1],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::WeightedSum, &[0.9, 0.1], 10);
 
     assert_eq!(results.len(), 2);
     assert_eq!(
@@ -305,17 +263,9 @@ fn test_intersection_basic() {
         field_1.push(record(id, (i + 3) as f32 * 0.2));
     }
 
-    let field_results = vec![
-        ("f0".to_string(), field_0),
-        ("f1".to_string(), field_1),
-    ];
+    let field_results = vec![("f0".to_string(), field_0), ("f1".to_string(), field_1)];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Intersection,
-        &[],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::Intersection, &[], 10);
 
     // Only 3 results should be returned (the intersection set).
     assert_eq!(results.len(), 3);
@@ -338,19 +288,14 @@ fn test_intersection_all_disjoint() {
         .map(|i| record(Uuid::new_v4(), i as f32 * 0.2))
         .collect();
 
-    let field_results = vec![
-        ("f0".to_string(), field_0),
-        ("f1".to_string(), field_1),
-    ];
+    let field_results = vec![("f0".to_string(), field_0), ("f1".to_string(), field_1)];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Intersection,
-        &[],
-        10,
+    let results = fuse_results(&field_results, FusionStrategy::Intersection, &[], 10);
+
+    assert!(
+        results.is_empty(),
+        "Disjoint results should yield empty intersection"
     );
-
-    assert!(results.is_empty(), "Disjoint results should yield empty intersection");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -370,12 +315,7 @@ fn test_single_field_passthrough() {
 
     let field_results = vec![("embed".to_string(), field)];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Rrf { k: 60 },
-        &[],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::Rrf { k: 60 }, &[], 10);
 
     assert_eq!(results.len(), 5);
     assert_sorted_descending(&results);
@@ -399,17 +339,9 @@ fn test_empty_results_from_one_field() {
 
     let field_1: Vec<ScoredRecord> = Vec::new(); // empty
 
-    let field_results = vec![
-        ("f0".to_string(), field_0),
-        ("f1".to_string(), field_1),
-    ];
+    let field_results = vec![("f0".to_string(), field_0), ("f1".to_string(), field_1)];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Rrf { k: 60 },
-        &[],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::Rrf { k: 60 }, &[], 10);
 
     // Should still return results from field 0.
     assert_eq!(results.len(), 5);
@@ -429,12 +361,7 @@ fn test_duplicate_uuid_across_fields() {
         ("image".to_string(), field_1),
     ];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Rrf { k: 60 },
-        &[],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::Rrf { k: 60 }, &[], 10);
 
     // Should produce exactly one fused result.
     assert_eq!(results.len(), 1);
@@ -465,12 +392,7 @@ fn test_limit_zero() {
 
     let field_results = vec![("f0".to_string(), field)];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Rrf { k: 60 },
-        &[],
-        0,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::Rrf { k: 60 }, &[], 0);
 
     assert!(results.is_empty());
 }
@@ -487,12 +409,7 @@ fn test_field_scores_populated() {
         ("image_embed".to_string(), field_1),
     ];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Rrf { k: 60 },
-        &[],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::Rrf { k: 60 }, &[], 10);
 
     assert_eq!(results.len(), 1);
     let field_scores = &results[0].field_scores;
@@ -521,17 +438,9 @@ fn test_intersection_with_empty_field() {
 
     let field_1: Vec<ScoredRecord> = Vec::new();
 
-    let field_results = vec![
-        ("f0".to_string(), field_0),
-        ("f1".to_string(), field_1),
-    ];
+    let field_results = vec![("f0".to_string(), field_0), ("f1".to_string(), field_1)];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Intersection,
-        &[],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::Intersection, &[], 10);
 
     assert!(
         results.is_empty(),
@@ -548,17 +457,9 @@ fn test_weighted_sum_single_element_fields() {
     let field_0 = vec![record(id, 0.5)];
     let field_1 = vec![record(id, 0.5)];
 
-    let field_results = vec![
-        ("f0".to_string(), field_0),
-        ("f1".to_string(), field_1),
-    ];
+    let field_results = vec![("f0".to_string(), field_0), ("f1".to_string(), field_1)];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::WeightedSum,
-        &[0.5, 0.5],
-        10,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::WeightedSum, &[0.5, 0.5], 10);
 
     assert_eq!(results.len(), 1);
     // With range=0, norm_dist=0, sim=1. Score = 0.5*1 + 0.5*1 = 1.0
@@ -600,12 +501,7 @@ fn test_rrf_documents_in_more_fields_rank_higher() {
         ("f2".to_string(), field_2),
     ];
 
-    let results = fuse_results(
-        &field_results,
-        FusionStrategy::Rrf { k: 60 },
-        &[],
-        20,
-    );
+    let results = fuse_results(&field_results, FusionStrategy::Rrf { k: 60 }, &[], 20);
 
     // id_triple: 3 * 1/(60+3) = 3/63 ~ 0.0476
     // id_single: 1/(60+1) = 1/61 ~ 0.0164

@@ -226,9 +226,8 @@ impl RaBitQuantizer {
 
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)?;
-        let data: RaBitQuantizerData = bincode::deserialize(&bytes).map_err(|e| {
-            VedaError::Index(format!("Failed to deserialize RaBitQuantizer: {e}"))
-        })?;
+        let data: RaBitQuantizerData = bincode::deserialize(&bytes)
+            .map_err(|e| VedaError::Index(format!("Failed to deserialize RaBitQuantizer: {e}")))?;
         Ok(Self {
             dimension: data.dimension,
             norms: data.norms,

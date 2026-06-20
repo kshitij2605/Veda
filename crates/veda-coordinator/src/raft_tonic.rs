@@ -27,13 +27,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use openraft::error::{
-    InstallSnapshotError, NetworkError, RPCError, RaftError, Unreachable,
-};
+use openraft::error::{InstallSnapshotError, NetworkError, RPCError, RaftError, Unreachable};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
-    InstallSnapshotResponse, VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
+    VoteRequest, VoteResponse,
 };
 use openraft::{AnyError, BasicNode, Raft};
 use tokio::sync::RwLock;
@@ -46,9 +44,9 @@ pub mod raft_proto {
     tonic::include_proto!("veda.raft");
 }
 
+use raft_proto::RawRpc;
 use raft_proto::veda_raft_client::VedaRaftClient;
 use raft_proto::veda_raft_server::{VedaRaft, VedaRaftServer};
-use raft_proto::RawRpc;
 
 // ---------------------------------------------------------------------------
 // PeerAddressBook — NodeId -> "host:port"
@@ -138,10 +136,7 @@ fn bincode_status<E: std::fmt::Display>(verb: &str, err: E) -> Status {
 
 #[tonic::async_trait]
 impl VedaRaft for RaftService {
-    async fn append_entries(
-        &self,
-        req: Request<RawRpc>,
-    ) -> Result<Response<RawRpc>, Status> {
+    async fn append_entries(&self, req: Request<RawRpc>) -> Result<Response<RawRpc>, Status> {
         let inbound: AppendEntriesRequest<VedaTypeConfig> =
             bincode::deserialize(&req.into_inner().payload)
                 .map_err(|e| bincode_status("decode AppendEntriesRequest", e))?;
@@ -155,27 +150,20 @@ impl VedaRaft for RaftService {
         Ok(Response::new(RawRpc { payload }))
     }
 
-    async fn vote(
-        &self,
-        req: Request<RawRpc>,
-    ) -> Result<Response<RawRpc>, Status> {
-        let inbound: VoteRequest<NodeId> =
-            bincode::deserialize(&req.into_inner().payload)
-                .map_err(|e| bincode_status("decode VoteRequest", e))?;
+    async fn vote(&self, req: Request<RawRpc>) -> Result<Response<RawRpc>, Status> {
+        let inbound: VoteRequest<NodeId> = bincode::deserialize(&req.into_inner().payload)
+            .map_err(|e| bincode_status("decode VoteRequest", e))?;
         let resp = self
             .raft
             .vote(inbound)
             .await
             .map_err(|e| Status::internal(format!("raft vote: {e}")))?;
-        let payload = bincode::serialize(&resp)
-            .map_err(|e| bincode_status("encode VoteResponse", e))?;
+        let payload =
+            bincode::serialize(&resp).map_err(|e| bincode_status("encode VoteResponse", e))?;
         Ok(Response::new(RawRpc { payload }))
     }
 
-    async fn install_snapshot(
-        &self,
-        req: Request<RawRpc>,
-    ) -> Result<Response<RawRpc>, Status> {
+    async fn install_snapshot(&self, req: Request<RawRpc>) -> Result<Response<RawRpc>, Status> {
         let inbound: InstallSnapshotRequest<VedaTypeConfig> =
             bincode::deserialize(&req.into_inner().payload)
                 .map_err(|e| bincode_status("decode InstallSnapshotRequest", e))?;
@@ -222,7 +210,8 @@ impl TonicRaftNetwork {
         } else {
             format!("http://{addr}")
         };
-        let endpoint = Endpoint::from_shared(uri).ok()?
+        let endpoint = Endpoint::from_shared(uri)
+            .ok()?
             .timeout(std::time::Duration::from_secs(5))
             .connect_timeout(std::time::Duration::from_secs(2));
         let channel = endpoint.connect().await.ok()?;
@@ -249,11 +238,7 @@ pub struct TonicRaftNetworkConn {
 impl RaftNetworkFactory<VedaTypeConfig> for TonicRaftNetwork {
     type Network = TonicRaftNetworkConn;
 
-    async fn new_client(
-        &mut self,
-        target: NodeId,
-        _node: &BasicNode,
-    ) -> Self::Network {
+    async fn new_client(&mut self, target: NodeId, _node: &BasicNode) -> Self::Network {
         TonicRaftNetworkConn {
             target,
             factory: self.clone(),
@@ -277,7 +262,10 @@ fn unreachable<E: std::error::Error>(
     node: NodeId,
     msg: impl Into<String>,
 ) -> RPCError<NodeId, BasicNode, E> {
-    RPCError::Unreachable(Unreachable::new(&NoRouteErr { node, msg: msg.into() }))
+    RPCError::Unreachable(Unreachable::new(&NoRouteErr {
+        node,
+        msg: msg.into(),
+    }))
 }
 
 fn net_err<E: std::error::Error>(
@@ -305,11 +293,10 @@ impl TonicRaftNetworkConn {
     {
         let bytes = bincode::serialize(&req)
             .map_err(|e| net_err(self.target, format!("encode {verb}: {e}")))?;
-        let channel = self
-            .factory
-            .channel_for(self.target)
-            .await
-            .ok_or_else(|| unreachable(self.target, format!("no route or dial failed ({verb})")))?;
+        let channel =
+            self.factory.channel_for(self.target).await.ok_or_else(|| {
+                unreachable(self.target, format!("no route or dial failed ({verb})"))
+            })?;
         let client = VedaRaftClient::new(channel);
         let resp = match send(client, RawRpc { payload: bytes }).await {
             Ok(r) => r,
@@ -328,25 +315,19 @@ impl TonicRaftNetworkConn {
     }
 }
 
-type SendFut = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<Response<RawRpc>, Status>> + Send>,
->;
+type SendFut =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response<RawRpc>, Status>> + Send>>;
 
 impl RaftNetwork<VedaTypeConfig> for TonicRaftNetworkConn {
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<VedaTypeConfig>,
         _option: RPCOption,
-    ) -> Result<
-        AppendEntriesResponse<NodeId>,
-        RPCError<NodeId, BasicNode, RaftError<NodeId>>,
-    > {
+    ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
         self.invoke::<_, AppendEntriesResponse<NodeId>, RaftError<NodeId>>(
             "AppendEntries",
             rpc,
-            |mut client, msg| {
-                Box::pin(async move { client.append_entries(msg).await })
-            },
+            |mut client, msg| Box::pin(async move { client.append_entries(msg).await }),
         )
         .await
     }
@@ -355,17 +336,10 @@ impl RaftNetwork<VedaTypeConfig> for TonicRaftNetworkConn {
         &mut self,
         rpc: VoteRequest<NodeId>,
         _option: RPCOption,
-    ) -> Result<
-        VoteResponse<NodeId>,
-        RPCError<NodeId, BasicNode, RaftError<NodeId>>,
-    > {
-        self.invoke::<_, VoteResponse<NodeId>, RaftError<NodeId>>(
-            "Vote",
-            rpc,
-            |mut client, msg| {
-                Box::pin(async move { client.vote(msg).await })
-            },
-        )
+    ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
+        self.invoke::<_, VoteResponse<NodeId>, RaftError<NodeId>>("Vote", rpc, |mut client, msg| {
+            Box::pin(async move { client.vote(msg).await })
+        })
         .await
     }
 
@@ -380,9 +354,7 @@ impl RaftNetwork<VedaTypeConfig> for TonicRaftNetworkConn {
         self.invoke::<_, InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>(
             "InstallSnapshot",
             rpc,
-            |mut client, msg| {
-                Box::pin(async move { client.install_snapshot(msg).await })
-            },
+            |mut client, msg| Box::pin(async move { client.install_snapshot(msg).await }),
         )
         .await
     }

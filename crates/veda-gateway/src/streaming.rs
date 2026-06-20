@@ -62,16 +62,11 @@ pub async fn spawn_ingestion_worker(state: AppState, nats_url: String) -> Result
     skip(state, payload),
     fields(collection = %collection, payload_size = payload.len())
 )]
-async fn handle_message(
-    state: &AppState,
-    collection: &str,
-    payload: &[u8],
-) -> Result<()> {
+async fn handle_message(state: &AppState, collection: &str, payload: &[u8]) -> Result<()> {
     use veda_core::schema::CollectionSchema;
 
-    let raw: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_slice(payload)
-            .map_err(|e| VedaError::Storage(format!("streaming: bad json: {e}")))?;
+    let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(payload)
+        .map_err(|e| VedaError::Storage(format!("streaming: bad json: {e}")))?;
 
     let schema: CollectionSchema = {
         let schemas = state.inner.schemas.read().await;
@@ -83,8 +78,8 @@ async fn handle_message(
         }
     };
 
-    let record = crate::rest::records::parse_record_public(&raw, &schema)
-        .map_err(VedaError::Storage)?;
+    let record =
+        crate::rest::records::parse_record_public(&raw, &schema).map_err(VedaError::Storage)?;
 
     let mut managers = state.inner.segment_managers.write().await;
     let shard_map = managers

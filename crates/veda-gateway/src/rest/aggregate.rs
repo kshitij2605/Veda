@@ -14,9 +14,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use veda_core::record::{FieldValue, Record};
 use veda_query::filter::parser::FilterParser;
@@ -62,13 +62,22 @@ fn field_as_key(fv: &FieldValue) -> String {
 type GatewayError = (StatusCode, Json<ErrorResponse>);
 
 fn not_found(msg: impl Into<String>) -> GatewayError {
-    (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg.into() }))
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse { error: msg.into() }),
+    )
 }
 fn bad_request(msg: impl Into<String>) -> GatewayError {
-    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: msg.into() }))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: msg.into() }),
+    )
 }
 fn internal(msg: impl Into<String>) -> GatewayError {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: msg.into() }))
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse { error: msg.into() }),
+    )
 }
 
 // ── Aggregate ─────────────────────────────────────────────────────────────────
@@ -105,7 +114,12 @@ struct Accumulator {
 
 impl Default for Accumulator {
     fn default() -> Self {
-        Self { count: 0, sum: 0.0, min: f64::MAX, max: f64::MIN }
+        Self {
+            count: 0,
+            sum: 0.0,
+            min: f64::MAX,
+            max: f64::MIN,
+        }
     }
 }
 
@@ -113,8 +127,12 @@ impl Accumulator {
     fn push(&mut self, v: f64) {
         self.count += 1;
         self.sum += v;
-        if v < self.min { self.min = v; }
-        if v > self.max { self.max = v; }
+        if v < self.min {
+            self.min = v;
+        }
+        if v > self.max {
+            self.max = v;
+        }
     }
 }
 
@@ -137,7 +155,10 @@ pub struct AggError {
 
 impl AggError {
     fn new(kind: AggErrorKind, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into() }
+        Self {
+            kind,
+            message: message.into(),
+        }
     }
 }
 
@@ -148,11 +169,14 @@ pub async fn aggregate(
     Query(q): Query<AggregateQuery>,
 ) -> Result<Json<AggregateResponse>, GatewayError> {
     let name = tenant::scope(&tenant, &name);
-    aggregate_core(&state, &name, &q).await.map(Json).map_err(|e| match e.kind {
-        AggErrorKind::NotFound => not_found(e.message),
-        AggErrorKind::BadRequest => bad_request(e.message),
-        AggErrorKind::Internal => internal(e.message),
-    })
+    aggregate_core(&state, &name, &q)
+        .await
+        .map(Json)
+        .map_err(|e| match e.kind {
+            AggErrorKind::NotFound => not_found(e.message),
+            AggErrorKind::BadRequest => bad_request(e.message),
+            AggErrorKind::Internal => internal(e.message),
+        })
 }
 
 /// Core aggregation over a *tenant-scoped* collection name. Shared by the
@@ -167,7 +191,10 @@ pub async fn aggregate_core(
     {
         let schemas = state.inner.schemas.read().await;
         if !schemas.contains_key(name) {
-            return Err(AggError::new(AggErrorKind::NotFound, format!("collection '{name}' not found")));
+            return Err(AggError::new(
+                AggErrorKind::NotFound,
+                format!("collection '{name}' not found"),
+            ));
         }
     }
 
@@ -175,16 +202,22 @@ pub async fn aggregate_core(
     let is_numeric_metric = matches!(metric, "sum" | "avg" | "min" | "max");
 
     // Parse optional filter.
-    let filter_expr = q.filter.as_deref()
-        .map(|s| FilterParser::parse(s)
-            .map_err(|e| AggError::new(AggErrorKind::BadRequest, format!("invalid filter: {e}"))))
+    let filter_expr = q
+        .filter
+        .as_deref()
+        .map(|s| {
+            FilterParser::parse(s).map_err(|e| {
+                AggError::new(AggErrorKind::BadRequest, format!("invalid filter: {e}"))
+            })
+        })
         .transpose()?;
 
     let now = now_secs();
 
     let managers = state.inner.segment_managers.read().await;
-    let shard_map = managers.get(name)
-        .ok_or_else(|| AggError::new(AggErrorKind::Internal, "no segment managers for collection"))?;
+    let shard_map = managers.get(name).ok_or_else(|| {
+        AggError::new(AggErrorKind::Internal, "no segment managers for collection")
+    })?;
 
     // key → Accumulator
     let mut accums: HashMap<String, Accumulator> = HashMap::new();
@@ -197,32 +230,56 @@ pub async fn aggregate_core(
         // Growing segment
         let gs = sm.growing_segment();
         for doc_id in 0..gs.count() {
-            if gs.is_deleted(doc_id) { continue; }
+            if gs.is_deleted(doc_id) {
+                continue;
+            }
             if let Some(rec) = gs.get_record(doc_id) {
-                if rec.is_expired_at(now) { continue; }
-                if let Some(ref fe) = filter_expr {
-                    if !evaluate_record(fe, rec) { continue; }
+                if rec.is_expired_at(now) {
+                    continue;
                 }
-                if let Err(e) = accumulate_record(rec, &q.field, q.group_by.as_deref(), no_group,
-                    is_numeric_metric, &bucket_key, &mut accums, &mut first_non_numeric) {
-                    return Err(e);
+                if let Some(ref fe) = filter_expr
+                    && !evaluate_record(fe, rec)
+                {
+                    continue;
                 }
+                accumulate_record(
+                    rec,
+                    &q.field,
+                    q.group_by.as_deref(),
+                    no_group,
+                    is_numeric_metric,
+                    &bucket_key,
+                    &mut accums,
+                    &mut first_non_numeric,
+                )?
             }
         }
 
         // Sealed segments
         for handle in sm.sealed_segments() {
             for doc_id in 0..handle.metadata.row_count as u32 {
-                if handle.reader.delete_bitmap().is_deleted(doc_id) { continue; }
+                if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                    continue;
+                }
                 if let Ok(rec) = handle.reader.get_record(doc_id) {
-                    if rec.is_expired_at(now) { continue; }
-                    if let Some(ref fe) = filter_expr {
-                        if !evaluate_record(fe, &rec) { continue; }
+                    if rec.is_expired_at(now) {
+                        continue;
                     }
-                    if let Err(e) = accumulate_record(&rec, &q.field, q.group_by.as_deref(), no_group,
-                        is_numeric_metric, &bucket_key, &mut accums, &mut first_non_numeric) {
-                        return Err(e);
+                    if let Some(ref fe) = filter_expr
+                        && !evaluate_record(fe, &rec)
+                    {
+                        continue;
                     }
+                    accumulate_record(
+                        &rec,
+                        &q.field,
+                        q.group_by.as_deref(),
+                        no_group,
+                        is_numeric_metric,
+                        &bucket_key,
+                        &mut accums,
+                        &mut first_non_numeric,
+                    )?
                 }
             }
         }
@@ -230,22 +287,44 @@ pub async fn aggregate_core(
     drop(managers);
 
     // Build result groups sorted by key.
-    let mut groups: Vec<AggregateGroup> = accums.into_iter().map(|(key, acc)| {
-        let value = match metric {
-            "count" => acc.count as f64,
-            "sum"   => acc.sum,
-            "avg"   => if acc.count == 0 { 0.0 } else { acc.sum / acc.count as f64 },
-            "min"   => if acc.count == 0 { 0.0 } else { acc.min },
-            "max"   => if acc.count == 0 { 0.0 } else { acc.max },
-            _       => acc.count as f64,
-        };
-        AggregateGroup { key, value }
-    }).collect();
+    let mut groups: Vec<AggregateGroup> = accums
+        .into_iter()
+        .map(|(key, acc)| {
+            let value = match metric {
+                "count" => acc.count as f64,
+                "sum" => acc.sum,
+                "avg" => {
+                    if acc.count == 0 {
+                        0.0
+                    } else {
+                        acc.sum / acc.count as f64
+                    }
+                }
+                "min" => {
+                    if acc.count == 0 {
+                        0.0
+                    } else {
+                        acc.min
+                    }
+                }
+                "max" => {
+                    if acc.count == 0 {
+                        0.0
+                    } else {
+                        acc.max
+                    }
+                }
+                _ => acc.count as f64,
+            };
+            AggregateGroup { key, value }
+        })
+        .collect();
     groups.sort_by(|a, b| a.key.cmp(&b.key));
 
     Ok(AggregateResponse { groups })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn accumulate_record(
     rec: &Record,
     field: &str,
@@ -269,9 +348,10 @@ fn accumulate_record(
                 if as_f64(v).is_none() {
                     if !*saw_non_numeric {
                         *saw_non_numeric = true;
-                        return Err(AggError::new(AggErrorKind::BadRequest, format!(
-                            "field '{field}' is not numeric; cannot apply numeric metric"
-                        )));
+                        return Err(AggError::new(
+                            AggErrorKind::BadRequest,
+                            format!("field '{field}' is not numeric; cannot apply numeric metric"),
+                        ));
                     }
                     return Ok(());
                 }
@@ -314,7 +394,9 @@ pub struct HistogramQuery {
     pub filter: Option<String>,
 }
 
-fn default_bins() -> usize { 10 }
+fn default_bins() -> usize {
+    10
+}
 
 #[derive(Debug, Serialize)]
 pub struct HistogramResponse {
@@ -345,14 +427,17 @@ pub async fn histogram(
 
     let bins = q.bins.max(1);
 
-    let filter_expr = q.filter.as_deref()
+    let filter_expr = q
+        .filter
+        .as_deref()
         .map(|s| FilterParser::parse(s).map_err(|e| bad_request(format!("invalid filter: {e}"))))
         .transpose()?;
 
     let now = now_secs();
 
     let managers = state.inner.segment_managers.read().await;
-    let shard_map = managers.get(&name)
+    let shard_map = managers
+        .get(&name)
         .ok_or_else(|| internal("no segment managers for collection"))?;
 
     // First pass: collect values.
@@ -361,11 +446,17 @@ pub async fn histogram(
     for sm in shard_map.values() {
         let gs = sm.growing_segment();
         for doc_id in 0..gs.count() {
-            if gs.is_deleted(doc_id) { continue; }
+            if gs.is_deleted(doc_id) {
+                continue;
+            }
             if let Some(rec) = gs.get_record(doc_id) {
-                if rec.is_expired_at(now) { continue; }
-                if let Some(ref fe) = filter_expr {
-                    if !evaluate_record(fe, rec) { continue; }
+                if rec.is_expired_at(now) {
+                    continue;
+                }
+                if let Some(ref fe) = filter_expr
+                    && !evaluate_record(fe, rec)
+                {
+                    continue;
                 }
                 if let Some(v) = rec.get(&q.field).and_then(as_f64) {
                     values.push(v);
@@ -374,11 +465,17 @@ pub async fn histogram(
         }
         for handle in sm.sealed_segments() {
             for doc_id in 0..handle.metadata.row_count as u32 {
-                if handle.reader.delete_bitmap().is_deleted(doc_id) { continue; }
+                if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                    continue;
+                }
                 if let Ok(rec) = handle.reader.get_record(doc_id) {
-                    if rec.is_expired_at(now) { continue; }
-                    if let Some(ref fe) = filter_expr {
-                        if !evaluate_record(fe, &rec) { continue; }
+                    if rec.is_expired_at(now) {
+                        continue;
+                    }
+                    if let Some(ref fe) = filter_expr
+                        && !evaluate_record(fe, &rec)
+                    {
+                        continue;
                     }
                     if let Some(v) = rec.get(&q.field).and_then(as_f64) {
                         values.push(v);
@@ -391,7 +488,13 @@ pub async fn histogram(
 
     if values.is_empty() {
         // Return `bins` empty bins with lo=0, hi=0.
-        let empty = (0..bins).map(|_| HistogramBin { lo: 0.0, hi: 0.0, count: 0 }).collect();
+        let empty = (0..bins)
+            .map(|_| HistogramBin {
+                lo: 0.0,
+                hi: 0.0,
+                count: 0,
+            })
+            .collect();
         return Ok(Json(HistogramResponse { bins: empty }));
     }
 
@@ -412,11 +515,13 @@ pub async fn histogram(
         counts[idx] += 1;
     }
 
-    let result_bins: Vec<HistogramBin> = (0..bins).map(|i| HistogramBin {
-        lo: min + i as f64 * width,
-        hi: min + (i + 1) as f64 * width,
-        count: counts[i],
-    }).collect();
+    let result_bins: Vec<HistogramBin> = (0..bins)
+        .map(|i| HistogramBin {
+            lo: min + i as f64 * width,
+            hi: min + (i + 1) as f64 * width,
+            count: counts[i],
+        })
+        .collect();
 
     Ok(Json(HistogramResponse { bins: result_bins }))
 }
@@ -464,14 +569,17 @@ pub async fn field_stats(
         }
     }
 
-    let filter_expr = q.filter.as_deref()
+    let filter_expr = q
+        .filter
+        .as_deref()
         .map(|s| FilterParser::parse(s).map_err(|e| bad_request(format!("invalid filter: {e}"))))
         .transpose()?;
 
     let now = now_secs();
 
     let managers = state.inner.segment_managers.read().await;
-    let shard_map = managers.get(&name)
+    let shard_map = managers
+        .get(&name)
         .ok_or_else(|| internal("no segment managers for collection"))?;
 
     let mut total_count: u64 = 0;
@@ -493,28 +601,64 @@ pub async fn field_stats(
     for sm in shard_map.values() {
         let gs = sm.growing_segment();
         for doc_id in 0..gs.count() {
-            if gs.is_deleted(doc_id) { continue; }
+            if gs.is_deleted(doc_id) {
+                continue;
+            }
             if let Some(rec) = gs.get_record(doc_id) {
-                if rec.is_expired_at(now) { continue; }
-                if let Some(ref fe) = filter_expr {
-                    if !evaluate_record(fe, rec) { continue; }
+                if rec.is_expired_at(now) {
+                    continue;
                 }
-                collect_field_stats(rec, &q.field, &mut total_count, &mut null_count,
-                    &mut distinct, &mut num_sum, &mut num_min, &mut num_max, &mut num_count,
-                    &mut is_numeric, &mut str_min_len, &mut str_max_len, &mut is_string);
+                if let Some(ref fe) = filter_expr
+                    && !evaluate_record(fe, rec)
+                {
+                    continue;
+                }
+                collect_field_stats(
+                    rec,
+                    &q.field,
+                    &mut total_count,
+                    &mut null_count,
+                    &mut distinct,
+                    &mut num_sum,
+                    &mut num_min,
+                    &mut num_max,
+                    &mut num_count,
+                    &mut is_numeric,
+                    &mut str_min_len,
+                    &mut str_max_len,
+                    &mut is_string,
+                );
             }
         }
         for handle in sm.sealed_segments() {
             for doc_id in 0..handle.metadata.row_count as u32 {
-                if handle.reader.delete_bitmap().is_deleted(doc_id) { continue; }
+                if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                    continue;
+                }
                 if let Ok(rec) = handle.reader.get_record(doc_id) {
-                    if rec.is_expired_at(now) { continue; }
-                    if let Some(ref fe) = filter_expr {
-                        if !evaluate_record(fe, &rec) { continue; }
+                    if rec.is_expired_at(now) {
+                        continue;
                     }
-                    collect_field_stats(&rec, &q.field, &mut total_count, &mut null_count,
-                        &mut distinct, &mut num_sum, &mut num_min, &mut num_max, &mut num_count,
-                        &mut is_numeric, &mut str_min_len, &mut str_max_len, &mut is_string);
+                    if let Some(ref fe) = filter_expr
+                        && !evaluate_record(fe, &rec)
+                    {
+                        continue;
+                    }
+                    collect_field_stats(
+                        &rec,
+                        &q.field,
+                        &mut total_count,
+                        &mut null_count,
+                        &mut distinct,
+                        &mut num_sum,
+                        &mut num_min,
+                        &mut num_max,
+                        &mut num_count,
+                        &mut is_numeric,
+                        &mut str_min_len,
+                        &mut str_max_len,
+                        &mut is_string,
+                    );
                 }
             }
         }
@@ -522,13 +666,21 @@ pub async fn field_stats(
     drop(managers);
 
     let (min, max, avg) = if is_numeric && num_count > 0 {
-        (Some(num_min), Some(num_max), Some(num_sum / num_count as f64))
+        (
+            Some(num_min),
+            Some(num_max),
+            Some(num_sum / num_count as f64),
+        )
     } else {
         (None, None, None)
     };
 
     let (min_length, max_length) = if is_string {
-        let lo = if str_min_len == u64::MAX { 0 } else { str_min_len };
+        let lo = if str_min_len == u64::MAX {
+            0
+        } else {
+            str_min_len
+        };
         (Some(lo), Some(str_max_len))
     } else {
         (None, None)
@@ -578,16 +730,24 @@ fn collect_field_stats(
                 *is_numeric = true;
                 *num_count += 1;
                 *num_sum += v;
-                if v < *num_min { *num_min = v; }
-                if v > *num_max { *num_max = v; }
+                if v < *num_min {
+                    *num_min = v;
+                }
+                if v > *num_max {
+                    *num_max = v;
+                }
             }
 
             // String length stats
             if let FieldValue::String(s) = fv {
                 *is_string = true;
                 let l = s.chars().count() as u64;
-                if l < *str_min_len { *str_min_len = l; }
-                if l > *str_max_len { *str_max_len = l; }
+                if l < *str_min_len {
+                    *str_min_len = l;
+                }
+                if l > *str_max_len {
+                    *str_max_len = l;
+                }
             }
         }
     }

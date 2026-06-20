@@ -18,7 +18,7 @@ use veda_core::vector::DenseVector;
 use veda_query::distributed::{DistributedQueryExecutor, ShardSearcher};
 use veda_query::local_shard::LocalShardSearcher;
 use veda_query::remote_shard::{
-    fetch_records_remote, RemoteShardSearcher, ShardSearchServer, ShardSearchService,
+    RemoteShardSearcher, ShardSearchServer, ShardSearchService, fetch_records_remote,
 };
 use veda_query::search::VectorSearchRequest;
 use veda_storage::segment_manager::SegmentManager;
@@ -54,7 +54,10 @@ fn build_segment_manager(tmp: &std::path::Path, n: u32) -> (SegmentManager, Vec<
         // hold byte-identical records.
         let id = Uuid::from_u128(0x5eed_0000_0000_0000_0000_0000_0000_0000 | i as u128);
         let mut record = Record::with_id(id);
-        record.set("embedding", FieldValue::Vector(DenseVector::new(seeded_vec(i))));
+        record.set(
+            "embedding",
+            FieldValue::Vector(DenseVector::new(seeded_vec(i))),
+        );
         record.set("category", FieldValue::String(format!("cat{}", i % 3)));
         sm.insert(record).unwrap();
         ids.push(id);
@@ -71,7 +74,10 @@ async fn remote_shard_search_and_fetch_round_trip() {
     let tmp_oracle = tempfile::tempdir().unwrap();
     let (sm_server, ids) = build_segment_manager(tmp_server.path(), 40);
     let (sm_oracle, ids_oracle) = build_segment_manager(tmp_oracle.path(), 40);
-    assert_eq!(ids, ids_oracle, "fixtures must be identical (deterministic ids)");
+    assert_eq!(
+        ids, ids_oracle,
+        "fixtures must be identical (deterministic ids)"
+    );
 
     let oracle = LocalShardSearcher::new(sm_oracle);
 
@@ -109,12 +115,11 @@ async fn remote_shard_search_and_fetch_round_trip() {
     // search_shard blocks on the runtime internally; run it off the
     // async worker via spawn_blocking so we don't block the reactor.
     let req_for_remote = request.clone();
-    let (remote_results, _t) = tokio::task::spawn_blocking(move || {
-        remote.search_shard(0, &req_for_remote)
-    })
-    .await
-    .unwrap()
-    .unwrap();
+    let (remote_results, _t) =
+        tokio::task::spawn_blocking(move || remote.search_shard(0, &req_for_remote))
+            .await
+            .unwrap()
+            .unwrap();
 
     // Ground truth from the in-process oracle.
     let (oracle_results, _t2) = oracle.search_shard(0, &request).unwrap();
@@ -234,6 +239,9 @@ async fn distributed_executor_mixes_local_and_remote() {
     // total_candidates = 10 (local) + 10 (remote).
     assert_eq!(response.total_candidates, 20);
     for w in response.results.windows(2) {
-        assert!(w[0].distance <= w[1].distance, "global merge must be sorted");
+        assert!(
+            w[0].distance <= w[1].distance,
+            "global merge must be sorted"
+        );
     }
 }

@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Mutex;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_core::embedding::{EmbeddingModelConfig, Modality};
@@ -58,8 +58,14 @@ async fn start_server() -> (String, tempfile::TempDir) {
 async fn start_auth_server() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let mut users = HashMap::new();
-    users.insert("admin".to_owned(), UserRecord::with_password("admin", Role::Admin));
-    users.insert("viewer".to_owned(), UserRecord::with_password("viewer", Role::Viewer));
+    users.insert(
+        "admin".to_owned(),
+        UserRecord::with_password("admin", Role::Admin),
+    );
+    users.insert(
+        "viewer".to_owned(),
+        UserRecord::with_password("viewer", Role::Viewer),
+    );
     let state = AppState::with_auth_and_users(tmp.path(), "test-jwt-secret", users);
     let router = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -86,8 +92,8 @@ async fn login(base: &str, user: &str, pass: &str) -> String {
 /// `{ "url", "markdown": "<string>", "success": true }` (same endpoint the
 /// client uses).
 async fn start_mock_crawl4ai() -> (String, tokio::task::JoinHandle<()>) {
-    use axum::routing::post;
     use axum::Router;
+    use axum::routing::post;
 
     async fn md() -> axum::Json<Value> {
         axum::Json(json!({
@@ -122,7 +128,12 @@ async fn create_web_collection(base: &str, name: &str) {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 201, "create collection failed: {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        201,
+        "create collection failed: {:?}",
+        resp.text().await
+    );
 }
 
 #[tokio::test]
@@ -145,14 +156,21 @@ async fn connector_crud_round_trip() {
     assert_eq!(r.status(), 201, "create failed: {:?}", r.text().await);
     let created: Value = r.json().await.unwrap();
     let id = created["id"].as_str().unwrap().to_owned();
-    assert!(id.starts_with("conn-"), "server should assign conn- id, got {id}");
+    assert!(
+        id.starts_with("conn-"),
+        "server should assign conn- id, got {id}"
+    );
     assert_eq!(created["kind"], "web");
     assert_eq!(created["name"], "Docs crawler");
     assert_eq!(created["enabled"], true);
     assert!(created["created_at"].as_i64().unwrap() > 0);
 
     // List → contains the new connector.
-    let r = c.get(format!("{base}/v1/admin/connectors")).send().await.unwrap();
+    let r = c
+        .get(format!("{base}/v1/admin/connectors"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 200);
     let body: Value = r.json().await.unwrap();
     let list = body["connectors"].as_array().unwrap();
@@ -160,7 +178,11 @@ async fn connector_crud_round_trip() {
     assert_eq!(list[0]["id"], id);
 
     // Get by id.
-    let r = c.get(format!("{base}/v1/admin/connectors/{id}")).send().await.unwrap();
+    let r = c
+        .get(format!("{base}/v1/admin/connectors/{id}"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 200);
     let got: Value = r.json().await.unwrap();
     assert_eq!(got["name"], "Docs crawler");
@@ -184,15 +206,27 @@ async fn connector_crud_round_trip() {
     assert_eq!(updated["enabled"], false);
 
     // Delete.
-    let r = c.delete(format!("{base}/v1/admin/connectors/{id}")).send().await.unwrap();
+    let r = c
+        .delete(format!("{base}/v1/admin/connectors/{id}"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 204);
 
     // Gone → 404 on get.
-    let r = c.get(format!("{base}/v1/admin/connectors/{id}")).send().await.unwrap();
+    let r = c
+        .get(format!("{base}/v1/admin/connectors/{id}"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 404);
 
     // List empty again.
-    let r = c.get(format!("{base}/v1/admin/connectors")).send().await.unwrap();
+    let r = c
+        .get(format!("{base}/v1/admin/connectors"))
+        .send()
+        .await
+        .unwrap();
     let body: Value = r.json().await.unwrap();
     assert!(body["connectors"].as_array().unwrap().is_empty());
 }
@@ -216,7 +250,10 @@ async fn connector_tenant_isolation() {
         .await
         .unwrap();
     assert_eq!(r.status(), 201);
-    let id = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_owned();
+    let id = r.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     // Tenant B does not see it in its list.
     let r = c
@@ -272,7 +309,12 @@ async fn connectors_require_admin_role() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "admin must be allowed: {:?}", r.text().await);
+    assert_eq!(
+        r.status(),
+        200,
+        "admin must be allowed: {:?}",
+        r.text().await
+    );
 }
 
 #[tokio::test]
@@ -287,7 +329,10 @@ async fn run_non_web_connector_returns_400() {
         .await
         .unwrap();
     assert_eq!(r.status(), 201);
-    let id = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_owned();
+    let id = r.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let r = c
         .post(format!("{base}/v1/admin/connectors/{id}/run"))
@@ -310,6 +355,7 @@ async fn run_unknown_connector_returns_404() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn run_web_connector_unconfigured_returns_503() {
     let (base, _tmp) = start_server().await;
     let c = Client::new();
@@ -325,7 +371,10 @@ async fn run_web_connector_unconfigured_returns_503() {
         .send()
         .await
         .unwrap();
-    let id = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_owned();
+    let id = r.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let _guard = CRAWL_ENV_LOCK.lock().unwrap();
     // SAFETY: serialized on CRAWL_ENV_LOCK.
@@ -344,6 +393,7 @@ async fn run_web_connector_unconfigured_returns_503() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn run_web_connector_with_mock_crawls_and_inserts() {
     let (crawl_url, _crawl_handle) = start_mock_crawl4ai().await;
     let (base, _tmp) = start_server().await;
@@ -366,7 +416,10 @@ async fn run_web_connector_with_mock_crawls_and_inserts() {
         .send()
         .await
         .unwrap();
-    let id = r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_owned();
+    let id = r.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let _guard = CRAWL_ENV_LOCK.lock().unwrap();
     // SAFETY: serialized on CRAWL_ENV_LOCK.
@@ -387,6 +440,9 @@ async fn run_web_connector_with_mock_crawls_and_inserts() {
 
     assert_eq!(status, 200, "run failed: {body}");
     assert_eq!(body["pages"], 1);
-    assert!(body["chunks_inserted"].as_u64().unwrap() >= 1, "expected chunks: {body}");
+    assert!(
+        body["chunks_inserted"].as_u64().unwrap() >= 1,
+        "expected chunks: {body}"
+    );
     assert_eq!(body["per_url"][0]["title"], "Veda Docs");
 }

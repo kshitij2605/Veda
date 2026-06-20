@@ -116,9 +116,9 @@ impl ScalarQuantizer {
                     };
                     let byte_idx = d / 2;
                     if d % 2 == 0 {
-                        out[byte_idx] |= nibble;       // low nibble
+                        out[byte_idx] |= nibble; // low nibble
                     } else {
-                        out[byte_idx] |= nibble << 4;  // high nibble
+                        out[byte_idx] |= nibble << 4; // high nibble
                     }
                 }
                 out
@@ -159,12 +159,7 @@ impl ScalarQuantizer {
 
     /// Estimate distance by decoding the stored code and computing distance on the reconstruction.
     /// The `metric` parameter is accepted for backward compatibility; self.metric is used.
-    pub fn estimate_distance(
-        &self,
-        query: &[f32],
-        code_idx: usize,
-        metric: DistanceMetric,
-    ) -> f32 {
+    pub fn estimate_distance(&self, query: &[f32], code_idx: usize, metric: DistanceMetric) -> f32 {
         let reconstructed = self.decode(&self.codes[code_idx]);
         compute_distance(query, &reconstructed, metric)
     }
@@ -214,9 +209,8 @@ impl ScalarQuantizer {
 
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)?;
-        let data: ScalarQuantizerData = bincode::deserialize(&bytes).map_err(|e| {
-            VedaError::Index(format!("Failed to deserialize ScalarQuantizer: {e}"))
-        })?;
+        let data: ScalarQuantizerData = bincode::deserialize(&bytes)
+            .map_err(|e| VedaError::Index(format!("Failed to deserialize ScalarQuantizer: {e}")))?;
         Ok(Self {
             dimension: data.dimension,
             bits: data.bits,

@@ -33,7 +33,7 @@ use openraft::storage::Adaptor;
 use openraft::{BasicNode, Config, Raft};
 
 use crate::network::CoordinatorError;
-use crate::peer_health::{spawn_probe, PeerHealthCache};
+use crate::peer_health::{PeerHealthCache, spawn_probe};
 use crate::raft::{NodeId, VedaTypeConfig};
 use crate::raft_network::InProcessNetwork;
 use crate::raft_storage::MemRaftStorage;
@@ -120,7 +120,11 @@ impl RaftCoordinator {
                 if size < threshold {
                     continue;
                 }
-                tracing::info!(wal_bytes = size, threshold, "WAL exceeded threshold; compacting");
+                tracing::info!(
+                    wal_bytes = size,
+                    threshold,
+                    "WAL exceeded threshold; compacting"
+                );
                 if let Err(e) = storage_a.log.compact().await {
                     tracing::error!(error = %e, "WAL compaction failed");
                 }
@@ -345,11 +349,7 @@ impl RaftCoordinator {
     /// the Raft log; once committed the new node is a full voter.
     /// Also registers the address in the local peer book so the
     /// Tonic transport can dial it.
-    pub async fn add_voter(
-        &self,
-        node_id: NodeId,
-        address: String,
-    ) -> Result<(), String> {
+    pub async fn add_voter(&self, node_id: NodeId, address: String) -> Result<(), String> {
         self.peers.register(node_id, address).await;
         self.raft
             .add_learner(node_id, BasicNode::default(), true)
@@ -357,11 +357,8 @@ impl RaftCoordinator {
             .map_err(|e| format!("add_learner: {e}"))?;
         // Compute the full membership set including the new voter.
         let metrics = self.raft.metrics().borrow().clone();
-        let mut members: std::collections::BTreeSet<NodeId> = metrics
-            .membership_config
-            .membership()
-            .voter_ids()
-            .collect();
+        let mut members: std::collections::BTreeSet<NodeId> =
+            metrics.membership_config.membership().voter_ids().collect();
         members.insert(node_id);
         self.raft
             .change_membership(members, false)
@@ -374,11 +371,8 @@ impl RaftCoordinator {
     /// then deregisters from the local peer book.
     pub async fn remove_voter(&self, node_id: NodeId) -> Result<(), String> {
         let metrics = self.raft.metrics().borrow().clone();
-        let mut members: std::collections::BTreeSet<NodeId> = metrics
-            .membership_config
-            .membership()
-            .voter_ids()
-            .collect();
+        let mut members: std::collections::BTreeSet<NodeId> =
+            metrics.membership_config.membership().voter_ids().collect();
         members.remove(&node_id);
         self.raft
             .change_membership(members, false)
@@ -402,11 +396,7 @@ impl RaftCoordinator {
     /// ClusterState.nodes map only sees RegisterNode commands).
     pub fn membership_snapshot(&self) -> RaftMembershipSnapshot {
         let m = self.raft.metrics().borrow().clone();
-        let voters: Vec<NodeId> = m
-            .membership_config
-            .membership()
-            .voter_ids()
-            .collect();
+        let voters: Vec<NodeId> = m.membership_config.membership().voter_ids().collect();
         RaftMembershipSnapshot {
             current_term: m.current_term,
             current_leader: m.current_leader,
@@ -449,9 +439,7 @@ impl RaftCoordinator {
     /// Callers should reach for this only when they need it —
     /// barrier writes go through the full Raft replication path,
     /// so it's slower than the plain `query_state`.
-    pub async fn linearisable_query_state(
-        &self,
-    ) -> Result<ClusterState, CoordinatorError> {
+    pub async fn linearisable_query_state(&self) -> Result<ClusterState, CoordinatorError> {
         // Best-effort barrier — if the cluster has no leader the
         // barrier write fails; treat that as the caller not getting
         // linearisability rather than a panic. The state machine

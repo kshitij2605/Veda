@@ -146,7 +146,9 @@ mod tests {
     }
     impl SpyDispatcher {
         fn new() -> Self {
-            Self { seen: Mutex::new(Vec::new()) }
+            Self {
+                seen: Mutex::new(Vec::new()),
+            }
         }
         fn calls(&self) -> Vec<RemediationAction> {
             self.seen.lock().unwrap().clone()
@@ -189,7 +191,9 @@ mod tests {
     }
 
     fn compact(col: &str) -> RemediationAction {
-        RemediationAction::Compact { collection: col.to_owned() }
+        RemediationAction::Compact {
+            collection: col.to_owned(),
+        }
     }
 
     #[tokio::test]
@@ -198,7 +202,10 @@ mod tests {
         let mut limiter = RateLimiter::new(300_000);
         let cfg = cfg_with(
             "compaction_backlog",
-            RuleConfig { auto_remediate: true, ..Default::default() },
+            RuleConfig {
+                auto_remediate: true,
+                ..Default::default()
+            },
         );
         let opened = vec![event(
             "compaction_backlog",
@@ -245,20 +252,32 @@ mod tests {
         // Muted (even with auto_remediate on).
         let cfg_muted = cfg_with(
             "compaction_backlog",
-            RuleConfig { auto_remediate: true, muted: true, ..Default::default() },
+            RuleConfig {
+                auto_remediate: true,
+                muted: true,
+                ..Default::default()
+            },
         );
-        assert!(run_remediation(&opened, &cfg_muted, &spy, &mut limiter, 1000)
-            .await
-            .is_empty());
+        assert!(
+            run_remediation(&opened, &cfg_muted, &spy, &mut limiter, 1000)
+                .await
+                .is_empty()
+        );
 
         // Disabled.
         let cfg_off = cfg_with(
             "compaction_backlog",
-            RuleConfig { auto_remediate: true, enabled: false, ..Default::default() },
+            RuleConfig {
+                auto_remediate: true,
+                enabled: false,
+                ..Default::default()
+            },
         );
-        assert!(run_remediation(&opened, &cfg_off, &spy, &mut limiter, 2000)
-            .await
-            .is_empty());
+        assert!(
+            run_remediation(&opened, &cfg_off, &spy, &mut limiter, 2000)
+                .await
+                .is_empty()
+        );
 
         assert!(spy.calls().is_empty());
     }
@@ -269,7 +288,10 @@ mod tests {
         let mut limiter = RateLimiter::new(300_000);
         let cfg = cfg_with(
             "some_rule",
-            RuleConfig { auto_remediate: true, ..Default::default() },
+            RuleConfig {
+                auto_remediate: true,
+                ..Default::default()
+            },
         );
         let opened = vec![event(
             "some_rule",
@@ -288,12 +310,23 @@ mod tests {
         let mut limiter = RateLimiter::new(300_000);
         let cfg = cfg_with(
             "compaction_backlog",
-            RuleConfig { auto_remediate: true, ..Default::default() },
+            RuleConfig {
+                auto_remediate: true,
+                ..Default::default()
+            },
         );
         // Two opened events, SAME scope, within the window.
         let opened = vec![
-            event("compaction_backlog", Scope::Collection("docs".into()), compact("docs")),
-            event("compaction_backlog", Scope::Collection("docs".into()), compact("docs")),
+            event(
+                "compaction_backlog",
+                Scope::Collection("docs".into()),
+                compact("docs"),
+            ),
+            event(
+                "compaction_backlog",
+                Scope::Collection("docs".into()),
+                compact("docs"),
+            ),
         ];
 
         let out1 = run_remediation(&opened, &cfg, &spy, &mut limiter, 1000).await;

@@ -156,7 +156,12 @@ pub fn forecast_metric(
 /// Time (epoch ms) at which `current` reaches `threshold` under a linear
 /// `slope_per_sec`, or `None` when the slope is flat or directed away from
 /// the threshold (the crossing is in the past / never).
-fn eta_to_threshold(current: f64, slope_per_sec: f64, threshold: f64, now_secs: f64) -> Option<i64> {
+fn eta_to_threshold(
+    current: f64,
+    slope_per_sec: f64,
+    threshold: f64,
+    now_secs: f64,
+) -> Option<i64> {
     let gap = threshold - current;
     // Already at/over the threshold on the approaching side → no future ETA.
     // A (near-)zero slope never crosses.
@@ -202,9 +207,18 @@ pub fn compute_forecasts(
     let ts: Vec<f64> = history.series(|s| s.taken_at_ms as f64 / 1000.0);
 
     // disk_used_pct (Option) → upward toward DISK_FULL_PCT.
-    let disk = paired(&ts, &history.series(|s| s.disk_used_pct.unwrap_or(f64::NAN)));
+    let disk = paired(
+        &ts,
+        &history.series(|s| s.disk_used_pct.unwrap_or(f64::NAN)),
+    );
     if let Some(f) = forecast_metric(
-        "disk_used_pct", None, &disk, DISK_FULL_PCT, now_ms, min_points, min_r2,
+        "disk_used_pct",
+        None,
+        &disk,
+        DISK_FULL_PCT,
+        now_ms,
+        min_points,
+        min_r2,
     ) {
         out.push(f);
     }
@@ -215,7 +229,13 @@ pub fn compute_forecasts(
         &history.series(|s| s.mem_available_bytes.map(|b| b as f64).unwrap_or(f64::NAN)),
     );
     if let Some(f) = forecast_metric(
-        "mem_available_bytes", None, &mem, 0.0, now_ms, min_points, min_r2,
+        "mem_available_bytes",
+        None,
+        &mem,
+        0.0,
+        now_ms,
+        min_points,
+        min_r2,
     ) {
         out.push(f);
     }
@@ -245,7 +265,13 @@ pub fn compute_forecasts(
             })
             .collect();
         if let Some(f) = forecast_metric(
-            "recall", Some(coll.clone()), &pts, RECALL_TARGET, now_ms, min_points, min_r2,
+            "recall",
+            Some(coll.clone()),
+            &pts,
+            RECALL_TARGET,
+            now_ms,
+            min_points,
+            min_r2,
         ) {
             out.push(f);
         }
@@ -270,7 +296,12 @@ mod tests {
 
     /// Build a `(ts_secs, value)` series of `n` points spaced `step_secs`
     /// apart starting at `t0_secs`, with `value(i)`.
-    fn series(n: usize, t0_secs: f64, step_secs: f64, value: impl Fn(usize) -> f64) -> Vec<(f64, f64)> {
+    fn series(
+        n: usize,
+        t0_secs: f64,
+        step_secs: f64,
+        value: impl Fn(usize) -> f64,
+    ) -> Vec<(f64, f64)> {
         (0..n)
             .map(|i| (t0_secs + i as f64 * step_secs, value(i)))
             .collect()
@@ -281,8 +312,16 @@ mod tests {
         // y = 2x + 3.
         let pts = series(10, 0.0, 1.0, |i| 2.0 * i as f64 + 3.0);
         let fit = linear_fit(&pts).expect("fit");
-        assert!((fit.slope_per_sec - 2.0).abs() < 1e-9, "slope {}", fit.slope_per_sec);
-        assert!((fit.intercept - 3.0).abs() < 1e-9, "intercept {}", fit.intercept);
+        assert!(
+            (fit.slope_per_sec - 2.0).abs() < 1e-9,
+            "slope {}",
+            fit.slope_per_sec
+        );
+        assert!(
+            (fit.intercept - 3.0).abs() < 1e-9,
+            "intercept {}",
+            fit.intercept
+        );
         assert!((fit.r2 - 1.0).abs() < 1e-9, "r2 {}", fit.r2);
     }
 
@@ -309,7 +348,9 @@ mod tests {
         // Disk rising 0.5%/step over 1000s steps from 50%, 30 points.
         // slope = 0.5% / 1000s = 5e-4 %/s. Threshold 100%.
         let now_secs = 1_000_000.0;
-        let pts = series(30, now_secs - 29.0 * 1000.0, 1000.0, |i| 50.0 + 0.5 * i as f64);
+        let pts = series(30, now_secs - 29.0 * 1000.0, 1000.0, |i| {
+            50.0 + 0.5 * i as f64
+        });
         let f = forecast_metric(
             "disk_used_pct",
             None,
@@ -397,7 +438,9 @@ mod tests {
     fn falling_recall_toward_lower_threshold_yields_eta() {
         // Recall decaying from 0.99 by 0.002/step toward a 0.90 target.
         let now_secs = 2_000_000.0;
-        let pts = series(30, now_secs - 29.0 * 1000.0, 1000.0, |i| 0.99 - 0.002 * i as f64);
+        let pts = series(30, now_secs - 29.0 * 1000.0, 1000.0, |i| {
+            0.99 - 0.002 * i as f64
+        });
         let f = forecast_metric(
             "recall",
             Some("docs".into()),

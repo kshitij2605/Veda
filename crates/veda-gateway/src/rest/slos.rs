@@ -12,9 +12,9 @@
 //!   DELETE /v1/admin/slos/{id}         — delete one definition
 //!   GET    /v1/admin/slos/{id}/status  — live SLI / budget / burn status
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Serialize;
 
 use crate::advisor::engine::now_ms;

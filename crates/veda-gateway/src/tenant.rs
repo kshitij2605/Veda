@@ -22,8 +22,8 @@
 //! tiers from the research doc are also v2+.
 
 use axum::extract::{FromRequestParts, Request, State};
-use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::Response;
 
@@ -122,7 +122,10 @@ pub fn scope(tenant: &TenantId, collection: &str) -> String {
 /// user-facing display (metrics, logs, API responses). Falls back
 /// to the raw name if no `__` separator is found.
 pub fn display_name(scoped: &str) -> &str {
-    scoped.split_once("__").map(|(_, name)| name).unwrap_or(scoped)
+    scoped
+        .split_once("__")
+        .map(|(_, name)| name)
+        .unwrap_or(scoped)
 }
 
 /// Inverse of [`scope`]. Returns `Some(collection_name)` when

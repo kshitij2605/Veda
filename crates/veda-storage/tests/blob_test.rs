@@ -15,7 +15,11 @@ fn test_schema() -> CollectionSchema {
     CollectionSchema::builder("test_collection")
         .add_field(FieldDefinition::blob("image"))
         .add_field(FieldDefinition::new("title", FieldType::String))
-        .add_field(FieldDefinition::vector("embedding", 4, DistanceMetric::Cosine))
+        .add_field(FieldDefinition::vector(
+            "embedding",
+            4,
+            DistanceMetric::Cosine,
+        ))
         .build()
         .unwrap()
 }
@@ -188,7 +192,10 @@ fn non_blob_fields_untouched() {
     }
 
     // Image should be a BlobRef
-    assert!(matches!(record.get("image").unwrap(), FieldValue::BlobRef(_)));
+    assert!(matches!(
+        record.get("image").unwrap(),
+        FieldValue::BlobRef(_)
+    ));
 }
 
 // --- ObjectStoreConfig tests ---

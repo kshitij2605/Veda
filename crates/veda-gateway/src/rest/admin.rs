@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
+use crate::auth;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
-use crate::auth;
 
 use super::state::AppState;
 
@@ -61,9 +61,7 @@ pub struct LoginError {
     pub error: String,
 }
 
-pub async fn health(
-    State(_state): State<AppState>,
-) -> Json<HealthResponse> {
+pub async fn health(State(_state): State<AppState>) -> Json<HealthResponse> {
     let checks = run_health_checks().await;
     let status = compute_status(&checks);
     Json(HealthResponse {
@@ -96,9 +94,7 @@ pub async fn readiness(
 /// `ClusterState.nodes` and flips `mode` to `"raft"`. Otherwise
 /// returns a single entry describing this process — same shape, so
 /// the dashboard table doesn't move when Raft turns on.
-pub async fn list_nodes(
-    State(state): State<AppState>,
-) -> Json<ListNodesResponse> {
+pub async fn list_nodes(State(state): State<AppState>) -> Json<ListNodesResponse> {
     let self_id_env = std::env::var("VEDA_NODE_ID")
         .ok()
         .filter(|s| !s.is_empty())
@@ -163,7 +159,11 @@ pub async fn list_nodes(
                     id: format!("node-{nid}"),
                     address,
                     role: role.into(),
-                    status: if is_self { self_status.clone() } else { peer_status },
+                    status: if is_self {
+                        self_status.clone()
+                    } else {
+                        peer_status
+                    },
                     version: "0.1.0".into(),
                     uptime_secs: if is_self { uptime_secs } else { 0 },
                     shard_count: if is_self { shard_count } else { 0 },
@@ -223,12 +223,15 @@ pub async fn cluster_join(
             }),
         ));
     };
-    coord.add_voter(req.node_id, req.address).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ClusterMembershipError { error: e }),
-        )
-    })?;
+    coord
+        .add_voter(req.node_id, req.address)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ClusterMembershipError { error: e }),
+            )
+        })?;
     Ok(StatusCode::CREATED)
 }
 
@@ -339,14 +342,21 @@ pub async fn login(
 
 pub async fn metrics(
     State(state): State<AppState>,
-) -> (StatusCode, [(axum::http::header::HeaderName, &'static str); 1], String) {
+) -> (
+    StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 1],
+    String,
+) {
     let body = match &state.inner.prometheus_handle {
         Some(handle) => handle.render(),
         None => String::from("# metrics recorder not installed\n"),
     };
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
 }
@@ -393,7 +403,9 @@ pub(crate) async fn run_health_checks() -> HashMap<String, String> {
         let status = match tokio::time::timeout(
             std::time::Duration::from_secs(2),
             tokio::net::TcpStream::connect(addr),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(_)) => "healthy",
             _ => "unavailable",
         };
@@ -448,8 +460,12 @@ pub struct RegionTopologyBody {
     pub epoch: u64,
 }
 
-fn default_staleness() -> u64 { 5_000 }
-fn default_epoch() -> u64 { 1 }
+fn default_staleness() -> u64 {
+    5_000
+}
+fn default_epoch() -> u64 {
+    1
+}
 
 #[derive(Debug, Serialize)]
 pub struct RegionTopologyResponse {
@@ -510,10 +526,12 @@ pub async fn put_region_topology(
         )
     })?;
     coord
-        .execute(veda_coordinator::raft_types::ClusterCommand::RegisterShardEnsemble {
-            shard_id: veda_coordinator::store::REGION_TOPOLOGY_KEY.to_string(),
-            ensemble_json: json,
-        })
+        .execute(
+            veda_coordinator::raft_types::ClusterCommand::RegisterShardEnsemble {
+                shard_id: veda_coordinator::store::REGION_TOPOLOGY_KEY.to_string(),
+                ensemble_json: json,
+            },
+        )
         .await
         .map_err(|e| {
             (
@@ -608,10 +626,12 @@ pub async fn promote_region(
         )
     })?;
     coord
-        .execute(veda_coordinator::raft_types::ClusterCommand::RegisterShardEnsemble {
-            shard_id: veda_coordinator::store::REGION_TOPOLOGY_KEY.to_string(),
-            ensemble_json: json,
-        })
+        .execute(
+            veda_coordinator::raft_types::ClusterCommand::RegisterShardEnsemble {
+                shard_id: veda_coordinator::store::REGION_TOPOLOGY_KEY.to_string(),
+                ensemble_json: json,
+            },
+        )
         .await
         .map_err(|e| {
             (
@@ -641,9 +661,7 @@ pub struct ReplicaSafeTsResponse {
 /// `GET /v1/admin/replica/safe_ts` — current cross-region
 /// reader-gating watermark on this gateway. `u128::MAX` means
 /// no gating (default).
-pub async fn get_replica_safe_ts(
-    State(state): State<AppState>,
-) -> Json<ReplicaSafeTsResponse> {
+pub async fn get_replica_safe_ts(State(state): State<AppState>) -> Json<ReplicaSafeTsResponse> {
     let ts = *state.inner.replica_safe_ts.read().await;
     Json(ReplicaSafeTsResponse {
         replica_safe_ts: ts.to_string(),

@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
 
 use super::buffer::{LogBuffer, LogRecord};
 
@@ -80,11 +80,11 @@ struct FieldVisitor {
 
 impl FieldVisitor {
     fn insert(&mut self, field: &Field, value: serde_json::Value) {
-        if field.name() == "message" {
-            if let serde_json::Value::String(s) = &value {
-                self.message = Some(s.clone());
-                return;
-            }
+        if field.name() == "message"
+            && let serde_json::Value::String(s) = &value
+        {
+            self.message = Some(s.clone());
+            return;
         }
         self.fields.insert(field.name().to_string(), value);
     }
@@ -133,8 +133,8 @@ impl Visit for FieldVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Registry;
+    use tracing_subscriber::layer::SubscriberExt;
 
     #[test]
     fn captures_warn_and_error_with_fields_skips_info() {

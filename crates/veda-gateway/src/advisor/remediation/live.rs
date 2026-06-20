@@ -11,8 +11,8 @@
 //! * `None` is unreachable here — [`run_remediation`](super::run_remediation)
 //!   filters it out before dispatch.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::advisor::event::RemediationAction;
 use crate::rest::state::AppState;
@@ -90,11 +90,7 @@ impl LiveDispatcher {
 }
 
 impl RemediationDispatcher for LiveDispatcher {
-    async fn dispatch(
-        &self,
-        action: &RemediationAction,
-        _now_ms: i64,
-    ) -> Result<String, String> {
+    async fn dispatch(&self, action: &RemediationAction, _now_ms: i64) -> Result<String, String> {
         match action {
             RemediationAction::Compact { collection } => self.compact(collection).await,
             RemediationAction::Reindex { collection } => {

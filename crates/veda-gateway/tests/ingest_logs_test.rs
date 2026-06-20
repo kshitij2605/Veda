@@ -13,7 +13,7 @@
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::{build_router, state::AppState};
@@ -47,7 +47,12 @@ async fn create_logs_collection(base: &str, name: &str) {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 201, "create collection: {}", r.text().await.unwrap());
+    assert_eq!(
+        r.status(),
+        201,
+        "create collection: {}",
+        r.text().await.unwrap()
+    );
 }
 
 #[tokio::test]

@@ -179,7 +179,11 @@ async fn read_only_snapshot_is_consistent_across_concurrent_writes() {
     // The reader at the OLDER start_ts must still see v1.
     match cc.read(&reader, b"k").await.unwrap() {
         ReadVisibility::Visible(Some(v)) => {
-            assert_eq!(&v[..], b"v1", "reader at older snapshot should see v1, not v2");
+            assert_eq!(
+                &v[..],
+                b"v1",
+                "reader at older snapshot should see v1, not v2"
+            );
         }
         other => panic!("reader saw unexpected visibility: {other:?}"),
     }
@@ -203,6 +207,8 @@ async fn abort_releases_locks_so_other_txns_can_proceed() {
         key: b"abort_key".to_vec(),
         value: Some(Bytes::from_static(b"b_value")),
     });
-    cc.prewrite(&b).await.expect("B prewrite should succeed after A aborts");
+    cc.prewrite(&b)
+        .await
+        .expect("B prewrite should succeed after A aborts");
     cc.commit(&b).await.expect("B commit should succeed");
 }

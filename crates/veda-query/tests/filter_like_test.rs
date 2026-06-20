@@ -52,7 +52,7 @@ fn double_quoted_with_japanese_works() {
 }
 
 #[test]
-fn like_percent_X_percent_translates_to_contains() {
+fn like_percent_x_percent_translates_to_contains() {
     let expr = FilterParser::parse("content LIKE '%バックアップ%'").unwrap();
     assert_eq!(
         expr,
@@ -64,7 +64,7 @@ fn like_percent_X_percent_translates_to_contains() {
 }
 
 #[test]
-fn like_X_percent_translates_to_starts_with() {
+fn like_x_percent_translates_to_starts_with() {
     let expr = FilterParser::parse("title LIKE 'Adobe%'").unwrap();
     assert_eq!(
         expr,

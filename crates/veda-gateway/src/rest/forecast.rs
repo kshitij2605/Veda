@@ -13,8 +13,8 @@
 //! guarded so they never fire on a flat/noisy series) — advisory only;
 //! nothing here mutates state.
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde::Serialize;
 
 use crate::advisor::forecast::Forecast;

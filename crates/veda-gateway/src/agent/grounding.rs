@@ -86,13 +86,14 @@ impl Grounding {
 /// `chunk_id`, preserving first-seen order.
 pub fn extract_citations(steps: &[AgentStep]) -> Vec<Citation> {
     // Map tool_call_id -> collection arg, for the paired ToolCall lookup.
-    let mut collections: std::collections::HashMap<&str, String> =
-        std::collections::HashMap::new();
+    let mut collections: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
     for step in steps {
-        if let AgentStep::ToolCall { tool_call_id, args, .. } = step {
-            if let Some(c) = args.get("collection").and_then(|v| v.as_str()) {
-                collections.insert(tool_call_id.as_str(), c.to_owned());
-            }
+        if let AgentStep::ToolCall {
+            tool_call_id, args, ..
+        } = step
+            && let Some(c) = args.get("collection").and_then(|v| v.as_str())
+        {
+            collections.insert(tool_call_id.as_str(), c.to_owned());
         }
     }
 
@@ -100,7 +101,13 @@ pub fn extract_citations(steps: &[AgentStep]) -> Vec<Citation> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for step in steps {
-        let AgentStep::ToolResult { tool_call_id, result, is_error, .. } = step else {
+        let AgentStep::ToolResult {
+            tool_call_id,
+            result,
+            is_error,
+            ..
+        } = step
+        else {
             continue;
         };
         if *is_error {
@@ -136,8 +143,11 @@ pub fn extract_citations(steps: &[AgentStep]) -> Vec<Citation> {
 
 /// First non-empty string value in a fields map (object iteration order).
 fn first_stringy_field(map: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
-    map.values()
-        .find_map(|v| v.as_str().filter(|s| !s.trim().is_empty()).map(str::to_owned))
+    map.values().find_map(|v| {
+        v.as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned)
+    })
 }
 
 /// Truncate `s` to at most `cap` characters (char-safe), appending an
@@ -195,12 +205,12 @@ pub async fn score_grounding<M: ChatModel>(
     }
 
     // Primary: LLM judge.
-    if let Some(model) = model {
-        if let Some(g) = judge_with_llm(model, query, answer, contexts).await {
-            return g;
-        }
-        // Judge failed/unparseable → fall through to embedding fallback.
+    if let Some(model) = model
+        && let Some(g) = judge_with_llm(model, query, answer, contexts).await
+    {
+        return g;
     }
+    // Judge failed/unparseable → fall through to embedding fallback.
 
     // Fallback: embedding cosine.
     embedding_fallback(embedder, query, answer, contexts).await
@@ -282,7 +292,9 @@ fn first_number(s: &str) -> Option<f64> {
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i] as char;
-        if c.is_ascii_digit() || (c == '.' && i + 1 < bytes.len() && (bytes[i + 1] as char).is_ascii_digit()) {
+        if c.is_ascii_digit()
+            || (c == '.' && i + 1 < bytes.len() && (bytes[i + 1] as char).is_ascii_digit())
+        {
             let start = i;
             let mut seen_dot = c == '.';
             i += 1;
@@ -404,7 +416,9 @@ mod tests {
     #[test]
     fn extract_citations_empty_without_search() {
         let steps = vec![
-            AgentStep::Reasoning { text: "no retrieval here".to_owned() },
+            AgentStep::Reasoning {
+                text: "no retrieval here".to_owned(),
+            },
             AgentStep::ToolCall {
                 tool_call_id: "c1".to_owned(),
                 tool_id: "list_collections".to_owned(),
@@ -481,10 +495,9 @@ mod tests {
             _tc: Option<&str>,
             _o: &CompletionOptions,
         ) -> LlmResult<ToolCompletion> {
-            self.replies
-                .borrow_mut()
-                .pop_front()
-                .unwrap_or(Err(veda_core::error::VedaError::Query("drained".to_owned())))
+            self.replies.borrow_mut().pop_front().unwrap_or(Err(
+                veda_core::error::VedaError::Query("drained".to_owned()),
+            ))
         }
     }
 
@@ -529,7 +542,10 @@ mod tests {
         )
         .await;
         assert_eq!(g.method, "llm_judge");
-        assert!(g.faithfulness.unwrap() < 0.2, "hallucination → low faithfulness");
+        assert!(
+            g.faithfulness.unwrap() < 0.2,
+            "hallucination → low faithfulness"
+        );
     }
 
     #[tokio::test]
@@ -554,9 +570,15 @@ mod tests {
             &["context text".to_owned()],
         )
         .await;
-        assert_eq!(g.method, "embedding", "unparseable judge → embedding fallback");
+        assert_eq!(
+            g.method, "embedding",
+            "unparseable judge → embedding fallback"
+        );
         assert!(g.faithfulness.is_some(), "embedding faithfulness computed");
-        assert!(g.answer_relevancy.is_some(), "embedding relevancy computed from query");
+        assert!(
+            g.answer_relevancy.is_some(),
+            "embedding relevancy computed from query"
+        );
     }
 
     #[tokio::test]
@@ -582,14 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_llm_no_embedder_is_none_not_error() {
-        let g = score_grounding::<FakeJudge>(
-            None,
-            None,
-            "q",
-            "a",
-            &["c".to_owned()],
-        )
-        .await;
+        let g = score_grounding::<FakeJudge>(None, None, "q", "a", &["c".to_owned()]).await;
         assert_eq!(g.method, "embedding");
         assert_eq!(g.faithfulness, None);
         assert_eq!(g.answer_relevancy, None);

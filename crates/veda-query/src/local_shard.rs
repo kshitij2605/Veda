@@ -112,6 +112,11 @@ fn build_vector_index(
     }
 }
 
+/// Matryoshka per-dimension indexes: `seg_id -> field -> dim -> HNSW`.
+type MrlIndexes = HashMap<Uuid, HashMap<String, HashMap<u32, Box<dyn VectorIndex>>>>;
+/// Per-doc MUVERA FDEs: `seg_id -> field -> Vec<(doc_id, fde)>`.
+type MuveraFdes = HashMap<Uuid, HashMap<String, Vec<(u32, Vec<f32>)>>>;
+
 /// Searches a local shard (in-process, no network).
 ///
 /// Wraps a `SegmentManager` and pre-built vector indexes for sealed segments,
@@ -126,15 +131,14 @@ pub struct LocalShardSearcher {
     /// Matryoshka per-dimension indexes: `seg_id -> field -> dim ->
     /// truncated-vector HNSW`. Built when a vector field declares
     /// `mrl_dims`; queried when search includes `truncate_to`.
-    mrl_indexes:
-        HashMap<Uuid, HashMap<String, HashMap<u32, Box<dyn VectorIndex>>>>,
+    mrl_indexes: MrlIndexes,
     /// One MUVERA encoder per (shard, field). Lazily created on first
     /// build_indexes call for a multi-vector field. The encoder is
     /// deterministic from the field name so all segments share anchors —
     /// a single query encoding then scores against every segment's FDE list.
     muvera_encoders: HashMap<String, crate::muvera::MuveraEncoder>,
     /// Per-doc MUVERA FDEs: `seg_id -> field -> Vec<(doc_id, fde)>`.
-    muvera_fdes: HashMap<Uuid, HashMap<String, Vec<(u32, Vec<f32>)>>>,
+    muvera_fdes: MuveraFdes,
 }
 
 impl LocalShardSearcher {
@@ -186,12 +190,15 @@ impl LocalShardSearcher {
 
             // Per-field MRL indexes for this segment. Built only when the
             // field declared mrl_dims.
-            let mut field_mrl: HashMap<String, HashMap<u32, Box<dyn VectorIndex>>> =
-                HashMap::new();
+            let mut field_mrl: HashMap<String, HashMap<u32, Box<dyn VectorIndex>>> = HashMap::new();
 
             for field_def in schema.vector_fields() {
-                if let FieldType::Vector { dimension, metric, mrl_dims, .. } =
-                    field_def.field_type()
+                if let FieldType::Vector {
+                    dimension,
+                    metric,
+                    mrl_dims,
+                    ..
+                } = field_def.field_type()
                 {
                     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(row_count as usize);
                     for doc_id in 0..row_count {
@@ -253,7 +260,7 @@ impl LocalShardSearcher {
                 .filter(|f| (0.01..=1.0).contains(f));
             let muvera_enabled = std::env::var("VEDA_MUVERA_ENABLED")
                 .ok()
-                .map(|s| !s.is_empty() && s != "0" && s.to_ascii_lowercase() != "false")
+                .map(|s| !s.is_empty() && s != "0" && !s.eq_ignore_ascii_case("false"))
                 .unwrap_or(false);
             let muvera_k_sim: usize = std::env::var("VEDA_MUVERA_K_SIM")
                 .ok()
@@ -281,9 +288,8 @@ impl LocalShardSearcher {
                     .collect();
 
                 // Build PLAID centroid pruning.
-                let plaid = crate::plaid::PlaidIndex::build(
-                    collected.iter().map(|(id, rows)| (*id, rows)),
-                );
+                let plaid =
+                    crate::plaid::PlaidIndex::build(collected.iter().map(|(id, rows)| (*id, rows)));
                 if plaid.centroid_count() > 0 {
                     plaid_field.insert(field_def.name().to_owned(), plaid);
                 }
@@ -420,8 +426,7 @@ impl ShardSearcher for LocalShardSearcher {
                     truncate_to: None, // already truncated
                     read_ts: request.read_ts,
                 };
-                let results =
-                    search_sealed_segment_ref(reader, mrl_index.as_ref(), &trunc_req)?;
+                let results = search_sealed_segment_ref(reader, mrl_index.as_ref(), &trunc_req)?;
                 all_results.extend(results);
                 continue;
             }
@@ -477,9 +482,7 @@ impl ShardSearcher for LocalShardSearcher {
                         local.truncate(request.k);
                     }
                 }
-                local.sort_by(|a, b| {
-                    a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-                });
+                local.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
                 local.truncate(request.k);
                 for (doc_id, distance) in local {
                     let record_id = reader
@@ -527,7 +530,11 @@ impl ShardSearcher for LocalShardSearcher {
         request: &SparseSearchRequest,
     ) -> Result<(Vec<ScoredRecord>, SearchTimings)> {
         let growing = self.segment_manager.growing_segment();
-        let growing_opt = if growing.count() > 0 { Some(growing) } else { None };
+        let growing_opt = if growing.count() > 0 {
+            Some(growing)
+        } else {
+            None
+        };
 
         let sealed_refs: Vec<&veda_storage::segment::SegmentReader> = self
             .segment_manager
@@ -546,8 +553,10 @@ impl ShardSearcher for LocalShardSearcher {
         let results = match request.read_ts {
             Some(ts) => {
                 use std::collections::HashMap;
-                let mut visible_per_seg: HashMap<veda_core::types::SegmentId, roaring::RoaringBitmap> =
-                    HashMap::new();
+                let mut visible_per_seg: HashMap<
+                    veda_core::types::SegmentId,
+                    roaring::RoaringBitmap,
+                > = HashMap::new();
                 if let Some(vis) = growing.visible_doc_ids_at(ts) {
                     visible_per_seg.insert(growing.id(), vis);
                 }
@@ -588,14 +597,15 @@ impl ShardSearcher for LocalShardSearcher {
         // Search filter -- shared across segments.
         let filter_start = Instant::now();
         // Prefer a pre-parsed filter_expr (e.g. injected by RLS at AST level).
-        let filter_expr: Option<crate::filter::FilterExpr> = if let Some(expr) = request.filter_expr.clone() {
-            Some(expr)
-        } else {
-            match &request.filter {
-                Some(s) => Some(crate::filter::parser::FilterParser::parse(s)?),
-                None => None,
-            }
-        };
+        let filter_expr: Option<crate::filter::FilterExpr> =
+            if let Some(expr) = request.filter_expr.clone() {
+                Some(expr)
+            } else {
+                match &request.filter {
+                    Some(s) => Some(crate::filter::parser::FilterParser::parse(s)?),
+                    None => None,
+                }
+            };
         let filter_ms = filter_start.elapsed().as_secs_f64() * 1000.0;
 
         let mut all_results: Vec<ScoredRecord> = Vec::new();
@@ -741,9 +751,8 @@ impl ShardSearcher for LocalShardSearcher {
                             (*doc_id, sim)
                         })
                         .collect();
-                    scored.sort_by(|a, b| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    scored
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     scored.truncate((request.k * 4).max(20));
                     let mut bm = RoaringBitmap::new();
                     for (id, _) in scored {
@@ -827,8 +836,8 @@ fn search_sealed_segment_ref(
     index: &dyn VectorIndex,
     request: &VectorSearchRequest,
 ) -> Result<Vec<ScoredRecord>> {
-    use crate::filter::parser::FilterParser;
     use crate::filter::FilterExpr;
+    use crate::filter::parser::FilterParser;
     use roaring::RoaringBitmap;
 
     let row_count = reader.row_count() as u32;

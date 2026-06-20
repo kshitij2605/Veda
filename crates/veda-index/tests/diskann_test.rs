@@ -91,14 +91,8 @@ fn test_recall_euclidean() {
     let vecs = random_vectors(&mut rng, n, dim);
     let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
 
-    let mut diskann = DiskAnnIndex::with_params(
-        DistanceMetric::Euclidean,
-        dim as u32,
-        64,
-        100,
-        1.2,
-        100,
-    );
+    let mut diskann =
+        DiskAnnIndex::with_params(DistanceMetric::Euclidean, dim as u32, 64, 100, 1.2, 100);
     diskann.build(&refs).unwrap();
 
     let mut flat = FlatIndex::new(DistanceMetric::Euclidean, dim as u32);
@@ -138,14 +132,8 @@ fn test_recall_dot_product() {
     let vecs = random_vectors(&mut rng, n, dim);
     let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
 
-    let mut diskann = DiskAnnIndex::with_params(
-        DistanceMetric::DotProduct,
-        dim as u32,
-        64,
-        100,
-        1.2,
-        100,
-    );
+    let mut diskann =
+        DiskAnnIndex::with_params(DistanceMetric::DotProduct, dim as u32, 64, 100, 1.2, 100);
     diskann.build(&refs).unwrap();
 
     let mut flat = FlatIndex::new(DistanceMetric::DotProduct, dim as u32);
@@ -274,14 +262,8 @@ fn test_l_search_tuning() {
     let vecs = random_vectors(&mut rng, n, dim);
     let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
 
-    let mut diskann = DiskAnnIndex::with_params(
-        DistanceMetric::Cosine,
-        dim as u32,
-        64,
-        100,
-        1.2,
-        100,
-    );
+    let mut diskann =
+        DiskAnnIndex::with_params(DistanceMetric::Cosine, dim as u32, 64, 100, 1.2, 100);
     diskann.build(&refs).unwrap();
 
     let mut flat = FlatIndex::new(DistanceMetric::Cosine, dim as u32);

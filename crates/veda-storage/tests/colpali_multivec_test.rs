@@ -123,5 +123,8 @@ fn maxsim_query_picks_the_matching_document() {
         scores.push((doc_id, sum_max));
     }
     scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    assert_eq!(scores[0].0 as usize, target_doc, "MaxSim top-1 should be doc {target_doc}; got ranking {scores:?}");
+    assert_eq!(
+        scores[0].0 as usize, target_doc,
+        "MaxSim top-1 should be doc {target_doc}; got ranking {scores:?}"
+    );
 }

@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use veda_core::error::{Result, VedaError};
 use veda_core::types::DistanceMetric;
 
-use crate::distance::compute_distance;
 use crate::hnsw::distance_provider::DistanceProvider;
 use crate::traits::{SearchResult, VectorIndex};
 
@@ -165,19 +164,15 @@ impl VectorIndex for HnswIndex {
 
         let max_level = self.graph.max_level();
         let mut ep_id = ep;
-        let dp = crate::hnsw::distance_provider::RawVectorsProvider::new(&self.vectors, self.metric);
+        let dp =
+            crate::hnsw::distance_provider::RawVectorsProvider::new(&self.vectors, self.metric);
         let mut ep_dist = dp.distance(query, ep_id);
 
         // Phase 1: Greedily descend from the top level down to layer 1.
         if max_level > 0 {
             for layer in (1..=max_level).rev() {
-                let (nearest_id, nearest_dist) = HnswSearcher::greedy_search(
-                    query,
-                    ep_id,
-                    layer,
-                    &self.graph,
-                    &dp,
-                );
+                let (nearest_id, nearest_dist) =
+                    HnswSearcher::greedy_search(query, ep_id, layer, &self.graph, &dp);
                 ep_id = nearest_id;
                 ep_dist = nearest_dist;
             }
@@ -229,19 +224,15 @@ impl VectorIndex for HnswIndex {
 
         let max_level = self.graph.max_level();
         let mut ep_id = ep;
-        let dp = crate::hnsw::distance_provider::RawVectorsProvider::new(&self.vectors, self.metric);
+        let dp =
+            crate::hnsw::distance_provider::RawVectorsProvider::new(&self.vectors, self.metric);
         let mut ep_dist = dp.distance(query, ep_id);
 
         // Phase 1: Greedily descend from the top level down to layer 1.
         if max_level > 0 {
             for layer in (1..=max_level).rev() {
-                let (nearest_id, nearest_dist) = HnswSearcher::greedy_search(
-                    query,
-                    ep_id,
-                    layer,
-                    &self.graph,
-                    &dp,
-                );
+                let (nearest_id, nearest_dist) =
+                    HnswSearcher::greedy_search(query, ep_id, layer, &self.graph, &dp);
                 ep_id = nearest_id;
                 ep_dist = nearest_dist;
             }

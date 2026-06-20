@@ -97,8 +97,7 @@ impl LogBuffer {
             })
             .filter(|r| match &needle {
                 Some(n) => {
-                    r.message.to_lowercase().contains(n)
-                        || r.target.to_lowercase().contains(n)
+                    r.message.to_lowercase().contains(n) || r.target.to_lowercase().contains(n)
                 }
                 None => true,
             })

@@ -17,19 +17,19 @@
 //! are NEVER returned by the GET endpoints — [`redact_channels`] maps the
 //! stored [`ChannelsConfig`] to a secret-free view.
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::advisor::anomaly::anomaly_rule_ids;
 use crate::advisor::config::{ChannelsConfig, RuleConfig};
 use crate::advisor::engine::{engine_rule_ids, run_tick, save_config};
 use crate::advisor::event::{OpsEvent, Severity};
-use crate::advisor::rca::{correlate_incident, RcaBundle};
+use crate::advisor::rca::{RcaBundle, correlate_incident};
 use crate::advisor::rules::catalog;
 use crate::agent::model::AgentStep;
-use crate::rest::agents::{run_agent_turn, AgentTurnError};
+use crate::rest::agents::{AgentTurnError, run_agent_turn};
 use crate::rest::collections::ErrorResponse;
 use crate::rest::state::AppState;
 use crate::tenant::TenantId;
@@ -88,11 +88,7 @@ pub async fn list_insights(
     let events = events
         .into_iter()
         .filter(|e| want_sev.is_none_or(|s| e.severity == s))
-        .filter(|e| {
-            want_scope
-                .as_deref()
-                .is_none_or(|k| scope_kind(e) == k)
-        })
+        .filter(|e| want_scope.as_deref().is_none_or(|k| scope_kind(e) == k))
         .collect();
     Json(EventsResponse { events })
 }
@@ -447,7 +443,12 @@ async fn find_event(state: &AppState, event_id: &str) -> Option<OpsEvent> {
     if let Some(ev) = store.open_events().into_iter().find(|e| e.id == event_id) {
         return Some(ev);
     }
-    store.history().iter().rev().find(|e| e.id == event_id).cloned()
+    store
+        .history()
+        .iter()
+        .rev()
+        .find(|e| e.id == event_id)
+        .cloned()
 }
 
 /// Build the triage prompt embedding the event context and asking the
@@ -489,7 +490,12 @@ pub fn rca_summary(bundle: &RcaBundle) -> String {
     s.push_str("\n\nCross-signal context (auto-joined in the incident window):");
 
     if !bundle.trace_ids.is_empty() {
-        let shown: Vec<&str> = bundle.trace_ids.iter().take(5).map(String::as_str).collect();
+        let shown: Vec<&str> = bundle
+            .trace_ids
+            .iter()
+            .take(5)
+            .map(String::as_str)
+            .collect();
         s.push_str(&format!("\n- correlated trace_ids: {}", shown.join(", ")));
     }
 
@@ -510,9 +516,15 @@ pub fn rca_summary(bundle: &RcaBundle) -> String {
     if bundle.logs.is_empty() {
         s.push_str("\n- correlated logs: none");
     } else {
-        s.push_str(&format!("\n- correlated logs (top {}):", MAX_LOGS.min(bundle.logs.len())));
+        s.push_str(&format!(
+            "\n- correlated logs (top {}):",
+            MAX_LOGS.min(bundle.logs.len())
+        ));
         for l in bundle.logs.iter().take(MAX_LOGS) {
-            s.push_str(&format!("\n  [{}] {} {}: {}", l.ts_ms, l.level, l.target, l.message));
+            s.push_str(&format!(
+                "\n  [{}] {} {}: {}",
+                l.ts_ms, l.level, l.target, l.message
+            ));
         }
     }
 
@@ -575,22 +587,23 @@ pub async fn triage_event(
     // no conversation id is threaded into agent memory.
     let (_agent, result, citations, grounding, _cache_hit, _guardrails) =
         run_agent_turn(&state, &tenant, None, "veda-ops", &[], &prompt, None)
-        .await
-        .map_err(|e| match e {
-            AgentTurnError::NoLlm => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse {
-                    error: "VEDA_LLM_ENDPOINT not configured. Set the env var to enable triage."
-                        .to_owned(),
-                }),
-            ),
-            AgentTurnError::NotFound(aid) => (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("agent '{aid}' not found"),
-                }),
-            ),
-        })?;
+            .await
+            .map_err(|e| match e {
+                AgentTurnError::NoLlm => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error:
+                            "VEDA_LLM_ENDPOINT not configured. Set the env var to enable triage."
+                                .to_owned(),
+                    }),
+                ),
+                AgentTurnError::NotFound(aid) => (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: format!("agent '{aid}' not found"),
+                    }),
+                ),
+            })?;
 
     Ok(Json(TriageResponse {
         event_id,
@@ -638,14 +651,18 @@ mod tests {
             _tool_choice: Option<&str>,
             _opts: &CompletionOptions,
         ) -> LlmResult<ToolCompletion> {
-            Ok(self.queue.borrow_mut().pop_front().unwrap_or(ToolCompletion {
-                content: Some("done".to_owned()),
-                tool_calls: Vec::new(),
-                finish_reason: Some("stop".to_owned()),
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-            }))
+            Ok(self
+                .queue
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(ToolCompletion {
+                    content: Some("done".to_owned()),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".to_owned()),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                }))
         }
     }
 
@@ -814,12 +831,18 @@ mod tests {
         );
         assert!(!result.steps.is_empty(), "expected a non-empty step trace");
         // The get_insights tool was dispatched and returned our seeded event.
-        let saw_tool = result.steps.iter().any(|s| matches!(
-            s,
-            AgentStep::ToolResult { result, is_error: false, .. }
-                if result["events"][0]["rule_id"] == "high_error_rate"
-        ));
-        assert!(saw_tool, "expected get_insights to surface the seeded event: {:?}", result.steps);
+        let saw_tool = result.steps.iter().any(|s| {
+            matches!(
+                s,
+                AgentStep::ToolResult { result, is_error: false, .. }
+                    if result["events"][0]["rule_id"] == "high_error_rate"
+            )
+        });
+        assert!(
+            saw_tool,
+            "expected get_insights to surface the seeded event: {:?}",
+            result.steps
+        );
     }
 
     /// The handler finds the seeded event, then — with no LLM configured —
@@ -846,12 +869,8 @@ mod tests {
                 1000,
             );
         }
-        let res = triage_event(
-            axum::extract::State(state),
-            axum::extract::Path(id),
-        )
-        .await;
-        let err = res.err().expect("no LLM → error");
+        let res = triage_event(axum::extract::State(state), axum::extract::Path(id)).await;
+        let err = res.expect_err("no LLM → error");
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -865,7 +884,7 @@ mod tests {
             axum::extract::Path("nope:global".to_owned()),
         )
         .await;
-        let err = res.err().expect("missing event → error");
+        let err = res.expect_err("missing event → error");
         assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 }

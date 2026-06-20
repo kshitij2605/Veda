@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use veda_core::metrics as m;
 use veda_core::schema::{CollectionSchema, FieldDefinition};
@@ -19,13 +19,9 @@ use crate::tenant::{self, Tenant};
 /// 307 (not 302) is the right code: it preserves the request
 /// method + body, so `POST` stays a `POST` on the leader.
 pub(crate) fn raft_redirect(leader_base: &str, path: &str) -> axum::response::Response {
-    use axum::http::{header, HeaderValue};
+    use axum::http::{HeaderValue, header};
     use axum::response::IntoResponse;
-    let url = format!(
-        "{}{}",
-        leader_base.trim_end_matches('/'),
-        path
-    );
+    let url = format!("{}{}", leader_base.trim_end_matches('/'), path);
     let mut resp = (
         StatusCode::TEMPORARY_REDIRECT,
         Json(serde_json::json!({
@@ -278,12 +274,8 @@ async fn create_collection_impl(
     }
 
     for f in &req.fields {
-        let field_def = parse_field_def(f).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
+        let field_def = parse_field_def(f)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
         builder = builder.add_field(field_def);
     }
 
@@ -382,14 +374,12 @@ async fn create_collection_impl(
                 // Compensating action: drop the collection so the
                 // create+seed pair is observable as
                 // all-or-nothing.
-                let _ = drop_collection_impl(state.clone(), tenant.clone(), user_name.to_owned()).await;
+                let _ =
+                    drop_collection_impl(state.clone(), tenant.clone(), user_name.to_owned()).await;
                 return Err((
                     seed_status,
                     Json(ErrorResponse {
-                        error: format!(
-                            "create-and-seed rolled back: {}",
-                            seed_err.0.error
-                        ),
+                        error: format!("create-and-seed rolled back: {}", seed_err.0.error),
                     }),
                 ));
             }
@@ -477,9 +467,7 @@ pub(crate) async fn materialize_collection_locally(
 /// state. Called by the periodic reconcile task in raft mode and
 /// also (synchronously, fall-through) by the create/drop handlers
 /// so the leader's response reflects the new state.
-pub async fn reconcile_collections_from_raft(
-    state: &AppState,
-) -> Result<(), String> {
+pub async fn reconcile_collections_from_raft(state: &AppState) -> Result<(), String> {
     let raft_state = {
         let guard = state.inner.raft.read().await;
         match guard.as_ref() {
@@ -536,7 +524,12 @@ pub async fn reconcile_collections_from_raft(
         let _ = state.inner.schemas.write().await.remove(name);
         let _ = state.inner.segment_managers.write().await.remove(name);
         let _ = state.inner.query_executors.write().await.remove(name);
-        let _ = state.inner.raft_materialized_records.write().await.remove(name);
+        let _ = state
+            .inner
+            .raft_materialized_records
+            .write()
+            .await
+            .remove(name);
     }
 
     // Phase E hard-remove: record materialisation from
@@ -582,11 +575,7 @@ pub async fn describe_collection(
         )
     })?;
 
-    let fields = schema
-        .fields()
-        .iter()
-        .map(field_to_info)
-        .collect();
+    let fields = schema.fields().iter().map(field_to_info).collect();
 
     Ok(Json(DescribeCollectionResponse {
         name,
@@ -692,7 +681,9 @@ pub async fn get_alias(
     } else {
         scoped.clone()
     };
-    let target_user = tenant::strip_prefix(&tenant, &target).unwrap_or(&target).to_owned();
+    let target_user = tenant::strip_prefix(&tenant, &target)
+        .unwrap_or(&target)
+        .to_owned();
     Ok(Json(AliasResponse {
         alias: name,
         target: target_user,
@@ -783,8 +774,8 @@ pub async fn reindex_collection(
         format!("{prefix}@v3")
     } else if name.contains("@v") {
         // generic vN bump
-        let bumped = bump_version_suffix(&name).unwrap_or_else(|| format!("{name}@v2"));
-        bumped
+
+        bump_version_suffix(&name).unwrap_or_else(|| format!("{name}@v2"))
     } else {
         format!("{name}@v2")
     };
@@ -795,15 +786,14 @@ pub async fn reindex_collection(
     //    so peers learn about it; in non-Raft mode the local
     //    materialise IS the create. We always materialise so
     //    the record-copy step below has somewhere to put rows.
-    let mut rewritten: serde_json::Value = serde_json::from_str(&schema_json)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("rewrite schema: {e}"),
-                }),
-            )
-        })?;
+    let mut rewritten: serde_json::Value = serde_json::from_str(&schema_json).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("rewrite schema: {e}"),
+            }),
+        )
+    })?;
     rewritten["name"] = serde_json::Value::String(scoped_new.clone());
     let new_schema_json = serde_json::to_string(&rewritten).unwrap_or(schema_json);
     let new_schema: CollectionSchema = serde_json::from_str(&new_schema_json).map_err(|e| {
@@ -842,7 +832,8 @@ pub async fn reindex_collection(
             }),
         )
     })?;
-    if let Err((status, e)) = materialize_collection_locally(&state, &new_schema, &sibling_dir).await
+    if let Err((status, e)) =
+        materialize_collection_locally(&state, &new_schema, &sibling_dir).await
     {
         return Err((status, e));
     }
@@ -987,10 +978,8 @@ async fn copy_source_records_to_sibling(
     };
     let mut copied = 0usize;
     for record in records {
-        let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
-            &record.id(),
-            shard_count,
-        );
+        let shard_id =
+            veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
         let Some(sm) = dst_shards.get_mut(&shard_id) else {
             continue;
         };
@@ -1018,8 +1007,8 @@ async fn rechunk_source_into_sibling(
     dst: &str,
     req: &ReindexRequest,
 ) -> Result<usize, (StatusCode, Json<ErrorResponse>)> {
-    use veda_core::record::FieldValue;
     use std::collections::BTreeMap;
+    use veda_core::record::FieldValue;
 
     let strategy = req.chunker.clone().ok_or_else(|| {
         (
@@ -1095,10 +1084,12 @@ async fn rechunk_source_into_sibling(
             }),
         ));
     };
-    let embedding_field: Option<String> = req
-        .embedding_field
-        .clone()
-        .or_else(|| dst_schema.vector_fields().first().map(|f| f.name().to_owned()));
+    let embedding_field: Option<String> = req.embedding_field.clone().or_else(|| {
+        dst_schema
+            .vector_fields()
+            .first()
+            .map(|f| f.name().to_owned())
+    });
     let embedding_dim: Option<u32> = embedding_field.as_ref().and_then(|name| {
         dst_schema.vector_fields().iter().find_map(|f| {
             if f.name() == name {
@@ -1111,8 +1102,7 @@ async fn rechunk_source_into_sibling(
             }
         })
     });
-    let embed_client_opt: Option<veda_core::embedding_client::EmbeddingClient> = if req.re_embed
-    {
+    let embed_client_opt: Option<veda_core::embedding_client::EmbeddingClient> = if req.re_embed {
         let registry = state.inner.embedding_registry.read().await;
         // Pick a text-modality model (re-chunk inputs are text).
         registry
@@ -1165,9 +1155,7 @@ async fn rechunk_source_into_sibling(
             // the re-chunk.
             if let Some(tpl) = template {
                 for f in dst_schema.scalar_fields() {
-                    if f.name() == text_field
-                        || f.name() == chunk_idx_field
-                    {
+                    if f.name() == text_field || f.name() == chunk_idx_field {
                         continue;
                     }
                     if let Some(v) = tpl.get(f.name()) {
@@ -1192,10 +1180,7 @@ async fn rechunk_source_into_sibling(
                         return Err((
                             StatusCode::FAILED_DEPENDENCY,
                             Json(ErrorResponse {
-                                error: format!(
-                                    "embed dim mismatch: schema={dim} got={}",
-                                    v.len()
-                                ),
+                                error: format!("embed dim mismatch: schema={dim} got={}", v.len()),
                             }),
                         ));
                     }
@@ -1238,10 +1223,8 @@ async fn rechunk_source_into_sibling(
     };
     let mut inserted = 0usize;
     for rec in new_records {
-        let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
-            &rec.id(),
-            shard_count,
-        );
+        let shard_id =
+            veda_coordinator::shard_router::ShardRouter::assign_shard(&rec.id(), shard_count);
         if let Some(sm) = dst_shards.get_mut(&shard_id)
             && sm.insert(rec).is_ok()
         {
@@ -1367,15 +1350,11 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
                     "ivfpq" | "ivf_pq" => veda_core::types::IndexType::IvfPq,
                     "flat" => veda_core::types::IndexType::Flat,
                     "rabitq" | "rabit_q" => veda_core::types::IndexType::RaBitQ,
-                    "rabitq_rerank" | "rabit_q_rerank" => {
-                        veda_core::types::IndexType::RaBitQRerank
-                    }
+                    "rabitq_rerank" | "rabit_q_rerank" => veda_core::types::IndexType::RaBitQRerank,
                     "hnsw_rabitq" | "hnsw_rabit_q" | "quantized_hnsw" => {
                         veda_core::types::IndexType::HnswRaBitQ
                     }
-                    "cagra" | "gpu_cagra" | "gpu" => {
-                        veda_core::types::IndexType::Cagra
-                    }
+                    "cagra" | "gpu_cagra" | "gpu" => veda_core::types::IndexType::Cagra,
                     "rabitq_ext_rerank" | "ext_rabitq_rerank" | "rabitq4_rerank" => {
                         veda_core::types::IndexType::RaBitQExtRerank
                     }
@@ -1409,12 +1388,17 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
             };
             // max_vectors is optional; 0 = unbounded.
             let max_vectors = f.max_vectors.unwrap_or(0);
-            Ok(FieldDefinition::multi_vector(&f.name, dim, max_vectors, metric)
-                .with_filterable(f.filterable))
+            Ok(
+                FieldDefinition::multi_vector(&f.name, dim, max_vectors, metric)
+                    .with_filterable(f.filterable),
+            )
         }
         "sparse_vector" | "sparsevector" => {
             let dim = f.dimension.ok_or_else(|| {
-                format!("field '{}': sparse_vector type requires 'dimension'", f.name)
+                format!(
+                    "field '{}': sparse_vector type requires 'dimension'",
+                    f.name
+                )
             })?;
             let metric = match f.metric.as_deref().unwrap_or("cosine") {
                 "cosine" => DistanceMetric::Cosine,
@@ -1433,36 +1417,28 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
             Ok(fd.with_filterable(f.filterable))
         }
         "blob" => Ok(FieldDefinition::blob(&f.name).with_filterable(f.filterable)),
-        "string" => Ok(
-            FieldDefinition::new(&f.name, FieldType::String)
-                .with_filterable(f.filterable)
-                .with_bm25(f.bm25)
-                .with_bm25_tokenizer(f.bm25_tokenizer.clone()),
-        ),
-        "int32" => Ok(
-            FieldDefinition::new(&f.name, FieldType::Int32).with_filterable(f.filterable),
-        ),
-        "int64" => Ok(
-            FieldDefinition::new(&f.name, FieldType::Int64).with_filterable(f.filterable),
-        ),
-        "float32" => Ok(
-            FieldDefinition::new(&f.name, FieldType::Float32).with_filterable(f.filterable),
-        ),
-        "float64" => Ok(
-            FieldDefinition::new(&f.name, FieldType::Float64).with_filterable(f.filterable),
-        ),
-        "bool" => Ok(
-            FieldDefinition::new(&f.name, FieldType::Bool).with_filterable(f.filterable),
-        ),
-        "timestamp" => Ok(
-            FieldDefinition::new(&f.name, FieldType::Timestamp).with_filterable(f.filterable),
-        ),
-        "json" => Ok(
-            FieldDefinition::new(&f.name, FieldType::Json).with_filterable(f.filterable),
-        ),
-        "uuid" => Ok(
-            FieldDefinition::new(&f.name, FieldType::Uuid).with_filterable(f.filterable),
-        ),
+        "string" => Ok(FieldDefinition::new(&f.name, FieldType::String)
+            .with_filterable(f.filterable)
+            .with_bm25(f.bm25)
+            .with_bm25_tokenizer(f.bm25_tokenizer.clone())),
+        "int32" => {
+            Ok(FieldDefinition::new(&f.name, FieldType::Int32).with_filterable(f.filterable))
+        }
+        "int64" => {
+            Ok(FieldDefinition::new(&f.name, FieldType::Int64).with_filterable(f.filterable))
+        }
+        "float32" => {
+            Ok(FieldDefinition::new(&f.name, FieldType::Float32).with_filterable(f.filterable))
+        }
+        "float64" => {
+            Ok(FieldDefinition::new(&f.name, FieldType::Float64).with_filterable(f.filterable))
+        }
+        "bool" => Ok(FieldDefinition::new(&f.name, FieldType::Bool).with_filterable(f.filterable)),
+        "timestamp" => {
+            Ok(FieldDefinition::new(&f.name, FieldType::Timestamp).with_filterable(f.filterable))
+        }
+        "json" => Ok(FieldDefinition::new(&f.name, FieldType::Json).with_filterable(f.filterable)),
+        "uuid" => Ok(FieldDefinition::new(&f.name, FieldType::Uuid).with_filterable(f.filterable)),
         "array_string" | "stringarray" | "string_array" => Ok(FieldDefinition::new(
             &f.name,
             FieldType::Array(Box::new(FieldType::String)),
@@ -1484,7 +1460,12 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
 
 fn field_to_info(f: &FieldDefinition) -> FieldInfo {
     let (type_str, dimension, metric, model) = match f.field_type() {
-        FieldType::Vector { dimension, metric, model_id, .. } => {
+        FieldType::Vector {
+            dimension,
+            metric,
+            model_id,
+            ..
+        } => {
             let m = match metric {
                 DistanceMetric::Cosine => "cosine",
                 DistanceMetric::Euclidean => "euclidean",
@@ -1493,7 +1474,12 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
                 DistanceMetric::Hamming => "hamming",
                 DistanceMetric::Jaccard => "jaccard",
             };
-            ("vector", Some(*dimension), Some(m.to_owned()), model_id.clone())
+            (
+                "vector",
+                Some(*dimension),
+                Some(m.to_owned()),
+                model_id.clone(),
+            )
         }
         FieldType::Blob => ("blob", None, None, None),
         FieldType::String => ("string", None, None, None),
@@ -1505,7 +1491,9 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
         FieldType::Timestamp => ("timestamp", None, None, None),
         FieldType::Json => ("json", None, None, None),
         FieldType::Uuid => ("uuid", None, None, None),
-        FieldType::SparseVector { dimension, metric, .. } => {
+        FieldType::SparseVector {
+            dimension, metric, ..
+        } => {
             let m = match metric {
                 DistanceMetric::Cosine => "cosine",
                 DistanceMetric::DotProduct => "dot_product",
@@ -1513,7 +1501,9 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
             };
             ("sparse_vector", Some(*dimension), Some(m.to_owned()), None)
         }
-        FieldType::MultiVector { dimension, metric, .. } => {
+        FieldType::MultiVector {
+            dimension, metric, ..
+        } => {
             let m = match metric {
                 DistanceMetric::Cosine => "cosine",
                 DistanceMetric::Euclidean => "euclidean",

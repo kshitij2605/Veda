@@ -91,10 +91,10 @@ fn test_recall_5000_vectors() {
     let mut ivfpq = IvfPqIndex::with_params(
         DistanceMetric::Euclidean,
         dim as u32,
-        50,  // nlist
-        20,  // nprobe
-        8,   // m_pq
-        8,   // nbits
+        50, // nlist
+        20, // nprobe
+        8,  // m_pq
+        8,  // nbits
     );
     ivfpq.build(&refs).unwrap();
 
@@ -168,11 +168,7 @@ fn test_delete_excludes_vectors() {
     let vectors = generate_vectors(n, dim, 55);
     let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
 
-    let mut ivfpq = IvfPqIndex::with_params(
-        DistanceMetric::Euclidean,
-        dim as u32,
-        8, 8, 4, 8,
-    );
+    let mut ivfpq = IvfPqIndex::with_params(DistanceMetric::Euclidean, dim as u32, 8, 8, 4, 8);
     ivfpq.build(&refs).unwrap();
 
     // Delete some vectors.
@@ -200,11 +196,7 @@ fn test_save_and_load() {
     let vectors = generate_vectors(n, dim, 88);
     let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
 
-    let mut ivfpq = IvfPqIndex::with_params(
-        DistanceMetric::Euclidean,
-        dim as u32,
-        16, 4, 4, 8,
-    );
+    let mut ivfpq = IvfPqIndex::with_params(DistanceMetric::Euclidean, dim as u32, 16, 4, 4, 8);
     ivfpq.build(&refs).unwrap();
 
     let query = generate_vectors(1, dim, 111)[0].clone();
@@ -232,11 +224,7 @@ fn test_insert_after_build() {
     let vectors = generate_vectors(n, dim, 66);
     let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
 
-    let mut ivfpq = IvfPqIndex::with_params(
-        DistanceMetric::Euclidean,
-        dim as u32,
-        8, 8, 4, 8,
-    );
+    let mut ivfpq = IvfPqIndex::with_params(DistanceMetric::Euclidean, dim as u32, 8, 8, 4, 8);
     ivfpq.build(&refs).unwrap();
 
     // Insert a new vector.
@@ -264,11 +252,7 @@ fn test_search_k_equals_1() {
     let vectors = generate_vectors(50, dim, 77);
     let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
 
-    let mut ivfpq = IvfPqIndex::with_params(
-        DistanceMetric::Euclidean,
-        dim as u32,
-        4, 4, 4, 8,
-    );
+    let mut ivfpq = IvfPqIndex::with_params(DistanceMetric::Euclidean, dim as u32, 4, 4, 4, 8);
     ivfpq.build(&refs).unwrap();
 
     let results = ivfpq.search(&vectors[0], 1).unwrap();
@@ -281,11 +265,7 @@ fn test_single_vector() {
     let vec = vec![1.0f32; dim];
     let refs: Vec<&[f32]> = vec![vec.as_slice()];
 
-    let mut ivfpq = IvfPqIndex::with_params(
-        DistanceMetric::Euclidean,
-        dim as u32,
-        1, 1, 4, 8,
-    );
+    let mut ivfpq = IvfPqIndex::with_params(DistanceMetric::Euclidean, dim as u32, 1, 1, 4, 8);
     ivfpq.build(&refs).unwrap();
 
     let results = ivfpq.search(&vec, 1).unwrap();

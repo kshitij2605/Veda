@@ -179,7 +179,8 @@ impl IvfPqIndex {
         for sq in 0..self.m_pq {
             let start = sq * sub_dim;
             let end = start + sub_dim;
-            let sub_vecs: Vec<Vec<f32>> = residuals.iter().map(|r| r[start..end].to_vec()).collect();
+            let sub_vecs: Vec<Vec<f32>> =
+                residuals.iter().map(|r| r[start..end].to_vec()).collect();
             let sub_refs: Vec<&[f32]> = sub_vecs.iter().map(|v| v.as_slice()).collect();
             let centroids = kmeans(&sub_refs, num_codes.min(sub_refs.len()), 25);
             self.pq_centroids.push(centroids);
@@ -401,8 +402,7 @@ impl VectorIndex for IvfPqIndex {
             .enumerate()
             .map(|(i, c)| (i, compute_distance(query, c, self.metric)))
             .collect();
-        centroid_dists
-            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        centroid_dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // 2. For each probed centroid, compute query residual and ADC.
         let mut candidates: Vec<SearchResult> = Vec::new();
@@ -424,8 +424,11 @@ impl VectorIndex for IvfPqIndex {
         }
 
         // 3. Sort by approximate distance and take top candidates for reranking.
-        candidates
-            .sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // 4. Rerank top candidates with exact distances for better accuracy.
         let rerank_count = (k * 10).min(candidates.len());
@@ -436,8 +439,11 @@ impl VectorIndex for IvfPqIndex {
                 distance: compute_distance(query, &self.vectors[c.id as usize], self.metric),
             })
             .collect();
-        reranked
-            .sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+        reranked.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         reranked.truncate(k);
 
         Ok(reranked)
@@ -473,8 +479,7 @@ impl VectorIndex for IvfPqIndex {
             .enumerate()
             .map(|(i, c)| (i, compute_distance(query, c, self.metric)))
             .collect();
-        centroid_dists
-            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        centroid_dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // 2. ADC distances, filtering by bitmap inside the walk.
         let mut candidates: Vec<SearchResult> = Vec::new();
@@ -486,13 +491,18 @@ impl VectorIndex for IvfPqIndex {
                     continue;
                 }
                 let dist = Self::adc_distance(&table, &self.pq_codes[vec_id as usize]);
-                candidates.push(SearchResult { id: vec_id, distance: dist });
+                candidates.push(SearchResult {
+                    id: vec_id,
+                    distance: dist,
+                });
             }
         }
 
         // 3. Sort + rerank top candidates with exact distances.
         candidates.sort_by(|a, b| {
-            a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal)
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         let rerank_count = (k * 4).min(candidates.len()).max(k);
         let rerank_count = rerank_count.min(candidates.len());
@@ -504,7 +514,9 @@ impl VectorIndex for IvfPqIndex {
             })
             .collect();
         reranked.sort_by(|a, b| {
-            a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal)
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         reranked.truncate(k);
         Ok(reranked)
@@ -522,8 +534,7 @@ impl VectorIndex for IvfPqIndex {
         if id as usize >= self.vectors.len() {
             self.vectors
                 .resize(id as usize + 1, vec![0.0; self.dimension as usize]);
-            self.pq_codes
-                .resize(id as usize + 1, vec![0u8; self.m_pq]);
+            self.pq_codes.resize(id as usize + 1, vec![0u8; self.m_pq]);
             self.vector_centroid.resize(id as usize + 1, 0);
         }
         self.vectors[id as usize] = vector.to_vec();

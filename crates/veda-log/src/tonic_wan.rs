@@ -34,9 +34,9 @@ pub mod proto {
     tonic::include_proto!("veda.wan");
 }
 
+use proto::RawRpc;
 pub use proto::veda_wan_client::VedaWanClient;
 pub use proto::veda_wan_server::{VedaWan, VedaWanServer};
-use proto::RawRpc;
 
 /// Wire payload for `ReplicaDurableSeq` (no inputs).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -114,10 +114,7 @@ impl TonicWanService {
 
 #[async_trait]
 impl VedaWan for TonicWanService {
-    async fn ship_batch(
-        &self,
-        req: Request<RawRpc>,
-    ) -> Result<Response<RawRpc>, Status> {
+    async fn ship_batch(&self, req: Request<RawRpc>) -> Result<Response<RawRpc>, Status> {
         let env: WanEnvelope<ShipBatchRpc> = bincode::deserialize(&req.into_inner().payload)
             .map_err(|e| Status::invalid_argument(format!("decode ShipBatchRpc: {e}")))?;
         let recv = self.route(&env.shard_id).await?;
@@ -126,9 +123,7 @@ impl VedaWan for TonicWanService {
             Err(WanError::EpochMismatch { local, batch }) => {
                 ShipBatchResult::EpochMismatch { local, batch }
             }
-            Err(WanError::SeqGap { expected, got }) => {
-                ShipBatchResult::SeqGap { expected, got }
-            }
+            Err(WanError::SeqGap { expected, got }) => ShipBatchResult::SeqGap { expected, got },
             Err(WanError::Io(s)) => ShipBatchResult::Io(s),
             Err(other) => ShipBatchResult::Io(format!("{other}")),
         };
@@ -137,41 +132,30 @@ impl VedaWan for TonicWanService {
         Ok(Response::new(RawRpc { payload }))
     }
 
-    async fn replica_durable_seq(
-        &self,
-        req: Request<RawRpc>,
-    ) -> Result<Response<RawRpc>, Status> {
+    async fn replica_durable_seq(&self, req: Request<RawRpc>) -> Result<Response<RawRpc>, Status> {
         let env: WanEnvelope<ReplicaDurableSeqRpc> =
             bincode::deserialize(&req.into_inner().payload)
                 .map_err(|e| Status::invalid_argument(format!("decode: {e}")))?;
         let recv = self.route(&env.shard_id).await?;
         let seq = recv.replica_durable_seq().await;
-        let payload = bincode::serialize(&seq)
-            .map_err(|e| Status::internal(format!("encode u64: {e}")))?;
+        let payload =
+            bincode::serialize(&seq).map_err(|e| Status::internal(format!("encode u64: {e}")))?;
         Ok(Response::new(RawRpc { payload }))
     }
 
-    async fn replica_safe_ts(
-        &self,
-        req: Request<RawRpc>,
-    ) -> Result<Response<RawRpc>, Status> {
-        let env: WanEnvelope<ReplicaSafeTsRpc> =
-            bincode::deserialize(&req.into_inner().payload)
-                .map_err(|e| Status::invalid_argument(format!("decode: {e}")))?;
+    async fn replica_safe_ts(&self, req: Request<RawRpc>) -> Result<Response<RawRpc>, Status> {
+        let env: WanEnvelope<ReplicaSafeTsRpc> = bincode::deserialize(&req.into_inner().payload)
+            .map_err(|e| Status::invalid_argument(format!("decode: {e}")))?;
         let recv = self.route(&env.shard_id).await?;
         let ts = recv.replica_safe_ts().await;
-        let payload = bincode::serialize(&ts)
-            .map_err(|e| Status::internal(format!("encode u128: {e}")))?;
+        let payload =
+            bincode::serialize(&ts).map_err(|e| Status::internal(format!("encode u128: {e}")))?;
         Ok(Response::new(RawRpc { payload }))
     }
 
-    async fn check_read_ts(
-        &self,
-        req: Request<RawRpc>,
-    ) -> Result<Response<RawRpc>, Status> {
-        let env: WanEnvelope<CheckReadTsRpc> =
-            bincode::deserialize(&req.into_inner().payload)
-                .map_err(|e| Status::invalid_argument(format!("decode: {e}")))?;
+    async fn check_read_ts(&self, req: Request<RawRpc>) -> Result<Response<RawRpc>, Status> {
+        let env: WanEnvelope<CheckReadTsRpc> = bincode::deserialize(&req.into_inner().payload)
+            .map_err(|e| Status::invalid_argument(format!("decode: {e}")))?;
         let recv = self.route(&env.shard_id).await?;
         let result = match recv.check_read_ts(env.payload.read_ts).await {
             Ok(safe_ts) => CheckReadTsResult::Ok { safe_ts },
@@ -239,8 +223,8 @@ impl TonicReceiver {
             shard_id: self.shard_id.clone(),
             payload,
         };
-        let bytes = bincode::serialize(&env)
-            .map_err(|e| WanError::Transport(format!("encode: {e}")))?;
+        let bytes =
+            bincode::serialize(&env).map_err(|e| WanError::Transport(format!("encode: {e}")))?;
         let mut client = self.client.lock().await;
         let req = Request::new(RawRpc { payload: bytes });
         let resp = match which {
@@ -251,8 +235,7 @@ impl TonicReceiver {
         }
         .map_err(|e| WanError::Transport(format!("rpc: {e}")))?;
         let resp_bytes = resp.into_inner().payload;
-        bincode::deserialize(&resp_bytes)
-            .map_err(|e| WanError::Transport(format!("decode: {e}")))
+        bincode::deserialize(&resp_bytes).map_err(|e| WanError::Transport(format!("decode: {e}")))
     }
 }
 
@@ -280,9 +263,7 @@ impl LogReceiver for TonicReceiver {
             ShipBatchResult::EpochMismatch { local, batch } => {
                 Err(WanError::EpochMismatch { local, batch })
             }
-            ShipBatchResult::SeqGap { expected, got } => {
-                Err(WanError::SeqGap { expected, got })
-            }
+            ShipBatchResult::SeqGap { expected, got } => Err(WanError::SeqGap { expected, got }),
             ShipBatchResult::Io(s) => Err(WanError::Io(s)),
         }
     }

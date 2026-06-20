@@ -19,6 +19,12 @@ pub struct HnswGraph {
     max_level: usize,
 }
 
+impl Default for HnswGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HnswGraph {
     /// Create a new empty graph.
     pub fn new() -> Self {
@@ -62,10 +68,10 @@ impl HnswGraph {
     /// Set the neighbor list for the given node at the specified layer.
     pub fn set_neighbors(&mut self, id: u32, layer: usize, neighbors: Vec<u32>) {
         let idx = id as usize;
-        if let Some(Some(node)) = self.nodes.get_mut(idx) {
-            if layer < node.neighbors.len() {
-                node.neighbors[layer] = neighbors;
-            }
+        if let Some(Some(node)) = self.nodes.get_mut(idx)
+            && layer < node.neighbors.len()
+        {
+            node.neighbors[layer] = neighbors;
         }
     }
 

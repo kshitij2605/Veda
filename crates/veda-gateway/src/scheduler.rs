@@ -173,11 +173,11 @@ impl JobRegistry {
     /// Persist the current registry to disk (blocking). Mirrors `SavedObjectStore::write_through`.
     pub fn save(&self) -> Result<(), String> {
         let path = self.path.clone();
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("scheduler: create_dir_all failed: {e}"))?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("scheduler: create_dir_all failed: {e}"))?;
         }
         let snapshot: HashMap<String, ScheduledJob> = self.jobs.lock().unwrap().clone();
         let bytes = serde_json::to_vec_pretty(&snapshot)
@@ -188,8 +188,8 @@ impl JobRegistry {
 
     /// Reload the registry from disk, replacing the in-memory state.
     pub fn load(&self) -> Result<(), String> {
-        let bytes = std::fs::read(&self.path)
-            .map_err(|e| format!("scheduler: read failed: {e}"))?;
+        let bytes =
+            std::fs::read(&self.path).map_err(|e| format!("scheduler: read failed: {e}"))?;
         let loaded: HashMap<String, ScheduledJob> = serde_json::from_slice(&bytes)
             .map_err(|e| format!("scheduler: deserialize failed: {e}"))?;
         *self.jobs.lock().unwrap() = loaded;
@@ -262,9 +262,7 @@ pub fn spawn_scheduler(state: AppState) -> JoinHandle<()> {
                 if let Some(kind) = kind {
                     dispatch(&kind, &state).await;
                     let ts = Utc::now().timestamp();
-                    if let Err(e) =
-                        state.inner.job_registry.update_last_run_and_save(&name, ts)
-                    {
+                    if let Err(e) = state.inner.job_registry.update_last_run_and_save(&name, ts) {
                         tracing::warn!(error = %e, job = %name, "scheduler: persist last_run failed");
                     }
                 }
@@ -295,9 +293,18 @@ mod tests {
 
     #[test]
     fn valid_cron_parses() {
-        assert!(Schedule::from_str("0 * * * * *").is_ok(), "every-minute should parse");
-        assert!(Schedule::from_str("0 0 * * * *").is_ok(), "every-hour should parse");
-        assert!(Schedule::from_str("0 0 0 * * *").is_ok(), "every-day should parse");
+        assert!(
+            Schedule::from_str("0 * * * * *").is_ok(),
+            "every-minute should parse"
+        );
+        assert!(
+            Schedule::from_str("0 0 * * * *").is_ok(),
+            "every-hour should parse"
+        );
+        assert!(
+            Schedule::from_str("0 0 0 * * *").is_ok(),
+            "every-day should parse"
+        );
     }
 
     #[test]

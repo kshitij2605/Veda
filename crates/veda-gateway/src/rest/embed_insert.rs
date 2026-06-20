@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 use veda_core::embedding::Modality;
@@ -88,7 +88,11 @@ pub async fn embed_insert(
         use veda_core::types::FieldType;
         let mut inferred: HashMap<String, AutoEmbedMapping> = HashMap::new();
         for fd in schema.vector_fields() {
-            if let FieldType::Vector { auto_embed: Some(cfg), .. } = &fd.field_type() {
+            if let FieldType::Vector {
+                auto_embed: Some(cfg),
+                ..
+            } = &fd.field_type()
+            {
                 inferred.insert(
                     fd.name().to_owned(),
                     AutoEmbedMapping {
@@ -141,10 +145,15 @@ pub async fn embed_insert(
             None => {
                 // If multimodal data is present, use multimodal model for everything
                 // so all embeddings share the same vector space.
-                let lookup_modality = if has_multimodal { Modality::Image } else { modality };
+                let lookup_modality = if has_multimodal {
+                    Modality::Image
+                } else {
+                    modality
+                };
                 let candidates = registry.find_by_modality(lookup_modality);
                 if candidates.is_empty() {
-                    let available: Vec<&str> = registry.list().iter().map(|c| c.name.as_str()).collect();
+                    let available: Vec<&str> =
+                        registry.list().iter().map(|c| c.name.as_str()).collect();
                     return Err((
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse {
@@ -169,14 +178,16 @@ pub async fn embed_insert(
         })?;
 
         // Validate model supports the modality.
-        registry.validate_modality(&model_name, modality).map_err(|e| {
-            (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        registry
+            .validate_modality(&model_name, modality)
+            .map_err(|e| {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?;
 
         // Validate target field is a vector field.
         let target_def = schema.get_field(target_field).ok_or_else(|| {
@@ -188,7 +199,11 @@ pub async fn embed_insert(
             )
         })?;
         match target_def.field_type() {
-            FieldType::Vector { dimension, model_id, .. } => {
+            FieldType::Vector {
+                dimension,
+                model_id,
+                ..
+            } => {
                 if model.output_dimension != *dimension {
                     return Err((
                         StatusCode::BAD_REQUEST,
@@ -257,7 +272,10 @@ pub async fn embed_insert(
                 None => {
                     errors.push(RecordError {
                         index: idx,
-                        error: format!("source field '{}' not present in record", mapping.source_field),
+                        error: format!(
+                            "source field '{}' not present in record",
+                            mapping.source_field
+                        ),
                     });
                     embed_ok = false;
                     break;
@@ -267,7 +285,8 @@ pub async fn embed_insert(
             let model_name = resolved_models.get(target_field).unwrap();
             let model_config = registry.get(model_name).unwrap();
             let client = EmbeddingClient::new(model_config.clone());
-            let modality = Modality::from_field_name(&mapping.source_field).unwrap_or(Modality::Text);
+            let modality =
+                Modality::from_field_name(&mapping.source_field).unwrap_or(Modality::Text);
 
             let vector = match modality {
                 Modality::Text => {
@@ -291,7 +310,10 @@ pub async fn embed_insert(
                         (
                             StatusCode::BAD_REQUEST,
                             Json(ErrorResponse {
-                                error: format!("invalid base64 in field '{}': {e}", mapping.source_field),
+                                error: format!(
+                                    "invalid base64 in field '{}': {e}",
+                                    mapping.source_field
+                                ),
                             }),
                         )
                     })?;
@@ -392,7 +414,10 @@ pub async fn embed_insert(
             }
             metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => name.clone()).set(0.0);
         }
-        let total_segments: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
+        let total_segments: usize = shard_map
+            .values()
+            .map(|sm| sm.sealed_segments().len())
+            .sum();
         metrics::gauge!(m::SEGMENTS_TOTAL, "collection" => name.clone()).set(total_segments as f64);
     }
 
@@ -410,8 +435,7 @@ pub async fn embed_insert(
 
     metrics::histogram!(m::INSERT_DURATION, "collection" => name.clone())
         .record(start.elapsed().as_secs_f64());
-    metrics::counter!(m::INSERT_TOTAL, "collection" => name.clone())
-        .increment(inserted as u64);
+    metrics::counter!(m::INSERT_TOTAL, "collection" => name.clone()).increment(inserted as u64);
 
     // Update record count gauge from segment managers.
     {

@@ -109,7 +109,10 @@ impl Crawl4aiClient {
         }
 
         let json: serde_json::Value = resp.json().await.map_err(|e| {
-            CrawlError::new("CRAWL_PARSE", format!("crawl4ai response parse failed: {e}"))
+            CrawlError::new(
+                "CRAWL_PARSE",
+                format!("crawl4ai response parse failed: {e}"),
+            )
         })?;
 
         parse_md_response(&json, url).ok_or_else(|| {
@@ -171,7 +174,11 @@ fn parse_md_response(json: &serde_json::Value, request_url: &str) -> Option<Craw
         .or_else(|| json.get("title"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned());
-    Some(CrawledPage { url, title, markdown: md })
+    Some(CrawledPage {
+        url,
+        title,
+        markdown: md,
+    })
 }
 
 /// Pull a markdown string out of a `/md` response value, tolerating both

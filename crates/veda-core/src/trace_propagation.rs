@@ -49,10 +49,10 @@ fn current_context() -> opentelemetry::Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::Context;
     use opentelemetry::trace::{
         SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
     };
-    use opentelemetry::Context;
     use reqwest::header::HeaderMap;
 
     fn set_w3c_propagator() {

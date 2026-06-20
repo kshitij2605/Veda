@@ -61,15 +61,14 @@ const DEFAULT_PRICES: &[(&str, f64, f64)] = &[
 /// metrics but skip cost. Pure + testable (env is read fresh each call so
 /// tests can set it).
 pub fn model_price(model: &str) -> Option<(f64, f64)> {
-    if let Ok(raw) = std::env::var("VEDA_LLM_PRICES") {
-        if let Ok(map) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(entry) = map.get(model) {
-                let input = entry.get("input").and_then(|v| v.as_f64());
-                let output = entry.get("output").and_then(|v| v.as_f64());
-                if let (Some(i), Some(o)) = (input, output) {
-                    return Some((i, o));
-                }
-            }
+    if let Ok(raw) = std::env::var("VEDA_LLM_PRICES")
+        && let Ok(map) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(entry) = map.get(model)
+    {
+        let input = entry.get("input").and_then(|v| v.as_f64());
+        let output = entry.get("output").and_then(|v| v.as_f64());
+        if let (Some(i), Some(o)) = (input, output) {
+            return Some((i, o));
         }
     }
     DEFAULT_PRICES

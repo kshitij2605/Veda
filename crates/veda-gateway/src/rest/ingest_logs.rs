@@ -45,9 +45,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tracing::instrument;
@@ -55,8 +55,8 @@ use veda_core::record::EXPIRES_AT_FIELD;
 use veda_core::types::FieldType;
 
 use super::collections::ErrorResponse;
-use super::embed_insert::{embed_insert, EmbedInsertRequest};
-use super::records::{insert_impl, InsertRequest};
+use super::embed_insert::{EmbedInsertRequest, embed_insert};
+use super::records::{InsertRequest, insert_impl};
 use super::state::AppState;
 use crate::logs::parse::parse_log_line;
 use crate::tenant::{self, Tenant};
@@ -135,7 +135,10 @@ pub async fn ingest_logs(
     let has_auto_embed = schema.vector_fields().iter().any(|fd| {
         matches!(
             fd.field_type(),
-            FieldType::Vector { auto_embed: Some(_), .. }
+            FieldType::Vector {
+                auto_embed: Some(_),
+                ..
+            }
         )
     });
 

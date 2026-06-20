@@ -1,5 +1,5 @@
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 

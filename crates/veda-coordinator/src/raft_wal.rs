@@ -43,7 +43,7 @@
 //! amplification fix, that work is not required yet.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -101,9 +101,8 @@ impl WalLog {
     /// Append a record, fsyncing before returning. Errors fail the
     /// caller — losing a vote/log append is not survivable.
     pub async fn append(&self, record: &WalRecord) -> std::io::Result<()> {
-        let payload = bincode::serialize(record).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let payload = bincode::serialize(record)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let len: u32 = payload
             .len()
             .try_into()
@@ -128,7 +127,7 @@ impl WalLog {
     /// boundary and returns the records that landed cleanly.
     /// Errors only fire for genuine I/O problems, not corruption.
     pub async fn replay(&self) -> std::io::Result<Vec<WalRecord>> {
-        let mut guard = self.inner.lock().await;
+        let guard = self.inner.lock().await;
         // Re-read from the start by opening a fresh handle — the
         // append handle is positioned at EOF and seek-on-append
         // is platform-dependent.
@@ -187,22 +186,16 @@ impl WalLog {
                 .write(true)
                 .truncate(true)
                 .open(&temp)?;
-            let mut total = 0u64;
             for record in surviving {
-                let payload = bincode::serialize(record).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-                })?;
+                let payload = bincode::serialize(record)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                 let len: u32 = payload.len().try_into().map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "payload >4GB",
-                    )
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "payload >4GB")
                 })?;
                 let crc = crc32fast::hash(&payload);
                 tmp_file.write_all(&crc.to_le_bytes())?;
                 tmp_file.write_all(&len.to_le_bytes())?;
                 tmp_file.write_all(&payload)?;
-                total += 8 + payload.len() as u64;
             }
             tmp_file.sync_all()?;
         }
@@ -347,7 +340,8 @@ mod tests {
             .unwrap()
             .len();
 
-        let surviving: Vec<WalRecord> = (11..=20).map(|i| WalRecord::Entry(make_entry(i))).collect();
+        let surviving: Vec<WalRecord> =
+            (11..=20).map(|i| WalRecord::Entry(make_entry(i))).collect();
         wal.rewrite(&surviving).await.unwrap();
 
         let post_compact_size = std::fs::metadata(tmp.path().join("raft_log.wal"))

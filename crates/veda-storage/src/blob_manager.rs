@@ -37,9 +37,9 @@ impl BlobManager {
             };
 
             let raw_bytes = match value {
-                FieldValue::String(s) => BASE64_STANDARD
-                    .decode(s)
-                    .map_err(|e| VedaError::Storage(format!("Invalid base64 for field '{field_name}': {e}")))?,
+                FieldValue::String(s) => BASE64_STANDARD.decode(s).map_err(|e| {
+                    VedaError::Storage(format!("Invalid base64 for field '{field_name}': {e}"))
+                })?,
                 _ => continue,
             };
 

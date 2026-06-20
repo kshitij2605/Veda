@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::auth::Role;
-use veda_gateway::rest::state::{AppState, UserRecord};
 use veda_gateway::rest::build_router;
+use veda_gateway::rest::state::{AppState, UserRecord};
 
 // ── Test helpers ────────────────────────────────────────────────────────────
 
@@ -99,7 +99,11 @@ async fn test_full_collection_lifecycle() {
     assert_eq!(resp.status(), 201);
 
     // 2. Verify it appears in list
-    let resp = c.get(format!("{base}/v1/collections")).send().await.unwrap();
+    let resp = c
+        .get(format!("{base}/v1/collections"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     let names: Vec<&str> = body["collections"]
@@ -196,7 +200,11 @@ async fn test_full_collection_lifecycle() {
     assert!(rec_fields.contains_key("active"));
 
     // 7. Delete 5 records by ID — gather IDs from search results
-    let ids_to_delete: Vec<&str> = results.iter().take(5).map(|r| r["id"].as_str().unwrap()).collect();
+    let ids_to_delete: Vec<&str> = results
+        .iter()
+        .take(5)
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
     let resp = c
         .delete(format!("{base}/v1/collections/lifecycle_col/records"))
         .json(&json!({ "ids": ids_to_delete }))
@@ -237,7 +245,11 @@ async fn test_full_collection_lifecycle() {
     assert_eq!(body["status"], "dropped");
 
     // 10. Verify it's gone from list
-    let resp = c.get(format!("{base}/v1/collections")).send().await.unwrap();
+    let resp = c
+        .get(format!("{base}/v1/collections"))
+        .send()
+        .await
+        .unwrap();
     let body: Value = resp.json().await.unwrap();
     let names: Vec<&str> = body["collections"]
         .as_array()
@@ -329,7 +341,10 @@ async fn test_filtered_search() {
     let body: Value = resp.json().await.unwrap();
     let count = body["count"].as_u64().unwrap();
     // Should return only electronics (at most 30)
-    assert!(count > 0 && count <= 30, "Expected 1-30 electronics results, got {count}");
+    assert!(
+        count > 0 && count <= 30,
+        "Expected 1-30 electronics results, got {count}"
+    );
 
     // 4. Search with filter "price BETWEEN 50 AND 150" — results in range
     let resp = c
@@ -451,7 +466,10 @@ async fn test_multi_vector_fusion() {
     }
 
     // 5. Verify results are sorted by score (descending for RRF — higher is better)
-    let scores: Vec<f64> = results.iter().map(|r| r["distance"].as_f64().unwrap()).collect();
+    let scores: Vec<f64> = results
+        .iter()
+        .map(|r| r["distance"].as_f64().unwrap())
+        .collect();
     for w in scores.windows(2) {
         assert!(
             w[0] >= w[1],
@@ -632,9 +650,7 @@ async fn test_error_get_nonexistent_record() {
     // Get nonexistent record -> 404
     let fake_id = uuid::Uuid::new_v4();
     let resp = c
-        .get(format!(
-            "{base}/v1/collections/norec_col/records/{fake_id}"
-        ))
+        .get(format!("{base}/v1/collections/norec_col/records/{fake_id}"))
         .send()
         .await
         .unwrap();
@@ -673,10 +689,7 @@ async fn test_error_empty_query() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["error"]
-        .as_str()
-        .unwrap()
-        .contains("must contain"));
+    assert!(body["error"].as_str().unwrap().contains("must contain"));
 }
 
 #[tokio::test]
@@ -780,7 +793,11 @@ async fn test_auth_flow() {
     assert_eq!(resp.status(), 200);
 
     // 2. Try to access protected endpoint without token -> 401
-    let resp = c.get(format!("{base}/v1/collections")).send().await.unwrap();
+    let resp = c
+        .get(format!("{base}/v1/collections"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401);
 
     // 3. Login -> get token
@@ -959,7 +976,11 @@ async fn test_multiple_collections_isolation() {
     assert_eq!(resp.status(), 200);
 
     // List should show only col_b
-    let resp = c.get(format!("{base}/v1/collections")).send().await.unwrap();
+    let resp = c
+        .get(format!("{base}/v1/collections"))
+        .send()
+        .await
+        .unwrap();
     let body: Value = resp.json().await.unwrap();
     let names: Vec<&str> = body["collections"]
         .as_array()
@@ -974,6 +995,7 @@ async fn test_multiple_collections_isolation() {
 // ── 9. Get record after insert verifies all field types ─────────────────────
 
 #[tokio::test]
+#[allow(clippy::approx_constant)]
 async fn test_get_record_all_field_types() {
     let (base, _tmp) = start_test_server().await;
     let c = client();
@@ -1302,7 +1324,12 @@ async fn test_sparse_vector_end_to_end() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     let results = body["results"].as_array().unwrap();
-    assert_eq!(results.len(), 3, "expected 3 results, got {}", results.len());
+    assert_eq!(
+        results.len(),
+        3,
+        "expected 3 results, got {}",
+        results.len()
+    );
     // First result should be the most similar (cosine ~ 0 for identical).
     let top_distance = results[0]["distance"].as_f64().unwrap();
     assert!(
@@ -1516,7 +1543,7 @@ async fn test_mrl_with_declared_dims_uses_index() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["results"].as_array().unwrap().len() >= 1);
+    assert!(!body["results"].as_array().unwrap().is_empty());
 
     // truncate_to=6 (NOT in mrl_dims) — still works via brute-force fallback.
     let resp = c
@@ -1675,7 +1702,10 @@ async fn test_mcp_initialize_and_list_tools() {
     assert_eq!(find("search")["annotations"]["destructiveHint"], false);
     assert_eq!(find("aggregate")["annotations"]["readOnlyHint"], true);
     assert_eq!(find("upsert_record")["annotations"]["readOnlyHint"], false);
-    assert_eq!(find("upsert_record")["annotations"]["destructiveHint"], true);
+    assert_eq!(
+        find("upsert_record")["annotations"]["destructiveHint"],
+        true
+    );
 
     // The multimodal search schema flows through unchanged.
     let search_props = &find("search")["inputSchema"]["properties"];
@@ -1814,7 +1844,10 @@ async fn test_mcp_tool_arg_error_returns_iserror_result() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert!(body.get("error").is_none(), "must not be a JSON-RPC error: {body}");
+    assert!(
+        body.get("error").is_none(),
+        "must not be a JSON-RPC error: {body}"
+    );
     assert_eq!(body["result"]["isError"], true, "body: {body}");
     let text = body["result"]["content"][0]["text"].as_str().unwrap();
     assert!(!text.is_empty(), "error message must be non-empty: {body}");
@@ -1841,7 +1874,10 @@ async fn test_mcp_tool_notfound_returns_iserror_result() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert!(body.get("error").is_none(), "must not be a JSON-RPC error: {body}");
+    assert!(
+        body.get("error").is_none(),
+        "must not be a JSON-RPC error: {body}"
+    );
     assert_eq!(body["result"]["isError"], true, "body: {body}");
     let text = body["result"]["content"][0]["text"].as_str().unwrap();
     assert!(!text.is_empty(), "error message must be non-empty: {body}");
@@ -1906,14 +1942,22 @@ async fn test_mcp_success_has_structured_content() {
     let text = body["result"]["content"][0]["text"].as_str().unwrap();
     let parsed_text: Value = serde_json::from_str(text).unwrap();
     let structured = &body["result"]["structuredContent"];
-    assert!(structured.is_object(), "structuredContent must be present: {body}");
+    assert!(
+        structured.is_object(),
+        "structuredContent must be present: {body}"
+    );
     // structuredContent is the raw tool JSON, equal to the parsed text block.
-    assert_eq!(*structured, parsed_text, "structuredContent must equal tool JSON");
-    assert!(structured["collections"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|n| n.as_str() == Some("mcp_struct")));
+    assert_eq!(
+        *structured, parsed_text,
+        "structuredContent must equal tool JSON"
+    );
+    assert!(
+        structured["collections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str() == Some("mcp_struct"))
+    );
 }
 
 #[tokio::test]
@@ -1934,7 +1978,10 @@ async fn test_mcp_initialize_protocol_negotiation() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["result"]["protocolVersion"], "2025-06-18", "body: {body}");
+    assert_eq!(
+        body["result"]["protocolVersion"], "2025-06-18",
+        "body: {body}"
+    );
 
     // Client requesting the older 2025-03-26 gets that echoed back.
     let resp = c
@@ -1949,7 +1996,10 @@ async fn test_mcp_initialize_protocol_negotiation() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["result"]["protocolVersion"], "2025-03-26", "body: {body}");
+    assert_eq!(
+        body["result"]["protocolVersion"], "2025-03-26",
+        "body: {body}"
+    );
 
     // No protocolVersion -> our preferred 2025-06-18.
     let resp = c
@@ -1964,7 +2014,10 @@ async fn test_mcp_initialize_protocol_negotiation() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["result"]["protocolVersion"], "2025-06-18", "body: {body}");
+    assert_eq!(
+        body["result"]["protocolVersion"], "2025-06-18",
+        "body: {body}"
+    );
 
     // An unsupported version -> our preferred 2025-06-18.
     let resp = c
@@ -1979,7 +2032,10 @@ async fn test_mcp_initialize_protocol_negotiation() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["result"]["protocolVersion"], "2025-06-18", "body: {body}");
+    assert_eq!(
+        body["result"]["protocolVersion"], "2025-06-18",
+        "body: {body}"
+    );
 }
 
 // ── MCP Streamable HTTP transport ──────────────────────────────────────────
@@ -2179,13 +2235,19 @@ async fn test_chunk_preview_runs_each_strategy() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["input_chars"].as_u64().unwrap(), text.chars().count() as u64);
+    assert_eq!(
+        body["input_chars"].as_u64().unwrap(),
+        text.chars().count() as u64
+    );
     let runs = body["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 3);
 
     // Default run keeps the user-provided label.
     assert_eq!(runs[0]["label"].as_str().unwrap(), "Default");
-    assert_eq!(runs[0]["strategy_name"].as_str().unwrap(), "markdown_recursive");
+    assert_eq!(
+        runs[0]["strategy_name"].as_str().unwrap(),
+        "markdown_recursive"
+    );
     // Each run reports nonzero elapsed and a chunks vec.
     for r in runs {
         assert!(r["elapsed_ms"].as_f64().is_some());
@@ -2199,10 +2261,10 @@ async fn test_chunk_preview_runs_each_strategy() {
     // Fixed-80 should split a 150-ish-char doc into more chunks than the
     // markdown_recursive default (max 2000c per chunk).
     assert!(
-        runs[1]["total_chunks"].as_u64().unwrap()
-            > runs[0]["total_chunks"].as_u64().unwrap(),
+        runs[1]["total_chunks"].as_u64().unwrap() > runs[0]["total_chunks"].as_u64().unwrap(),
         "fixed-80 ({}) should produce more chunks than markdown_recursive ({})",
-        runs[1]["total_chunks"], runs[0]["total_chunks"],
+        runs[1]["total_chunks"],
+        runs[0]["total_chunks"],
     );
 }
 
@@ -2350,10 +2412,7 @@ async fn test_coverage_empty_then_after_search() {
         hit_count as u64,
         "retrieved_chunks should equal the number of hits the search returned"
     );
-    assert_eq!(
-        body["orphan_count"].as_u64().unwrap(),
-        5 - hit_count as u64,
-    );
+    assert_eq!(body["orphan_count"].as_u64().unwrap(), 5 - hit_count as u64,);
     let top_hits = body["top_hits"].as_array().unwrap();
     assert_eq!(top_hits.len(), hit_count);
     for hit in top_hits {

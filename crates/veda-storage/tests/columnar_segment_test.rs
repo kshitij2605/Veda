@@ -71,12 +71,18 @@ fn columnar_segment_round_trips_via_reader() {
     // Records reconstruct with scalar values intact.
     let got_a = r.get_record(0).unwrap();
     assert_eq!(got_a.id(), id_a);
-    assert_eq!(got_a.get("title"), Some(&FieldValue::String("alpha".into())));
+    assert_eq!(
+        got_a.get("title"),
+        Some(&FieldValue::String("alpha".into()))
+    );
     assert_eq!(got_a.get("price"), Some(&FieldValue::Float64(9.99)));
     assert_eq!(got_a.get("year"), Some(&FieldValue::Int64(2024)));
 
     let got_b = r.get_record(1).unwrap();
-    assert_eq!(got_b.get("title"), Some(&FieldValue::String("ブラボー".into())));
+    assert_eq!(
+        got_b.get("title"),
+        Some(&FieldValue::String("ブラボー".into()))
+    );
 
     let got_c = r.get_record(2).unwrap();
     assert_eq!(got_c.get("price"), Some(&FieldValue::Float64(0.0)));
@@ -101,5 +107,8 @@ fn jsonl_default_still_works_after_columnar_landing() {
     assert_eq!(r.metadata().stored_format, StoredFormat::Jsonl);
     assert_eq!(r.doc_id_for_uuid(&id), Some(0));
     let got = r.get_record(0).unwrap();
-    assert_eq!(got.get("title"), Some(&FieldValue::String("default-jsonl".into())));
+    assert_eq!(
+        got.get("title"),
+        Some(&FieldValue::String("default-jsonl".into()))
+    );
 }

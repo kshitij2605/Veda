@@ -23,7 +23,9 @@ use veda_storage::mvcc::MvccStore;
 #[test]
 fn snapshot_isolation_reader_never_sees_future_write() {
     let mut store = MvccStore::new();
-    store.put_payload(b"k", 100, Bytes::from_static(b"v1")).unwrap();
+    store
+        .put_payload(b"k", 100, Bytes::from_static(b"v1"))
+        .unwrap();
     // Snapshot at ts = 50 — earlier than v1's commit.
     assert!(store.get_at(b"k", 50).is_none());
     // Snapshot at ts = 99 — still earlier than commit 100.
@@ -34,7 +36,9 @@ fn snapshot_isolation_reader_never_sees_future_write() {
     assert_eq!(store.get_at(b"k", 200).as_deref(), Some(&b"v1"[..]));
 
     // Future write at ts=300.
-    store.put_payload(b"k", 300, Bytes::from_static(b"v2")).unwrap();
+    store
+        .put_payload(b"k", 300, Bytes::from_static(b"v2"))
+        .unwrap();
     // Reader at 200 must still see v1, not v2.
     assert_eq!(
         store.get_at(b"k", 200).as_deref(),
@@ -51,9 +55,15 @@ fn snapshot_isolation_holds_across_interleaved_writes() {
     // per-key snapshot order. (Cross-key SI is the same as
     // per-key SI under MVCC.)
     let mut store = MvccStore::new();
-    store.put_payload(b"a", 100, Bytes::from_static(b"a1")).unwrap();
-    store.put_payload(b"b", 200, Bytes::from_static(b"b1")).unwrap();
-    store.put_payload(b"a", 300, Bytes::from_static(b"a2")).unwrap();
+    store
+        .put_payload(b"a", 100, Bytes::from_static(b"a1"))
+        .unwrap();
+    store
+        .put_payload(b"b", 200, Bytes::from_static(b"b1"))
+        .unwrap();
+    store
+        .put_payload(b"a", 300, Bytes::from_static(b"a2"))
+        .unwrap();
 
     // Snapshot at ts=150 sees a1, no b.
     assert_eq!(store.get_at(b"a", 150).as_deref(), Some(&b"a1"[..]));
@@ -71,9 +81,13 @@ fn snapshot_isolation_holds_across_interleaved_writes() {
 #[test]
 fn snapshot_isolation_handles_tombstones_correctly() {
     let mut store = MvccStore::new();
-    store.put_payload(b"k", 100, Bytes::from_static(b"v1")).unwrap();
+    store
+        .put_payload(b"k", 100, Bytes::from_static(b"v1"))
+        .unwrap();
     store.delete(b"k", 200).unwrap(); // tombstone at 200
-    store.put_payload(b"k", 300, Bytes::from_static(b"v2")).unwrap();
+    store
+        .put_payload(b"k", 300, Bytes::from_static(b"v2"))
+        .unwrap();
 
     // Snapshot before delete: see v1.
     assert_eq!(store.get_at(b"k", 150).as_deref(), Some(&b"v1"[..]));
@@ -89,12 +103,17 @@ fn gc_safety_keeps_the_floor_version_even_after_safe_ts_advances() {
     // commit_ts ≤ safe_ts. GC must keep it so reads at
     // read_ts = safe_ts return correctly.
     let mut store = MvccStore::new();
-    store.put_payload(b"k", 100, Bytes::from_static(b"v1")).unwrap();
+    store
+        .put_payload(b"k", 100, Bytes::from_static(b"v1"))
+        .unwrap();
     // Advance safe_ts to 200 — v1 is the floor (≤ 200, no
     // newer version exists). GC must NOT drop it.
     store.set_safe_ts(200);
     let dropped = store.gc();
-    assert_eq!(dropped, 0, "floor version v1 must not be dropped (no newer version exists)");
+    assert_eq!(
+        dropped, 0,
+        "floor version v1 must not be dropped (no newer version exists)"
+    );
     // The floor is still observable.
     assert_eq!(store.get_at(b"k", 200).as_deref(), Some(&b"v1"[..]));
 }
@@ -102,17 +121,28 @@ fn gc_safety_keeps_the_floor_version_even_after_safe_ts_advances() {
 #[test]
 fn gc_safety_drops_only_versions_strictly_below_floor() {
     let mut store = MvccStore::new();
-    store.put_payload(b"k", 100, Bytes::from_static(b"v1")).unwrap();
-    store.put_payload(b"k", 200, Bytes::from_static(b"v2")).unwrap();
-    store.put_payload(b"k", 300, Bytes::from_static(b"v3")).unwrap();
-    store.put_payload(b"k", 400, Bytes::from_static(b"v4")).unwrap();
+    store
+        .put_payload(b"k", 100, Bytes::from_static(b"v1"))
+        .unwrap();
+    store
+        .put_payload(b"k", 200, Bytes::from_static(b"v2"))
+        .unwrap();
+    store
+        .put_payload(b"k", 300, Bytes::from_static(b"v3"))
+        .unwrap();
+    store
+        .put_payload(b"k", 400, Bytes::from_static(b"v4"))
+        .unwrap();
 
     // Safe at 350: floor is v3 (300 ≤ 350; v2/v1 are
     // strictly below the floor). v4 is above safe_ts so must
     // be kept too (a reader at read_ts=400 needs it).
     store.set_safe_ts(350);
     let dropped = store.gc();
-    assert_eq!(dropped, 2, "v1 + v2 strictly below the floor should be dropped");
+    assert_eq!(
+        dropped, 2,
+        "v1 + v2 strictly below the floor should be dropped"
+    );
 
     // Surviving versions:
     //  - v3 (floor, kept regardless)
@@ -129,7 +159,9 @@ fn gc_safety_preserves_tombstone_floor() {
     // the tombstone would resurface the older value to readers
     // at safe_ts, violating the delete history.
     let mut store = MvccStore::new();
-    store.put_payload(b"k", 100, Bytes::from_static(b"v1")).unwrap();
+    store
+        .put_payload(b"k", 100, Bytes::from_static(b"v1"))
+        .unwrap();
     store.delete(b"k", 200).unwrap();
     // Advance safe_ts past the tombstone.
     store.set_safe_ts(250);
@@ -147,8 +179,12 @@ fn gc_safety_never_drops_versions_above_safe_ts() {
     // Versions above safe_ts may still be observed by readers
     // at higher read_ts; GC must leave them alone.
     let mut store = MvccStore::new();
-    store.put_payload(b"k", 100, Bytes::from_static(b"v1")).unwrap();
-    store.put_payload(b"k", 500, Bytes::from_static(b"v2")).unwrap();
+    store
+        .put_payload(b"k", 100, Bytes::from_static(b"v1"))
+        .unwrap();
+    store
+        .put_payload(b"k", 500, Bytes::from_static(b"v2"))
+        .unwrap();
     store.set_safe_ts(200);
     let dropped = store.gc();
     // v1 is the floor (kept); v2 is above safe_ts (kept).

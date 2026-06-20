@@ -1,9 +1,9 @@
-use rand::seq::SliceRandom;
 use rand::Rng;
+use rand::seq::SliceRandom;
 
-use crate::distance::compute_distance;
 use crate::diskann::graph::VamanaGraph;
 use crate::diskann::searcher::greedy_search;
+use crate::distance::compute_distance;
 use veda_core::types::DistanceMetric;
 
 /// Compute the medoid: the vector closest to the centroid of all vectors.
@@ -65,11 +65,8 @@ pub fn robust_prune(
 
         // Remove from remaining all v where dist(v, p*) * alpha <= dist(v, p).
         remaining.retain(|&(v_id, dist_v_p)| {
-            let dist_v_pstar = compute_distance(
-                &vectors[v_id as usize],
-                &vectors[p_star as usize],
-                metric,
-            );
+            let dist_v_pstar =
+                compute_distance(&vectors[v_id as usize], &vectors[p_star as usize], metric);
             dist_v_pstar * alpha > dist_v_p
         });
     }

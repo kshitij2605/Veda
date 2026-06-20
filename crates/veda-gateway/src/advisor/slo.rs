@@ -274,13 +274,13 @@ impl SloState {
         let burn_rate_fast = self.burn_rate(def, def.fast_burn.window_secs, now_ms, allowed_bad);
         let burn_rate_slow = self.burn_rate(def, def.slow_burn.window_secs, now_ms, allowed_bad);
 
-        let compliant = sli_pct.map_or(true, |s| s >= def.target_pct);
+        let compliant = sli_pct.is_none_or(|s| s >= def.target_pct);
 
         let fast_burn_threshold = def.fast_burn.threshold;
         let slow_burn_threshold = def.slow_burn.threshold;
-        let breaching_fast = burn_rate_fast.map_or(false, |r| r >= fast_burn_threshold);
-        let breaching_slow = burn_rate_slow.map_or(false, |r| r >= slow_burn_threshold);
-        let budget_exhausted = error_budget_remaining_pct.map_or(false, |p| p <= 0.0);
+        let breaching_fast = burn_rate_fast.is_some_and(|r| r >= fast_burn_threshold);
+        let breaching_slow = burn_rate_slow.is_some_and(|r| r >= slow_burn_threshold);
+        let budget_exhausted = error_budget_remaining_pct.is_some_and(|p| p <= 0.0);
 
         SloStatus {
             slo_id: def.id.clone(),
@@ -326,10 +326,11 @@ impl SloState {
     /// surfaced — the in-memory copy is authoritative. Mirrors
     /// [`crate::advisor::event::EventStore::save`].
     pub fn save(&self, path: &Path) {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            let _ = std::fs::create_dir_all(parent);
         }
         match serde_json::to_vec_pretty(self) {
             Ok(bytes) => {
@@ -411,10 +412,11 @@ impl SloRegistry {
 
     /// Persist to `path` as pretty JSON. Failure is logged, not surfaced.
     pub fn save(&self, path: &Path) {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            let _ = std::fs::create_dir_all(parent);
         }
         match serde_json::to_vec_pretty(self) {
             Ok(bytes) => {
@@ -669,9 +671,21 @@ mod tests {
         let now = 10_000_000u64;
         st.record("s", 800, 1000, now); // 200 bad
         let status = st.status(&avail_slo("s"), now);
-        assert!(status.breaching_fast, "burn {:?} >= {}", status.burn_rate_fast, status.fast_burn_threshold);
-        assert!(status.breaching_slow, "burn {:?} >= {}", status.burn_rate_slow, status.slow_burn_threshold);
-        assert!(status.budget_exhausted, "remaining {:?}", status.error_budget_remaining_pct);
+        assert!(
+            status.breaching_fast,
+            "burn {:?} >= {}",
+            status.burn_rate_fast, status.fast_burn_threshold
+        );
+        assert!(
+            status.breaching_slow,
+            "burn {:?} >= {}",
+            status.burn_rate_slow, status.slow_burn_threshold
+        );
+        assert!(
+            status.budget_exhausted,
+            "remaining {:?}",
+            status.error_budget_remaining_pct
+        );
         assert!((status.fast_burn_threshold - 14.4).abs() < APPROX);
         assert!((status.slow_burn_threshold - 6.0).abs() < APPROX);
     }
@@ -772,7 +786,10 @@ mod tests {
             serde_json::from_value(serde_json::json!({"kind":"faithfulness"})).unwrap();
         assert_eq!(none_agent, SloKind::Faithfulness { agent: None });
         let v = serde_json::to_value(&none_agent).unwrap();
-        assert!(v.get("agent").is_none(), "None agent must not serialize: {v}");
+        assert!(
+            v.get("agent").is_none(),
+            "None agent must not serialize: {v}"
+        );
     }
 
     #[test]

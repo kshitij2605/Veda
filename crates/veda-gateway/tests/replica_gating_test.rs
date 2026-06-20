@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Once;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::build_router;
@@ -131,7 +131,9 @@ async fn read_at_ts_above_safe_ts_returns_503() {
 
     // Read at ts way above 1000 → 503.
     let resp = c
-        .get(format!("{base}/v1/collections/gated_b/records/{id}?at=99999999999"))
+        .get(format!(
+            "{base}/v1/collections/gated_b/records/{id}?at=99999999999"
+        ))
         .send()
         .await
         .unwrap();

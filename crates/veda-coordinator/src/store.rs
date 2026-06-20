@@ -45,10 +45,7 @@ impl LogStore {
     /// Append a command and return the index it was assigned.
     pub fn append(&mut self, command: ClusterCommand) -> u64 {
         let index = self.next_index();
-        self.entries.push(LogEntry {
-            index,
-            command,
-        });
+        self.entries.push(LogEntry { index, command });
         index
     }
 
@@ -62,7 +59,9 @@ impl LogStore {
 
     /// Return the last entry's index, or 0 if the log is empty.
     pub fn last_index(&self) -> u64 {
-        self.entries.last().map_or(self.last_purged_index, |e| e.index)
+        self.entries
+            .last()
+            .map_or(self.last_purged_index, |e| e.index)
     }
 
     /// Get entries in the range `[start, end)` (both are 1-based indices).
@@ -198,10 +197,7 @@ impl ClusterStateMachine {
     /// name for `name`, following at most one alias hop. If
     /// `name` is not aliased, returns `name` unchanged.
     pub fn resolve_collection<'a>(&'a self, name: &'a str) -> &'a str {
-        self.aliases
-            .get(name)
-            .map(|s| s.as_str())
-            .unwrap_or(name)
+        self.aliases.get(name).map(|s| s.as_str()).unwrap_or(name)
     }
 
     /// Phase G: read access to the alias map. Used by the
@@ -353,9 +349,9 @@ impl ClusterStateMachine {
                         "RenewTsLease epoch {epoch} != current {}",
                         current.epoch
                     )),
-                    None => ClusterResponse::Error(
-                        "RenewTsLease has no current lease to renew".into(),
-                    ),
+                    None => {
+                        ClusterResponse::Error("RenewTsLease has no current lease to renew".into())
+                    }
                 }
             }
 
@@ -378,10 +374,7 @@ impl ClusterStateMachine {
                 let new_ensemble_json = match self.shard_ensembles.get(shard_id) {
                     Some(existing) => match serde_json::from_str::<serde_json::Value>(existing) {
                         Ok(mut v) => {
-                            let cur_epoch = v
-                                .get("epoch")
-                                .and_then(|e| e.as_u64())
-                                .unwrap_or(0);
+                            let cur_epoch = v.get("epoch").and_then(|e| e.as_u64()).unwrap_or(0);
                             if *new_epoch <= cur_epoch {
                                 return ClusterResponse::Error(format!(
                                     "ChangeShardWriter new_epoch {new_epoch} not strictly > {cur_epoch}"
@@ -645,9 +638,7 @@ mod tests {
         // Entry at index 2 while last_applied is 0 (expects 1).
         let entry = LogEntry {
             index: 2,
-            command: ClusterCommand::DropCollection {
-                name: "x".into(),
-            },
+            command: ClusterCommand::DropCollection { name: "x".into() },
         };
         let resp = sm.apply(&entry);
         assert!(matches!(resp, ClusterResponse::Error(_)));
@@ -900,7 +891,9 @@ mod tests {
         // Round-trips through the snapshot.
         let snap = sm.snapshot();
         assert_eq!(
-            snap.shard_ensembles.get(REGION_TOPOLOGY_KEY).map(|s| s.as_str()),
+            snap.shard_ensembles
+                .get(REGION_TOPOLOGY_KEY)
+                .map(|s| s.as_str()),
             Some(topology_v2)
         );
     }
@@ -908,7 +901,8 @@ mod tests {
     #[test]
     fn register_shard_ensemble_stores_json_blob() {
         let mut sm = ClusterStateMachine::new();
-        let ensemble_json = r#"{"writers":[1,2,3],"write_quorum":3,"ack_quorum":2,"epoch":1,"writer_leader":1}"#;
+        let ensemble_json =
+            r#"{"writers":[1,2,3],"write_quorum":3,"ack_quorum":2,"epoch":1,"writer_leader":1}"#;
         drive(
             &mut sm,
             [ClusterCommand::RegisterShardEnsemble {
@@ -917,7 +911,10 @@ mod tests {
             }],
         );
         let snap = sm.snapshot();
-        assert_eq!(snap.shard_ensembles.get("docs:0"), Some(&ensemble_json.to_owned()));
+        assert_eq!(
+            snap.shard_ensembles.get("docs:0"),
+            Some(&ensemble_json.to_owned())
+        );
     }
 
     #[test]

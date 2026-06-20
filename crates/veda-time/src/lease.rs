@@ -33,7 +33,11 @@ impl TsLease {
     /// Construct a lease. No validation here — `_meta` apply does
     /// the epoch monotonicity check.
     pub fn new(epoch: u64, holder_node_id: u64, ceiling_ns: u64) -> Self {
-        Self { epoch, holder_node_id, ceiling_ns }
+        Self {
+            epoch,
+            holder_node_id,
+            ceiling_ns,
+        }
     }
 
     /// Check if `wall_ns` is within the lease's validity window.

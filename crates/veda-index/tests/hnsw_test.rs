@@ -17,11 +17,7 @@ fn random_vectors(rng: &mut StdRng, count: usize, dim: usize) -> Vec<Vec<f32>> {
 
 /// Compute recall@k: the fraction of ground-truth top-k results that appear
 /// in the approximate result set, averaged over all queries.
-fn compute_recall(
-    hnsw_results: &[Vec<u32>],
-    flat_results: &[Vec<u32>],
-    k: usize,
-) -> f64 {
+fn compute_recall(hnsw_results: &[Vec<u32>], flat_results: &[Vec<u32>], k: usize) -> f64 {
     assert_eq!(hnsw_results.len(), flat_results.len());
     let mut total_recall = 0.0;
     for (hnsw_res, flat_res) in hnsw_results.iter().zip(flat_results.iter()) {

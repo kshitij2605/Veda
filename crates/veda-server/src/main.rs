@@ -7,10 +7,7 @@ use veda_gateway::server::{ServerConfig, start_server};
 /// (`parentbased_traceidratio`); a missing or unparseable ratio arg
 /// defaults to `1.0`, so the unset-env case samples everything — i.e. no
 /// change from the previous SDK-default behaviour.
-fn resolve_sampler(
-    name: Option<String>,
-    arg: Option<String>,
-) -> opentelemetry_sdk::trace::Sampler {
+fn resolve_sampler(name: Option<String>, arg: Option<String>) -> opentelemetry_sdk::trace::Sampler {
     use opentelemetry_sdk::trace::Sampler;
 
     let ratio = arg
@@ -46,10 +43,12 @@ async fn main() {
     }
 
     // Initialize tracing with optional OpenTelemetry export.
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info".into());
+    let env_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
-    let otel_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().filter(|s| !s.is_empty());
+    let otel_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     // Log Insights capture buffer. The same `Arc` feeds both the
     // tracing CaptureLayer (below) and `AppState.log_buffer` (via
@@ -112,7 +111,8 @@ async fn main() {
             ]))
             .build();
 
-        let otel_log_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&log_provider);
+        let otel_log_layer =
+            opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&log_provider);
 
         let fmt_layer = tracing_subscriber::fmt::layer().json();
 
@@ -121,7 +121,10 @@ async fn main() {
             .with(fmt_layer)
             .with(otel_trace_layer)
             .with(otel_log_layer)
-            .with(veda_gateway::logs::CaptureLayer::new(log_buffer.clone(), capture_level))
+            .with(veda_gateway::logs::CaptureLayer::new(
+                log_buffer.clone(),
+                capture_level,
+            ))
             .init();
 
         // Enable W3C Trace Context propagation for incoming traceparent headers.
@@ -139,7 +142,10 @@ async fn main() {
         tracing_subscriber::registry()
             .with(env_filter)
             .with(fmt_layer)
-            .with(veda_gateway::logs::CaptureLayer::new(log_buffer.clone(), capture_level))
+            .with(veda_gateway::logs::CaptureLayer::new(
+                log_buffer.clone(),
+                capture_level,
+            ))
             .init();
     }
 
@@ -148,7 +154,7 @@ async fn main() {
 
     let data_dir = args
         .get(1)
-        .map(|s| std::path::PathBuf::from(s))
+        .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("./veda-data"));
 
     let listen_addr = args
@@ -215,7 +221,10 @@ mod sampler_tests {
 
     #[test]
     fn traceidratio_uses_arg() {
-        assert_eq!(dbg(Some("traceidratio"), Some("0.1")), "TraceIdRatioBased(0.1)");
+        assert_eq!(
+            dbg(Some("traceidratio"), Some("0.1")),
+            "TraceIdRatioBased(0.1)"
+        );
     }
 
     #[test]
@@ -228,10 +237,7 @@ mod sampler_tests {
 
     #[test]
     fn ratio_arg_defaults_to_one_when_missing_or_garbage() {
-        assert_eq!(
-            dbg(Some("traceidratio"), None),
-            "TraceIdRatioBased(1.0)"
-        );
+        assert_eq!(dbg(Some("traceidratio"), None), "TraceIdRatioBased(1.0)");
         assert_eq!(
             dbg(Some("traceidratio"), Some("garbage")),
             "TraceIdRatioBased(1.0)"

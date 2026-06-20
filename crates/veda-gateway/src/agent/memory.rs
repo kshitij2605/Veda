@@ -89,9 +89,7 @@ pub fn memory_schema(scoped_name: &str, dimension: u32) -> Result<CollectionSche
         .add_field(FieldDefinition::new(TEXT_FIELD, FieldType::String))
         .add_field(FieldDefinition::new("role", FieldType::String))
         .add_field(FieldDefinition::new(AGENT_ID_FIELD, FieldType::String).with_filterable(true))
-        .add_field(
-            FieldDefinition::new("conversation_id", FieldType::String).with_filterable(true),
-        )
+        .add_field(FieldDefinition::new("conversation_id", FieldType::String).with_filterable(true))
         .add_field(FieldDefinition::new("ts", FieldType::Int64).with_filterable(true))
         .add_field(
             FieldDefinition::vector(EMBEDDING_FIELD, dimension, DistanceMetric::Cosine)
@@ -115,8 +113,14 @@ fn turn_record_map(
     embedding: Vec<f32>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut m = serde_json::Map::new();
-    m.insert(TEXT_FIELD.to_owned(), serde_json::Value::String(text.to_owned()));
-    m.insert("role".to_owned(), serde_json::Value::String(role.to_owned()));
+    m.insert(
+        TEXT_FIELD.to_owned(),
+        serde_json::Value::String(text.to_owned()),
+    );
+    m.insert(
+        "role".to_owned(),
+        serde_json::Value::String(role.to_owned()),
+    );
     m.insert(
         AGENT_ID_FIELD.to_owned(),
         serde_json::Value::String(agent_id.to_owned()),
@@ -355,7 +359,17 @@ pub async fn write_turn(
         }
     };
 
-    write_turn_embedded(state, tenant, agent_id, conversation_id, role, text, ts, embedding).await;
+    write_turn_embedded(
+        state,
+        tenant,
+        agent_id,
+        conversation_id,
+        role,
+        text,
+        ts,
+        embedding,
+    )
+    .await;
 }
 
 /// Write one already-embedded memory turn and make it **immediately
@@ -364,6 +378,7 @@ pub async fn write_turn(
 /// finds it (a bare `SegmentManager::insert` would leave it only in the
 /// growing segment the executor never sees). Best-effort. The vector is
 /// supplied explicitly so this is unit-testable without a live embedder.
+#[allow(clippy::too_many_arguments)]
 async fn write_turn_embedded(
     state: &AppState,
     tenant: &TenantId,
@@ -422,7 +437,10 @@ mod tests {
 
     #[test]
     fn format_block_renders_role_and_text() {
-        let turns = vec![turn("user", "what index does veda use?"), turn("assistant", "HNSW.")];
+        let turns = vec![
+            turn("user", "what index does veda use?"),
+            turn("assistant", "HNSW."),
+        ];
         let block = format_memory_block(&turns, 1500).expect("some block");
         assert!(block.starts_with("Relevant earlier context"));
         assert!(block.contains("(user) what index does veda use?"));
@@ -433,7 +451,11 @@ mod tests {
     fn format_block_truncates_to_max_chars() {
         let turns = vec![turn("user", &"x".repeat(5000))];
         let block = format_memory_block(&turns, 100).expect("some block");
-        assert_eq!(block.chars().count(), 100, "block must be truncated to max_chars");
+        assert_eq!(
+            block.chars().count(),
+            100,
+            "block must be truncated to max_chars"
+        );
     }
 
     #[test]
@@ -451,7 +473,14 @@ mod tests {
         // the explicit embedding vector).
         let dim = 4u32;
         let schema = memory_schema("t1::_agent_memory", dim).expect("schema builds");
-        let raw = turn_record_map("ag-1", "conv-7", "user", "remember HNSW", 12345, vec![0.1, 0.2, 0.3, 0.4]);
+        let raw = turn_record_map(
+            "ag-1",
+            "conv-7",
+            "user",
+            "remember HNSW",
+            12345,
+            vec![0.1, 0.2, 0.3, 0.4],
+        );
         let rec = crate::rest::records::parse_record_public(&raw, &schema).expect("record parses");
 
         assert_eq!(string_field(&rec, TEXT_FIELD), "remember HNSW");
@@ -472,7 +501,14 @@ mod tests {
         // skipped for those callers.
         let dim = 4u32;
         let schema = memory_schema("t1::_agent_memory", dim).expect("schema builds");
-        let raw = turn_record_map("ag-1", "", "user", "no conversation", 1, vec![0.1, 0.2, 0.3, 0.4]);
+        let raw = turn_record_map(
+            "ag-1",
+            "",
+            "user",
+            "no conversation",
+            1,
+            vec![0.1, 0.2, 0.3, 0.4],
+        );
         let rec = crate::rest::records::parse_record_public(&raw, &schema).expect("record parses");
         assert_eq!(string_field(&rec, "conversation_id"), "");
     }
@@ -493,7 +529,10 @@ mod tests {
         let state = AppState::new(tmp.path());
         let tenant = TenantId::default_tenant();
         let turns = retrieve_memory(&state, &tenant, "ag-1", "anything", DEFAULT_RECALL_K).await;
-        assert!(turns.is_empty(), "no embedder/collection → empty recall, never an error");
+        assert!(
+            turns.is_empty(),
+            "no embedder/collection → empty recall, never an error"
+        );
     }
 
     #[tokio::test]
@@ -526,7 +565,14 @@ mod tests {
         let embedding = vec![0.0f32, 1.0, 0.0, 0.0];
 
         write_turn_embedded(
-            &state, &tenant, agent_id, "conv-1", "user", "remember HNSW", 1, embedding.clone(),
+            &state,
+            &tenant,
+            agent_id,
+            "conv-1",
+            "user",
+            "remember HNSW",
+            1,
+            embedding.clone(),
         )
         .await;
 
@@ -572,8 +618,14 @@ mod tests {
             let mut embedding = vec![0.0f32; 8];
             embedding[i % 8] = 1.0 + i as f32;
             write_turn_embedded(
-                &state, &tenant, agent_id, "conv-1", "user",
-                &format!("turn {i}"), 1 + i as i64, embedding,
+                &state,
+                &tenant,
+                agent_id,
+                "conv-1",
+                "user",
+                &format!("turn {i}"),
+                1 + i as i64,
+                embedding,
             )
             .await;
         }
@@ -581,10 +633,22 @@ mod tests {
         let scoped = tenant::scope(&tenant, MEMORY_COLLECTION);
         let managers = state.inner.segment_managers.read().await;
         let shard_map = managers.get(&scoped).expect("memory collection exists");
-        let sealed_total: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
-        let growing_total: u32 = shard_map.values().map(|sm| sm.growing_segment().count()).sum();
-        assert_eq!(sealed_total, 0, "writing {N} turns must not seal per write (got {sealed_total})");
-        assert_eq!(growing_total as usize, N, "all {N} turns must live in the growing segment");
+        let sealed_total: usize = shard_map
+            .values()
+            .map(|sm| sm.sealed_segments().len())
+            .sum();
+        let growing_total: u32 = shard_map
+            .values()
+            .map(|sm| sm.growing_segment().count())
+            .sum();
+        assert_eq!(
+            sealed_total, 0,
+            "writing {N} turns must not seal per write (got {sealed_total})"
+        );
+        assert_eq!(
+            growing_total as usize, N,
+            "all {N} turns must live in the growing segment"
+        );
     }
 
     #[tokio::test]
@@ -592,7 +656,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = AppState::new(tmp.path());
         let tenant = TenantId::default_tenant();
-        assert!(retrieve_memory(&state, &tenant, "ag-1", "   ", DEFAULT_RECALL_K).await.is_empty());
+        assert!(
+            retrieve_memory(&state, &tenant, "ag-1", "   ", DEFAULT_RECALL_K)
+                .await
+                .is_empty()
+        );
         // Empty text write is a no-op (returns before touching the embedder).
         write_turn(&state, &tenant, "ag-1", "c", "user", "   ", 1).await;
         let scoped = tenant::scope(&tenant, MEMORY_COLLECTION);
@@ -603,12 +671,22 @@ mod tests {
     fn memory_schema_marks_agent_id_filterable_and_vector_dim() {
         let schema = memory_schema("t1::_agent_memory", 8).expect("schema builds");
         let agent_field = schema.get_field(AGENT_ID_FIELD).expect("agent_id field");
-        assert!(agent_field.filterable(), "agent_id must be filterable for per-agent recall");
+        assert!(
+            agent_field.filterable(),
+            "agent_id must be filterable for per-agent recall"
+        );
         let vec_field = schema.get_field(EMBEDDING_FIELD).expect("embedding field");
         match vec_field.field_type() {
-            FieldType::Vector { dimension, auto_embed, .. } => {
+            FieldType::Vector {
+                dimension,
+                auto_embed,
+                ..
+            } => {
                 assert_eq!(*dimension, 8);
-                assert!(auto_embed.is_some(), "embedding field must carry auto_embed config");
+                assert!(
+                    auto_embed.is_some(),
+                    "embedding field must carry auto_embed config"
+                );
             }
             other => panic!("expected vector field type, got {other:?}"),
         }

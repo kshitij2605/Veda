@@ -28,9 +28,7 @@ use serde::Serialize;
 use veda_core::embedding::Modality;
 
 use crate::logs::buffer::LogRecord;
-use crate::logs::categorize::{
-    cluster_embedded, cluster_normalized, normalize_message,
-};
+use crate::logs::categorize::{cluster_embedded, cluster_normalized, normalize_message};
 use crate::rest::state::AppState;
 
 /// Maximum number of distinct messages embedded / considered per call.
@@ -133,7 +131,10 @@ pub fn attribute(
     let mut drivers: Vec<Driver> = spike
         .iter()
         .map(|c| {
-            let baseline_count = baseline_by_id.get(c.category.as_str()).copied().unwrap_or(0);
+            let baseline_count = baseline_by_id
+                .get(c.category.as_str())
+                .copied()
+                .unwrap_or(0);
             let growth = c.count.saturating_sub(baseline_count);
             Driver {
                 category: c.category.clone(),
@@ -369,6 +370,7 @@ fn label_records_embedded(
             Some(i) => {
                 let acc = &mut accs[i];
                 let n = acc.count;
+                #[allow(clippy::needless_range_loop)]
                 for k in 0..acc.centroid.len() {
                     acc.centroid[k] = (acc.centroid[k] * n + emb[k]) / (n + 1.0);
                 }
@@ -420,7 +422,12 @@ fn categorize_template(records: &[LogRecord]) -> Vec<(String, String, i64)> {
     // Map normalized-template → (id, representative).
     let by_rep: HashMap<String, (String, String)> = cats
         .iter()
-        .map(|c| (c.representative.clone(), (c.id.clone(), c.representative.clone())))
+        .map(|c| {
+            (
+                c.representative.clone(),
+                (c.id.clone(), c.representative.clone()),
+            )
+        })
         .collect();
     records
         .iter()
@@ -458,8 +465,16 @@ mod tests {
     #[test]
     fn attribute_dominant_category_ranks_first_with_correct_share() {
         // Spike: catA grew 2→20 (+18), catB grew 5→8 (+3); catC flat 4→4.
-        let spike = vec![cc("a", "db timeout", 20), cc("b", "slow query", 8), cc("c", "retry", 4)];
-        let baseline = vec![cc("a", "db timeout", 2), cc("b", "slow query", 5), cc("c", "retry", 4)];
+        let spike = vec![
+            cc("a", "db timeout", 20),
+            cc("b", "slow query", 8),
+            cc("c", "retry", 4),
+        ];
+        let baseline = vec![
+            cc("a", "db timeout", 2),
+            cc("b", "slow query", 5),
+            cc("c", "retry", 4),
+        ];
         let attr = attribute(&spike, &baseline, 300, 900, "embedding");
 
         assert_eq!(attr.spike_count, 32);
@@ -592,7 +607,11 @@ mod tests {
         // The "db timeout" category dominates the growth.
         assert!(!attr.drivers.is_empty());
         let top = &attr.drivers[0];
-        assert!(top.representative.contains("db timeout"), "got {}", top.representative);
+        assert!(
+            top.representative.contains("db timeout"),
+            "got {}",
+            top.representative
+        );
         assert!(top.growth >= 8, "db timeout grew ~10-2=8");
         assert!(top.share_of_growth > 0.5);
     }

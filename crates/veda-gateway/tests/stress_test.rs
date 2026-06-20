@@ -1,10 +1,10 @@
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::{build_router, state::AppState};
@@ -507,10 +507,7 @@ async fn test_mixed_read_write() {
             ("Throughput:", format!("{ops_per_sec:.0} ops/sec")),
             ("", String::new()),
             ("-- Writes --", String::new()),
-            (
-                "  Total:",
-                format!("{}", num_writers * inserts_per_writer),
-            ),
+            ("  Total:", format!("{}", num_writers * inserts_per_writer)),
             ("  Avg:", fmt_duration(write_latencies.avg())),
             ("  p50:", fmt_duration(write_latencies.p50())),
             ("  p95:", fmt_duration(write_latencies.p95())),
@@ -518,10 +515,7 @@ async fn test_mixed_read_write() {
             ("  Errors:", format!("{total_write_errors}")),
             ("", String::new()),
             ("-- Reads --", String::new()),
-            (
-                "  Total:",
-                format!("{}", num_readers * queries_per_reader),
-            ),
+            ("  Total:", format!("{}", num_readers * queries_per_reader)),
             ("  Avg:", fmt_duration(read_latencies.avg())),
             ("  p50:", fmt_duration(read_latencies.p50())),
             ("  p95:", fmt_duration(read_latencies.p95())),
@@ -614,14 +608,8 @@ async fn test_large_collection() {
                 "Insert rate:",
                 format!("{insert_throughput:.0} records/sec"),
             ),
-            (
-                "Batch avg:",
-                fmt_duration(insert_latencies.avg()),
-            ),
-            (
-                "Batch p95:",
-                fmt_duration(insert_latencies.p95()),
-            ),
+            ("Batch avg:", fmt_duration(insert_latencies.avg())),
+            ("Batch p95:", fmt_duration(insert_latencies.p95())),
             ("", String::new()),
             ("Search k=10:", fmt_duration(search_time)),
             (

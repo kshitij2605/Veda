@@ -15,14 +15,14 @@
 //! opt-in "Apply reindex" button POSTs the existing
 //! `/v1/collections/{name}/reindex` endpoint separately.
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde::Serialize;
 
 use crate::advisor::config::AdvisorConfig;
 use crate::advisor::event::OpsEvent;
 use crate::advisor::recall_probe::IndexParams;
-use crate::advisor::rules::{catalog, run_rules, RuleHit};
+use crate::advisor::rules::{RuleHit, catalog, run_rules};
 use crate::advisor::snapshot::IndexSnapshot;
 use crate::rest::state::AppState;
 
@@ -143,7 +143,10 @@ pub async fn index_advisor(State(state): State<AppState>) -> Json<IndexAdvisorRe
                 .get(&ih.collection)
                 .map(|hits| hits.iter().map(Recommendation::from).collect())
                 .unwrap_or_default();
-            let open_events = open_by_coll.get(&ih.collection).cloned().unwrap_or_default();
+            let open_events = open_by_coll
+                .get(&ih.collection)
+                .cloned()
+                .unwrap_or_default();
             // Suggest a concrete reindex body only when there's a
             // recommendation to act on. Directional: re-embed straight
             // reindex (index params aren't schema-surfaced yet).

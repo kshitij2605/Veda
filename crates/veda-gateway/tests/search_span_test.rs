@@ -157,7 +157,10 @@ async fn search_span_carries_retrieval_and_db_attributes() {
         Some("spans")
     );
     assert_eq!(
-        search.fields.get("retrieval.query_type").map(String::as_str),
+        search
+            .fields
+            .get("retrieval.query_type")
+            .map(String::as_str),
         Some("dense")
     );
     assert_eq!(
@@ -165,7 +168,10 @@ async fn search_span_carries_retrieval_and_db_attributes() {
         Some("3")
     );
     assert_eq!(
-        search.fields.get("retrieval.index_type").map(String::as_str),
+        search
+            .fields
+            .get("retrieval.index_type")
+            .map(String::as_str),
         Some("hnsw")
     );
     // result_count is recorded on the Ok path; 3 records match within top_k.

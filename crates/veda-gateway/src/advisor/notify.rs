@@ -103,35 +103,47 @@ impl Notifier {
     async fn dispatch_event(&self, ev: &OpsEvent, is_open: bool) -> usize {
         let mut sent = 0usize;
 
-        if let Some(cfg) = &self.channels.webhook {
-            if cfg.enabled && meets(cfg.min_severity, ev.severity) {
-                match self.send_webhook(cfg, ev, is_open).await {
-                    Ok(()) => sent += 1,
-                    Err(e) => tracing::warn!(channel = "webhook", event = %ev.id, error = %e, "notify: send failed"),
+        if let Some(cfg) = &self.channels.webhook
+            && cfg.enabled
+            && meets(cfg.min_severity, ev.severity)
+        {
+            match self.send_webhook(cfg, ev, is_open).await {
+                Ok(()) => sent += 1,
+                Err(e) => {
+                    tracing::warn!(channel = "webhook", event = %ev.id, error = %e, "notify: send failed")
                 }
             }
         }
-        if let Some(cfg) = &self.channels.slack {
-            if cfg.enabled && meets(cfg.min_severity, ev.severity) {
-                match self.send_slack(cfg, ev, is_open).await {
-                    Ok(()) => sent += 1,
-                    Err(e) => tracing::warn!(channel = "slack", event = %ev.id, error = %e, "notify: send failed"),
+        if let Some(cfg) = &self.channels.slack
+            && cfg.enabled
+            && meets(cfg.min_severity, ev.severity)
+        {
+            match self.send_slack(cfg, ev, is_open).await {
+                Ok(()) => sent += 1,
+                Err(e) => {
+                    tracing::warn!(channel = "slack", event = %ev.id, error = %e, "notify: send failed")
                 }
             }
         }
-        if let Some(cfg) = &self.channels.pagerduty {
-            if cfg.enabled && meets(cfg.min_severity, ev.severity) {
-                match self.send_pagerduty(cfg, ev, is_open).await {
-                    Ok(()) => sent += 1,
-                    Err(e) => tracing::warn!(channel = "pagerduty", event = %ev.id, error = %e, "notify: send failed"),
+        if let Some(cfg) = &self.channels.pagerduty
+            && cfg.enabled
+            && meets(cfg.min_severity, ev.severity)
+        {
+            match self.send_pagerduty(cfg, ev, is_open).await {
+                Ok(()) => sent += 1,
+                Err(e) => {
+                    tracing::warn!(channel = "pagerduty", event = %ev.id, error = %e, "notify: send failed")
                 }
             }
         }
-        if let Some(cfg) = &self.channels.email {
-            if cfg.enabled && meets(cfg.min_severity, ev.severity) {
-                match self.send_email(cfg, ev, is_open).await {
-                    Ok(()) => sent += 1,
-                    Err(e) => tracing::warn!(channel = "email", event = %ev.id, error = %e, "notify: send failed"),
+        if let Some(cfg) = &self.channels.email
+            && cfg.enabled
+            && meets(cfg.min_severity, ev.severity)
+        {
+            match self.send_email(cfg, ev, is_open).await {
+                Ok(()) => sent += 1,
+                Err(e) => {
+                    tracing::warn!(channel = "email", event = %ev.id, error = %e, "notify: send failed")
                 }
             }
         }
@@ -226,7 +238,11 @@ fn webhook_body(ev: &OpsEvent, is_open: bool) -> serde_json::Value {
 /// Slack incoming-webhook JSON body.
 fn slack_body(ev: &OpsEvent, is_open: bool) -> serde_json::Value {
     let emoji = severity_emoji(ev.severity);
-    let prefix = if is_open { String::new() } else { "RESOLVED: ".to_owned() };
+    let prefix = if is_open {
+        String::new()
+    } else {
+        "RESOLVED: ".to_owned()
+    };
     let text = format!(
         "{emoji} {prefix}*{title}*\nScope: `{scope}`\n{detail}\n_Recommendation:_ {rec}",
         title = ev.title,
@@ -301,9 +317,7 @@ pub fn build_email(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::advisor::config::{
-        EmailChannel, PagerDutyChannel, SlackChannel, WebhookChannel,
-    };
+    use crate::advisor::config::{EmailChannel, PagerDutyChannel, SlackChannel, WebhookChannel};
     use crate::advisor::event::{EventStatus, RemediationAction, Scope};
     use std::io::{Read, Write};
     use std::net::TcpListener as StdTcpListener;
@@ -557,8 +571,13 @@ mod tests {
     #[test]
     fn build_email_open_subject_and_body() {
         let cfg = email_cfg();
-        let msg = build_email(&cfg, &ev(Severity::High, EventStatus::Open), true, "ops@veda.test")
-            .unwrap();
+        let msg = build_email(
+            &cfg,
+            &ev(Severity::High, EventStatus::Open),
+            true,
+            "ops@veda.test",
+        )
+        .unwrap();
         let raw = String::from_utf8(msg.formatted()).unwrap();
         assert!(raw.contains("Subject: [High] Compaction backlog on docs"));
         assert!(raw.contains("42 sealed segments"));
@@ -569,9 +588,13 @@ mod tests {
     #[test]
     fn build_email_resolved_subject() {
         let cfg = email_cfg();
-        let msg =
-            build_email(&cfg, &ev(Severity::Low, EventStatus::Closed), false, "ops@veda.test")
-                .unwrap();
+        let msg = build_email(
+            &cfg,
+            &ev(Severity::Low, EventStatus::Closed),
+            false,
+            "ops@veda.test",
+        )
+        .unwrap();
         let raw = String::from_utf8(msg.formatted()).unwrap();
         assert!(raw.contains("Subject: [RESOLVED] Compaction backlog on docs"));
     }

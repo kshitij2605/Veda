@@ -29,11 +29,11 @@
 //!   DELETE /v1/conversations/{id}              delete
 //!   POST   /v1/conversations/{id}/feedback     capture user feedback
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
@@ -46,8 +46,8 @@ use crate::agent::catalog::{ToolContext, ToolErrorKind, ToolSpec};
 use crate::agent::executor::{self, DEFAULT_MAX_STEPS};
 use crate::agent::grounding::{self, Citation, Grounding};
 use crate::agent::model::{
-    default_agent, Agent, AgentStep, AgentTool, Conversation, ConversationMessage, ConverseRequest,
-    ConverseResponse, Feedback,
+    Agent, AgentStep, AgentTool, Conversation, ConversationMessage, ConverseRequest,
+    ConverseResponse, Feedback, default_agent,
 };
 use crate::agent::store;
 use crate::auth::Claims;
@@ -56,10 +56,16 @@ use crate::tenant::{self, Tenant, TenantId};
 type GatewayError = (StatusCode, Json<ErrorResponse>);
 
 fn not_found(msg: impl Into<String>) -> GatewayError {
-    (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg.into() }))
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse { error: msg.into() }),
+    )
 }
 fn service_unavailable(msg: impl Into<String>) -> GatewayError {
-    (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error: msg.into() }))
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse { error: msg.into() }),
+    )
 }
 
 /// Extract the optional authenticated subject for RLS: `None` when the
@@ -342,7 +348,7 @@ pub(crate) async fn run_agent_turn(
         None if agent_id == "veda-agent" => default_agent(),
         None if agent_id == "veda-ops" => crate::agent::model::default_ops_agent(),
         None if agent_id == "veda-web" => crate::agent::model::default_web_agent(),
-        None =>return Err(AgentTurnError::NotFound(agent_id.to_owned())),
+        None => return Err(AgentTurnError::NotFound(agent_id.to_owned())),
     };
 
     // 3. Build the model honoring any per-agent override. Capture the
@@ -365,16 +371,9 @@ pub(crate) async fn run_agent_turn(
     //     fail-open (regex always applies); skipped entirely (byte-identical
     //     to today) when guardrails==false.
     let guard_mode = guardrails::mode_for(&agent);
-    let input_verdict = guardrails::check_text(
-        state,
-        input,
-        guard_mode,
-        guardrails::DEFAULT_THRESHOLD,
-    )
-    .await;
-    if guard_mode != GuardrailMode::Off
-        && input_verdict.action == GuardrailAction::Block
-    {
+    let input_verdict =
+        guardrails::check_text(state, input, guard_mode, guardrails::DEFAULT_THRESHOLD).await;
+    if guard_mode != GuardrailMode::Off && input_verdict.action == GuardrailAction::Block {
         metrics::counter!("veda_llm_guardrail_blocked_total", "model" => model_name.clone())
             .increment(1);
         let result = RunResult {
@@ -510,10 +509,7 @@ pub(crate) async fn run_agent_turn(
     let grounding = if citations.is_empty() {
         None
     } else {
-        let contexts: Vec<String> = citations
-            .iter()
-            .filter_map(|c| c.snippet.clone())
-            .collect();
+        let contexts: Vec<String> = citations.iter().filter_map(|c| c.snippet.clone()).collect();
         // Resolve a text embedder for the fallback path (clone the config
         // off the lock; build the client off the lock — mirrors logs
         // categorize). `None` when the deployment can't embed text.
@@ -560,7 +556,13 @@ pub(crate) async fn run_agent_turn(
         let ts = crate::advisor::engine::now_ms().max(0);
         let conversation_id = conversation_id.unwrap_or("");
         crate::agent::memory::write_turn(
-            state, tenant, agent_id, conversation_id, "user", input, ts,
+            state,
+            tenant,
+            agent_id,
+            conversation_id,
+            "user",
+            input,
+            ts,
         )
         .await;
         if !result.response.trim().is_empty() {
@@ -670,10 +672,10 @@ fn build_trace_fields(
 fn tool_ids_from_steps(steps: &[AgentStep]) -> String {
     let mut ids: Vec<&str> = Vec::new();
     for s in steps {
-        if let AgentStep::ToolCall { tool_id, .. } = s {
-            if !ids.contains(&tool_id.as_str()) {
-                ids.push(tool_id.as_str());
-            }
+        if let AgentStep::ToolCall { tool_id, .. } = s
+            && !ids.contains(&tool_id.as_str())
+        {
+            ids.push(tool_id.as_str());
         }
     }
     ids.join(",")
@@ -771,11 +773,13 @@ fn emit_run_metrics(model: &str, m: &RunMetrics) {
     match vm::model_price(model) {
         Some(price) => {
             let micro = vm::cost_micro_usd(m.prompt_tokens, m.completion_tokens, price);
-            metrics::counter!(vm::LLM_COST_USD_TOTAL, "model" => model.to_owned())
-                .increment(micro);
+            metrics::counter!(vm::LLM_COST_USD_TOTAL, "model" => model.to_owned()).increment(micro);
         }
         None => {
-            tracing::debug!(model, "no price configured for LLM model; skipping cost metric");
+            tracing::debug!(
+                model,
+                "no price configured for LLM model; skipping cost metric"
+            );
         }
     }
 }
@@ -784,10 +788,7 @@ fn emit_run_metrics(model: &str, m: &RunMetrics) {
 
 /// Build an [`LlmClient`] from the gateway's global config, applying the
 /// agent's optional [`ModelOverride`] (endpoint / model).
-fn build_client(
-    base: veda_core::llm_client::LlmConfig,
-    agent: &Agent,
-) -> LlmClient {
+fn build_client(base: veda_core::llm_client::LlmConfig, agent: &Agent) -> LlmClient {
     let mut cfg = base;
     if let Some(ov) = &agent.model {
         if let Some(ep) = &ov.endpoint {
@@ -836,7 +837,11 @@ pub async fn converse(
     // TODO (phase 3): pass image attachments to the search tool as query_image_b64
     let user_input = match &req.attachments {
         Some(atts) if !atts.is_empty() => {
-            format!("{}\n\n[the user attached {} image(s)]", req.input, atts.len())
+            format!(
+                "{}\n\n[the user attached {} image(s)]",
+                req.input,
+                atts.len()
+            )
         }
         _ => req.input.clone(),
     };
@@ -948,7 +953,7 @@ async fn run_streaming_turn(
         None if agent_id == "veda-agent" => default_agent(),
         None if agent_id == "veda-ops" => crate::agent::model::default_ops_agent(),
         None if agent_id == "veda-web" => crate::agent::model::default_web_agent(),
-        None =>{
+        None => {
             return StreamDonePayload {
                 conversation_id: user_facing_cid,
                 response: format!("agent '{agent_id}' not found"),
@@ -987,7 +992,9 @@ async fn run_streaming_turn(
                 .increment(1);
             let refusal = crate::agent::guardrails::REFUSAL_MESSAGE.to_owned();
             let _ = event_tx
-                .send(executor::StreamEvent::AnswerDelta { text: refusal.clone() })
+                .send(executor::StreamEvent::AnswerDelta {
+                    text: refusal.clone(),
+                })
                 .await;
             conversation.messages.push(ConversationMessage {
                 role: "user".to_owned(),
@@ -1026,7 +1033,9 @@ async fn run_streaming_turn(
             metrics::counter!("veda_llm_cache_hits_total", "model" => model_name.clone())
                 .increment(1);
             let _ = event_tx
-                .send(executor::StreamEvent::AnswerDelta { text: hit.response.clone() })
+                .send(executor::StreamEvent::AnswerDelta {
+                    text: hit.response.clone(),
+                })
                 .await;
             conversation.messages.push(ConversationMessage {
                 role: "user".to_owned(),
@@ -1105,8 +1114,7 @@ async fn run_streaming_turn(
     let grounding = if citations.is_empty() {
         None
     } else {
-        let contexts: Vec<String> =
-            citations.iter().filter_map(|c| c.snippet.clone()).collect();
+        let contexts: Vec<String> = citations.iter().filter_map(|c| c.snippet.clone()).collect();
         let embedder = {
             use veda_core::embedding::Modality;
             let registry = state.inner.embedding_registry.read().await;
@@ -1144,7 +1152,13 @@ async fn run_streaming_turn(
         let ts = crate::advisor::engine::now_ms().max(0);
         let conversation_id = conversation.id.as_str();
         crate::agent::memory::write_turn(
-            state, tenant, agent_id, conversation_id, "user", input, ts,
+            state,
+            tenant,
+            agent_id,
+            conversation_id,
+            "user",
+            input,
+            ts,
         )
         .await;
         if !result.response.trim().is_empty() {
@@ -1193,7 +1207,6 @@ async fn run_streaming_turn(
         cache_hit: false,
     }
 }
-
 
 /// Terminal `done` SSE frame payload: the same summary fields the blocking
 /// `/converse` returns, sent once the streaming run completes.
@@ -1245,8 +1258,7 @@ pub async fn converse_stream(
             match store::get_conversation(&state.inner.saved_objects, &scoped_cid).await {
                 Some(c) => c,
                 None => {
-                    return not_found(format!("conversation '{cid}' not found"))
-                        .into_response();
+                    return not_found(format!("conversation '{cid}' not found")).into_response();
                 }
             }
         }
@@ -1265,17 +1277,19 @@ pub async fn converse_stream(
 
     let user_input = match &req.attachments {
         Some(atts) if !atts.is_empty() => {
-            format!("{}\n\n[the user attached {} image(s)]", req.input, atts.len())
+            format!(
+                "{}\n\n[the user attached {} image(s)]",
+                req.input,
+                atts.len()
+            )
         }
         _ => req.input.clone(),
     };
 
     // Channel carrying live executor events to the SSE forwarder, plus a
     // oneshot for the terminal `done` summary.
-    let (event_tx, event_rx) =
-        tokio::sync::mpsc::channel::<executor::StreamEvent>(64);
-    let (done_tx, done_rx) =
-        tokio::sync::oneshot::channel::<StreamDonePayload>();
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<executor::StreamEvent>(64);
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamDonePayload>();
 
     // Spawn the streaming run on an owned-state task (everything it needs is
     // reachable from the cloned AppState). It emits StreamEvents as it goes
@@ -1337,28 +1351,26 @@ fn build_sse_stream(
     event_rx: tokio::sync::mpsc::Receiver<executor::StreamEvent>,
     done_rx: tokio::sync::oneshot::Receiver<StreamDonePayload>,
 ) -> impl Stream<Item = std::result::Result<Event, std::convert::Infallible>> {
-    futures::stream::unfold(
-        SseState::Live(event_rx, done_rx),
-        |state| async move {
-            match state {
-                SseState::Live(mut event_rx, done_rx) => match event_rx.recv().await {
-                    Some(ev) => {
-                        Some((Ok(event_to_sse(&ev)), SseState::Live(event_rx, done_rx)))
-                    }
-                    // Sender dropped → run finished; emit the done frame.
-                    None => emit_done(done_rx).await,
-                },
-                SseState::End => None,
-            }
-        },
-    )
+    futures::stream::unfold(SseState::Live(event_rx, done_rx), |state| async move {
+        match state {
+            SseState::Live(mut event_rx, done_rx) => match event_rx.recv().await {
+                Some(ev) => Some((Ok(event_to_sse(&ev)), SseState::Live(event_rx, done_rx))),
+                // Sender dropped → run finished; emit the done frame.
+                None => emit_done(done_rx).await,
+            },
+            SseState::End => None,
+        }
+    })
 }
 
 /// Await the terminal summary and emit it as the `done` SSE event. A
 /// dropped oneshot (run task panicked) yields a minimal error `done`.
 async fn emit_done(
     done_rx: tokio::sync::oneshot::Receiver<StreamDonePayload>,
-) -> Option<(std::result::Result<Event, std::convert::Infallible>, SseState)> {
+) -> Option<(
+    std::result::Result<Event, std::convert::Infallible>,
+    SseState,
+)> {
     let payload = done_rx.await.unwrap_or_else(|_| StreamDonePayload {
         conversation_id: String::new(),
         response: "the agent run failed".to_owned(),
@@ -1432,7 +1444,10 @@ pub struct FeedbackRequest {
 }
 
 fn bad_request(msg: impl Into<String>) -> GatewayError {
-    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: msg.into() }))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: msg.into() }),
+    )
 }
 
 /// Capture user feedback (thumbs up/down + optional note) on a conversation.
@@ -1496,12 +1511,24 @@ mod tests {
             emit_run_metrics("gpt-4o-mini", &metrics(2000, 1000));
         });
         let out = handle.render();
-        assert!(out.contains("veda_llm_tokens_total"), "missing tokens series:\n{out}");
-        assert!(out.contains("veda_agent_run_duration_seconds"), "missing duration series:\n{out}");
-        assert!(out.contains("veda_llm_cost_usd_total"), "missing cost series:\n{out}");
+        assert!(
+            out.contains("veda_llm_tokens_total"),
+            "missing tokens series:\n{out}"
+        );
+        assert!(
+            out.contains("veda_agent_run_duration_seconds"),
+            "missing duration series:\n{out}"
+        );
+        assert!(
+            out.contains("veda_llm_cost_usd_total"),
+            "missing cost series:\n{out}"
+        );
         assert!(out.contains("gpt-4o-mini"), "missing model label:\n{out}");
         // No TTFT on the blocking path (the helper leaves ttft_ms None).
-        assert!(!out.contains("veda_llm_ttft_seconds"), "blocking metrics must not emit ttft:\n{out}");
+        assert!(
+            !out.contains("veda_llm_ttft_seconds"),
+            "blocking metrics must not emit ttft:\n{out}"
+        );
     }
 
     /// A streaming run (ttft_ms = Some) emits the TTFT histogram series.
@@ -1515,12 +1542,15 @@ mod tests {
             emit_run_metrics("gpt-4o-mini", &m);
         });
         let out = handle.render();
-        assert!(out.contains("veda_llm_ttft_seconds"), "missing ttft series:\n{out}");
+        assert!(
+            out.contains("veda_llm_ttft_seconds"),
+            "missing ttft series:\n{out}"
+        );
     }
 
     // ── Conversation feedback capture ────────────────────────────────────
 
-    use crate::agent::model::{Conversation, Feedback};
+    use crate::agent::model::Conversation;
     use crate::tenant::{Tenant, TenantId};
 
     /// Seed a conversation owned by `tenant` (user-facing id `cid`) and
@@ -1583,8 +1613,14 @@ mod tests {
 
         // Metric incremented with the rating label.
         let out = handle.render();
-        assert!(out.contains("veda_llm_feedback_total"), "missing feedback metric:\n{out}");
-        assert!(out.contains("rating=\"up\""), "missing rating label:\n{out}");
+        assert!(
+            out.contains("veda_llm_feedback_total"),
+            "missing feedback metric:\n{out}"
+        );
+        assert!(
+            out.contains("rating=\"up\""),
+            "missing rating label:\n{out}"
+        );
     }
 
     #[tokio::test]
@@ -1594,7 +1630,10 @@ mod tests {
             State(state),
             Tenant(TenantId::parse("acme").unwrap()),
             Path("does-not-exist".to_owned()),
-            Json(FeedbackRequest { rating: "down".to_owned(), note: None }),
+            Json(FeedbackRequest {
+                rating: "down".to_owned(),
+                note: None,
+            }),
         )
         .await
         .expect_err("unknown id should 404");
@@ -1609,7 +1648,10 @@ mod tests {
             State(state.clone()),
             Tenant(TenantId::parse("rival").unwrap()),
             Path("c1".to_owned()),
-            Json(FeedbackRequest { rating: "up".to_owned(), note: None }),
+            Json(FeedbackRequest {
+                rating: "up".to_owned(),
+                note: None,
+            }),
         )
         .await
         .expect_err("cross-tenant feedback should 404");
@@ -1617,7 +1659,9 @@ mod tests {
 
         // acme's conversation is untouched.
         let scoped = crate::tenant::scope(&TenantId::parse("acme").unwrap(), "c1");
-        let conv = store::get_conversation(&state.inner.saved_objects, &scoped).await.unwrap();
+        let conv = store::get_conversation(&state.inner.saved_objects, &scoped)
+            .await
+            .unwrap();
         assert!(conv.feedback.is_empty());
     }
 
@@ -1628,7 +1672,10 @@ mod tests {
             State(state),
             Tenant(TenantId::parse("acme").unwrap()),
             Path("c1".to_owned()),
-            Json(FeedbackRequest { rating: "meh".to_owned(), note: None }),
+            Json(FeedbackRequest {
+                rating: "meh".to_owned(),
+                note: None,
+            }),
         )
         .await
         .expect_err("invalid rating should 400");
@@ -1687,7 +1734,9 @@ mod tests {
                 is_error: false,
                 duration_ms: Some(1.0),
             },
-            AgentStep::Reasoning { text: "Veda uses HNSW.".to_owned() },
+            AgentStep::Reasoning {
+                text: "Veda uses HNSW.".to_owned(),
+            },
         ]
     }
 
@@ -1701,8 +1750,7 @@ mod tests {
         assert_eq!(citations.len(), 1);
         assert_eq!(citations[0].collection.as_deref(), Some("docs"));
 
-        let contexts: Vec<String> =
-            citations.iter().filter_map(|c| c.snippet.clone()).collect();
+        let contexts: Vec<String> = citations.iter().filter_map(|c| c.snippet.clone()).collect();
         let judge = FakeJudge("FAITHFULNESS: 0.9\nANSWER_RELEVANCY: 0.8".to_owned());
         let g = grounding::score_grounding(
             Some(&judge),
@@ -1733,7 +1781,9 @@ mod tests {
     /// response omits the empty `citations`/null `grounding` (serde skip).
     #[tokio::test]
     async fn converse_surface_empty_citations_no_context_when_not_searched() {
-        let steps = vec![AgentStep::Reasoning { text: "hi, no tools".to_owned() }];
+        let steps = vec![AgentStep::Reasoning {
+            text: "hi, no tools".to_owned(),
+        }];
         let citations = grounding::extract_citations(&steps);
         assert!(citations.is_empty());
 
@@ -1770,8 +1820,14 @@ mod tests {
             );
         });
         let out = handle.render();
-        assert!(out.contains("veda_agent_citations"), "missing citations series:\n{out}");
-        assert!(out.contains("veda_agent_faithfulness"), "missing faithfulness series:\n{out}");
+        assert!(
+            out.contains("veda_agent_citations"),
+            "missing citations series:\n{out}"
+        );
+        assert!(
+            out.contains("veda_agent_faithfulness"),
+            "missing faithfulness series:\n{out}"
+        );
     }
 
     /// An unpriced model still emits tokens + duration, but no cost series
@@ -1785,8 +1841,14 @@ mod tests {
             emit_run_metrics("local-llama-7b-unpriced", &metrics(100, 50));
         });
         let out = handle.render();
-        assert!(out.contains("veda_llm_tokens_total"), "missing tokens series:\n{out}");
-        assert!(out.contains("veda_agent_run_duration_seconds"), "missing duration series:\n{out}");
+        assert!(
+            out.contains("veda_llm_tokens_total"),
+            "missing tokens series:\n{out}"
+        );
+        assert!(
+            out.contains("veda_agent_run_duration_seconds"),
+            "missing duration series:\n{out}"
+        );
         assert!(
             !out.contains("veda_llm_cost_usd_total"),
             "unpriced model must not emit a cost series:\n{out}"

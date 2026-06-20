@@ -18,7 +18,7 @@ use veda_query::filter::record_eval::evaluate_record;
 use veda_query::search::VectorSearchRequest;
 
 use crate::agent::catalog::{ToolContext, ToolOutcome, ToolSpec};
-use crate::rest::aggregate::{aggregate_core, AggErrorKind, AggregateQuery};
+use crate::rest::aggregate::{AggErrorKind, AggregateQuery, aggregate_core};
 use crate::rest::records::{field_value_to_json, parse_record_public, record_passes_rls_owner};
 
 /// The full set of built-in tool specs (id == MCP/OpenAI tool name).
@@ -289,7 +289,10 @@ pub fn build_query_body(
 ) -> Result<crate::rest::search::QueryBody, String> {
     use crate::rest::search::{QueryBody, SingleVectorQuery};
     let dense = || QueryBody {
-        vector: Some(SingleVectorQuery { field: field.to_owned(), values: vector.clone() }),
+        vector: Some(SingleVectorQuery {
+            field: field.to_owned(),
+            values: vector.clone(),
+        }),
         sparse_vector: None,
         colpali: None,
         multi_vector: None,
@@ -306,11 +309,15 @@ pub fn build_query_body(
             if !sparse_supported {
                 return Err(
                     "mode 'sparse' requires a collection with a sparse-vector field and a \
-                     sparse-capable embedder".to_owned(),
+                     sparse-capable embedder"
+                        .to_owned(),
                 );
             }
-            Err("mode 'sparse' is not yet supported via the agent search tool (the query \
-                 embedder produces a dense vector); use mode 'dense' or 'auto'".to_owned())
+            Err(
+                "mode 'sparse' is not yet supported via the agent search tool (the query \
+                 embedder produces a dense vector); use mode 'dense' or 'auto'"
+                    .to_owned(),
+            )
         }
         SearchMode::Hybrid => Err(
             "mode 'hybrid' is not yet supported via the agent search tool; use 'dense' or 'auto'"
@@ -335,13 +342,13 @@ pub fn select_query_model(
     bound_model: Option<&str>,
     modality: Modality,
 ) -> Result<EmbeddingModelConfig, String> {
-    if modality == Modality::Text {
-        if let Some(name) = bound_model {
-            return registry
-                .get(name)
-                .cloned()
-                .ok_or_else(|| format!("bound model '{name}' not in registry"));
-        }
+    if modality == Modality::Text
+        && let Some(name) = bound_model
+    {
+        return registry
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("bound model '{name}' not in registry"));
     }
     registry
         .find_by_modality(modality)
@@ -371,9 +378,7 @@ fn search_rls_filter_expr(
         None => None,
     };
     match (owner_field, user) {
-        (Some(field), Some(u)) => {
-            Ok(crate::rls::inject_owner_filter(parsed, field, u, false))
-        }
+        (Some(field), Some(u)) => Ok(crate::rls::inject_owner_filter(parsed, field, u, false)),
         _ => Ok(parsed),
     }
 }
@@ -393,13 +398,21 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
             (Some(q), None) => (Modality::Text, Some(q), None),
             (None, Some(b)) => match BASE64_STANDARD.decode(b) {
                 Ok(bytes) => (Modality::Image, None, Some(bytes)),
-                Err(e) => return ToolOutcome::invalid_args(format!("invalid base64 in query_image_b64: {e}")),
+                Err(e) => {
+                    return ToolOutcome::invalid_args(format!(
+                        "invalid base64 in query_image_b64: {e}"
+                    ));
+                }
             },
             (Some(_), Some(_)) => {
-                return ToolOutcome::invalid_args("provide exactly one of `query` or `query_image_b64`, not both");
+                return ToolOutcome::invalid_args(
+                    "provide exactly one of `query` or `query_image_b64`, not both",
+                );
             }
             (None, None) => {
-                return ToolOutcome::invalid_args("one of `query` or `query_image_b64` is required");
+                return ToolOutcome::invalid_args(
+                    "one of `query` or `query_image_b64` is required",
+                );
             }
         };
 
@@ -431,14 +444,11 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
     // (`Some`) caller on an RLS collection; `None` (admin/system) bypasses.
     // Mirrors REST `/search` — the executor prefers `filter_expr` over the
     // raw string `filter`, so this is the security-correct path.
-    let filter_expr = match search_rls_filter_expr(
-        filter.as_deref(),
-        schema.rls_owner_field(),
-        ctx.user,
-    ) {
-        Ok(e) => e,
-        Err(e) => return ToolOutcome::invalid_args(e),
-    };
+    let filter_expr =
+        match search_rls_filter_expr(filter.as_deref(), schema.rls_owner_field(), ctx.user) {
+            Ok(e) => e,
+            Err(e) => return ToolOutcome::invalid_args(e),
+        };
 
     // Resolve target vector field.
     let vec_fields = schema.vector_fields();
@@ -447,7 +457,9 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
     } else if let Some(first) = vec_fields.first() {
         first.name().to_owned()
     } else {
-        return ToolOutcome::invalid_args(format!("collection '{collection}' has no vector fields"));
+        return ToolOutcome::invalid_args(format!(
+            "collection '{collection}' has no vector fields"
+        ));
     };
     let Some(field_def) = schema.get_field(&field_name) else {
         return ToolOutcome::invalid_args(format!("field '{field_name}' not found"));
@@ -527,7 +539,9 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
         .filter(|f| {
             matches!(
                 f.field_type(),
-                FieldType::Vector { .. } | FieldType::MultiVector { .. } | FieldType::SparseVector { .. }
+                FieldType::Vector { .. }
+                    | FieldType::MultiVector { .. }
+                    | FieldType::SparseVector { .. }
             )
         })
         .map(|f| f.name())
@@ -628,7 +642,9 @@ pub async fn get_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolO
         let schemas = ctx.state.inner.schemas.read().await;
         match schemas.get(collection) {
             Some(s) => s.rls_owner_field().map(str::to_owned),
-            None => return ToolOutcome::not_found(format!("collection '{user_collection}' not found")),
+            None => {
+                return ToolOutcome::not_found(format!("collection '{user_collection}' not found"));
+            }
         }
     };
     let rls_owner = rls_field.as_deref().and(ctx.user);
@@ -653,7 +669,11 @@ pub async fn get_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolO
                 if rec.is_expired_at(now_secs) {
                     return ToolOutcome::not_found("record not found");
                 }
-                if !crate::rest::records::record_passes_rls_owner(rec, rls_field.as_deref(), rls_owner) {
+                if !crate::rest::records::record_passes_rls_owner(
+                    rec,
+                    rls_field.as_deref(),
+                    rls_owner,
+                ) {
                     return ToolOutcome::not_found("record not found");
                 }
                 return ToolOutcome::ok(record_json(rec));
@@ -670,7 +690,11 @@ pub async fn get_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolO
                     if rec.is_expired_at(now_secs) {
                         return ToolOutcome::not_found("record not found");
                     }
-                    if !crate::rest::records::record_passes_rls_owner(&rec, rls_field.as_deref(), rls_owner) {
+                    if !crate::rest::records::record_passes_rls_owner(
+                        &rec,
+                        rls_field.as_deref(),
+                        rls_owner,
+                    ) {
                         return ToolOutcome::not_found("record not found");
                     }
                     return ToolOutcome::ok(record_json(&rec));
@@ -754,7 +778,9 @@ pub async fn filter_query(ctx: &ToolContext<'_>, args: serde_json::Value) -> Too
         let schemas = ctx.state.inner.schemas.read().await;
         match schemas.get(collection) {
             Some(s) => s.rls_owner_field().map(str::to_owned),
-            None => return ToolOutcome::not_found(format!("collection '{user_collection}' not found")),
+            None => {
+                return ToolOutcome::not_found(format!("collection '{user_collection}' not found"));
+            }
         }
     };
     let rls_owner = rls_field.as_deref().and(ctx.user);
@@ -827,7 +853,10 @@ pub async fn filter_query(ctx: &ToolContext<'_>, args: serde_json::Value) -> Too
 /// that is absent from the map is simply skipped (no error). Field order
 /// follows the `keep` list. Only the record `fields` map is affected;
 /// the hit's `id`/`distance` are never touched (they live outside this map).
-fn project_fields(fields: &mut serde_json::Map<String, serde_json::Value>, keep: &Option<Vec<String>>) {
+fn project_fields(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    keep: &Option<Vec<String>>,
+) {
     let Some(keep) = keep else { return };
     let mut projected = serde_json::Map::new();
     for name in keep {
@@ -952,7 +981,10 @@ mod tests {
     #[test]
     fn project_fields_absent_name_omitted_no_error() {
         let mut fields = sample_fields();
-        project_fields(&mut fields, &Some(vec!["title".to_owned(), "missing".to_owned()]));
+        project_fields(
+            &mut fields,
+            &Some(vec!["title".to_owned(), "missing".to_owned()]),
+        );
         assert_eq!(fields.len(), 1);
         assert_eq!(fields.get("title").and_then(|v| v.as_str()), Some("Hello"));
         assert!(!fields.contains_key("missing"));
@@ -966,7 +998,16 @@ mod tests {
             .expect("search spec present");
         let props = &spec.input_schema["properties"];
         // existing params preserved + the new `fields` projection param.
-        for p in ["collection", "query", "query_image_b64", "mode", "field", "limit", "filter", "fields"] {
+        for p in [
+            "collection",
+            "query",
+            "query_image_b64",
+            "mode",
+            "field",
+            "limit",
+            "filter",
+            "fields",
+        ] {
             assert!(props.get(p).is_some(), "search schema missing '{p}'");
         }
         assert_eq!(props["fields"]["type"], "array");

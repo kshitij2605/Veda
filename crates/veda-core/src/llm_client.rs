@@ -48,7 +48,9 @@ impl LlmConfig {
             // on the endpoint.
             "default".to_owned()
         });
-        let api_key = std::env::var("VEDA_LLM_API_KEY").ok().filter(|s| !s.is_empty());
+        let api_key = std::env::var("VEDA_LLM_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
         let timeout = std::env::var("VEDA_LLM_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -155,9 +157,8 @@ pub struct FunctionCall {
 impl FunctionCall {
     /// Parse the JSON-encoded `arguments` string into a `serde_json::Value`.
     pub fn parse_arguments(&self) -> Result<serde_json::Value> {
-        serde_json::from_str(&self.arguments).map_err(|e| {
-            VedaError::Query(format!("tool call arguments parse failed: {e}"))
-        })
+        serde_json::from_str(&self.arguments)
+            .map_err(|e| VedaError::Query(format!("tool call arguments parse failed: {e}")))
     }
 }
 
@@ -287,9 +288,8 @@ fn parse_stream_data(data: &str) -> Result<Option<StreamDelta>> {
     if data == "[DONE]" {
         return Ok(None);
     }
-    let chunk: StreamChunk = serde_json::from_str(data).map_err(|e| {
-        VedaError::Query(format!("llm stream chunk parse failed: {e}"))
-    })?;
+    let chunk: StreamChunk = serde_json::from_str(data)
+        .map_err(|e| VedaError::Query(format!("llm stream chunk parse failed: {e}")))?;
     let content = chunk
         .choices
         .first()
@@ -361,9 +361,10 @@ impl LlmClient {
         if let Some(key) = &self.config.api_key {
             req = req.bearer_auth(key);
         }
-        let resp = req.send().await.map_err(|e| {
-            VedaError::Query(format!("llm request failed: {e}"))
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| VedaError::Query(format!("llm request failed: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -372,9 +373,10 @@ impl LlmClient {
                 text.chars().take(500).collect::<String>(),
             )));
         }
-        let chat: ChatResponse = resp.json().await.map_err(|e| {
-            VedaError::Query(format!("llm response parse failed: {e}"))
-        })?;
+        let chat: ChatResponse = resp
+            .json()
+            .await
+            .map_err(|e| VedaError::Query(format!("llm response parse failed: {e}")))?;
         let choice = chat
             .choices
             .into_iter()
@@ -428,9 +430,10 @@ impl LlmClient {
         if let Some(key) = &self.config.api_key {
             req = req.bearer_auth(key);
         }
-        let resp = req.send().await.map_err(|e| {
-            VedaError::Query(format!("llm request failed: {e}"))
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| VedaError::Query(format!("llm request failed: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -439,9 +442,10 @@ impl LlmClient {
                 text.chars().take(500).collect::<String>(),
             )));
         }
-        let chat: ChatResponse = resp.json().await.map_err(|e| {
-            VedaError::Query(format!("llm response parse failed: {e}"))
-        })?;
+        let chat: ChatResponse = resp
+            .json()
+            .await
+            .map_err(|e| VedaError::Query(format!("llm response parse failed: {e}")))?;
         Ok(Self::completion_from_response(chat))
     }
 
@@ -487,9 +491,10 @@ impl LlmClient {
         if let Some(key) = &self.config.api_key {
             req = req.bearer_auth(key);
         }
-        let resp = req.send().await.map_err(|e| {
-            VedaError::Query(format!("llm request failed: {e}"))
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| VedaError::Query(format!("llm request failed: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -581,8 +586,7 @@ impl LlmClient {
 /// `impl Stream`) so the trait method can carry a default impl and so
 /// callers can hold a single concrete type regardless of the
 /// implementation.
-pub type DeltaStream<'a> =
-    std::pin::Pin<Box<dyn Stream<Item = Result<StreamDelta>> + Send + 'a>>;
+pub type DeltaStream<'a> = std::pin::Pin<Box<dyn Stream<Item = Result<StreamDelta>> + Send + 'a>>;
 
 /// Abstraction over a tool-calling chat model so callers (agents, tests)
 /// can substitute a fake implementation. Implemented by [`LlmClient`].
@@ -608,9 +612,7 @@ pub trait ChatModel {
         messages: &'a [ChatMessage],
         opts: &'a CompletionOptions,
     ) -> Result<DeltaStream<'a>> {
-        let completion = self
-            .complete_with_tools(messages, &[], None, opts)
-            .await?;
+        let completion = self.complete_with_tools(messages, &[], None, opts).await?;
         let delta = StreamDelta {
             content: completion.content.unwrap_or_default(),
             prompt_tokens: completion.prompt_tokens,
@@ -673,7 +675,10 @@ mod tests {
         let v = serde_json::to_value(&body).expect("serializes");
         assert_eq!(v["tool_choice"], "auto");
         // The non-streaming request must NOT carry a `stream` field.
-        assert!(v.get("stream").is_none(), "stream leaked into blocking req: {v}");
+        assert!(
+            v.get("stream").is_none(),
+            "stream leaked into blocking req: {v}"
+        );
         let t = &v["tools"][0];
         assert_eq!(t["type"], "function");
         assert_eq!(t["function"]["name"], "search");
@@ -694,8 +699,7 @@ mod tests {
     #[test]
     fn plain_message_serializes_unchanged() {
         // Guards the existing `complete()` wire format: {role, content}.
-        let v = serde_json::to_value(ChatMessage::text("system", "be brief"))
-            .expect("serializes");
+        let v = serde_json::to_value(ChatMessage::text("system", "be brief")).expect("serializes");
         assert_eq!(v, serde_json::json!({"role":"system","content":"be brief"}));
     }
 
@@ -829,8 +833,7 @@ data: [DONE]\n\
         let msgs = vec![ChatMessage::text("user", "hi")];
         let opts = CompletionOptions::default();
         let stream = fake.complete_stream(&msgs, &opts).await.expect("stream");
-        let deltas: Vec<StreamDelta> =
-            stream.map(|r| r.expect("delta ok")).collect().await;
+        let deltas: Vec<StreamDelta> = stream.map(|r| r.expect("delta ok")).collect().await;
         assert_eq!(deltas.len(), 1, "default impl yields exactly one delta");
         assert_eq!(deltas[0].content, "the whole answer");
         assert_eq!(deltas[0].total_tokens, 5);

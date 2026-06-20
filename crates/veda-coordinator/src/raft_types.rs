@@ -20,14 +20,9 @@ use veda_time::TsLease;
 pub enum ClusterCommand {
     // -- Schema / collection operations --
     /// Create a new collection with the given schema (stored as JSON).
-    CreateCollection {
-        name: String,
-        schema_json: String,
-    },
+    CreateCollection { name: String, schema_json: String },
     /// Drop an existing collection.
-    DropCollection {
-        name: String,
-    },
+    DropCollection { name: String },
 
     // -- Node lifecycle --
     /// Register a node in the cluster.
@@ -37,9 +32,7 @@ pub enum ClusterCommand {
         roles: Vec<String>,
     },
     /// Remove a node from the cluster.
-    DeregisterNode {
-        node_id: u64,
-    },
+    DeregisterNode { node_id: u64 },
 
     /// No-op log entry. Used as a linearisable-read barrier:
     /// a caller that needs a read reflecting every committed entry
@@ -87,10 +80,7 @@ pub enum ClusterCommand {
     },
     /// Extend the current lease's ceiling. Rejected unless `epoch`
     /// equals the current lease's epoch.
-    RenewTsLease {
-        epoch: u64,
-        ceiling_ns: u64,
-    },
+    RenewTsLease { epoch: u64, ceiling_ns: u64 },
 
     // -- Phase E: slim metadata Raft ----------------------------
     //
@@ -135,10 +125,7 @@ pub enum ClusterCommand {
     /// `SetCollectionAlias { alias: "docs", target: "docs" }`
     /// makes `docs` resolve to itself again, undoing a prior
     /// reindex.
-    SetCollectionAlias {
-        alias: String,
-        target: String,
-    },
+    SetCollectionAlias { alias: String, target: String },
 }
 
 impl fmt::Display for ClusterCommand {
@@ -159,7 +146,11 @@ impl fmt::Display for ClusterCommand {
                 shard_id,
                 node_id,
             } => write!(f, "UnassignShard({collection}/{shard_id}->{node_id})"),
-            Self::GrantTsLease { epoch, holder_node_id, .. } => {
+            Self::GrantTsLease {
+                epoch,
+                holder_node_id,
+                ..
+            } => {
                 write!(f, "GrantTsLease(epoch={epoch}, holder={holder_node_id})")
             }
             Self::RenewTsLease { epoch, ceiling_ns } => {
@@ -168,7 +159,11 @@ impl fmt::Display for ClusterCommand {
             Self::RegisterShardEnsemble { shard_id, .. } => {
                 write!(f, "RegisterShardEnsemble({shard_id})")
             }
-            Self::ChangeShardWriter { shard_id, new_writer, new_epoch } => {
+            Self::ChangeShardWriter {
+                shard_id,
+                new_writer,
+                new_epoch,
+            } => {
                 write!(
                     f,
                     "ChangeShardWriter({shard_id} -> {new_writer} @ epoch {new_epoch})"
@@ -177,7 +172,11 @@ impl fmt::Display for ClusterCommand {
             Self::SetCollectionAlias { alias, target } => {
                 write!(f, "SetCollectionAlias({alias} -> {target})")
             }
-            Self::RecordTxnCommit { txn_id, commit_ts_ns, .. } => {
+            Self::RecordTxnCommit {
+                txn_id,
+                commit_ts_ns,
+                ..
+            } => {
                 write!(f, "RecordTxnCommit({txn_id} @ {commit_ts_ns})")
             }
         }

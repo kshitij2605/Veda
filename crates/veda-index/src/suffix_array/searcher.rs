@@ -35,11 +35,7 @@ impl SuffixArrayIndex {
     /// 3. If preserve_order, check that matched words appear in ascending order
     ///    within each document
     /// 4. Return matches for qualifying documents
-    pub fn search_fuzzy(
-        &self,
-        pattern: &str,
-        config: &PatternSearchConfig,
-    ) -> Vec<PatternMatch> {
+    pub fn search_fuzzy(&self, pattern: &str, config: &PatternSearchConfig) -> Vec<PatternMatch> {
         if pattern.is_empty() || self.sa.is_empty() {
             return Vec::new();
         }

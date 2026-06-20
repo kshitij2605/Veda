@@ -30,10 +30,10 @@
 //!   successful `result` carrying a `CallToolResult` with `isError: true`,
 //!   so the calling model can read the message and self-correct.
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::catalog::ToolContext;
@@ -169,12 +169,12 @@ pub async fn handle_mcp_get() -> impl IntoResponse {
 // initialize
 // ---------------------------------------------------------------------------
 
-fn handle_initialize(params: Option<serde_json::Value>) -> Result<serde_json::Value, (i32, String)> {
+fn handle_initialize(
+    params: Option<serde_json::Value>,
+) -> Result<serde_json::Value, (i32, String)> {
     // Negotiate the protocol version: echo the client's requested version
     // if we support it, otherwise fall back to our preferred version.
-    let requested = params
-        .as_ref()
-        .and_then(|p| p["protocolVersion"].as_str());
+    let requested = params.as_ref().and_then(|p| p["protocolVersion"].as_str());
     let negotiated = match requested {
         Some(v) if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) => v,
         _ => PROTOCOL_VERSION,
@@ -218,7 +218,9 @@ async fn handle_tools_call(
     params: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, (i32, String)> {
     let params = params.ok_or((-32602, "missing params".into()))?;
-    let tool_name = params["name"].as_str().ok_or((-32602, "missing tool name".into()))?;
+    let tool_name = params["name"]
+        .as_str()
+        .ok_or((-32602, "missing tool name".into()))?;
     let args = params
         .get("arguments")
         .cloned()
@@ -229,7 +231,11 @@ async fn handle_tools_call(
     // (`"unknown tool: ..."`), which we map to the JSON-RPC -32601
     // protocol error below.
     let ctx = ToolContext::new(state, tenant);
-    let outcome = state.inner.tool_catalog.dispatch(&ctx, tool_name, args).await;
+    let outcome = state
+        .inner
+        .tool_catalog
+        .dispatch(&ctx, tool_name, args)
+        .await;
     if outcome.is_error {
         let msg = outcome.content["error"]
             .as_str()

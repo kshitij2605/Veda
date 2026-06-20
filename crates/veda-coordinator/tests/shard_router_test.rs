@@ -174,10 +174,7 @@ fn write_routing_returns_all_active_replicas() {
             (2, "n2:9000", NodeStatus::Active),
             (3, "n3:9000", NodeStatus::Inactive),
         ],
-        &[
-            ("col", 0, &[1, 2, 3]),
-            ("col", 1, &[1, 2]),
-        ],
+        &[("col", 0, &[1, 2, 3]), ("col", 1, &[1, 2])],
     );
 
     let router = ShardRouter::new(ReplicaSelection::First);

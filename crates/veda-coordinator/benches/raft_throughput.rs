@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use veda_coordinator::raft_coordinator::RaftCoordinator;
 use veda_coordinator::raft_types::{ClusterCommand, ClusterResponse};
 
-fn percentile(samples: &mut Vec<Duration>, pct: f64) -> Duration {
+fn percentile(samples: &mut [Duration], pct: f64) -> Duration {
     if samples.is_empty() {
         return Duration::ZERO;
     }

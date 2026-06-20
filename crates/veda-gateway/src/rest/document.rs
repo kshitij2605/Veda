@@ -1,8 +1,8 @@
 use std::io::Read;
 
+use axum::Json;
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Serialize;
 use tracing::instrument;
 use veda_core::chunking::ChunkingStrategy;
@@ -167,9 +167,21 @@ pub async fn process_document(
     };
 
     let fname = file_name.unwrap_or_else(|| "document".to_owned());
-    let strategy = parse_chunking_strategy(chunking_strategy_name.as_deref(), chunk_size, chunk_overlap);
+    let strategy =
+        parse_chunking_strategy(chunking_strategy_name.as_deref(), chunk_size, chunk_overlap);
 
-    let result = process_single_file(&state, &name, &schema, &endpoint, file_data, &fname, skip_captions, dpi, &strategy).await?;
+    let result = process_single_file(
+        &state,
+        &name,
+        &schema,
+        &endpoint,
+        file_data,
+        &fname,
+        skip_captions,
+        dpi,
+        &strategy,
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(result)))
 }
@@ -266,7 +278,8 @@ pub async fn process_documents_batch(
         }
     }
 
-    let strategy = parse_chunking_strategy(chunking_strategy_name.as_deref(), chunk_size, chunk_overlap);
+    let strategy =
+        parse_chunking_strategy(chunking_strategy_name.as_deref(), chunk_size, chunk_overlap);
 
     if files.is_empty() {
         return Err((
@@ -275,7 +288,8 @@ pub async fn process_documents_batch(
                 error: OcrError {
                     code: "MISSING_FILE".to_owned(),
                     message: "No files provided in the multipart upload.".to_owned(),
-                    suggestion: "Include one or more 'files' fields in the multipart form data.".to_owned(),
+                    suggestion: "Include one or more 'files' fields in the multipart form data."
+                        .to_owned(),
                 },
             }),
         ));
@@ -285,7 +299,18 @@ pub async fn process_documents_batch(
     let mut total_inserted = 0usize;
 
     for (fname, data) in files {
-        let result = process_single_file(&state, &name, &schema, &endpoint, data, &fname, skip_captions, dpi, &strategy).await?;
+        let result = process_single_file(
+            &state,
+            &name,
+            &schema,
+            &endpoint,
+            data,
+            &fname,
+            skip_captions,
+            dpi,
+            &strategy,
+        )
+        .await?;
         total_inserted += result.records_inserted;
         results.push(result);
     }
@@ -359,6 +384,7 @@ pub(crate) fn parse_chunking_strategy(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_single_file(
     state: &AppState,
     collection_name: &str,
@@ -390,18 +416,24 @@ async fn process_single_file(
     };
 
     let url = format!("{}/api/v1/pdf/process", flashparse_endpoint);
-    let resp = client.post(&url).multipart(form).send().await.map_err(|e| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(OcrErrorResponse {
-                error: OcrError {
-                    code: "OCR_SERVICE_UNAVAILABLE".to_owned(),
-                    message: format!("Failed to connect to FlashParse: {}", e),
-                    suggestion: "Ensure FlashParse is running: docker compose --profile ocr up".to_owned(),
-                },
-            }),
-        )
-    })?;
+    let resp = client
+        .post(&url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(OcrErrorResponse {
+                    error: OcrError {
+                        code: "OCR_SERVICE_UNAVAILABLE".to_owned(),
+                        message: format!("Failed to connect to FlashParse: {}", e),
+                        suggestion: "Ensure FlashParse is running: docker compose --profile ocr up"
+                            .to_owned(),
+                    },
+                }),
+            )
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -466,7 +498,10 @@ async fn process_single_file(
         })?;
 
         let entry_name = file.name().to_owned();
-        if entry_name.ends_with(".md") || entry_name.ends_with(".markdown") || entry_name.ends_with(".mmd") {
+        if entry_name.ends_with(".md")
+            || entry_name.ends_with(".markdown")
+            || entry_name.ends_with(".mmd")
+        {
             let mut content = String::new();
             file.read_to_string(&mut content).ok();
             if !markdown_content.is_empty() {
@@ -549,7 +584,11 @@ async fn process_single_file(
     let pages = text_result.chunks_inserted.max(1);
     for (record_id, text) in &text_result.chunks {
         let preview = if text.chars().count() > 100 {
-            let end = text.char_indices().nth(100).map(|(i, _)| i).unwrap_or(text.len());
+            let end = text
+                .char_indices()
+                .nth(100)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
             format!("{}...", &text[..end])
         } else {
             text.clone()
@@ -606,9 +645,9 @@ async fn process_single_file(
     // Insert image records.
     {
         let mut managers = state.inner.segment_managers.write().await;
-        let shard_map = managers.get_mut(collection_name).ok_or_else(|| {
-            ocr_err("no segment managers for collection".into())
-        })?;
+        let shard_map = managers
+            .get_mut(collection_name)
+            .ok_or_else(|| ocr_err("no segment managers for collection".into()))?;
 
         // Get blob store for storing extracted images.
         let blob_store = state.inner.blob_store.read().await.clone();
@@ -620,13 +659,16 @@ async fn process_single_file(
             if has_image_blob_field {
                 let blob_key = format!("{}/{}/{}", collection_name, record.id(), img_name);
                 let store = ArcBlobStore(blob_store.clone());
-                store.put(&blob_key, img_data).map_err(|e| {
-                    ocr_err(format!("failed to store image blob: {e}"))
-                })?;
+                store
+                    .put(&blob_key, img_data)
+                    .map_err(|e| ocr_err(format!("failed to store image blob: {e}")))?;
                 record.set("image_blob", FieldValue::BlobRef(blob_key));
             }
             if has_content_field {
-                record.set("content", FieldValue::String(format!("[image: {}] ({} bytes)", img_name, img_data.len())));
+                record.set(
+                    "content",
+                    FieldValue::String(format!("[image: {}] ({} bytes)", img_name, img_data.len())),
+                );
             }
             if has_source_file_field {
                 record.set("source_file", FieldValue::String(file_name.to_owned()));
@@ -645,13 +687,16 @@ async fn process_single_file(
             }
 
             let record_id = record.id().to_string();
-            let shard_id =
-                veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
+            let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
+                &record.id(),
+                shard_count,
+            );
 
-            let sm = shard_map.get_mut(&shard_id).ok_or_else(|| {
-                ocr_err(format!("shard {shard_id} not found"))
-            })?;
-            sm.insert(record).map_err(|e| ocr_err(format!("insert failed: {e}")))?;
+            let sm = shard_map
+                .get_mut(&shard_id)
+                .ok_or_else(|| ocr_err(format!("shard {shard_id} not found")))?;
+            sm.insert(record)
+                .map_err(|e| ocr_err(format!("insert failed: {e}")))?;
 
             response_chunks.push(ChunkSummary {
                 id: record_id.clone(),
@@ -663,23 +708,26 @@ async fn process_single_file(
 
         // Seal growing segments.
         for sm in shard_map.values_mut() {
-            sm.seal_growing().map_err(|e| ocr_err(format!("failed to seal segment: {e}")))?;
+            sm.seal_growing()
+                .map_err(|e| ocr_err(format!("failed to seal segment: {e}")))?;
         }
     }
 
     // Rebuild query executors.
-    rebuild_executors(state, collection_name).await.map_err(|(status, json_err)| {
-        (
-            status,
-            Json(OcrErrorResponse {
-                error: OcrError {
-                    code: "REBUILD_FAILED".to_owned(),
-                    message: json_err.error.clone(),
-                    suggestion: "Check server logs.".to_owned(),
-                },
-            }),
-        )
-    })?;
+    rebuild_executors(state, collection_name)
+        .await
+        .map_err(|(status, json_err)| {
+            (
+                status,
+                Json(OcrErrorResponse {
+                    error: OcrError {
+                        code: "REBUILD_FAILED".to_owned(),
+                        message: json_err.error.clone(),
+                        suggestion: "Check server logs.".to_owned(),
+                    },
+                }),
+            )
+        })?;
 
     Ok(ProcessDocumentResponse {
         status: "processed".to_owned(),
