@@ -3,7 +3,6 @@ use veda_core::simd;
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Scalar reference implementations for comparison against SIMD dispatch.
-
 fn scalar_dot_product(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
@@ -100,12 +99,7 @@ fn test_manhattan_matches_scalar_all_dimensions() {
         let b = make_vector(dim, 99);
         let expected = scalar_manhattan(&a, &b);
         let actual = simd::manhattan_distance(&a, &b);
-        assert_close(
-            actual,
-            expected,
-            1e-4,
-            &format!("manhattan dim={dim}"),
-        );
+        assert_close(actual, expected, 1e-4, &format!("manhattan dim={dim}"));
     }
 }
 
@@ -288,12 +282,7 @@ fn test_orthogonal_unit_vectors_cosine_distance_one() {
     let mut e1 = vec![0.0_f32; 128];
     e0[0] = 1.0;
     e1[1] = 1.0;
-    assert_close(
-        simd::cosine_distance(&e0, &e1),
-        1.0,
-        1e-5,
-        "cosine(e0, e1)",
-    );
+    assert_close(simd::cosine_distance(&e0, &e1), 1.0, 1e-5, "cosine(e0, e1)");
 }
 
 #[test]
@@ -429,12 +418,7 @@ fn test_known_cosine_identical_direction() {
 fn test_known_cosine_opposite() {
     let a = [1.0, 0.0];
     let b = [-1.0, 0.0];
-    assert_close(
-        simd::cosine_distance(&a, &b),
-        2.0,
-        1e-5,
-        "cosine opposite",
-    );
+    assert_close(simd::cosine_distance(&a, &b), 2.0, 1e-5, "cosine opposite");
 }
 
 #[test]

@@ -10,8 +10,8 @@
 //!   GET /v1/admin/slow-queries    — slowest searches across collections,
 //!                                    from the per-collection query log.
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
 use crate::logs::categorize::CategorizeOptions;

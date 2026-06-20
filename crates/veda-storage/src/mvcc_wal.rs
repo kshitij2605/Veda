@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::mvcc::{MvccStore, MvccValue, Ts};
+use crate::mvcc::{MvccStore, Ts};
 
 const FRAME_HEADER_BYTES: usize = 8; // crc32(u32) + len(u32)
 
@@ -95,8 +95,8 @@ impl MvccWal {
     /// Append a record + fsync. Caller is responsible for
     /// throttling — every call is one fsync.
     pub fn append(&mut self, entry: &MvccWalEntry) -> Result<(), MvccWalError> {
-        let payload = bincode::serialize(entry)
-            .map_err(|e| MvccWalError::Encode(format!("{e}")))?;
+        let payload =
+            bincode::serialize(entry).map_err(|e| MvccWalError::Encode(format!("{e}")))?;
         let len = payload.len() as u32;
         let crc = crc32fast::hash(&payload);
         // Format: [crc32 LE][len LE][payload]
@@ -307,10 +307,7 @@ mod tests {
         }
         // Corrupt the tail: append garbage that won't pass CRC.
         {
-            let mut f = OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .unwrap();
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
             f.write_all(&[0xff; 32]).unwrap();
             f.sync_all().unwrap();
         }
@@ -362,16 +359,16 @@ mod tests {
         // Truncate to lose the last byte of the second frame's
         // payload.
         let len = std::fs::metadata(&path).unwrap().len();
-        let f = OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap();
+        let f = OpenOptions::new().write(true).open(&path).unwrap();
         f.set_len(len - 1).unwrap();
         let mut store = MvccStore::new();
         let (applied, dropped) = MvccWal::replay_into(&path, &mut store).unwrap();
         assert_eq!(applied, 1, "only the first frame should survive");
         assert!(dropped > 0, "tail should report bytes dropped");
-        assert_eq!(store.get_at(b"k1", 150).as_deref(), Some(b"alpha".as_slice()));
+        assert_eq!(
+            store.get_at(b"k1", 150).as_deref(),
+            Some(b"alpha".as_slice())
+        );
         assert!(store.get_at(b"k2", 150).is_none());
     }
 
@@ -427,8 +424,14 @@ mod tests {
         let mut store2 = MvccStore::new();
         MvccWal::load_snapshot_into(&snap_path, &mut store2).unwrap();
         MvccWal::replay_into(&wal_path, &mut store2).unwrap();
-        assert_eq!(store2.get_at(b"x", 150).as_deref(), Some(b"snap_value".as_slice()));
-        assert_eq!(store2.get_at(b"y", 250).as_deref(), Some(b"post_value".as_slice()));
+        assert_eq!(
+            store2.get_at(b"x", 150).as_deref(),
+            Some(b"snap_value".as_slice())
+        );
+        assert_eq!(
+            store2.get_at(b"y", 250).as_deref(),
+            Some(b"post_value".as_slice())
+        );
     }
 
     #[test]

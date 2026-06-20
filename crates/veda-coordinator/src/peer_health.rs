@@ -79,10 +79,7 @@ impl PeerHealthCache {
 /// The `self_id` is excluded from probes (we know our own health
 /// directly). The book is re-snapshotted on every tick so membership
 /// changes are picked up automatically.
-pub fn spawn_probe(
-    self_id: NodeId,
-    peers: PeerAddressBook,
-) -> PeerHealthCache {
+pub fn spawn_probe(self_id: NodeId, peers: PeerAddressBook) -> PeerHealthCache {
     let cache = PeerHealthCache::new();
     let cache_clone = cache.clone();
     let interval = std::env::var("VEDA_PEER_HEALTH_INTERVAL_SECS")
@@ -133,10 +130,10 @@ pub fn spawn_probe(
 /// customized), we leave it alone — they can override via
 /// `VEDA_PEER_REST_PORT_OFFSET` later if needed.
 fn swap_to_rest_port(addr: &str) -> String {
-    if let Some((host, port)) = addr.rsplit_once(':') {
-        if port == "6341" {
-            return format!("{host}:6340");
-        }
+    if let Some((host, port)) = addr.rsplit_once(':')
+        && port == "6341"
+    {
+        return format!("{host}:6340");
     }
     addr.to_owned()
 }

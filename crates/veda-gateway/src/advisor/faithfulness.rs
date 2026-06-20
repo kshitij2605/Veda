@@ -70,7 +70,7 @@ impl FaithfulnessResults {
         self.samples
             .iter()
             .filter(|s| s.ts_ms > since_ms)
-            .filter(|s| agent_filter.map_or(true, |a| s.agent == a))
+            .filter(|s| agent_filter.is_none_or(|a| s.agent == a))
             .map(|s| s.faithfulness)
             .collect()
     }
@@ -83,7 +83,10 @@ impl FaithfulnessResults {
             return Vec::new();
         }
         let start = self.samples.len().saturating_sub(limit);
-        self.samples[start..].iter().map(|s| s.faithfulness).collect()
+        self.samples[start..]
+            .iter()
+            .map(|s| s.faithfulness)
+            .collect()
     }
 
     /// Total retained sample count (test/inspection aid).
@@ -98,10 +101,11 @@ impl FaithfulnessResults {
 
     /// Persist to `path` as pretty JSON. Failure is logged, not surfaced.
     pub fn save(&self, path: &Path) {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            let _ = std::fs::create_dir_all(parent);
         }
         match serde_json::to_vec_pretty(self) {
             Ok(bytes) => {

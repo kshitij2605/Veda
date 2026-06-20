@@ -16,9 +16,9 @@
 //! `AppState::open_txn_handles`); commit triggers prewrite +
 //! commit on the coordinator.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Serialize;
 use veda_coordinator::percolator::TxnError;
 
@@ -106,12 +106,7 @@ pub async fn abort(
     State(state): State<AppState>,
     Path(txn_id): Path<String>,
 ) -> Result<Json<TxnStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let handle = state
-        .inner
-        .open_txn_handles
-        .write()
-        .await
-        .remove(&txn_id);
+    let handle = state.inner.open_txn_handles.write().await.remove(&txn_id);
     if let Some(h) = handle {
         state.inner.txn_coordinator.abort(&h).await;
     }
@@ -128,9 +123,7 @@ fn map_txn_err(e: TxnError) -> (StatusCode, Json<ErrorResponse>) {
     let status = match &e {
         TxnError::NotOpen { .. } => StatusCode::NOT_FOUND,
         TxnError::AlreadyCommitted { .. } => StatusCode::CONFLICT,
-        TxnError::LockConflict { .. } | TxnError::WriteWriteConflict { .. } => {
-            StatusCode::CONFLICT
-        }
+        TxnError::LockConflict { .. } | TxnError::WriteWriteConflict { .. } => StatusCode::CONFLICT,
         TxnError::Tso(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
     (

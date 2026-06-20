@@ -10,7 +10,7 @@
 //!     conversation id, and the conversation is persisted.
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::Mutex;
 use tokio::net::TcpListener;
@@ -51,8 +51,8 @@ async fn start_test_server_with_llm() -> (String, tempfile::TempDir) {
 /// completion with a final answer and no tool calls. The gateway then
 /// streams that answer to the SSE client as multiple `answer` deltas.
 async fn start_mock_llm() -> (String, tokio::task::JoinHandle<()>) {
-    use axum::routing::post;
     use axum::Router;
+    use axum::routing::post;
 
     async fn completions() -> axum::Json<Value> {
         axum::Json(json!({
@@ -102,6 +102,7 @@ async fn test_blocking_converse_still_503_without_llm() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_converse_stream_emits_ordered_frames_ending_in_done() {
     // Spin a mock OpenAI SSE endpoint, point the gateway's LLM at it via
     // env (serialized), and assert the streamed frames.
@@ -148,10 +149,10 @@ async fn test_converse_stream_emits_ordered_frames_ending_in_done() {
     for line in body.lines() {
         if let Some(ev) = line.strip_prefix("event:") {
             cur_event = Some(ev.trim().to_owned());
-        } else if let Some(data) = line.strip_prefix("data:") {
-            if let Some(ev) = cur_event.take() {
-                frames.push((ev, data.trim().to_owned()));
-            }
+        } else if let Some(data) = line.strip_prefix("data:")
+            && let Some(ev) = cur_event.take()
+        {
+            frames.push((ev, data.trim().to_owned()));
         }
     }
 
@@ -159,7 +160,10 @@ async fn test_converse_stream_emits_ordered_frames_ending_in_done() {
 
     // At least one `answer` frame, and the last frame is `done`.
     let answer_count = frames.iter().filter(|(e, _)| e == "answer").count();
-    assert!(answer_count >= 1, "expected >=1 answer frame, frames: {frames:?}");
+    assert!(
+        answer_count >= 1,
+        "expected >=1 answer frame, frames: {frames:?}"
+    );
 
     let (last_event, last_data) = frames.last().unwrap();
     assert_eq!(last_event, "done", "last frame must be `done`: {frames:?}");
@@ -178,7 +182,11 @@ async fn test_converse_stream_emits_ordered_frames_ending_in_done() {
     // The `done` payload carries metrics + a conversation id.
     let done: Value = serde_json::from_str(last_data).unwrap();
     assert_eq!(done["response"], "Veda uses HNSW.");
-    assert!(done["conversation_id"].as_str().is_some_and(|s| !s.is_empty()));
+    assert!(
+        done["conversation_id"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
     assert_eq!(done["metrics"]["total_tokens"], 10);
 
     // The conversation was persisted and is fetchable.

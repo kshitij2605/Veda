@@ -42,7 +42,10 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     app_state.load_blob_store_from_env().await;
     let recovered = app_state.recover_collections_from_disk().await;
     if recovered > 0 {
-        tracing::info!(collections = recovered, "recovered collections from data_dir on startup");
+        tracing::info!(
+            collections = recovered,
+            "recovered collections from data_dir on startup"
+        );
     }
     // Phase C: optional per-shard log appliers (VEDA_LOG_APPLIER=1).
     // Single-node default leaves them off — the writer's

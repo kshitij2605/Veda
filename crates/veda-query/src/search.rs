@@ -8,10 +8,10 @@ use veda_index::traits::{SearchResult, VectorIndex};
 use veda_storage::growing_segment::GrowingSegment;
 use veda_storage::segment::SegmentReader;
 
+use crate::filter::FilterExpr;
 use crate::filter::evaluator::FilterContext;
 use crate::filter::parser::FilterParser;
 use crate::filter::record_eval::evaluate_record;
-use crate::filter::FilterExpr;
 
 /// A search request for a single dense vector field.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -136,8 +136,7 @@ impl SearchExecutor {
         // 2. Search segments (filter eval + ANN).
         let ann_start = Instant::now();
         if let Some(gs) = growing_segment {
-            let (results, candidates) =
-                search_growing_segment(gs, request, filter_expr.as_ref())?;
+            let (results, candidates) = search_growing_segment(gs, request, filter_expr.as_ref())?;
             total_candidates += candidates;
             all_results.extend(results);
         }
@@ -300,7 +299,8 @@ impl SearchExecutor {
                 };
                 local.push((doc_id, dist));
                 if local.len() > request.k * 4 {
-                    local.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                    local
+                        .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
                     local.truncate(request.k);
                 }
             }
@@ -472,7 +472,8 @@ impl SearchExecutor {
                 let dist = simd::maxsim_distance(&request.query_rows, doc_rows, per_row);
                 local.push((doc_id, dist));
                 if local.len() > request.k * 4 {
-                    local.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                    local
+                        .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
                     local.truncate(request.k);
                 }
             }
@@ -752,11 +753,7 @@ fn search_sealed_segment_truncated(
 }
 
 /// Register a specific field's scalar indexes from a SegmentReader into a FilterContext.
-fn register_field_index<'a>(
-    ctx: &mut FilterContext<'a>,
-    reader: &'a SegmentReader,
-    field: &str,
-) {
+fn register_field_index<'a>(ctx: &mut FilterContext<'a>, reader: &'a SegmentReader, field: &str) {
     if let Some(idx) = reader.inverted_index(field) {
         ctx.add_inverted(field, idx);
     }

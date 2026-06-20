@@ -1,5 +1,5 @@
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
@@ -70,7 +70,12 @@ async fn create_test_collection(base: &str, name: &str) {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 201, "failed to create collection: {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        201,
+        "failed to create collection: {:?}",
+        resp.text().await
+    );
 }
 
 // ── 1. Embed-insert with mock model → records inserted with vectors ─────
@@ -144,7 +149,10 @@ async fn test_embed_insert_unsupported_modality() {
     assert_eq!(resp.status(), 422);
     let body: Value = resp.json().await.unwrap();
     let error = body["error"].as_str().unwrap();
-    assert!(error.contains("does not support"), "error should mention modality mismatch: {error}");
+    assert!(
+        error.contains("does not support"),
+        "error should mention modality mismatch: {error}"
+    );
 }
 
 // ── 3. Embed-insert with missing model → 400 error ─────────────────────
@@ -155,7 +163,9 @@ async fn test_embed_insert_missing_model() {
     create_test_collection(&base, "missing_model_col").await;
 
     let resp = client()
-        .post(format!("{base}/v1/collections/missing_model_col/embed-insert"))
+        .post(format!(
+            "{base}/v1/collections/missing_model_col/embed-insert"
+        ))
         .json(&json!({
             "records": [
                 { "title": "Test", "image": "aW1hZ2U=" }
@@ -171,5 +181,8 @@ async fn test_embed_insert_missing_model() {
     assert_eq!(resp.status(), 400);
     let body: Value = resp.json().await.unwrap();
     let error = body["error"].as_str().unwrap();
-    assert!(error.contains("not found"), "error should mention model not found: {error}");
+    assert!(
+        error.contains("not found"),
+        "error should mention model not found: {error}"
+    );
 }

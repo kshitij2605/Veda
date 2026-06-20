@@ -98,7 +98,9 @@ pub async fn web_search(_ctx: &ToolContext<'_>, args: serde_json::Value) -> Tool
         Ok(results) => {
             let items: Vec<serde_json::Value> = results
                 .into_iter()
-                .map(|r| serde_json::json!({ "title": r.title, "url": r.url, "snippet": r.snippet }))
+                .map(
+                    |r| serde_json::json!({ "title": r.title, "url": r.url, "snippet": r.snippet }),
+                )
                 .collect();
             ToolOutcome::ok(serde_json::json!({ "results": items, "count": items.len() }))
         }

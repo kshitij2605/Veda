@@ -29,17 +29,25 @@ use serde::{Deserialize, Serialize};
 /// `physical_ns` is nanoseconds since Unix epoch; `logical` is the
 /// tiebreaker that increments when multiple HLCs are generated in
 /// the same nanosecond.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct Hlc {
     pub physical_ns: u64,
     pub logical: u32,
 }
 
 impl Hlc {
-    pub const ZERO: Hlc = Hlc { physical_ns: 0, logical: 0 };
+    pub const ZERO: Hlc = Hlc {
+        physical_ns: 0,
+        logical: 0,
+    };
 
     pub fn new(physical_ns: u64, logical: u32) -> Self {
-        Self { physical_ns, logical }
+        Self {
+            physical_ns,
+            logical,
+        }
     }
 
     /// Pack into u128 for storage where a single integer is more
@@ -94,7 +102,10 @@ impl HlcClock {
         let wall = wall_clock_ns();
         let mut guard = self.state.lock().expect("HlcClock mutex poisoned");
         let next = if wall > guard.physical_ns {
-            Hlc { physical_ns: wall, logical: 0 }
+            Hlc {
+                physical_ns: wall,
+                logical: 0,
+            }
         } else {
             // Wall clock didn't advance (or went backwards) — bump
             // logical. Saturating add so a pathological caller
@@ -117,21 +128,22 @@ impl HlcClock {
 
         let max_phys = wall.max(guard.physical_ns).max(remote.physical_ns);
 
-        let next_logical = if max_phys == wall
-            && max_phys > guard.physical_ns
-            && max_phys > remote.physical_ns
-        {
-            0
-        } else if max_phys == guard.physical_ns && max_phys == remote.physical_ns {
-            guard.logical.max(remote.logical).saturating_add(1)
-        } else if max_phys == guard.physical_ns {
-            guard.logical.saturating_add(1)
-        } else {
-            // max_phys == remote.physical_ns and not equal to local
-            remote.logical.saturating_add(1)
-        };
+        let next_logical =
+            if max_phys == wall && max_phys > guard.physical_ns && max_phys > remote.physical_ns {
+                0
+            } else if max_phys == guard.physical_ns && max_phys == remote.physical_ns {
+                guard.logical.max(remote.logical).saturating_add(1)
+            } else if max_phys == guard.physical_ns {
+                guard.logical.saturating_add(1)
+            } else {
+                // max_phys == remote.physical_ns and not equal to local
+                remote.logical.saturating_add(1)
+            };
 
-        let next = Hlc { physical_ns: max_phys, logical: next_logical };
+        let next = Hlc {
+            physical_ns: max_phys,
+            logical: next_logical,
+        };
         *guard = next;
         next
     }
@@ -203,15 +215,27 @@ mod tests {
         let clock = HlcClock::new();
         let mut prev = clock.now();
         let mut remotes = [
-            Hlc { physical_ns: prev.physical_ns + 500, logical: 0 },
-            Hlc { physical_ns: prev.physical_ns + 100, logical: 7 },
-            Hlc { physical_ns: prev.physical_ns + 2_000, logical: 1 },
+            Hlc {
+                physical_ns: prev.physical_ns + 500,
+                logical: 0,
+            },
+            Hlc {
+                physical_ns: prev.physical_ns + 100,
+                logical: 7,
+            },
+            Hlc {
+                physical_ns: prev.physical_ns + 2_000,
+                logical: 1,
+            },
         ]
         .into_iter()
         .cycle();
         for _ in 0..1_000 {
             let local = clock.now();
-            assert!(local > prev, "now() not monotonic at step prev={prev:?} local={local:?}");
+            assert!(
+                local > prev,
+                "now() not monotonic at step prev={prev:?} local={local:?}"
+            );
             prev = local;
 
             let remote = remotes.next().unwrap();

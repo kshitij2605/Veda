@@ -61,7 +61,7 @@ pub fn verify_token(token: &str, secret: &str) -> Result<Claims, StatusCode> {
 /// `VEDA_AUTH_MODE` env):
 ///   - `Disabled` — no-op
 ///   - `Static`   — HS256 verify against `jwt_secret` (backwards-
-///                  compatible with the original path)
+///     compatible with the original path)
 ///   - `Oidc(..)` — verify against IdP-issued public key from JWKS
 pub async fn auth_middleware(
     State(state): State<AppState>,

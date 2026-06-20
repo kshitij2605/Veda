@@ -181,7 +181,13 @@ fn test_search_with_filter_bitmap() {
 
     let query = make_vector(128, 7);
     let results = seg
-        .search("embedding", &query, 5, DistanceMetric::Euclidean, Some(&filter))
+        .search(
+            "embedding",
+            &query,
+            5,
+            DistanceMetric::Euclidean,
+            Some(&filter),
+        )
         .unwrap();
 
     assert_eq!(results.len(), 5);
@@ -219,8 +225,14 @@ fn test_search_skips_deleted_records() {
 
     let result_ids: Vec<u32> = results.iter().map(|r| r.0).collect();
     assert!(!result_ids.contains(&5), "deleted doc 5 should not appear");
-    assert!(!result_ids.contains(&10), "deleted doc 10 should not appear");
-    assert!(!result_ids.contains(&15), "deleted doc 15 should not appear");
+    assert!(
+        !result_ids.contains(&10),
+        "deleted doc 10 should not appear"
+    );
+    assert!(
+        !result_ids.contains(&15),
+        "deleted doc 15 should not appear"
+    );
 }
 
 #[test]
@@ -276,7 +288,10 @@ fn test_should_seal_false_for_small_data() {
         seg.insert(make_record(i)).unwrap();
     }
 
-    assert!(!seg.should_seal(), "10 records should not trigger seal at 512MiB threshold");
+    assert!(
+        !seg.should_seal(),
+        "10 records should not trigger seal at 512MiB threshold"
+    );
 }
 
 #[test]
@@ -334,7 +349,11 @@ fn test_seal_produces_valid_sealed_segment() {
         // Verify vector data.
         let expected_vec = make_vector(128, i);
         let actual_vec = reader.get_vector("embedding", i).unwrap();
-        assert_eq!(actual_vec, expected_vec.as_slice(), "vector mismatch at doc {i}");
+        assert_eq!(
+            actual_vec,
+            expected_vec.as_slice(),
+            "vector mismatch at doc {i}"
+        );
     }
 }
 

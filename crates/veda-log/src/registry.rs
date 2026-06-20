@@ -77,7 +77,10 @@ mod tests {
         let reg = ShardLogRegistry::new(tmp.path().join("_logs"));
         let a = reg.get_or_open("coll", 0).unwrap();
         let b = reg.get_or_open("coll", 0).unwrap();
-        assert!(std::sync::Arc::ptr_eq(&a, &b), "same (collection,shard) returns the cached Arc");
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "same (collection,shard) returns the cached Arc"
+        );
     }
 
     #[test]

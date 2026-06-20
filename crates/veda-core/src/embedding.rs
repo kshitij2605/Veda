@@ -205,7 +205,11 @@ impl EmbeddingModelConfig {
     }
 
     /// Builder-style override for endpoint + api_key on a preset.
-    pub fn with_endpoint(mut self, endpoint: impl Into<String>, api_key: impl Into<String>) -> Self {
+    pub fn with_endpoint(
+        mut self,
+        endpoint: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Self {
         self.endpoint = endpoint.into();
         self.api_key = api_key.into();
         self
@@ -243,11 +247,7 @@ impl EmbeddingModelRegistry {
 
     /// Validate that a model supports a given modality.
     /// Returns `Ok(())` or `Err(VedaError::ModalityNotSupported)` with a suggestion.
-    pub fn validate_modality(
-        &self,
-        model_name: &str,
-        modality: Modality,
-    ) -> Result<(), VedaError> {
+    pub fn validate_modality(&self, model_name: &str, modality: Modality) -> Result<(), VedaError> {
         let model = self.get(model_name).ok_or_else(|| {
             VedaError::InvalidSchema(format!("model '{model_name}' not found in registry"))
         })?;
@@ -300,9 +300,9 @@ pub fn validate_auto_embed_config(
     }
 
     // Validate target field is a vector field.
-    let target = schema.get_field(&config.target_field).ok_or_else(|| {
-        VedaError::FieldNotFound(config.target_field.clone())
-    })?;
+    let target = schema
+        .get_field(&config.target_field)
+        .ok_or_else(|| VedaError::FieldNotFound(config.target_field.clone()))?;
     let target_dim = match target.field_type() {
         FieldType::Vector { dimension, .. } => *dimension,
         _ => {
@@ -357,7 +357,10 @@ mod preset_tests {
         let qwen = EmbeddingModelConfig::preset("qwen3-embedding-8b").unwrap();
         assert_eq!(qwen.output_dimension, 4096);
         assert!(qwen.supported_modalities.contains(&Modality::Text));
-        assert!(qwen.endpoint.is_empty(), "preset endpoint must be deployment-supplied");
+        assert!(
+            qwen.endpoint.is_empty(),
+            "preset endpoint must be deployment-supplied"
+        );
     }
 
     #[test]

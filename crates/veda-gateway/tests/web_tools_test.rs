@@ -4,7 +4,7 @@
 //! (endpoints unset → clean not-configured, web tools excluded from the
 //! default agent), and the built-in `veda-web` agent's whitelist.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
@@ -22,8 +22,8 @@ static WEB_ENV_LOCK: Mutex<()> = Mutex::new(());
 /// A mock searxng server: `GET /search` returns three canned results,
 /// mirroring `{ "results": [ {title, url, content, engine} ] }`.
 async fn start_mock_searxng() -> (String, tokio::task::JoinHandle<()>) {
-    use axum::routing::get;
     use axum::Router;
+    use axum::routing::get;
 
     async fn search() -> axum::Json<Value> {
         axum::Json(json!({
@@ -46,10 +46,14 @@ async fn start_mock_searxng() -> (String, tokio::task::JoinHandle<()>) {
 /// A mock crawl4ai server: `POST /md` returns the real per-URL shape
 /// `{ "url", "markdown": "<string>", "success": true }`, recording the
 /// request body so the test can assert the single-`url` contract.
-async fn start_mock_crawl4ai() -> (String, Arc<Mutex<Option<Value>>>, tokio::task::JoinHandle<()>) {
+async fn start_mock_crawl4ai() -> (
+    String,
+    Arc<Mutex<Option<Value>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    use axum::Router;
     use axum::extract::State as AxState;
     use axum::routing::post;
-    use axum::Router;
 
     let seen: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
 
@@ -107,6 +111,7 @@ async fn searxng_client_unreachable_is_clean_error() {
 // ── web_search tool ──────────────────────────────────────────────────────
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn web_search_tool_dispatches_and_returns_results() {
     let (searx_url, _h) = start_mock_searxng().await;
     let tmp = tempfile::tempdir().unwrap();
@@ -121,7 +126,11 @@ async fn web_search_tool_dispatches_and_returns_results() {
         std::env::set_var("VEDA_SEARXNG_ENDPOINT", &searx_url);
     }
     let out = cat
-        .dispatch(&ctx, "web_search", json!({ "query": "vector db", "limit": 2 }))
+        .dispatch(
+            &ctx,
+            "web_search",
+            json!({ "query": "vector db", "limit": 2 }),
+        )
         .await;
     unsafe {
         std::env::remove_var("VEDA_SEARXNG_ENDPOINT");
@@ -138,6 +147,7 @@ async fn web_search_tool_dispatches_and_returns_results() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn web_search_tool_unset_is_clean_not_configured() {
     let tmp = tempfile::tempdir().unwrap();
     let state = AppState::new(tmp.path());
@@ -156,7 +166,11 @@ async fn web_search_tool_unset_is_clean_not_configured() {
     drop(_guard);
 
     // Not configured is a clean success result, not an error.
-    assert!(!out.is_error, "should not be a hard error: {:?}", out.content);
+    assert!(
+        !out.is_error,
+        "should not be a hard error: {:?}",
+        out.content
+    );
     assert_eq!(out.content["not_configured"], true);
     assert!(out.content["message"].as_str().is_some());
 }
@@ -164,6 +178,7 @@ async fn web_search_tool_unset_is_clean_not_configured() {
 // ── fetch_url tool ───────────────────────────────────────────────────────
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_url_tool_dispatches_and_returns_markdown() {
     let (crawl_url, seen, _h) = start_mock_crawl4ai().await;
     let tmp = tempfile::tempdir().unwrap();
@@ -188,23 +203,39 @@ async fn fetch_url_tool_dispatches_and_returns_markdown() {
     assert!(!out.is_error, "fetch_url errored: {:?}", out.content);
     assert_eq!(out.content["url"], "https://veda.dev");
     assert_eq!(out.content["title"], "Veda");
-    assert!(out.content["markdown"].as_str().unwrap().contains("multimodal vector database"));
+    assert!(
+        out.content["markdown"]
+            .as_str()
+            .unwrap()
+            .contains("multimodal vector database")
+    );
     assert_eq!(out.content["truncated"], false);
 
     // The client must hit `POST /md` with a single `url` string.
-    let sent = seen.lock().unwrap().clone().expect("crawl4ai /md was not called");
-    assert_eq!(sent["url"], "https://veda.dev", "client must POST single `url` to /md: {sent}");
-    assert!(sent.get("urls").is_none(), "client must not send `urls` array: {sent}");
+    let sent = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("crawl4ai /md was not called");
+    assert_eq!(
+        sent["url"], "https://veda.dev",
+        "client must POST single `url` to /md: {sent}"
+    );
+    assert!(
+        sent.get("urls").is_none(),
+        "client must not send `urls` array: {sent}"
+    );
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_url_tool_ssrf_blocked_without_crawling() {
     // crawl4ai is configured and counts hits; a private target URL must be
     // blocked by the SSRF guard with a clean `{ blocked: true }` outcome
     // (not a hard error) and the crawl server must never be contacted.
+    use axum::Router;
     use axum::extract::State as AxState;
     use axum::routing::post;
-    use axum::Router;
 
     let hits = Arc::new(AtomicUsize::new(0));
     async fn md(AxState(hits): AxState<Arc<AtomicUsize>>) -> axum::Json<Value> {
@@ -241,7 +272,11 @@ async fn fetch_url_tool_ssrf_blocked_without_crawling() {
     }
     drop(_guard);
 
-    assert!(!out.is_error, "blocked URL should be a clean outcome: {:?}", out.content);
+    assert!(
+        !out.is_error,
+        "blocked URL should be a clean outcome: {:?}",
+        out.content
+    );
     assert_eq!(out.content["blocked"], true);
     assert_eq!(out.content["code"], "URL_BLOCKED_PRIVATE");
     assert_eq!(
@@ -252,6 +287,7 @@ async fn fetch_url_tool_ssrf_blocked_without_crawling() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_url_tool_unset_is_clean_not_configured() {
     let tmp = tempfile::tempdir().unwrap();
     let state = AppState::new(tmp.path());
@@ -269,7 +305,11 @@ async fn fetch_url_tool_unset_is_clean_not_configured() {
         .await;
     drop(_guard);
 
-    assert!(!out.is_error, "should not be a hard error: {:?}", out.content);
+    assert!(
+        !out.is_error,
+        "should not be a hard error: {:?}",
+        out.content
+    );
     assert_eq!(out.content["not_configured"], true);
 }
 
@@ -288,8 +328,14 @@ fn web_tools_are_registered_builtins_but_opt_in() {
     // the default agent uses.
     let default_specs = cat.specs_for(&default_agent().tool_ids);
     let default_ids: Vec<&str> = default_specs.iter().map(|s| s.id.as_str()).collect();
-    assert!(!default_ids.contains(&"web_search"), "web_search must be opt-in");
-    assert!(!default_ids.contains(&"fetch_url"), "fetch_url must be opt-in");
+    assert!(
+        !default_ids.contains(&"web_search"),
+        "web_search must be opt-in"
+    );
+    assert!(
+        !default_ids.contains(&"fetch_url"),
+        "fetch_url must be opt-in"
+    );
 }
 
 #[test]

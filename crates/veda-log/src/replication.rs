@@ -52,9 +52,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
-use veda_time::Hlc;
 
-use crate::format::{LogEntryV2, LogOp};
+use crate::format::LogEntryV2;
 use crate::shard_log::ShardLog;
 
 /// Node identifier as used by `_meta` Raft. Re-exported from the
@@ -340,7 +339,13 @@ pub fn rebuild_ensemble(
     let new_writers: Vec<NodeId> = current
         .writers
         .iter()
-        .map(|w| if *w == failed_node { replacement_node } else { *w })
+        .map(|w| {
+            if *w == failed_node {
+                replacement_node
+            } else {
+                *w
+            }
+        })
         .collect();
     // If the leader was the failed node, the operator picks a
     // survivor; default to the replacement.
@@ -371,7 +376,10 @@ impl LogWriter {
         // remove followers via ensemble change before all
         // local registries catch up. Order matters for parallel
         // dispatch.
-        Self { ensemble, followers }
+        Self {
+            ensemble,
+            followers,
+        }
     }
 
     pub fn ensemble(&self) -> &LogEnsemble {
@@ -530,8 +538,10 @@ impl LogWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::LogOp;
     use bytes::Bytes;
     use tempfile::TempDir;
+    use veda_time::Hlc;
 
     fn entry(seq_id: u64) -> LogEntryV2 {
         LogEntryV2 {
@@ -550,7 +560,8 @@ mod tests {
         for i in 0..n {
             let tmp = tempfile::tempdir().unwrap();
             let log = Arc::new(ShardLog::open(tmp.path()).unwrap());
-            follows.push(Arc::new(LocalFollower::new(i as NodeId + 1, log)) as Arc<dyn LogFollower>);
+            follows
+                .push(Arc::new(LocalFollower::new(i as NodeId + 1, log)) as Arc<dyn LogFollower>);
             tmps.push(tmp);
         }
         (tmps, follows)
@@ -617,13 +628,19 @@ mod tests {
         // Majority ack 1..=3.
         let ens1 = LogEnsemble::new(vec![1, 2, 3], 2, 1, 1);
         let writer1 = LogWriter::new(ens1, vec![follows[0].clone(), follows[1].clone()]);
-        writer1.append_batch((1..=3).map(entry).collect()).await.unwrap();
+        writer1
+            .append_batch((1..=3).map(entry).collect())
+            .await
+            .unwrap();
         // Minority-only entry on follower 3 at seq 1..=4.
         let writer_three = LogWriter::new(
             LogEnsemble::new(vec![1, 2, 3], 1, 1, 1),
             vec![follows[2].clone()],
         );
-        writer_three.append_batch((1..=4).map(entry).collect()).await.unwrap();
+        writer_three
+            .append_batch((1..=4).map(entry).collect())
+            .await
+            .unwrap();
 
         // Pre-recovery state: follower 3 sees 4 entries.
         assert_eq!(follows[2].last_durable_seq().await.unwrap(), 4);
@@ -632,7 +649,10 @@ mod tests {
         let ens2 = LogEnsemble::new(vec![1, 2, 3], 2, 2, 2);
         let writer2 = LogWriter::new(ens2, follows.clone());
         let safe = writer2.open_and_recover().await.unwrap();
-        assert!(safe >= 3 && safe <= 4, "safe_seq should be 3 or 4, got {safe}");
+        assert!(
+            (3..=4).contains(&safe),
+            "safe_seq should be 3 or 4, got {safe}"
+        );
 
         // After recovery, every follower's durable_seq is at
         // most safe_seq.
@@ -658,7 +678,10 @@ mod tests {
         // Node 2 was the leader; it failed and is replaced by 4.
         let next = rebuild_ensemble(&cur, 2, 4);
         assert_eq!(next.writers, vec![1, 4, 3]);
-        assert_eq!(next.writer_leader, 4, "replacement becomes leader when old leader failed");
+        assert_eq!(
+            next.writer_leader, 4,
+            "replacement becomes leader when old leader failed"
+        );
         assert_eq!(next.epoch, 8);
     }
 
@@ -670,13 +693,15 @@ mod tests {
         let src_tmp = tempfile::tempdir().unwrap();
         let src_log = Arc::new(ShardLog::open(src_tmp.path()).unwrap());
         for i in 1..=5u64 {
-            src_log.append_one(
-                Hlc::new(i, 0),
-                1,
-                Bytes::copy_from_slice(&i.to_le_bytes()),
-                LogOp::Put,
-                Bytes::from(format!("{{\"i\":{i}}}").into_bytes()),
-            ).unwrap();
+            src_log
+                .append_one(
+                    Hlc::new(i, 0),
+                    1,
+                    Bytes::copy_from_slice(&i.to_le_bytes()),
+                    LogOp::Put,
+                    Bytes::from(format!("{{\"i\":{i}}}").into_bytes()),
+                )
+                .unwrap();
         }
         assert_eq!(src_log.durable_seq(), 5);
 
@@ -731,7 +756,10 @@ mod tests {
         assert!(r1.is_empty(), "1st failure shouldn't trip threshold");
         assert!(r2.is_empty(), "2nd failure shouldn't trip");
         assert_eq!(r3, vec![7], "3rd consecutive failure should trip");
-        assert!(r4.is_empty(), "4th probe shouldn't re-fire (edge-triggered)");
+        assert!(
+            r4.is_empty(),
+            "4th probe shouldn't re-fire (edge-triggered)"
+        );
     }
 
     #[tokio::test]
@@ -771,11 +799,7 @@ mod tests {
             counter: std::sync::Mutex::new(0),
             pattern: vec![false, false, true, false, false],
         });
-        let monitor = FollowerHealthMonitor::new(
-            vec![f1],
-            3,
-            std::time::Duration::from_millis(10),
-        );
+        let monitor = FollowerHealthMonitor::new(vec![f1], 3, std::time::Duration::from_millis(10));
         let mut state = std::collections::HashMap::new();
         for _ in 0..5 {
             let trips = monitor.probe_once(&mut state).await;
@@ -810,11 +834,8 @@ mod tests {
         let original = LogEnsemble::new(vec![1, 2, 3], 2, 1, 1);
         let mut state = std::collections::HashMap::new();
         let bad: Arc<dyn LogFollower> = Arc::new(AlwaysFailing(2));
-        let monitor = FollowerHealthMonitor::new(
-            vec![bad],
-            2,
-            std::time::Duration::from_millis(10),
-        );
+        let monitor =
+            FollowerHealthMonitor::new(vec![bad], 2, std::time::Duration::from_millis(10));
         let _ = monitor.probe_once(&mut state).await;
         let fired = monitor.probe_once(&mut state).await;
         assert_eq!(fired, vec![2]);

@@ -115,13 +115,8 @@ impl VectorIndex for DiskAnnIndex {
             return Ok(());
         }
 
-        self.graph = builder::build_vamana(
-            &self.vectors,
-            self.metric,
-            self.r,
-            self.l_build,
-            self.alpha,
-        );
+        self.graph =
+            builder::build_vamana(&self.vectors, self.metric, self.r, self.l_build, self.alpha);
 
         Ok(())
     }
@@ -144,14 +139,8 @@ impl VectorIndex for DiskAnnIndex {
         };
 
         let l = self.l_search.max(k);
-        let candidates = searcher::greedy_search(
-            query,
-            medoid,
-            l,
-            &self.graph,
-            &self.vectors,
-            self.metric,
-        );
+        let candidates =
+            searcher::greedy_search(query, medoid, l, &self.graph, &self.vectors, self.metric);
 
         let results: Vec<SearchResult> = candidates
             .into_iter()
@@ -196,14 +185,8 @@ impl VectorIndex for DiskAnnIndex {
         // same tradeoff that ACORN-style filtered ANN papers
         // discuss).
         let l = self.l_search.max(k * 4);
-        let candidates = searcher::greedy_search(
-            query,
-            medoid,
-            l,
-            &self.graph,
-            &self.vectors,
-            self.metric,
-        );
+        let candidates =
+            searcher::greedy_search(query, medoid, l, &self.graph, &self.vectors, self.metric);
         let results: Vec<SearchResult> = candidates
             .into_iter()
             .filter(|&(id, _)| !self.deleted.contains(&id) && filter.contains(id))

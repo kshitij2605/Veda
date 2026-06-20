@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
-use veda_gateway::auth::{generate_token, Role};
+use veda_gateway::auth::{Role, generate_token};
 use veda_gateway::rest::build_router;
 use veda_gateway::rest::state::{AppState, UserRecord};
 
@@ -32,7 +32,13 @@ async fn start_server() -> (String, tempfile::TempDir) {
 async fn start_auth_server() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let mut users = HashMap::new();
-    users.insert("admin".into(), UserRecord { password: "admin".into(), role: Role::Admin });
+    users.insert(
+        "admin".into(),
+        UserRecord {
+            password: "admin".into(),
+            role: Role::Admin,
+        },
+    );
     let state = AppState::with_auth_and_users(tmp.path(), "bm25-rls-secret", users);
     let router = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -62,7 +68,12 @@ async fn create_and_seed(base: &str, name: &str) {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 201, "create collection: {}", r.text().await.unwrap());
+    assert_eq!(
+        r.status(),
+        201,
+        "create collection: {}",
+        r.text().await.unwrap()
+    );
 
     let r = client()
         .post(format!("{base}/v1/collections/{name}/insert"))
@@ -109,7 +120,11 @@ async fn bm25_honors_scalar_filter() {
         .unwrap();
     assert_eq!(r.status(), 200, "search: {}", r.text().await.unwrap());
     let body: Value = r.json().await.unwrap();
-    assert_eq!(body["results"].as_array().unwrap().len(), 5, "no-filter: {body}");
+    assert_eq!(
+        body["results"].as_array().unwrap().len(),
+        5,
+        "no-filter: {body}"
+    );
 
     // With level = 'ERROR': only the 2 ERROR records survive, and they must
     // actually contain the term.
@@ -123,14 +138,25 @@ async fn bm25_honors_scalar_filter() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "filtered search: {}", r.text().await.unwrap());
+    assert_eq!(
+        r.status(),
+        200,
+        "filtered search: {}",
+        r.text().await.unwrap()
+    );
     let body: Value = r.json().await.unwrap();
     let lv = levels(&body);
     assert_eq!(lv.len(), 2, "expected exactly 2 ERROR hits; got {body}");
-    assert!(lv.iter().all(|l| l == "ERROR"), "all hits must be ERROR; got {lv:?}");
+    assert!(
+        lv.iter().all(|l| l == "ERROR"),
+        "all hits must be ERROR; got {lv:?}"
+    );
     for h in body["results"].as_array().unwrap() {
         assert!(
-            h["fields"]["message"].as_str().unwrap().contains("exploded"),
+            h["fields"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("exploded"),
             "hit must contain the term; got {h}"
         );
     }
@@ -154,11 +180,19 @@ async fn match_phrase_honors_scalar_filter() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "phrase search: {}", r.text().await.unwrap());
+    assert_eq!(
+        r.status(),
+        200,
+        "phrase search: {}",
+        r.text().await.unwrap()
+    );
     let body: Value = r.json().await.unwrap();
     let lv = levels(&body);
     assert_eq!(lv.len(), 3, "expected 3 INFO hits; got {body}");
-    assert!(lv.iter().all(|l| l == "INFO"), "all hits must be INFO; got {lv:?}");
+    assert!(
+        lv.iter().all(|l| l == "INFO"),
+        "all hits must be INFO; got {lv:?}"
+    );
 }
 
 // ── 3. Hybrid: BM25 leg is filtered ────────────────────────────────────────
@@ -218,7 +252,12 @@ async fn hybrid_bm25_leg_honors_scalar_filter() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "hybrid search: {}", r.text().await.unwrap());
+    assert_eq!(
+        r.status(),
+        200,
+        "hybrid search: {}",
+        r.text().await.unwrap()
+    );
     let body: Value = r.json().await.unwrap();
     let lv = levels(&body);
     assert!(!lv.is_empty(), "hybrid must return survivors; got {body}");
@@ -301,6 +340,10 @@ async fn bm25_enforces_rls() {
         .iter()
         .filter_map(|h| h["fields"]["owner"].as_str().map(str::to_owned))
         .collect();
-    assert_eq!(owners.len(), 1, "alice must see exactly her record; got {body}");
+    assert_eq!(
+        owners.len(),
+        1,
+        "alice must see exactly her record; got {body}"
+    );
     assert_eq!(owners[0], "alice", "RLS leak: alice saw {owners:?}");
 }

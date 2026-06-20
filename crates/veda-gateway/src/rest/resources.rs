@@ -13,12 +13,12 @@
 //! and `cpu_pct` is null. All signal fields are `Option` → serialized as
 //! `null` on non-Linux; the route always returns 200 with this shape.
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde::Serialize;
 
 use crate::advisor::engine::now_ms;
-use crate::advisor::snapshot::{collect, cpu_pct, OpsSnapshot};
+use crate::advisor::snapshot::{OpsSnapshot, collect, cpu_pct};
 use crate::rest::state::AppState;
 
 #[derive(Debug, Serialize)]

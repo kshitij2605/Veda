@@ -1,4 +1,4 @@
-use veda_core::chunking::{chunk_markdown, ChunkingStrategy, TimeWindowPlan};
+use veda_core::chunking::{ChunkingStrategy, TimeWindowPlan, chunk_markdown};
 
 #[test]
 fn default_strategy_is_markdown_recursive() {
@@ -98,7 +98,9 @@ fn sentence_strategy_respects_sentence_boundaries() {
     // Each chunk should end at a sentence boundary (ends with period or contains complete sentences).
     for chunk in &chunks {
         assert!(
-            chunk.text.trim().ends_with('.') || chunk.text.trim().ends_with('?') || chunk.text.trim().ends_with('!'),
+            chunk.text.trim().ends_with('.')
+                || chunk.text.trim().ends_with('?')
+                || chunk.text.trim().ends_with('!'),
             "Chunk should end at sentence boundary: '{}'",
             chunk.text
         );
@@ -214,7 +216,10 @@ fn heading_path_tracking() {
     );
     // At least one chunk should have heading path populated.
     let has_headings = chunks.iter().any(|c| !c.heading_path.is_empty());
-    assert!(has_headings, "Some chunks should have heading_path populated");
+    assert!(
+        has_headings,
+        "Some chunks should have heading_path populated"
+    );
 }
 
 #[test]
@@ -247,7 +252,11 @@ fn markdown_heading_level_1_splits_on_h1() {
             chunk_overlap: 0,
         },
     );
-    assert!(chunks.len() >= 2, "Should split on H1 headings, got {} chunks", chunks.len());
+    assert!(
+        chunks.len() >= 2,
+        "Should split on H1 headings, got {} chunks",
+        chunks.len()
+    );
     assert!(chunks[0].text.contains("Chapter 1") || chunks[0].text.contains("chapter one"));
 }
 
@@ -262,12 +271,17 @@ fn markdown_heading_level_2_splits_on_h1_and_h2() {
             chunk_overlap: 0,
         },
     );
-    assert!(chunks.len() >= 2, "Should split on H1/H2, got {} chunks", chunks.len());
+    assert!(
+        chunks.len() >= 2,
+        "Should split on H1/H2, got {} chunks",
+        chunks.len()
+    );
 }
 
 #[test]
 fn markdown_heading_level_3_splits_on_all_headings() {
-    let text = "# H1\n\n## H2\n\nContent.\n\n### H3a\n\nSub content a.\n\n### H3b\n\nSub content b.";
+    let text =
+        "# H1\n\n## H2\n\nContent.\n\n### H3a\n\nSub content a.\n\n### H3b\n\nSub content b.";
     let chunks = chunk_markdown(
         text,
         &ChunkingStrategy::MarkdownHeading {
@@ -276,14 +290,21 @@ fn markdown_heading_level_3_splits_on_all_headings() {
             chunk_overlap: 0,
         },
     );
-    assert!(chunks.len() >= 3, "Should split on H1/H2/H3, got {} chunks", chunks.len());
+    assert!(
+        chunks.len() >= 3,
+        "Should split on H1/H2/H3, got {} chunks",
+        chunks.len()
+    );
 }
 
 #[test]
 fn markdown_heading_subsplits_large_sections() {
     let mut text = "# Big Section\n\n".to_string();
     for i in 0..50 {
-        text.push_str(&format!("Paragraph {} with enough content to make it sizeable. ", i));
+        text.push_str(&format!(
+            "Paragraph {} with enough content to make it sizeable. ",
+            i
+        ));
         text.push_str("This is additional text to bulk up the paragraph.\n\n");
     }
     let chunks = chunk_markdown(
@@ -294,10 +315,17 @@ fn markdown_heading_subsplits_large_sections() {
             chunk_overlap: 0,
         },
     );
-    assert!(chunks.len() > 1, "Large section should be sub-split by paragraphs");
+    assert!(
+        chunks.len() > 1,
+        "Large section should be sub-split by paragraphs"
+    );
     for chunk in &chunks {
         // Allow some tolerance (paragraphs may not split exactly at boundary).
-        assert!(chunk.text.len() <= 600, "Chunk too large: {} chars", chunk.text.len());
+        assert!(
+            chunk.text.len() <= 600,
+            "Chunk too large: {} chars",
+            chunk.text.len()
+        );
     }
 }
 
@@ -332,7 +360,11 @@ fn semantic_splits_on_topic_change() {
             window_size: 2,
         },
     );
-    assert!(chunks.len() >= 2, "Should split between cats and finance topics, got {} chunks", chunks.len());
+    assert!(
+        chunks.len() >= 2,
+        "Should split between cats and finance topics, got {} chunks",
+        chunks.len()
+    );
 }
 
 #[test]
@@ -352,7 +384,11 @@ fn semantic_keeps_similar_content_together() {
         },
     );
     // Similar topic should have few or no splits.
-    assert!(chunks.len() <= 3, "Similar content should stay together, got {} chunks", chunks.len());
+    assert!(
+        chunks.len() <= 3,
+        "Similar content should stay together, got {} chunks",
+        chunks.len()
+    );
 }
 
 #[test]
@@ -368,7 +404,11 @@ fn semantic_respects_max_chunk_size() {
     );
     for chunk in &chunks {
         // Allow some tolerance for sub-splitting.
-        assert!(chunk.text.len() <= 250, "Chunk exceeds max: {} chars", chunk.text.len());
+        assert!(
+            chunk.text.len() <= 250,
+            "Chunk exceeds max: {} chars",
+            chunk.text.len()
+        );
     }
 }
 
@@ -421,7 +461,10 @@ fn hierarchical_produces_coarse_and_fine() {
 
     assert!(!coarse.is_empty(), "expected coarse chunks");
     assert!(!fine.is_empty(), "expected fine chunks");
-    assert!(fine.len() > coarse.len(), "fine chunks should outnumber coarse");
+    assert!(
+        fine.len() > coarse.len(),
+        "fine chunks should outnumber coarse"
+    );
     for w in chunks.windows(2) {
         assert!(w[0].index < w[1].index);
     }
@@ -432,7 +475,10 @@ fn time_window_default_15s_overlap_3s() {
     let plan = TimeWindowPlan::default();
     // 30s clip → expect windows at [0,15], [12,27], [24,30].
     let windows = plan.windows(30_000);
-    assert_eq!(windows, vec![(0, 15_000), (12_000, 27_000), (24_000, 30_000)]);
+    assert_eq!(
+        windows,
+        vec![(0, 15_000), (12_000, 27_000), (24_000, 30_000)]
+    );
 }
 
 #[test]
@@ -445,14 +491,23 @@ fn time_window_handles_empty_and_short() {
 
 #[test]
 fn time_window_no_overlap() {
-    let plan = TimeWindowPlan { window_ms: 10_000, overlap_ms: 0 };
+    let plan = TimeWindowPlan {
+        window_ms: 10_000,
+        overlap_ms: 0,
+    };
     let windows = plan.windows(25_000);
-    assert_eq!(windows, vec![(0, 10_000), (10_000, 20_000), (20_000, 25_000)]);
+    assert_eq!(
+        windows,
+        vec![(0, 10_000), (10_000, 20_000), (20_000, 25_000)]
+    );
 }
 
 #[test]
 fn scene_aligned_windows_respects_cuts() {
-    let plan = TimeWindowPlan { window_ms: 15_000, overlap_ms: 0 };
+    let plan = TimeWindowPlan {
+        window_ms: 15_000,
+        overlap_ms: 0,
+    };
     // 60s video with cuts at 12s, 27s, 50s → scenes [0,12], [12,27], [27,50], [50,60]
     let out = plan.scene_aligned_windows(&[12_000, 27_000, 50_000], 60_000);
     // Each scene should map to at least one (start, end) range.
@@ -462,7 +517,10 @@ fn scene_aligned_windows_respects_cuts() {
 
 #[test]
 fn scene_aligned_short_scenes_merge() {
-    let plan = TimeWindowPlan { window_ms: 15_000, overlap_ms: 0 };
+    let plan = TimeWindowPlan {
+        window_ms: 15_000,
+        overlap_ms: 0,
+    };
     // Cuts at 2s and 4s — both scenes are <7.5s (min_len = 7500), so they
     // merge with the next.
     let out = plan.scene_aligned_windows(&[2_000, 4_000], 30_000);
@@ -473,11 +531,18 @@ fn scene_aligned_short_scenes_merge() {
 
 #[test]
 fn scene_aligned_long_scenes_subdivide() {
-    let plan = TimeWindowPlan { window_ms: 15_000, overlap_ms: 0 };
+    let plan = TimeWindowPlan {
+        window_ms: 15_000,
+        overlap_ms: 0,
+    };
     // No cuts in a 60s video — the whole thing is one scene, longer than
     // 22.5s, so it should be subdivided into ~4 windows.
     let out = plan.scene_aligned_windows(&[], 60_000);
-    assert!(out.len() >= 4, "expected subdivision, got {} windows", out.len());
+    assert!(
+        out.len() >= 4,
+        "expected subdivision, got {} windows",
+        out.len()
+    );
 }
 
 #[test]

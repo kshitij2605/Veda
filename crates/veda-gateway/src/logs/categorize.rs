@@ -19,14 +19,14 @@
 //! `tokio::sync::Mutex` and the whole thing is held as an
 //! `Arc<LogCategorizer>` on `AppStateInner`.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use serde::Serialize;
 use tokio::sync::Mutex;
-use veda_core::embedding::Modality;
 use veda_core::embedding::EmbeddingModelRegistry;
+use veda_core::embedding::Modality;
 use veda_core::embedding_client::EmbeddingClient;
 
 use crate::logs::LogBuffer;
@@ -110,7 +110,7 @@ impl LogCategorizer {
         registry: &EmbeddingModelRegistry,
         opts: CategorizeOptions,
     ) -> Vec<LogCategory> {
-        let limit = opts.limit.min(MAX_MESSAGES).max(1);
+        let limit = opts.limit.clamp(1, MAX_MESSAGES);
         let records = buffer.recent(limit, Some("WARN"), None);
         if records.is_empty() {
             return Vec::new();
@@ -419,6 +419,7 @@ pub fn cluster_embedded(
                 let acc = &mut accs[i];
                 // Running-mean centroid update.
                 let n = acc.count as f32;
+                #[allow(clippy::needless_range_loop)]
                 for k in 0..acc.centroid.len() {
                     acc.centroid[k] = (acc.centroid[k] * n + emb[k]) / (n + 1.0);
                 }
@@ -537,12 +538,10 @@ mod tests {
 
     #[test]
     fn normalize_message_handles_uuid_and_quotes() {
-        let a = normalize_message(
-            "deleting record 550e8400-e29b-41d4-a716-446655440000 named \"foo\"",
-        );
-        let b = normalize_message(
-            "deleting record 7c9e6679-7425-40de-944b-e07fc1f90ae7 named \"bar\"",
-        );
+        let a =
+            normalize_message("deleting record 550e8400-e29b-41d4-a716-446655440000 named \"foo\"");
+        let b =
+            normalize_message("deleting record 7c9e6679-7425-40de-944b-e07fc1f90ae7 named \"bar\"");
         assert_eq!(a, b);
         assert!(a.contains("<id>"));
         assert!(a.contains("<str>"));
@@ -568,7 +567,12 @@ mod tests {
     fn cluster_embedded_groups_similar_splits_orthogonal() {
         let items = vec![
             ("a".to_string(), vec![1.0, 0.0], 10i64, "WARN".to_string()),
-            ("b".to_string(), vec![0.99, 0.01], 20i64, "ERROR".to_string()),
+            (
+                "b".to_string(),
+                vec![0.99, 0.01],
+                20i64,
+                "ERROR".to_string(),
+            ),
             ("c".to_string(), vec![0.0, 1.0], 30i64, "WARN".to_string()),
         ];
         let cats = cluster_embedded(&items, 0.9);

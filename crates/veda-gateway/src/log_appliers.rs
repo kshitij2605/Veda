@@ -61,13 +61,21 @@ pub async fn spawn_for_all_known_collections(state: AppState) -> Vec<JoinHandle<
         managers
             .iter()
             .flat_map(|(name, shards)| {
-                shards.keys().map(|s| (name.clone(), *s)).collect::<Vec<_>>()
+                shards
+                    .keys()
+                    .map(|s| (name.clone(), *s))
+                    .collect::<Vec<_>>()
             })
             .collect()
     };
     let mut handles = Vec::with_capacity(pairs.len());
     for (collection, shard_id) in pairs {
-        handles.push(spawn_one(state.clone(), collection, shard_id, Duration::from_millis(50)));
+        handles.push(spawn_one(
+            state.clone(),
+            collection,
+            shard_id,
+            Duration::from_millis(50),
+        ));
     }
     tracing::info!(
         appliers_spawned = handles.len(),
@@ -153,8 +161,8 @@ fn apply_entries(sm: &mut SegmentManager, batch: &[LogEntryV2]) -> Result<u64, S
                 let record: Record = serde_json::from_slice(&entry.payload)
                     .map_err(|e| format!("decode record @ seq={}: {e}", entry.seq_id))?;
                 if sm.has_mvcc() {
-                    let commit_ts = ((entry.hlc_ts.physical_ns as u128) << 32)
-                        | (entry.hlc_ts.logical as u128);
+                    let commit_ts =
+                        ((entry.hlc_ts.physical_ns as u128) << 32) | (entry.hlc_ts.logical as u128);
                     sm.insert_mvcc(commit_ts, record)
                         .map_err(|e| format!("insert_mvcc: {e}"))?;
                 } else {
@@ -164,8 +172,8 @@ fn apply_entries(sm: &mut SegmentManager, batch: &[LogEntryV2]) -> Result<u64, S
             LogOp::Delete => {
                 let rid = uuid_from_key(&entry.key)?;
                 if sm.has_mvcc() {
-                    let commit_ts = ((entry.hlc_ts.physical_ns as u128) << 32)
-                        | (entry.hlc_ts.logical as u128);
+                    let commit_ts =
+                        ((entry.hlc_ts.physical_ns as u128) << 32) | (entry.hlc_ts.logical as u128);
                     sm.delete_mvcc(commit_ts, &rid)
                         .map_err(|e| format!("delete_mvcc: {e}"))?;
                 } else {
@@ -325,7 +333,10 @@ mod tests {
         )
         .unwrap();
         let mut managers = state.inner.segment_managers.write().await;
-        managers.entry(collection.to_owned()).or_default().insert(0, sm);
+        managers
+            .entry(collection.to_owned())
+            .or_default()
+            .insert(0, sm);
     }
 
     async fn append_n(state: &AppState, collection: &str, n: u64) {
@@ -334,7 +345,8 @@ mod tests {
             let r = record();
             let payload = Bytes::from(serde_json::to_vec(&r).unwrap());
             let key = Bytes::copy_from_slice(r.id().as_bytes());
-            log.append_one(Hlc::new(i, 0), 1, key, LogOp::Put, payload).unwrap();
+            log.append_one(Hlc::new(i, 0), 1, key, LogOp::Put, payload)
+                .unwrap();
         }
     }
 
@@ -350,12 +362,23 @@ mod tests {
             applier.tick(&state, "coll", 0).await.unwrap();
         }
 
-        let cursor_path = state.inner.shard_logs.shard_dir("coll", 0).join("applied.cursor");
+        let cursor_path = state
+            .inner
+            .shard_logs
+            .shard_dir("coll", 0)
+            .join("applied.cursor");
         let persisted = veda_log::cursor::read_cursor(&cursor_path);
-        assert!(persisted > 0, "a seal should have advanced the durable cursor");
+        assert!(
+            persisted > 0,
+            "a seal should have advanced the durable cursor"
+        );
 
         let applier2 = ShardApplier::open(&state, "coll", 0).await.unwrap();
-        assert_eq!(applier2.next_seq(), persisted + 1, "resume from cursor+1, not 1");
+        assert_eq!(
+            applier2.next_seq(),
+            persisted + 1,
+            "resume from cursor+1, not 1"
+        );
     }
 
     #[tokio::test]
@@ -369,11 +392,23 @@ mod tests {
         let applied = applier.tick(&state, "coll", 0).await.unwrap();
         assert_eq!(applied, 5);
 
-        let cursor_path = state.inner.shard_logs.shard_dir("coll", 0).join("applied.cursor");
-        assert_eq!(veda_log::cursor::read_cursor(&cursor_path), 0, "no seal -> cursor stays 0");
+        let cursor_path = state
+            .inner
+            .shard_logs
+            .shard_dir("coll", 0)
+            .join("applied.cursor");
+        assert_eq!(
+            veda_log::cursor::read_cursor(&cursor_path),
+            0,
+            "no seal -> cursor stays 0"
+        );
 
         let applier2 = ShardApplier::open(&state, "coll", 0).await.unwrap();
-        assert_eq!(applier2.next_seq(), 1, "fresh applier replays unsealed entries from 1");
+        assert_eq!(
+            applier2.next_seq(),
+            1,
+            "fresh applier replays unsealed entries from 1"
+        );
     }
 
     #[tokio::test]
@@ -406,7 +441,12 @@ mod tests {
             "applier task should be cancelled on drop"
         );
         assert!(
-            !state.inner.applier_handles.lock().unwrap().contains_key("coll"),
+            !state
+                .inner
+                .applier_handles
+                .lock()
+                .unwrap()
+                .contains_key("coll"),
             "collection's applier handles should be deregistered"
         );
     }

@@ -2,20 +2,17 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::auth::{self, Role};
-use veda_gateway::rest::state::{AppState, UserRecord};
 use veda_gateway::rest::build_router;
+use veda_gateway::rest::state::{AppState, UserRecord};
 
 /// Start a test server with auth enabled and the given users.
-async fn start_auth_server(
-    users: HashMap<String, UserRecord>,
-) -> (String, tempfile::TempDir) {
+async fn start_auth_server(users: HashMap<String, UserRecord>) -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
-    let app_state =
-        AppState::with_auth_and_users(tmp.path(), "test-jwt-secret", users);
+    let app_state = AppState::with_auth_and_users(tmp.path(), "test-jwt-secret", users);
     let router = build_router(app_state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -221,14 +218,8 @@ fn test_rbac_admin_can_do_everything() {
 
 #[test]
 fn test_rbac_editor_permissions() {
-    assert!(veda_gateway::rbac::check_permission(
-        Role::Editor,
-        "search"
-    ));
-    assert!(veda_gateway::rbac::check_permission(
-        Role::Editor,
-        "insert"
-    ));
+    assert!(veda_gateway::rbac::check_permission(Role::Editor, "search"));
+    assert!(veda_gateway::rbac::check_permission(Role::Editor, "insert"));
     assert!(veda_gateway::rbac::check_permission(
         Role::Editor,
         "delete_records"
@@ -241,18 +232,12 @@ fn test_rbac_editor_permissions() {
         Role::Editor,
         "describe_collection"
     ));
-    assert!(!veda_gateway::rbac::check_permission(
-        Role::Editor,
-        "admin"
-    ));
+    assert!(!veda_gateway::rbac::check_permission(Role::Editor, "admin"));
 }
 
 #[test]
 fn test_rbac_viewer_permissions() {
-    assert!(veda_gateway::rbac::check_permission(
-        Role::Viewer,
-        "search"
-    ));
+    assert!(veda_gateway::rbac::check_permission(Role::Viewer, "search"));
     assert!(veda_gateway::rbac::check_permission(
         Role::Viewer,
         "get_record"
@@ -273,8 +258,5 @@ fn test_rbac_viewer_permissions() {
         Role::Viewer,
         "delete_records"
     ));
-    assert!(!veda_gateway::rbac::check_permission(
-        Role::Viewer,
-        "admin"
-    ));
+    assert!(!veda_gateway::rbac::check_permission(Role::Viewer, "admin"));
 }

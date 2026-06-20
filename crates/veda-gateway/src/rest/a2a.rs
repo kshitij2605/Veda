@@ -14,12 +14,12 @@
 //!   GET  /v1/a2a/{agent_id}/card   discovery AgentCard
 //!   POST /v1/a2a/{agent_id}        JSON-RPC 2.0 (`message/send`)
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 
-use super::agents::{run_agent_turn, AgentTurnError};
+use super::agents::{AgentTurnError, run_agent_turn};
 use super::collections::ErrorResponse;
 use super::state::AppState;
 use crate::agent::model::default_agent;
@@ -52,14 +52,16 @@ pub async fn agent_card(
     Tenant(tenant): Tenant,
     Path(agent_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let agent = resolve_agent(&state, &tenant, &agent_id).await.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("agent '{agent_id}' not found"),
-            }),
-        )
-    })?;
+    let agent = resolve_agent(&state, &tenant, &agent_id)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("agent '{agent_id}' not found"),
+                }),
+            )
+        })?;
 
     // Skills are the agent's tool specs (empty whitelist = all builtins),
     // mapped one-to-one onto A2A skills.
@@ -141,7 +143,17 @@ pub async fn message_send(
 
     // A2A does not persist a Veda conversation, so no conversation id is
     // threaded into agent memory here.
-    match run_agent_turn(&state, &tenant, user.as_deref(), &agent_id, &[], &input, None).await {
+    match run_agent_turn(
+        &state,
+        &tenant,
+        user.as_deref(),
+        &agent_id,
+        &[],
+        &input,
+        None,
+    )
+    .await
+    {
         Ok((_agent, result, citations, grounding, _cache_hit, _guardrails)) => {
             let message = serde_json::json!({
                 "role": "agent",
@@ -188,10 +200,10 @@ fn extract_text(req: &serde_json::Value) -> Option<String> {
         .as_array()?;
     let mut texts: Vec<&str> = Vec::new();
     for p in parts {
-        if p.get("kind").and_then(|k| k.as_str()) == Some("text") {
-            if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
-                texts.push(t);
-            }
+        if p.get("kind").and_then(|k| k.as_str()) == Some("text")
+            && let Some(t) = p.get("text").and_then(|t| t.as_str())
+        {
+            texts.push(t);
         }
     }
     if texts.is_empty() {
@@ -200,7 +212,11 @@ fn extract_text(req: &serde_json::Value) -> Option<String> {
     Some(texts.join(""))
 }
 
-fn jsonrpc_error(id: serde_json::Value, code: i32, message: impl Into<String>) -> serde_json::Value {
+fn jsonrpc_error(
+    id: serde_json::Value,
+    code: i32,
+    message: impl Into<String>,
+) -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,

@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::raft_types::{ClusterCommand, ClusterResponse, ClusterState};
 use crate::store::{ClusterStateMachine, LogStore};
@@ -83,7 +83,10 @@ pub struct CoordinatorHandle {
 
 impl CoordinatorHandle {
     /// Submit a command and wait for the response.
-    pub async fn execute(&self, command: ClusterCommand) -> Result<ClusterResponse, CoordinatorError> {
+    pub async fn execute(
+        &self,
+        command: ClusterCommand,
+    ) -> Result<ClusterResponse, CoordinatorError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(CoordinatorMsg::Command(CommandEnvelope {

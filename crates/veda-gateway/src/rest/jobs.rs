@@ -5,9 +5,9 @@
 //!   GET    /v1/admin/jobs         — list all registered jobs
 //!   DELETE /v1/admin/jobs/{name}  — remove a job by name
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::rest::collections::ErrorResponse;
@@ -72,19 +72,12 @@ pub async fn create_job(
         .inner
         .job_registry
         .register(job.clone())
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
     Ok((StatusCode::CREATED, Json(JobResponse::from(job))))
 }
 
 /// `GET /v1/admin/jobs` — list all registered jobs.
-pub async fn list_jobs(
-    State(state): State<AppState>,
-) -> Json<ListJobsResponse> {
+pub async fn list_jobs(State(state): State<AppState>) -> Json<ListJobsResponse> {
     let mut jobs: Vec<JobResponse> = state
         .inner
         .job_registry
@@ -101,15 +94,11 @@ pub async fn delete_job(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .inner
-        .job_registry
-        .remove(&name)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
+    state.inner.job_registry.remove(&name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }

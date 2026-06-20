@@ -43,7 +43,9 @@ fn test_register_and_get() {
 
     assert_eq!(registry.list().len(), 2);
 
-    let clip = registry.get("clip-vit-l-14").expect("should find clip model");
+    let clip = registry
+        .get("clip-vit-l-14")
+        .expect("should find clip model");
     assert_eq!(clip.output_dimension, 768);
 
     let bge = registry.get("bge-large").expect("should find bge model");
@@ -76,8 +78,16 @@ fn test_validate_modality_supported() {
     let mut registry = EmbeddingModelRegistry::new();
     registry.register(clip_model());
 
-    assert!(registry.validate_modality("clip-vit-l-14", Modality::Image).is_ok());
-    assert!(registry.validate_modality("clip-vit-l-14", Modality::Text).is_ok());
+    assert!(
+        registry
+            .validate_modality("clip-vit-l-14", Modality::Image)
+            .is_ok()
+    );
+    assert!(
+        registry
+            .validate_modality("clip-vit-l-14", Modality::Text)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -94,7 +104,10 @@ fn test_validate_modality_unsupported_with_suggestion() {
         VedaError::ModalityNotSupported { model, modality } => {
             assert_eq!(model, "bge-large");
             assert!(modality.contains("Image"));
-            assert!(modality.contains("clip-vit-l-14"), "should suggest clip model");
+            assert!(
+                modality.contains("clip-vit-l-14"),
+                "should suggest clip model"
+            );
         }
         other => panic!("expected ModalityNotSupported, got: {other}"),
     }
@@ -103,7 +116,9 @@ fn test_validate_modality_unsupported_with_suggestion() {
 #[test]
 fn test_validate_modality_model_not_found() {
     let registry = EmbeddingModelRegistry::new();
-    let err = registry.validate_modality("no-such-model", Modality::Text).unwrap_err();
+    let err = registry
+        .validate_modality("no-such-model", Modality::Text)
+        .unwrap_err();
     assert!(matches!(err, VedaError::InvalidSchema(_)));
 }
 
@@ -117,7 +132,10 @@ async fn test_embed_text_correct_dimension() {
 
     // Should be normalized (L2 norm ≈ 1.0)
     let norm: f32 = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
-    assert!((norm - 1.0).abs() < 1e-4, "vector should be normalized, got norm={norm}");
+    assert!(
+        (norm - 1.0).abs() < 1e-4,
+        "vector should be normalized, got norm={norm}"
+    );
 }
 
 #[tokio::test]
@@ -136,7 +154,9 @@ async fn test_embed_text_deterministic() {
 #[test]
 fn test_validate_input_rejects_wrong_modality() {
     let client = EmbeddingClient::new(text_only_model());
-    let err = client.validate_input(b"fake image bytes", Modality::Image).unwrap_err();
+    let err = client
+        .validate_input(b"fake image bytes", Modality::Image)
+        .unwrap_err();
     assert!(matches!(err, VedaError::ModalityNotSupported { .. }));
 }
 
@@ -159,8 +179,13 @@ fn test_validate_input_rejects_oversized() {
     // 100 bytes is ok
     assert!(client.validate_input(&[0u8; 100], Modality::Text).is_ok());
     // 101 bytes exceeds limit
-    let err = client.validate_input(&[0u8; 101], Modality::Text).unwrap_err();
-    assert!(matches!(err, VedaError::InvalidSchema(ref msg) if msg.contains("exceeds")), "got: {err}");
+    let err = client
+        .validate_input(&[0u8; 101], Modality::Text)
+        .unwrap_err();
+    assert!(
+        matches!(err, VedaError::InvalidSchema(ref msg) if msg.contains("exceeds")),
+        "got: {err}"
+    );
 }
 
 // ── 6. Auto-embed config validation ────────────────────────────────────
@@ -171,8 +196,15 @@ fn test_auto_embed_config_valid() {
     registry.register(clip_model());
 
     let schema = CollectionSchema::builder("products")
-        .add_field(FieldDefinition::new("image", veda_core::types::FieldType::Blob))
-        .add_field(FieldDefinition::vector("image_embedding", 768, DistanceMetric::Cosine))
+        .add_field(FieldDefinition::new(
+            "image",
+            veda_core::types::FieldType::Blob,
+        ))
+        .add_field(FieldDefinition::vector(
+            "image_embedding",
+            768,
+            DistanceMetric::Cosine,
+        ))
         .build()
         .unwrap();
 
@@ -192,7 +224,11 @@ fn test_auto_embed_config_missing_source_field() {
     registry.register(clip_model());
 
     let schema = CollectionSchema::builder("products")
-        .add_field(FieldDefinition::vector("image_embedding", 768, DistanceMetric::Cosine))
+        .add_field(FieldDefinition::vector(
+            "image_embedding",
+            768,
+            DistanceMetric::Cosine,
+        ))
         .build()
         .unwrap();
 
@@ -204,7 +240,10 @@ fn test_auto_embed_config_missing_source_field() {
     };
 
     let err = validate_auto_embed_config(&config, &registry, &schema).unwrap_err();
-    assert!(matches!(err, VedaError::FieldNotFound(ref f) if f == "image"), "got: {err}");
+    assert!(
+        matches!(err, VedaError::FieldNotFound(ref f) if f == "image"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -213,8 +252,15 @@ fn test_auto_embed_config_dimension_mismatch() {
     registry.register(clip_model()); // output_dimension = 768
 
     let schema = CollectionSchema::builder("products")
-        .add_field(FieldDefinition::new("image", veda_core::types::FieldType::Blob))
-        .add_field(FieldDefinition::vector("image_embedding", 512, DistanceMetric::Cosine))
+        .add_field(FieldDefinition::new(
+            "image",
+            veda_core::types::FieldType::Blob,
+        ))
+        .add_field(FieldDefinition::vector(
+            "image_embedding",
+            512,
+            DistanceMetric::Cosine,
+        ))
         .build()
         .unwrap();
 
@@ -226,7 +272,16 @@ fn test_auto_embed_config_dimension_mismatch() {
     };
 
     let err = validate_auto_embed_config(&config, &registry, &schema).unwrap_err();
-    assert!(matches!(err, VedaError::DimensionMismatch { expected: 512, actual: 768 }), "got: {err}");
+    assert!(
+        matches!(
+            err,
+            VedaError::DimensionMismatch {
+                expected: 512,
+                actual: 768
+            }
+        ),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -235,8 +290,14 @@ fn test_auto_embed_config_target_not_vector() {
     registry.register(clip_model());
 
     let schema = CollectionSchema::builder("products")
-        .add_field(FieldDefinition::new("image", veda_core::types::FieldType::Blob))
-        .add_field(FieldDefinition::new("image_embedding", veda_core::types::FieldType::String))
+        .add_field(FieldDefinition::new(
+            "image",
+            veda_core::types::FieldType::Blob,
+        ))
+        .add_field(FieldDefinition::new(
+            "image_embedding",
+            veda_core::types::FieldType::String,
+        ))
         .build()
         .unwrap();
 
@@ -248,7 +309,10 @@ fn test_auto_embed_config_target_not_vector() {
     };
 
     let err = validate_auto_embed_config(&config, &registry, &schema).unwrap_err();
-    assert!(matches!(err, VedaError::InvalidSchema(ref msg) if msg.contains("not a vector")), "got: {err}");
+    assert!(
+        matches!(err, VedaError::InvalidSchema(ref msg) if msg.contains("not a vector")),
+        "got: {err}"
+    );
 }
 
 // ── 7. Modality detection from MIME types ───────────────────────────────
@@ -269,13 +333,28 @@ fn test_modality_from_mime() {
 
 #[test]
 fn test_modality_from_field_name() {
-    assert_eq!(Modality::from_field_name("text_content"), Some(Modality::Text));
+    assert_eq!(
+        Modality::from_field_name("text_content"),
+        Some(Modality::Text)
+    );
     assert_eq!(Modality::from_field_name("title"), Some(Modality::Text));
-    assert_eq!(Modality::from_field_name("description"), Some(Modality::Text));
+    assert_eq!(
+        Modality::from_field_name("description"),
+        Some(Modality::Text)
+    );
     assert_eq!(Modality::from_field_name("image"), Some(Modality::Image));
-    assert_eq!(Modality::from_field_name("product_photo"), Some(Modality::Image));
-    assert_eq!(Modality::from_field_name("audio_clip"), Some(Modality::Audio));
-    assert_eq!(Modality::from_field_name("video_file"), Some(Modality::Video));
+    assert_eq!(
+        Modality::from_field_name("product_photo"),
+        Some(Modality::Image)
+    );
+    assert_eq!(
+        Modality::from_field_name("audio_clip"),
+        Some(Modality::Audio)
+    );
+    assert_eq!(
+        Modality::from_field_name("video_file"),
+        Some(Modality::Video)
+    );
     assert_eq!(Modality::from_field_name("pdf_data"), Some(Modality::Pdf));
     assert_eq!(Modality::from_field_name("random_field"), None);
 }

@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use veda_core::error::{Result, VedaError};
-use veda_core::record::{FieldValue, Record, EXPIRES_AT_FIELD};
+use veda_core::record::{EXPIRES_AT_FIELD, FieldValue, Record};
 use veda_core::schema::CollectionSchema;
 use veda_core::types::{FieldType, SegmentId};
 
 use crate::bitmap_index::BitmapIndex;
-use crate::delete_bitmap::DeleteBitmap;
 use crate::bm25_index::Bm25Index;
+use crate::delete_bitmap::DeleteBitmap;
 use crate::inverted_index::InvertedIndex;
 use crate::multivector_storage::{MultiVectorStorageReader, MultiVectorStorageWriter};
 use crate::range_index::RangeIndex;
@@ -255,8 +255,7 @@ impl SegmentWriter {
         // Initialize multi-vector writers.
         let mut multivec_writers = HashMap::new();
         for field in schema.multi_vector_fields() {
-            multivec_writers
-                .insert(field.name().to_owned(), MultiVectorStorageWriter::create());
+            multivec_writers.insert(field.name().to_owned(), MultiVectorStorageWriter::create());
         }
         let multivec_dir = dir.join(MULTIVEC_DIR);
         fs::create_dir_all(&multivec_dir)?;
@@ -591,9 +590,8 @@ impl SegmentWriter {
         //     at least one doc was inserted with a stamp.
         //     Non-MVCC segments stay byte-identical on disk.
         if self.commit_ts.iter().any(|t| t.is_some()) {
-            let ts_bytes = bincode::serialize(&self.commit_ts).map_err(|e| {
-                VedaError::Storage(format!("encode commit_ts sidecar: {e}"))
-            })?;
+            let ts_bytes = bincode::serialize(&self.commit_ts)
+                .map_err(|e| VedaError::Storage(format!("encode commit_ts sidecar: {e}")))?;
             fs::write(self.dir.join(COMMIT_TS_FILE), ts_bytes)?;
         }
 
@@ -769,8 +767,7 @@ impl SegmentReader {
                 ScalarIndexKind::Bitmap => {
                     let path = scalars_dir.join(bitmap_file(field.name()));
                     if path.exists() {
-                        bitmap_indexes
-                            .insert(field.name().to_owned(), BitmapIndex::load(&path)?);
+                        bitmap_indexes.insert(field.name().to_owned(), BitmapIndex::load(&path)?);
                     }
                 }
             }
@@ -784,8 +781,7 @@ impl SegmentReader {
             if field.bm25() && matches!(field.field_type(), FieldType::String) {
                 let path = scalars_dir.join(bm25_file(field.name()));
                 if path.exists() {
-                    bm25_indexes
-                        .insert(field.name().to_owned(), Bm25Index::load(&path)?);
+                    bm25_indexes.insert(field.name().to_owned(), Bm25Index::load(&path)?);
                 }
             }
         }
@@ -815,9 +811,8 @@ impl SegmentReader {
         let commit_ts_path = dir.join(COMMIT_TS_FILE);
         let commit_ts: Vec<Option<u128>> = if commit_ts_path.exists() {
             let bytes = fs::read(&commit_ts_path)?;
-            bincode::deserialize(&bytes).map_err(|e| {
-                VedaError::Storage(format!("decode commit_ts sidecar: {e}"))
-            })?
+            bincode::deserialize(&bytes)
+                .map_err(|e| VedaError::Storage(format!("decode commit_ts sidecar: {e}")))?
         } else {
             Vec::new()
         };
@@ -919,9 +914,6 @@ impl SegmentReader {
         self.stored_fields.iter_uuid_doc_ids()
     }
 
-    /// Return the raw bytes of the JSONL line for the given doc_id, or
-    /// `None` if `doc_id` is out of range. Strips the trailing newline.
-
     /// Get segment metadata.
     pub fn metadata(&self) -> &SegmentMetadata {
         &self.metadata
@@ -945,10 +937,7 @@ impl SegmentReader {
 
     /// Iterate `(doc_id, &SparseVec)` for a sparse field, or `None` if the
     /// field has no sparse reader (e.g., legacy segment).
-    pub fn iter_sparse(
-        &self,
-        field: &str,
-    ) -> Option<impl Iterator<Item = (u32, &SparseVec)>> {
+    pub fn iter_sparse(&self, field: &str) -> Option<impl Iterator<Item = (u32, &SparseVec)>> {
         self.sparse_readers.get(field).map(|r| r.iter())
     }
 
@@ -992,12 +981,12 @@ impl SegmentReader {
                     _ => {
                         return Err(VedaError::Storage(
                             "missing __record_id__ in stored data".into(),
-                        ))
+                        ));
                     }
                 };
-                let id: uuid::Uuid = record_id_str.parse().map_err(|e| {
-                    VedaError::Storage(format!("invalid record id: {e}"))
-                })?;
+                let id: uuid::Uuid = record_id_str
+                    .parse()
+                    .map_err(|e| VedaError::Storage(format!("invalid record id: {e}")))?;
                 (id, scalar_data)
             }
             StoredFieldsBackend::Columnar(c) => {

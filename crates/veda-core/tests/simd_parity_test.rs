@@ -5,7 +5,10 @@
 use veda_core::simd_simsimd;
 
 fn i8_dot_ref(a: &[i8], b: &[i8]) -> i32 {
-    a.iter().zip(b).map(|(&x, &y)| (x as i32) * (y as i32)).sum()
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| (x as i32) * (y as i32))
+        .sum()
 }
 
 fn seeded_i8(seed: u32, n: usize) -> Vec<i8> {
@@ -59,7 +62,11 @@ fn cosine_ref(a: &[f32], b: &[f32]) -> f32 {
     let d = dot_ref(a, b);
     let na = norm2_ref(a).sqrt();
     let nb = norm2_ref(b).sqrt();
-    if na * nb == 0.0 { 1.0 } else { 1.0 - d / (na * nb) }
+    if na * nb == 0.0 {
+        1.0
+    } else {
+        1.0 - d / (na * nb)
+    }
 }
 
 const DIMS: &[usize] = &[1, 7, 16, 31, 128, 768, 1024, 1536, 3072];
@@ -81,11 +88,27 @@ fn f32_kernels_match_scalar_reference() {
 
         // Direct SimSIMD kernels.
         close(simd_simsimd::dot_product(&a, &b), dot_ref(&a, &b), "ss dot");
-        close(simd_simsimd::l2_squared(&a, &b), l2sq_ref(&a, &b), "ss l2sq");
-        close(simd_simsimd::manhattan_distance(&a, &b), l1_ref(&a, &b), "ss l1");
+        close(
+            simd_simsimd::l2_squared(&a, &b),
+            l2sq_ref(&a, &b),
+            "ss l2sq",
+        );
+        close(
+            simd_simsimd::manhattan_distance(&a, &b),
+            l1_ref(&a, &b),
+            "ss l1",
+        );
         close(simd_simsimd::l2_norm_squared(&a), norm2_ref(&a), "ss norm2");
-        close(simd_simsimd::cosine_distance(&a, &b), cosine_ref(&a, &b), "ss cos");
-        close(simd_simsimd::euclidean_distance(&a, &b), l2sq_ref(&a, &b).sqrt(), "ss euc");
+        close(
+            simd_simsimd::cosine_distance(&a, &b),
+            cosine_ref(&a, &b),
+            "ss cos",
+        );
+        close(
+            simd_simsimd::euclidean_distance(&a, &b),
+            l2sq_ref(&a, &b).sqrt(),
+            "ss euc",
+        );
 
         // Dispatched public API (verifies the wiring).
         close(simd::dot_product(&a, &b), dot_ref(&a, &b), "api dot");
@@ -93,7 +116,11 @@ fn f32_kernels_match_scalar_reference() {
         close(simd::manhattan_distance(&a, &b), l1_ref(&a, &b), "api l1");
         close(simd::l2_norm_squared(&a), norm2_ref(&a), "api norm2");
         close(simd::cosine_distance(&a, &b), cosine_ref(&a, &b), "api cos");
-        close(simd::euclidean_distance(&a, &b), l2sq_ref(&a, &b).sqrt(), "api euc");
+        close(
+            simd::euclidean_distance(&a, &b),
+            l2sq_ref(&a, &b).sqrt(),
+            "api euc",
+        );
     }
 }
 
@@ -104,8 +131,20 @@ fn cosine_zero_norm_returns_one() {
     // dispatched API. (The non-zero parity test never hits this branch.)
     let zero = vec![0.0f32; 128];
     let b = seeded_f32(7, 128);
-    assert_eq!(simd_simsimd::cosine_distance(&zero, &b), 1.0, "ss zero-norm");
-    assert_eq!(simd_simsimd::cosine_distance(&b, &zero), 1.0, "ss zero-norm (swapped)");
-    assert_eq!(simd_simsimd::cosine_distance(&zero, &zero), 1.0, "ss both-zero");
+    assert_eq!(
+        simd_simsimd::cosine_distance(&zero, &b),
+        1.0,
+        "ss zero-norm"
+    );
+    assert_eq!(
+        simd_simsimd::cosine_distance(&b, &zero),
+        1.0,
+        "ss zero-norm (swapped)"
+    );
+    assert_eq!(
+        simd_simsimd::cosine_distance(&zero, &zero),
+        1.0,
+        "ss both-zero"
+    );
     assert_eq!(simd::cosine_distance(&zero, &b), 1.0, "api zero-norm");
 }

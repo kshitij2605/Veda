@@ -11,8 +11,8 @@
 //! seen). This is the data the Niriksha "Incidents" panel reads. Empty
 //! until the correlator has run at least once.
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde::Serialize;
 
 use crate::advisor::incidents::Incident;
@@ -97,6 +97,9 @@ mod tests {
     #[test]
     fn noise_reduction_empty_is_zero() {
         let nr = noise_reduction(&[]);
-        assert_eq!((nr.event_count, nr.incident_count, nr.suppressed), (0, 0, 0));
+        assert_eq!(
+            (nr.event_count, nr.incident_count, nr.suppressed),
+            (0, 0, 0)
+        );
     }
 }

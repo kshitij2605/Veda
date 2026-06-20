@@ -36,8 +36,8 @@ use std::sync::Arc;
 use openraft::storage::{LogState, Snapshot};
 use openraft::{
     AnyError, BasicNode, Entry, EntryPayload, LogId, Membership, RaftLogReader,
-    RaftSnapshotBuilder, RaftStorage, SnapshotMeta, StorageError, StorageIOError,
-    StoredMembership, Vote,
+    RaftSnapshotBuilder, RaftStorage, SnapshotMeta, StorageError, StorageIOError, StoredMembership,
+    Vote,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -75,7 +75,7 @@ fn atomic_write_blocking(path: &Path, bytes: Vec<u8>) -> std::io::Result<()> {
 async fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> Result<(), std::io::Error> {
     tokio::task::spawn_blocking(move || atomic_write_blocking(&path, bytes))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
 }
 
 /// Apply one WAL record to the in-memory LogInner during recovery.
@@ -92,11 +92,7 @@ fn apply_wal_record_to(inner: &mut LogInner, record: WalRecord) {
         }
         WalRecord::Truncate(log_id) => {
             inner.entries.retain(|&idx, _| idx < log_id.index);
-            inner.last_log_id = inner
-                .entries
-                .iter()
-                .next_back()
-                .map(|(_, e)| e.log_id);
+            inner.last_log_id = inner.entries.iter().next_back().map(|(_, e)| e.log_id);
         }
         WalRecord::Purge(log_id) => {
             inner.entries.retain(|&idx, _| idx > log_id.index);
@@ -303,8 +299,10 @@ impl MemLogState {
     /// Safe to call concurrently with reads. Holds the write lock
     /// for the duration so appends queue rather than race.
     pub async fn compact(&self) -> std::io::Result<()> {
-        let mut guard = self.inner.write().await;
-        let Some(wal) = guard.wal.clone() else { return Ok(()) };
+        let guard = self.inner.write().await;
+        let Some(wal) = guard.wal.clone() else {
+            return Ok(());
+        };
 
         let mut surviving: Vec<WalRecord> = Vec::new();
         if let Some(lid) = guard.last_purged {
@@ -380,7 +378,9 @@ impl StateInner {
     }
 
     async fn persist(&self) {
-        let Some(path) = self.path.clone() else { return };
+        let Some(path) = self.path.clone() else {
+            return;
+        };
         let bytes = match bincode::serialize(&self.to_persisted()) {
             Ok(b) => b,
             Err(e) => {
@@ -413,8 +413,10 @@ impl MemStateMachine {
     pub async fn with_dir(dir: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("raft_state.bin");
-        let mut inner = StateInner::default();
-        inner.path = Some(path.clone());
+        let mut inner = StateInner {
+            path: Some(path.clone()),
+            ..Default::default()
+        };
         if path.exists() {
             let bytes = std::fs::read(&path)?;
             match bincode::deserialize::<StatePersistedData>(&bytes) {
@@ -478,15 +480,11 @@ impl MemStateMachine {
             last_applied_index: guard.applied_log.map(|l| l.index).unwrap_or(0),
             state_bytes,
         };
-        let bytes = bincode::serialize(&payload)
-            .map_err(|e| format!("snapshot serialize: {e}"))?;
+        let bytes = bincode::serialize(&payload).map_err(|e| format!("snapshot serialize: {e}"))?;
         let snapshot_id = format!(
             "{}-{}",
             guard.applied_log.map(|l| l.index).unwrap_or(0),
-            guard
-                .applied_log
-                .map(|l| l.leader_id.term)
-                .unwrap_or(0)
+            guard.applied_log.map(|l| l.leader_id.term).unwrap_or(0)
         );
         Ok(StoredSnapshot {
             meta: SnapshotMeta {
@@ -499,8 +497,8 @@ impl MemStateMachine {
     }
 
     pub async fn install_snapshot(&self, snap: StoredSnapshot) -> Result<(), String> {
-        let payload: VedaSnapshot = bincode::deserialize(&snap.bytes)
-            .map_err(|e| format!("snapshot deserialize: {e}"))?;
+        let payload: VedaSnapshot =
+            bincode::deserialize(&snap.bytes).map_err(|e| format!("snapshot deserialize: {e}"))?;
         let restored: crate::store::ClusterStateMachine =
             bincode::deserialize(&payload.state_bytes)
                 .map_err(|e| format!("state machine deserialize: {e}"))?;
@@ -660,10 +658,7 @@ impl RaftStorage<VedaTypeConfig> for MemRaftStorage {
         Ok(())
     }
 
-    async fn purge_logs_upto(
-        &mut self,
-        log_id: LogId<NodeId>,
-    ) -> Result<(), StorageError<NodeId>> {
+    async fn purge_logs_upto(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
         self.log.purge(log_id).await;
         Ok(())
     }
@@ -672,13 +667,8 @@ impl RaftStorage<VedaTypeConfig> for MemRaftStorage {
 
     async fn last_applied_state(
         &mut self,
-    ) -> Result<
-        (
-            Option<LogId<NodeId>>,
-            StoredMembership<NodeId, BasicNode>,
-        ),
-        StorageError<NodeId>,
-    > {
+    ) -> Result<(Option<LogId<NodeId>>, StoredMembership<NodeId, BasicNode>), StorageError<NodeId>>
+    {
         Ok((self.sm.applied_log().await, self.sm.membership().await))
     }
 
@@ -909,10 +899,7 @@ mod tests {
         assert_eq!(fetched.len(), 3);
 
         // -- apply_to_state_machine handles Blank / Normal / Membership
-        let responses = store
-            .apply_to_state_machine(&[e1, e2, e3])
-            .await
-            .unwrap();
+        let responses = store.apply_to_state_machine(&[e1, e2, e3]).await.unwrap();
         assert_eq!(responses.len(), 3);
         assert!(matches!(responses[1], ClusterResponse::Ok));
         let (applied, membership) = store.last_applied_state().await.unwrap();

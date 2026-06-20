@@ -49,7 +49,11 @@ pub async fn request_metrics(req: Request, next: Next) -> Response {
     // Record errors for 4xx/5xx responses.
     let status_code = response.status().as_u16();
     if status_code >= 400 {
-        let error_type = if status_code >= 500 { "server_error" } else { "client_error" };
+        let error_type = if status_code >= 500 {
+            "server_error"
+        } else {
+            "client_error"
+        };
         metrics::counter!(m::ERRORS_TOTAL, "type" => error_type).increment(1);
     }
 

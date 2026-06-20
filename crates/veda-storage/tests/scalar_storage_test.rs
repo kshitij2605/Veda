@@ -190,13 +190,13 @@ fn test_range_index_search_range() {
     for doc_id in result.iter() {
         let price = prices[doc_id as usize];
         assert!(
-            price >= 100.0 && price <= 200.0,
+            (100.0..=200.0).contains(&price),
             "doc {doc_id} price {price} not in [100, 200]"
         );
     }
     // Verify no docs in range were missed.
     for (i, &price) in prices.iter().enumerate() {
-        if price >= 100.0 && price <= 200.0 {
+        if (100.0..=200.0).contains(&price) {
             assert!(
                 result.contains(i as u32),
                 "doc {i} price {price} should be in range result"
@@ -492,7 +492,7 @@ fn test_cross_index_category_and_price_range() {
         assert!(inverted.contains("electronics", doc_id));
         let price = pseudo_random_f64(doc_id, 10.0, 500.0);
         assert!(
-            price >= 100.0 && price <= 200.0,
+            (100.0..=200.0).contains(&price),
             "doc {doc_id} price {price} not in range"
         );
     }

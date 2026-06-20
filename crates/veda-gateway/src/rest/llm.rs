@@ -16,14 +16,12 @@
 //! Wire: the client mirrors OpenAI `chat/completions`, so this also
 //! works against vLLM, llama.cpp server, Ollama, etc.
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
-use veda_core::llm_client::{
-    ChatMessage, CompletionOptions, CompletionResult, LlmClient,
-};
+use veda_core::llm_client::{ChatMessage, CompletionOptions, CompletionResult, LlmClient};
 
 use super::collections::ErrorResponse;
 use super::state::AppState;

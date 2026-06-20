@@ -153,7 +153,11 @@ mod tests {
             let p = dir.path().join("idx.bin");
             idx.save(&p).unwrap();
             let re = ScalarQuantIndex::load(&p, DistanceMetric::Cosine, 48).unwrap();
-            assert_eq!(re.dimension(), 48, "bits={bits} dimension preserved after load");
+            assert_eq!(
+                re.dimension(),
+                48,
+                "bits={bits} dimension preserved after load"
+            );
         }
     }
 }

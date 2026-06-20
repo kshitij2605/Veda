@@ -6,12 +6,12 @@
 //! diff chunk boundaries / size distributions side-by-side before
 //! committing to a strategy for a real ingest.
 
-use axum::http::StatusCode;
 use axum::Json;
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
-use veda_core::chunking::{chunk_markdown, TextChunk};
+use veda_core::chunking::{TextChunk, chunk_markdown};
 
 use super::collections::ErrorResponse;
 use super::document::parse_chunking_strategy;
@@ -105,9 +105,7 @@ pub async fn preview(
             spec.chunk_size,
             spec.chunk_overlap,
         );
-        let label = spec
-            .label
-            .unwrap_or_else(|| spec.strategy_name.clone());
+        let label = spec.label.unwrap_or_else(|| spec.strategy_name.clone());
 
         let start = Instant::now();
         let chunks: Vec<TextChunk> = chunk_markdown(&req.text, &strategy);

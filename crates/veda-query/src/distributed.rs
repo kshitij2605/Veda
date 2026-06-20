@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use veda_core::error::{Result, VedaError};
 use veda_core::types::DistanceMetric;
 
-use crate::fusion::{fuse_results, FusedResult, MultiVectorQuery};
+use crate::fusion::{FusedResult, MultiVectorQuery, fuse_results};
 use crate::search::{
     MultiVectorSearchRequest, ScoredRecord, SearchResponse, SearchTimings, SparseSearchRequest,
     VectorSearchRequest,
@@ -89,7 +89,9 @@ impl DistributedQueryExecutor {
         }
         let scoring_start = std::time::Instant::now();
         all_results.sort_by(|a, b| {
-            a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal)
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         all_results.truncate(request.k);
         agg.scoring_ms += scoring_start.elapsed().as_secs_f64() * 1000.0;

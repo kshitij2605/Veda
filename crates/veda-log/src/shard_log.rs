@@ -73,7 +73,9 @@ impl ShardLog {
         for entry in std::fs::read_dir(&base)? {
             let entry = entry?;
             let name = entry.file_name();
-            let Some(name_str) = name.to_str() else { continue };
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
             if let Some(stem) = name_str.strip_suffix(".log")
                 && let Ok(seq) = stem.parse::<u64>()
             {
@@ -130,10 +132,7 @@ impl ShardLog {
         op: LogOp,
         payload: bytes::Bytes,
     ) -> Result<u64, ShardLogError> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("ShardLog mutex poisoned");
+        let mut state = self.state.lock().expect("ShardLog mutex poisoned");
 
         // Decide whether to roll over before this append.
         if state.active.should_roll() {
@@ -149,7 +148,9 @@ impl ShardLog {
             op,
             payload,
         };
-        let frame = entry.encode().map_err(|e| ShardLogError::Encode(e.to_string()))?;
+        let frame = entry
+            .encode()
+            .map_err(|e| ShardLogError::Encode(e.to_string()))?;
         let offset = state.active.append(&frame)?;
         state.active.maybe_index(seq_id, offset)?;
         state.active.sync_all()?;
@@ -169,10 +170,7 @@ impl ShardLog {
         // the correctness path. Optimised seek lands in a B follow-up.
         let mut seg_paths: Vec<PathBuf> = state.segments.iter().cloned().collect();
         // Include the active segment if it isn't already in the list.
-        if !seg_paths
-            .iter()
-            .any(|p| p == &state.active.log_path)
-        {
+        if !seg_paths.iter().any(|p| p == &state.active.log_path) {
             seg_paths.push(state.active.log_path.clone());
         }
         // No-segments edge case shouldn't happen (open() always
@@ -215,10 +213,7 @@ impl ShardLog {
 
     /// Next seq_id that would be assigned (= durable_seq + 1 in steady state).
     pub fn next_seq(&self) -> u64 {
-        self.state
-            .lock()
-            .expect("ShardLog mutex poisoned")
-            .next_seq
+        self.state.lock().expect("ShardLog mutex poisoned").next_seq
     }
 
     /// Phase D: copy every segment file from `self` into
@@ -250,9 +245,9 @@ impl ShardLog {
         let mut copied_names: std::collections::HashSet<std::ffi::OsString> =
             std::collections::HashSet::new();
         for seg_path in &state.segments {
-            let file_name = seg_path
-                .file_name()
-                .ok_or_else(|| ShardLogError::Io(std::io::Error::other("segment has no file name")))?;
+            let file_name = seg_path.file_name().ok_or_else(|| {
+                ShardLogError::Io(std::io::Error::other("segment has no file name"))
+            })?;
             std::fs::copy(seg_path, dest.join(file_name))?;
             copied_names.insert(file_name.to_os_string());
         }

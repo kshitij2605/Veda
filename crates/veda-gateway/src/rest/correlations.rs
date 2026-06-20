@@ -15,11 +15,11 @@
 
 use std::collections::HashMap;
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
-use crate::rest::query_log::{read_window_entries, QueryLogEntry};
+use crate::rest::query_log::{QueryLogEntry, read_window_entries};
 use crate::rest::state::AppState;
 use crate::tenant::{self, Tenant};
 
@@ -253,21 +253,15 @@ pub async fn correlations(
                     e.query_type.clone()
                 }
             }),
-            "has_filter" => build_dimension(dim, &entries, |e| {
-                format!("filter={}", e.has_filter)
-            }),
-            "reranked" => {
-                build_dimension(dim, &entries, |e| format!("reranked={}", e.reranked))
-            }
+            "has_filter" => build_dimension(dim, &entries, |e| format!("filter={}", e.has_filter)),
+            "reranked" => build_dimension(dim, &entries, |e| format!("reranked={}", e.reranked)),
             "index_type" => build_dimension(dim, &entries, |e| {
                 e.index_type.clone().unwrap_or_else(|| "<none>".to_owned())
             }),
-            "result_count" => {
-                build_dimension(dim, &entries, |e| count_bucket(e.result_count as u64).to_owned())
-            }
-            "top_k" => {
-                build_dimension(dim, &entries, |e| count_bucket(e.top_k as u64).to_owned())
-            }
+            "result_count" => build_dimension(dim, &entries, |e| {
+                count_bucket(e.result_count as u64).to_owned()
+            }),
+            "top_k" => build_dimension(dim, &entries, |e| count_bucket(e.top_k as u64).to_owned()),
             _ => unreachable!("dimension list is filtered to ALL_DIMENSIONS"),
         })
         .collect();

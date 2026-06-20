@@ -18,13 +18,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use openraft::BasicNode;
 use openraft::error::{InstallSnapshotError, RPCError, RaftError, Unreachable};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
-    InstallSnapshotResponse, VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
+    VoteRequest, VoteResponse,
 };
-use openraft::BasicNode;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::raft::{NodeId, VedaTypeConfig};
@@ -57,6 +57,10 @@ impl NodeAddressBook {
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
     }
+
+    pub async fn is_empty(&self) -> bool {
+        self.inner.read().await.is_empty()
+    }
 }
 
 /// In-process channel-based "network" for unit tests. Sends bincode bytes
@@ -87,11 +91,7 @@ impl InProcessNetwork {
         self.routes.lock().await.remove(&node_id);
     }
 
-    pub async fn send(
-        &self,
-        target: NodeId,
-        payload: Vec<u8>,
-    ) -> Result<(), &'static str> {
+    pub async fn send(&self, target: NodeId, payload: Vec<u8>) -> Result<(), &'static str> {
         let sender = {
             let guard = self.routes.lock().await;
             guard.get(&target).cloned()
@@ -122,11 +122,7 @@ pub struct InProcessConn {
 impl RaftNetworkFactory<VedaTypeConfig> for Arc<InProcessNetwork> {
     type Network = InProcessConn;
 
-    async fn new_client(
-        &mut self,
-        target: NodeId,
-        _node: &BasicNode,
-    ) -> Self::Network {
+    async fn new_client(&mut self, target: NodeId, _node: &BasicNode) -> Self::Network {
         InProcessConn {
             target,
             network: self.clone(),
@@ -159,10 +155,7 @@ impl RaftNetwork<VedaTypeConfig> for InProcessConn {
         &mut self,
         _rpc: AppendEntriesRequest<VedaTypeConfig>,
         _option: RPCOption,
-    ) -> Result<
-        AppendEntriesResponse<NodeId>,
-        RPCError<NodeId, BasicNode, RaftError<NodeId>>,
-    > {
+    ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
         // The in-process transport never delivers responses across
         // tasks today — it is a fire-and-forget byte router. In
         // single-node mode openraft never asks the leader to talk to
@@ -197,10 +190,7 @@ impl RaftNetwork<VedaTypeConfig> for InProcessConn {
         &mut self,
         _rpc: VoteRequest<NodeId>,
         _option: RPCOption,
-    ) -> Result<
-        VoteResponse<NodeId>,
-        RPCError<NodeId, BasicNode, RaftError<NodeId>>,
-    > {
+    ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
         Err(unreachable(
             self.target,
             "Vote via in-process transport not routed",

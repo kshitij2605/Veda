@@ -92,12 +92,16 @@ pub fn fuse_results(
 
     for (field_idx, (_field_name, results)) in field_results.iter().enumerate() {
         for (rank, result) in results.iter().enumerate() {
-            let entry = doc_scores.entry(result.id).or_insert_with(|| DocAccumulator {
-                segment_id: result.segment_id,
-                doc_id: result.doc_id,
-                field_entries: Vec::new(),
-            });
-            entry.field_entries.push((field_idx, rank + 1, result.distance));
+            let entry = doc_scores
+                .entry(result.id)
+                .or_insert_with(|| DocAccumulator {
+                    segment_id: result.segment_id,
+                    doc_id: result.doc_id,
+                    field_entries: Vec::new(),
+                });
+            entry
+                .field_entries
+                .push((field_idx, rank + 1, result.distance));
         }
     }
 
@@ -114,9 +118,7 @@ pub fn fuse_results(
             fuse_weighted_sum(&doc_scores, field_results, &normalised, limit)
         }
         FusionStrategy::Dbsf => fuse_dbsf(&doc_scores, field_results, limit),
-        FusionStrategy::Intersection => {
-            fuse_intersection(&doc_scores, field_results, limit)
-        }
+        FusionStrategy::Intersection => fuse_intersection(&doc_scores, field_results, limit),
     }
 }
 
@@ -137,9 +139,7 @@ fn normalise_weights(weights: &[f32], n: usize) -> Vec<f32> {
         }
     } else {
         let uniform = 1.0 / n as f32;
-        for w in &mut out {
-            *w = uniform;
-        }
+        out.fill(uniform);
     }
     out
 }
@@ -471,12 +471,7 @@ mod tests {
     #[test]
     fn convex_combination_normalises_weights() {
         let (id_top, id_mid, id_low, fixture) = two_field_fixture();
-        let results_un = fuse_results(
-            &fixture,
-            FusionStrategy::ConvexCombination,
-            &[3.0, 1.0],
-            10,
-        );
+        let results_un = fuse_results(&fixture, FusionStrategy::ConvexCombination, &[3.0, 1.0], 10);
         let results_norm = fuse_results(
             &fixture,
             FusionStrategy::ConvexCombination,
@@ -505,12 +500,7 @@ mod tests {
     #[test]
     fn convex_combination_zero_weights_fall_back_uniform() {
         let (id_top, _, id_low, fixture) = two_field_fixture();
-        let r = fuse_results(
-            &fixture,
-            FusionStrategy::ConvexCombination,
-            &[0.0, 0.0],
-            10,
-        );
+        let r = fuse_results(&fixture, FusionStrategy::ConvexCombination, &[0.0, 0.0], 10);
         assert_eq!(r.len(), 3);
         // Equivalent to (0.5, 0.5) — id_top dominates.
         assert_eq!(r[0].id, id_top);

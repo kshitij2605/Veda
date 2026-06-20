@@ -8,7 +8,7 @@
 use axum::Json;
 use serde::Deserialize;
 
-use veda_query::adaptive::{route_query, RouteRecommendation};
+use veda_query::adaptive::{RouteRecommendation, route_query};
 
 #[derive(Debug, Deserialize)]
 pub struct RouteRequest {

@@ -134,7 +134,9 @@ pub struct PercolatorCommit {
 pub enum TxnError {
     #[error("lock conflict on key {key:?}: held by txn '{held_by}'")]
     LockConflict { key: Vec<u8>, held_by: String },
-    #[error("write-write conflict on key {key:?}: newer commit_ts={newer_ts} > start_ts={start_ts}")]
+    #[error(
+        "write-write conflict on key {key:?}: newer commit_ts={newer_ts} > start_ts={start_ts}"
+    )]
     WriteWriteConflict {
         key: Vec<u8>,
         newer_ts: u64,
@@ -317,7 +319,8 @@ impl TxnCoordinator {
                         key: m.key.clone(),
                         newer_ts: 0,
                         start_ts: handle.start_ts_ns,
-                    }.tap_log(format!("mvcc.put: {e}"))
+                    }
+                    .tap_log(format!("mvcc.put: {e}"))
                 })?;
             }
         }
@@ -417,7 +420,10 @@ mod tests {
     use veda_time::LocalTso;
 
     fn mut_put(key: &[u8], v: &[u8]) -> Mutation {
-        Mutation { key: key.to_vec(), value: Some(Bytes::copy_from_slice(v)) }
+        Mutation {
+            key: key.to_vec(),
+            value: Some(Bytes::copy_from_slice(v)),
+        }
     }
 
     #[tokio::test]
@@ -507,10 +513,13 @@ mod tests {
         let t2 = cc.begin().await.unwrap();
         match cc.read(&t2, b"k").await.unwrap() {
             ReadVisibility::Visible(Some(bytes)) => assert_eq!(&bytes[..], b"v1"),
-            other => panic!("expected Visible(v1), got {other:?}", other = match other {
-                ReadVisibility::Visible(v) => format!("Visible({v:?})"),
-                ReadVisibility::Locked { held_by, .. } => format!("Locked by {held_by}"),
-            }),
+            other => panic!(
+                "expected Visible(v1), got {other:?}",
+                other = match other {
+                    ReadVisibility::Visible(v) => format!("Visible({v:?})"),
+                    ReadVisibility::Locked { held_by, .. } => format!("Locked by {held_by}"),
+                }
+            ),
         }
         // T3 commits k=v3 while T2 still open.
         let mut t3 = cc.begin().await.unwrap();
@@ -581,6 +590,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let rolled = cc.resolve_orphan_locks().await;
         assert!(rolled >= 1);
-        assert!(cc.locks.get(b"k").await.is_none(), "orphan resolver must drop the expired lock");
+        assert!(
+            cc.locks.get(b"k").await.is_none(),
+            "orphan resolver must drop the expired lock"
+        );
     }
 }

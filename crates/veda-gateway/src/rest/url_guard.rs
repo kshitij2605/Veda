@@ -130,8 +130,7 @@ pub fn check_url_allowed(url: &str) -> Result<(), UrlGuardError> {
 
 /// [`check_url_allowed`] with an explicit policy (lets tests avoid env).
 pub fn check_url_with_policy(url: &str, policy: &WebPolicy) -> Result<(), UrlGuardError> {
-    let parsed =
-        url::Url::parse(url).map_err(|_| UrlGuardError::Malformed(url.to_owned()))?;
+    let parsed = url::Url::parse(url).map_err(|_| UrlGuardError::Malformed(url.to_owned()))?;
 
     // 1. Scheme: only http/https.
     let scheme = parsed.scheme();
@@ -323,8 +322,7 @@ mod tests {
     #[test]
     fn blocks_cloud_metadata_link_local() {
         assert!(matches!(
-            check_url_with_policy("http://169.254.169.254/latest/meta-data/", &open())
-                .unwrap_err(),
+            check_url_with_policy("http://169.254.169.254/latest/meta-data/", &open()).unwrap_err(),
             UrlGuardError::PrivateAddress(_)
         ));
     }

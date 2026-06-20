@@ -133,7 +133,9 @@ pub fn default_web_agent() -> Agent {
     Agent {
         id: "veda-web".to_owned(),
         name: "Veda Web".to_owned(),
-        description: "Web-research assistant that searches and reads the live web to ground its answers.".to_owned(),
+        description:
+            "Web-research assistant that searches and reads the live web to ground its answers."
+                .to_owned(),
         instructions: "You are Veda's web-research assistant. Use web_search to find relevant \
 sources, then fetch_url to read the most promising ones before answering. You may also use \
 search to ground answers in the user's own collections. Always cite the URLs you used; if a \
@@ -298,7 +300,10 @@ mod tests {
         };
         let v = serde_json::to_value(&step).unwrap();
         assert_eq!(v["kind"], "tool_result");
-        assert!(v.get("duration_ms").is_none(), "duration_ms should be skipped: {v}");
+        assert!(
+            v.get("duration_ms").is_none(),
+            "duration_ms should be skipped: {v}"
+        );
         // Round-trips and back-compat: old payload without duration_ms parses.
         let back: AgentStep = serde_json::from_value(v).unwrap();
         assert_eq!(back, step);
@@ -336,8 +341,13 @@ mod tests {
 
     #[test]
     fn other_step_variants_unchanged() {
-        let reasoning = AgentStep::Reasoning { text: "hi".to_owned() };
-        assert_eq!(serde_json::to_value(&reasoning).unwrap()["kind"], "reasoning");
+        let reasoning = AgentStep::Reasoning {
+            text: "hi".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(&reasoning).unwrap()["kind"],
+            "reasoning"
+        );
         let call = AgentStep::ToolCall {
             tool_call_id: "c1".to_owned(),
             tool_id: "t".to_owned(),
@@ -440,7 +450,13 @@ mod tests {
         };
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("metrics").is_none(), "metrics should be skipped: {v}");
-        assert!(v.get("citations").is_none(), "empty citations should be skipped: {v}");
-        assert!(v.get("grounding").is_none(), "grounding should be skipped: {v}");
+        assert!(
+            v.get("citations").is_none(),
+            "empty citations should be skipped: {v}"
+        );
+        assert!(
+            v.get("grounding").is_none(),
+            "grounding should be skipped: {v}"
+        );
     }
 }

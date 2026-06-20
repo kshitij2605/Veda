@@ -62,7 +62,15 @@ fn parse_json_object(obj: Map<String, Value>, default_level_uc: &str, now_ms: i6
     // Remaining top-level scalar keys → fields (skip the keys we consumed
     // for message/level/ts, and skip non-scalar values).
     let consumed = [
-        "message", "msg", "body", "level", "severity", "lvl", "timestamp", "ts", "time",
+        "message",
+        "msg",
+        "body",
+        "level",
+        "severity",
+        "lvl",
+        "timestamp",
+        "ts",
+        "time",
         "@timestamp",
     ];
     let mut fields = Map::new();
@@ -75,7 +83,12 @@ fn parse_json_object(obj: Map<String, Value>, default_level_uc: &str, now_ms: i6
         }
     }
 
-    ParsedLog { ts_ms, level, message, fields }
+    ParsedLog {
+        ts_ms,
+        level,
+        message,
+        fields,
+    }
 }
 
 fn parse_plain_line(line: &str, default_level_uc: &str, now_ms: i64) -> ParsedLog {
@@ -85,24 +98,24 @@ fn parse_plain_line(line: &str, default_level_uc: &str, now_ms: i64) -> ParsedLo
     // Try a leading RFC3339 timestamp.
     let mut ts_ms = now_ms;
     let mut rest_start = 0usize; // byte offset into `trimmed` after consumed prefix
-    if let Some(first) = tokens.clone().next() {
-        if let Some(ms) = rfc3339_to_ms(first) {
-            ts_ms = ms;
-            // advance past the timestamp token.
-            rest_start = first.len();
-            let _ = tokens.next();
-        }
+    if let Some(first) = tokens.clone().next()
+        && let Some(ms) = rfc3339_to_ms(first)
+    {
+        ts_ms = ms;
+        // advance past the timestamp token.
+        rest_start = first.len();
+        let _ = tokens.next();
     }
 
     // Try a level token at the (new) front of the remaining tokens.
     let mut level = default_level_uc.to_owned();
     let remainder = trimmed[rest_start..].trim_start();
     let mut msg_start_in_remainder = 0usize;
-    if let Some(tok) = remainder.split_whitespace().next() {
-        if let Some(lvl) = match_level(tok) {
-            level = lvl;
-            msg_start_in_remainder = tok.len();
-        }
+    if let Some(tok) = remainder.split_whitespace().next()
+        && let Some(lvl) = match_level(tok)
+    {
+        level = lvl;
+        msg_start_in_remainder = tok.len();
     }
 
     let message = remainder[msg_start_in_remainder..].trim().to_owned();
@@ -114,7 +127,12 @@ fn parse_plain_line(line: &str, default_level_uc: &str, now_ms: i64) -> ParsedLo
         message
     };
 
-    ParsedLog { ts_ms, level, message, fields: Map::new() }
+    ParsedLog {
+        ts_ms,
+        level,
+        message,
+        fields: Map::new(),
+    }
 }
 
 /// Match a bare level token (case-insensitive). Returns the canonical
@@ -134,10 +152,10 @@ fn match_level(tok: &str) -> Option<String> {
 /// First present, non-empty string value among `keys`.
 fn first_string(obj: &Map<String, Value>, keys: &[&str]) -> Option<String> {
     for k in keys {
-        if let Some(Value::String(s)) = obj.get(*k) {
-            if !s.is_empty() {
-                return Some(s.clone());
-            }
+        if let Some(Value::String(s)) = obj.get(*k)
+            && !s.is_empty()
+        {
+            return Some(s.clone());
         }
     }
     None
@@ -146,7 +164,10 @@ fn first_string(obj: &Map<String, Value>, keys: &[&str]) -> Option<String> {
 /// A scalar JSON value (string / number / bool / null) — arrays and
 /// objects are dropped from `fields`.
 fn is_scalar(v: &Value) -> bool {
-    matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null)
+    matches!(
+        v,
+        Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null
+    )
 }
 
 /// Convert a JSON timestamp value to unix millis. Accepts an RFC3339
@@ -240,7 +261,10 @@ mod tests {
         let p = parse_log_line(line, "INFO", NOW);
         assert_eq!(p.level, "WARN");
         assert!(p.message.contains("cache miss"), "got: {}", p.message);
-        assert!(!p.message.contains("WARN"), "level token should be stripped");
+        assert!(
+            !p.message.contains("WARN"),
+            "level token should be stripped"
+        );
         assert_ne!(p.ts_ms, NOW, "ts should be parsed, not now");
     }
 

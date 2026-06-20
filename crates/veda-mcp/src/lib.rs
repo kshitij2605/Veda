@@ -21,10 +21,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 /// Returns `None` when the line is not valid JSON at all (caller skips it).
 pub fn is_request(line: &str) -> Option<bool> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    let has_id = value
-        .get("id")
-        .map(|id| !id.is_null())
-        .unwrap_or(false);
+    let has_id = value.get("id").map(|id| !id.is_null()).unwrap_or(false);
     Some(has_id)
 }
 
@@ -94,9 +91,15 @@ pub async fn forward_message(
     match result {
         Ok(resp) => match resp.text().await {
             Ok(text) => Some(text.replace(['\n', '\r'], " ")),
-            Err(e) => Some(error_response(&id, &format!("failed to read response body: {e}"))),
+            Err(e) => Some(error_response(
+                &id,
+                &format!("failed to read response body: {e}"),
+            )),
         },
-        Err(e) => Some(error_response(&id, &format!("HTTP request to Veda failed: {e}"))),
+        Err(e) => Some(error_response(
+            &id,
+            &format!("HTTP request to Veda failed: {e}"),
+        )),
     }
 }
 
@@ -249,8 +252,7 @@ mod tests {
     async fn malformed_line_returns_none_without_network() {
         // No mock server: a malformed line must short-circuit before any HTTP.
         let client = Client::new();
-        let out = forward_message(&client, "http://127.0.0.1:1/v1/mcp", None, "}{ not json")
-            .await;
+        let out = forward_message(&client, "http://127.0.0.1:1/v1/mcp", None, "}{ not json").await;
         assert!(out.is_none());
     }
 

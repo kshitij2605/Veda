@@ -39,9 +39,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
-use veda_coordinator::linearisability_checker::{
-    check_history, History, OpKind, OpOutcome,
-};
+use veda_coordinator::linearisability_checker::{History, OpKind, OpOutcome, check_history};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,14 +59,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(4);
-    let collection = std::env::var("VEDA_LIN_COLLECTION")
-        .unwrap_or_else(|_| "lin_smoke".into());
+    let collection = std::env::var("VEDA_LIN_COLLECTION").unwrap_or_else(|_| "lin_smoke".into());
     let history_out = std::env::var("VEDA_LIN_HISTORY_OUT")
         .unwrap_or_else(|_| "linearisability-history.jsonl".into());
 
-    eprintln!(
-        "[lin] driving cluster: {nodes:?} duration={duration_secs}s clients={clients}"
-    );
+    eprintln!("[lin] driving cluster: {nodes:?} duration={duration_secs}s clients={clients}");
 
     // Use the leader's node to create the collection if needed.
     // For simplicity just try every node; whichever forwards to
@@ -124,8 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Insert a fresh record with a deterministic payload.
                     let payload = format!("client{}-seq{}", client_id, rng_state);
                     let started = Instant::now();
-                    let (id, outcome) =
-                        insert_record(&client, node, &collection, &payload).await;
+                    let (id, outcome) = insert_record(&client, node, &collection, &payload).await;
                     if let Some(real_id) = &id {
                         known_ids.lock().await.push(real_id.clone());
                     }
@@ -154,14 +148,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let inv = history.snapshot().await;
     eprintln!("[lin] history has {} invocations", inv.len());
-    history.dump_jsonl(std::path::Path::new(&history_out)).await?;
+    history
+        .dump_jsonl(std::path::Path::new(&history_out))
+        .await?;
     eprintln!("[lin] history dumped to {history_out}");
 
     // Elle-compatible JSONL: feed straight into `elle-cli` for an
     // independent cycle-detection check. Default path mirrors the
     // native dump so both files live side-by-side.
-    let elle_out = std::env::var("VEDA_LIN_ELLE_OUT")
-        .unwrap_or_else(|_| format!("{history_out}.elle.jsonl"));
+    let elle_out =
+        std::env::var("VEDA_LIN_ELLE_OUT").unwrap_or_else(|_| format!("{history_out}.elle.jsonl"));
     history
         .dump_elle_jsonl(std::path::Path::new(&elle_out))
         .await?;
@@ -266,10 +262,7 @@ async fn read_record(
             node, collection, id
         )
     } else {
-        format!(
-            "{}/v1/collections/{}/records/{}",
-            node, collection, id
-        )
+        format!("{}/v1/collections/{}/records/{}", node, collection, id)
     };
     match client.get(&url).send().await {
         Ok(resp) => {

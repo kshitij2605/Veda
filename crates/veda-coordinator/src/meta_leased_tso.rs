@@ -46,7 +46,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use async_trait::async_trait;
-use veda_time::{Hlc, HlcClock, Ts, TsRange, Tso, TsoError};
+use veda_time::{HlcClock, Ts, TsRange, Tso, TsoError};
 
 use crate::raft::NodeId;
 use crate::raft_coordinator::RaftCoordinator;
@@ -228,7 +228,10 @@ impl std::fmt::Debug for MetaLeasedTso {
 impl Tso for MetaLeasedTso {
     async fn allocate(&self, n: u32) -> Result<TsRange, TsoError> {
         if n == 0 {
-            return Ok(TsRange { start: self.clock.now(), count: 0 });
+            return Ok(TsRange {
+                start: self.clock.now(),
+                count: 0,
+            });
         }
         self.check_lease().await?;
         let start = self.clock.now();
@@ -274,10 +277,8 @@ mod tests {
         let coord = RaftCoordinator::start_single_node(1).await.unwrap();
         // Wait briefly for the leader to settle.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let tso = Arc::new(
-            MetaLeasedTso::new(coord.clone())
-                .with_lease_duration(Duration::from_secs(2)),
-        );
+        let tso =
+            Arc::new(MetaLeasedTso::new(coord.clone()).with_lease_duration(Duration::from_secs(2)));
         tso.start_renewer().await;
         // Renewer's first tick fires within renew_interval/2 ≈
         // 333ms. Give it a second.

@@ -31,7 +31,10 @@ impl EmbeddingClient {
         if self.is_real_endpoint() {
             self.embed_text_http(text).await
         } else {
-            Ok(deterministic_vector(text.as_bytes(), self.config.output_dimension))
+            Ok(deterministic_vector(
+                text.as_bytes(),
+                self.config.output_dimension,
+            ))
         }
     }
 
@@ -72,7 +75,11 @@ impl EmbeddingClient {
         self.config.endpoint.starts_with("http") && !self.config.endpoint.contains("mock")
     }
 
-    fn build_multimodal_payload(&self, data: &[u8], modality: Modality) -> Result<serde_json::Value> {
+    fn build_multimodal_payload(
+        &self,
+        data: &[u8],
+        modality: Modality,
+    ) -> Result<serde_json::Value> {
         let b64 = BASE64_STANDARD.encode(data);
         let (media_part, instruction) = match modality {
             Modality::Image => (
@@ -115,7 +122,10 @@ impl EmbeddingClient {
         let start = Instant::now();
         let body = self.build_multimodal_payload(data, modality)?;
 
-        let url = format!("{}/v1/embeddings", self.config.endpoint.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/embeddings",
+            self.config.endpoint.trim_end_matches('/')
+        );
         let mut trace_headers = reqwest::header::HeaderMap::new();
         crate::trace_propagation::inject_current_context(&mut trace_headers);
         let mut request = self
@@ -123,7 +133,9 @@ impl EmbeddingClient {
             .post(&url)
             .headers(trace_headers)
             .json(&body)
-            .timeout(std::time::Duration::from_secs(self.config.timeout_seconds as u64));
+            .timeout(std::time::Duration::from_secs(
+                self.config.timeout_seconds as u64,
+            ));
 
         if !self.config.api_key.is_empty() {
             request = request.bearer_auth(&self.config.api_key);
@@ -167,7 +179,10 @@ impl EmbeddingClient {
             "input": text
         });
 
-        let url = format!("{}/v1/embeddings", self.config.endpoint.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/embeddings",
+            self.config.endpoint.trim_end_matches('/')
+        );
         let mut trace_headers = reqwest::header::HeaderMap::new();
         crate::trace_propagation::inject_current_context(&mut trace_headers);
         let mut request = self
@@ -175,7 +190,9 @@ impl EmbeddingClient {
             .post(&url)
             .headers(trace_headers)
             .json(&body)
-            .timeout(std::time::Duration::from_secs(self.config.timeout_seconds as u64));
+            .timeout(std::time::Duration::from_secs(
+                self.config.timeout_seconds as u64,
+            ));
 
         if !self.config.api_key.is_empty() {
             request = request.bearer_auth(&self.config.api_key);
@@ -282,7 +299,9 @@ mod tests {
     fn test_build_multimodal_payload_image() {
         let client = EmbeddingClient::new(mock_config());
         let data = b"fake-image-bytes";
-        let payload = client.build_multimodal_payload(data, Modality::Image).unwrap();
+        let payload = client
+            .build_multimodal_payload(data, Modality::Image)
+            .unwrap();
 
         // Verify top-level structure
         assert_eq!(payload["model"], "test-vlm");

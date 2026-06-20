@@ -40,7 +40,12 @@ pub trait Rule: Send + Sync {
     fn default_severity(&self) -> Severity;
     /// Evaluate against a snapshot. `history` supplies rates/trends;
     /// `cfg` supplies thresholds. May return multiple hits.
-    fn check(&self, snap: &OpsSnapshot, history: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit>;
+    fn check(
+        &self,
+        snap: &OpsSnapshot,
+        history: &SnapshotHistory,
+        cfg: &RuleConfig,
+    ) -> Vec<RuleHit>;
 }
 
 /// Read a numeric threshold from the rule's `thresholds` JSON, falling
@@ -206,7 +211,12 @@ impl Rule for HighErrorRate {
     fn default_severity(&self) -> Severity {
         Severity::High
     }
-    fn check(&self, snap: &OpsSnapshot, history: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+    fn check(
+        &self,
+        snap: &OpsSnapshot,
+        history: &SnapshotHistory,
+        cfg: &RuleConfig,
+    ) -> Vec<RuleHit> {
         let limit = threshold_f64(cfg, "error_ratio", 0.05);
         let req_rate = history.rate("veda_requests_total", snap);
         let err_rate = history.rate("veda_errors_total", snap);
@@ -527,7 +537,12 @@ impl Rule for HighCpu {
     fn default_severity(&self) -> Severity {
         Severity::Medium
     }
-    fn check(&self, snap: &OpsSnapshot, history: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+    fn check(
+        &self,
+        snap: &OpsSnapshot,
+        history: &SnapshotHistory,
+        cfg: &RuleConfig,
+    ) -> Vec<RuleHit> {
         let limit = threshold_f64(cfg, "cpu_pct", 85.0);
         // Needs a previous snapshot to diff the jiffy counters.
         let Some(prev) = history.previous() else {
@@ -1171,7 +1186,12 @@ impl Rule for LlmCostBudget {
     fn default_severity(&self) -> Severity {
         Severity::Medium
     }
-    fn check(&self, snap: &OpsSnapshot, history: &SnapshotHistory, cfg: &RuleConfig) -> Vec<RuleHit> {
+    fn check(
+        &self,
+        snap: &OpsSnapshot,
+        history: &SnapshotHistory,
+        cfg: &RuleConfig,
+    ) -> Vec<RuleHit> {
         // Default budget: 1.0 USD per snapshot window. Operators retune via
         // RuleConfig thresholds `{"usd_per_window": x}`.
         let budget_usd = threshold_f64(cfg, "usd_per_window", 1.0);
@@ -1326,8 +1346,8 @@ pub fn run_rules(
 mod tests {
     use super::*;
     use crate::advisor::snapshot::{
-        CollectionSnapshot, GlobalSnapshot, HealthSnapshot, NodeSnapshot, OpsSnapshot,
-        QuerySnapshot, SnapshotHistory, DEFAULT_HISTORY_CAP,
+        CollectionSnapshot, DEFAULT_HISTORY_CAP, GlobalSnapshot, HealthSnapshot, NodeSnapshot,
+        OpsSnapshot, QuerySnapshot, SnapshotHistory,
     };
     use std::collections::HashMap;
 
@@ -1417,7 +1437,12 @@ mod tests {
     #[test]
     fn healthy_snapshot_trips_nothing() {
         let snap = base_snapshot();
-        let hits = run_rules(&catalog(), &snap, &empty_history(), &AdvisorConfig::default());
+        let hits = run_rules(
+            &catalog(),
+            &snap,
+            &empty_history(),
+            &AdvisorConfig::default(),
+        );
         assert!(hits.is_empty(), "unexpected hits: {hits:?}");
     }
 
@@ -1520,7 +1545,8 @@ mod tests {
 
         let mut now = base_snapshot();
         now.taken_at_ms = 10_000;
-        now.counters.insert("veda_llm_cost_usd_total".into(), 2_000_000.0);
+        now.counters
+            .insert("veda_llm_cost_usd_total".into(), 2_000_000.0);
 
         let mut hist = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
         hist.push(prev);
@@ -1539,10 +1565,15 @@ mod tests {
         prev.counters.insert("veda_llm_cost_usd_total".into(), 0.0);
         let mut now = base_snapshot();
         now.taken_at_ms = 10_000;
-        now.counters.insert("veda_llm_cost_usd_total".into(), 100_000.0); // $0.10
+        now.counters
+            .insert("veda_llm_cost_usd_total".into(), 100_000.0); // $0.10
         let mut hist = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
         hist.push(prev);
-        assert!(LlmCostBudget.check(&now, &hist, &RuleConfig::default()).is_empty());
+        assert!(
+            LlmCostBudget
+                .check(&now, &hist, &RuleConfig::default())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1554,12 +1585,21 @@ mod tests {
         now.taken_at_ms = 10_000;
         let mut hist = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
         hist.push(prev);
-        assert!(LlmCostBudget.check(&now, &hist, &RuleConfig::default()).is_empty());
+        assert!(
+            LlmCostBudget
+                .check(&now, &hist, &RuleConfig::default())
+                .is_empty()
+        );
 
         // Counter present but no history (cold start) → skip.
         let mut now2 = base_snapshot();
-        now2.counters.insert("veda_llm_cost_usd_total".into(), 5_000_000.0);
-        assert!(LlmCostBudget.check(&now2, &empty_history(), &RuleConfig::default()).is_empty());
+        now2.counters
+            .insert("veda_llm_cost_usd_total".into(), 5_000_000.0);
+        assert!(
+            LlmCostBudget
+                .check(&now2, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1567,7 +1607,7 @@ mod tests {
         // 11 baseline @ ~0.9 then 10 recent @ ~0.5 → drop ~0.4 > 0.15.
         let mut snap = base_snapshot();
         let mut series: Vec<f64> = vec![0.9; QUALITY_DRIFT_WINDOW + 1];
-        series.extend(std::iter::repeat(0.5).take(QUALITY_DRIFT_WINDOW));
+        series.extend(std::iter::repeat_n(0.5, QUALITY_DRIFT_WINDOW));
         snap.faithfulness_recent = series;
         let hits = QualityDrift.check(&snap, &empty_history(), &RuleConfig::default());
         assert_eq!(hits.len(), 1, "should fire on a sustained quality drop");
@@ -1579,7 +1619,11 @@ mod tests {
     fn quality_drift_silent_on_stable_series() {
         let mut snap = base_snapshot();
         snap.faithfulness_recent = vec![0.85; QUALITY_DRIFT_WINDOW * 2 + 1];
-        assert!(QualityDrift.check(&snap, &empty_history(), &RuleConfig::default()).is_empty());
+        assert!(
+            QualityDrift
+                .check(&snap, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1588,10 +1632,18 @@ mod tests {
         // Fewer than QUALITY_DRIFT_WINDOW + 1 samples → warm-up, no fire,
         // even though the few present samples drop sharply.
         snap.faithfulness_recent = vec![0.9, 0.9, 0.1, 0.1];
-        assert!(QualityDrift.check(&snap, &empty_history(), &RuleConfig::default()).is_empty());
+        assert!(
+            QualityDrift
+                .check(&snap, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
         // Empty series (no faithfulness produced) → skip.
         let snap2 = base_snapshot();
-        assert!(QualityDrift.check(&snap2, &empty_history(), &RuleConfig::default()).is_empty());
+        assert!(
+            QualityDrift
+                .check(&snap2, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1842,20 +1894,27 @@ mod tests {
         let mut snap = base_snapshot();
         snap.open_fds = Some(900);
         snap.fd_limit = None;
-        assert!(FdExhaustion
-            .check(&snap, &empty_history(), &RuleConfig::default())
-            .is_empty());
+        assert!(
+            FdExhaustion
+                .check(&snap, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
         let mut snap2 = base_snapshot();
         snap2.open_fds = None;
         snap2.fd_limit = Some(1000);
-        assert!(FdExhaustion
-            .check(&snap2, &empty_history(), &RuleConfig::default())
-            .is_empty());
+        assert!(
+            FdExhaustion
+                .check(&snap2, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
     }
 
     // --- synthetic rule ------------------------------------------------
 
-    fn summary(probe_id: &str, consecutive_failures: u32) -> crate::advisor::synthetic::SyntheticSummary {
+    fn summary(
+        probe_id: &str,
+        consecutive_failures: u32,
+    ) -> crate::advisor::synthetic::SyntheticSummary {
         crate::advisor::synthetic::SyntheticSummary {
             probe_id: probe_id.into(),
             name: format!("{probe_id} probe"),
@@ -1903,14 +1962,23 @@ mod tests {
             thresholds: serde_json::json!({ "consecutive_failures": 10 }),
             ..Default::default()
         };
-        assert!(SyntheticFailing.check(&snap, &empty_history(), &cfg).is_empty());
+        assert!(
+            SyntheticFailing
+                .check(&snap, &empty_history(), &cfg)
+                .is_empty()
+        );
     }
 
     #[test]
     fn resource_rules_skip_on_resourceless_snapshot() {
         // A snapshot with no resource signals must trip none of them.
         let snap = base_snapshot();
-        let hits = run_rules(&catalog(), &snap, &empty_history(), &AdvisorConfig::default());
+        let hits = run_rules(
+            &catalog(),
+            &snap,
+            &empty_history(),
+            &AdvisorConfig::default(),
+        );
         for id in [
             "disk_space_low",
             "high_cpu",
@@ -1918,7 +1986,10 @@ mod tests {
             "fd_exhaustion",
             "system_memory_low",
         ] {
-            assert!(find(&hits, id).is_none(), "{id} fired on resourceless snapshot");
+            assert!(
+                find(&hits, id).is_none(),
+                "{id} fired on resourceless snapshot"
+            );
         }
     }
 
@@ -1964,15 +2035,19 @@ mod tests {
     fn index_recall_degraded_skips_on_empty_or_none() {
         // Empty index_health → nothing.
         let snap = base_snapshot();
-        assert!(IndexRecallDegraded
-            .check(&snap, &empty_history(), &RuleConfig::default())
-            .is_empty());
+        assert!(
+            IndexRecallDegraded
+                .check(&snap, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
         // recall == None → skip cleanly (cannot judge).
         let mut snap2 = base_snapshot();
         snap2.index_health = vec![index_health("docs", Some(20.0), None)];
-        assert!(IndexRecallDegraded
-            .check(&snap2, &empty_history(), &RuleConfig::default())
-            .is_empty());
+        assert!(
+            IndexRecallDegraded
+                .check(&snap2, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1980,8 +2055,7 @@ mod tests {
         let mut snap = base_snapshot();
         // p95 120ms > 50ms AND recall 0.98 >= 0.95 → over-spending.
         snap.index_health = vec![index_health("docs", Some(120.0), Some(0.98))];
-        let hits =
-            IndexLatencyHighForRecall.check(&snap, &empty_history(), &RuleConfig::default());
+        let hits = IndexLatencyHighForRecall.check(&snap, &empty_history(), &RuleConfig::default());
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].rule_id, "index_latency_high_for_recall");
         assert_eq!(hits[0].scope, Scope::Index("docs".into()));
@@ -1994,8 +2068,7 @@ mod tests {
         // High p95 but recall NOT adequate → that's the recall rule's job.
         let mut snap = base_snapshot();
         snap.index_health = vec![index_health("docs", Some(120.0), Some(0.7))];
-        let hits =
-            IndexLatencyHighForRecall.check(&snap, &empty_history(), &RuleConfig::default());
+        let hits = IndexLatencyHighForRecall.check(&snap, &empty_history(), &RuleConfig::default());
         assert!(hits.is_empty());
     }
 
@@ -2003,29 +2076,34 @@ mod tests {
     fn index_latency_high_for_recall_silent_when_latency_low() {
         let mut snap = base_snapshot();
         snap.index_health = vec![index_health("docs", Some(10.0), Some(0.98))];
-        let hits =
-            IndexLatencyHighForRecall.check(&snap, &empty_history(), &RuleConfig::default());
+        let hits = IndexLatencyHighForRecall.check(&snap, &empty_history(), &RuleConfig::default());
         assert!(hits.is_empty());
     }
 
     #[test]
     fn index_latency_high_for_recall_skips_on_empty_or_none() {
         let snap = base_snapshot();
-        assert!(IndexLatencyHighForRecall
-            .check(&snap, &empty_history(), &RuleConfig::default())
-            .is_empty());
+        assert!(
+            IndexLatencyHighForRecall
+                .check(&snap, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
         // p95 present but recall None → skip (cannot tell it's over-spending).
         let mut snap2 = base_snapshot();
         snap2.index_health = vec![index_health("docs", Some(120.0), None)];
-        assert!(IndexLatencyHighForRecall
-            .check(&snap2, &empty_history(), &RuleConfig::default())
-            .is_empty());
+        assert!(
+            IndexLatencyHighForRecall
+                .check(&snap2, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
         // recall present but p95 None → skip.
         let mut snap3 = base_snapshot();
         snap3.index_health = vec![index_health("docs", None, Some(0.98))];
-        assert!(IndexLatencyHighForRecall
-            .check(&snap3, &empty_history(), &RuleConfig::default())
-            .is_empty());
+        assert!(
+            IndexLatencyHighForRecall
+                .check(&snap3, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
     }
 
     // --- capacity-forecast rules ---------------------------------------
@@ -2054,7 +2132,14 @@ mod tests {
     #[test]
     fn disk_full_forecast_fires_when_eta_within_window() {
         let mut snap = base_snapshot();
-        snap.forecasts = vec![forecast(&snap, "disk_used_pct", None, 80.0, 95.0, Some(3.0))];
+        snap.forecasts = vec![forecast(
+            &snap,
+            "disk_used_pct",
+            None,
+            80.0,
+            95.0,
+            Some(3.0),
+        )];
         let hits = DiskFullForecast.check(&snap, &empty_history(), &RuleConfig::default());
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].rule_id, "disk_full_forecast");
@@ -2069,7 +2154,14 @@ mod tests {
     fn disk_full_forecast_silent_when_eta_beyond_window() {
         let mut snap = base_snapshot();
         // ETA 30 days out, default window 7 → no fire.
-        snap.forecasts = vec![forecast(&snap, "disk_used_pct", None, 80.0, 95.0, Some(30.0))];
+        snap.forecasts = vec![forecast(
+            &snap,
+            "disk_used_pct",
+            None,
+            80.0,
+            95.0,
+            Some(30.0),
+        )];
         let hits = DiskFullForecast.check(&snap, &empty_history(), &RuleConfig::default());
         assert!(hits.is_empty());
     }
@@ -2078,15 +2170,19 @@ mod tests {
     fn disk_full_forecast_silent_when_no_eta_or_no_forecast() {
         // No forecast at all.
         let snap = base_snapshot();
-        assert!(DiskFullForecast
-            .check(&snap, &empty_history(), &RuleConfig::default())
-            .is_empty());
+        assert!(
+            DiskFullForecast
+                .check(&snap, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
         // Forecast present but flat (eta None) → no fire.
         let mut snap2 = base_snapshot();
         snap2.forecasts = vec![forecast(&snap2, "disk_used_pct", None, 80.0, 95.0, None)];
-        assert!(DiskFullForecast
-            .check(&snap2, &empty_history(), &RuleConfig::default())
-            .is_empty());
+        assert!(
+            DiskFullForecast
+                .check(&snap2, &empty_history(), &RuleConfig::default())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2110,7 +2206,14 @@ mod tests {
     #[test]
     fn recall_decay_forecast_fires_for_downward_collection() {
         let mut snap = base_snapshot();
-        snap.forecasts = vec![forecast(&snap, "recall", Some("docs"), 0.93, 0.90, Some(4.0))];
+        snap.forecasts = vec![forecast(
+            &snap,
+            "recall",
+            Some("docs"),
+            0.93,
+            0.90,
+            Some(4.0),
+        )];
         let hits = RecallDecayForecast.check(&snap, &empty_history(), &RuleConfig::default());
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].rule_id, "recall_decay_forecast");
@@ -2122,7 +2225,12 @@ mod tests {
     #[test]
     fn forecast_rules_silent_on_forecastless_snapshot() {
         let snap = base_snapshot();
-        let hits = run_rules(&catalog(), &snap, &empty_history(), &AdvisorConfig::default());
+        let hits = run_rules(
+            &catalog(),
+            &snap,
+            &empty_history(),
+            &AdvisorConfig::default(),
+        );
         for id in [
             "disk_full_forecast",
             "memory_growth_forecast",
@@ -2179,7 +2287,12 @@ mod tests {
     #[test]
     fn change_point_rule_silent_when_empty() {
         let snap = base_snapshot();
-        let hits = run_rules(&catalog(), &snap, &empty_history(), &AdvisorConfig::default());
+        let hits = run_rules(
+            &catalog(),
+            &snap,
+            &empty_history(),
+            &AdvisorConfig::default(),
+        );
         assert!(find(&hits, "change_point_detected").is_none());
     }
 }

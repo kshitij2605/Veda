@@ -28,9 +28,9 @@
 //!    — the gateway runs the normal search (oversampled), then reranks
 //!    results in place.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use veda_core::record::FieldValue;
@@ -225,6 +225,7 @@ async fn fetch_candidate_texts(
     skip(query, documents, model_override, instruction),
     fields(n_documents = documents.len(), top_k)
 )]
+#[allow(clippy::type_complexity)]
 pub async fn call_reranker(
     query: &str,
     documents: &[String],
@@ -260,7 +261,10 @@ pub async fn call_reranker(
         && !inst.is_empty()
         && let Some(obj) = body.as_object_mut()
     {
-        obj.insert("instruction".to_owned(), serde_json::Value::String(inst.to_owned()));
+        obj.insert(
+            "instruction".to_owned(),
+            serde_json::Value::String(inst.to_owned()),
+        );
     }
 
     let mut trace_headers = reqwest::header::HeaderMap::new();

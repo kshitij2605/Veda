@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Once;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::build_router;
@@ -72,7 +72,12 @@ async fn mvcc_get_with_at_far_future_returns_latest() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 201, "insert via mvcc should succeed: {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        201,
+        "insert via mvcc should succeed: {:?}",
+        resp.text().await
+    );
     let body: Value = resp.json().await.unwrap();
     let id = body["ids"][0].as_str().unwrap().to_owned();
 
@@ -82,7 +87,12 @@ async fn mvcc_get_with_at_far_future_returns_latest() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "far-future read should find: {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        200,
+        "far-future read should find: {:?}",
+        resp.text().await
+    );
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["fields"]["label"], json!("v1"));
 }
@@ -178,9 +188,16 @@ async fn mvcc_off_collection_uses_legacy_get_path() {
     // `at` is ignored. With ?at=0 — also ignored on a legacy
     // collection (would otherwise wrongly 404).
     let resp = c
-        .get(format!("{base}/v1/collections/legacy_docs/records/{id}?at=0"))
+        .get(format!(
+            "{base}/v1/collections/legacy_docs/records/{id}?at=0"
+        ))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "legacy read must ignore ?at=: {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        200,
+        "legacy read must ignore ?at=: {:?}",
+        resp.text().await
+    );
 }

@@ -66,7 +66,7 @@ fn make_record(i: u32) -> Record {
     );
     record.set("title", FieldValue::String(format!("item_{i}")));
     record.set("price", FieldValue::Float64(i as f64 * 1.5));
-    record.set("is_active", FieldValue::Bool(i % 2 == 0));
+    record.set("is_active", FieldValue::Bool(i.is_multiple_of(2)));
     record
 }
 
@@ -306,9 +306,7 @@ fn test_blob_ref_fields() {
         assert_eq!(record.id(), originals[i as usize].id());
         assert_eq!(
             record.get("image_data"),
-            Some(&FieldValue::BlobRef(format!(
-                "s3://bucket/image_{i}.png"
-            )))
+            Some(&FieldValue::BlobRef(format!("s3://bucket/image_{i}.png")))
         );
         assert_eq!(
             record.get("name"),

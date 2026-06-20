@@ -33,9 +33,8 @@ pub fn archive_segment_to_blob(
     let mut uploaded = 0usize;
     walk_dir(segment_dir, segment_dir, |rel, full| {
         let key = format!("{prefix}{}", rel.to_string_lossy().replace('\\', "/"));
-        let bytes = fs::read(full).map_err(|e| {
-            VedaError::Storage(format!("cold archive: read {full:?} failed: {e}"))
-        })?;
+        let bytes = fs::read(full)
+            .map_err(|e| VedaError::Storage(format!("cold archive: read {full:?} failed: {e}")))?;
         blob_store.put(&key, &bytes)?;
         uploaded += 1;
         Ok(())
@@ -65,9 +64,8 @@ pub fn restore_segment_from_blob(
             fs::create_dir_all(parent)?;
         }
         let bytes = blob_store.get(&key)?;
-        fs::write(&dest, bytes).map_err(|e| {
-            VedaError::Storage(format!("cold restore: write {dest:?} failed: {e}"))
-        })?;
+        fs::write(&dest, bytes)
+            .map_err(|e| VedaError::Storage(format!("cold restore: write {dest:?} failed: {e}")))?;
         count += 1;
     }
     Ok(count)

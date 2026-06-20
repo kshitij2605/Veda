@@ -206,7 +206,12 @@ fn test_delete_record_in_sealed_segment() {
     // Delete a record from the sealed segment.
     let found = mgr.delete_record(ids[3]).unwrap();
     assert!(found);
-    assert!(mgr.sealed_segments()[0].reader.delete_bitmap().is_deleted(3));
+    assert!(
+        mgr.sealed_segments()[0]
+            .reader
+            .delete_bitmap()
+            .is_deleted(3)
+    );
 }
 
 #[test]
@@ -216,7 +221,8 @@ fn test_load_from_disk() {
 
     // Create manager, insert, seal.
     {
-        let mut mgr = SegmentManager::new(schema.clone(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
+        let mut mgr =
+            SegmentManager::new(schema.clone(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
         for i in 0..25 {
             mgr.insert(make_record(i)).unwrap();
         }
@@ -306,13 +312,8 @@ fn test_cold_tier_demote_and_promote_roundtrip() {
     assert!(mgr.sealed_segments().is_empty());
 
     // At least one blob exists under the expected prefix.
-    let keys = store
-        .list(&format!("cold/manager_test/{seg_id}/"))
-        .unwrap();
-    assert!(
-        !keys.is_empty(),
-        "blob store should contain archived files"
-    );
+    let keys = store.list(&format!("cold/manager_test/{seg_id}/")).unwrap();
+    assert!(!keys.is_empty(), "blob store should contain archived files");
 
     // Promote back. Reader should re-open and metadata should be Warm.
     mgr.promote_from_cold(seg_id, &store, "manager_test")
@@ -339,6 +340,8 @@ fn test_cold_tier_demote_unknown_segment_returns_none() {
     let store = LocalBlobStore::new(blob_dir.path()).unwrap();
 
     let ghost_id = uuid::Uuid::new_v4();
-    let result = mgr.demote_to_cold(ghost_id, &store, "manager_test").unwrap();
+    let result = mgr
+        .demote_to_cold(ghost_id, &store, "manager_test")
+        .unwrap();
     assert!(result.is_none());
 }

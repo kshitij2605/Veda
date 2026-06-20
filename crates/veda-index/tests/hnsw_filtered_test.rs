@@ -249,7 +249,10 @@ fn test_empty_filter() {
     let filter = RoaringBitmap::new();
     let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
     let results = hnsw.search_filtered(&query, k, &filter).unwrap();
-    assert!(results.is_empty(), "Expected empty results for empty filter");
+    assert!(
+        results.is_empty(),
+        "Expected empty results for empty filter"
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -321,11 +324,7 @@ fn test_deleted_and_filtered() {
     for query in &queries {
         let results = hnsw.search_filtered(query, k, &filter).unwrap();
         for r in &results {
-            assert!(
-                filter.contains(r.id),
-                "ID {} not in filter",
-                r.id
-            );
+            assert!(filter.contains(r.id), "ID {} not in filter", r.id);
             assert!(
                 !deleted_ids.contains(&r.id),
                 "Deleted ID {} appeared in filtered results",

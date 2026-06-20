@@ -51,7 +51,11 @@ impl LogTailer {
     /// Block (via tokio sleep) until the tailer has caught up to
     /// `target` or the deadline elapses. Polling implementation;
     /// the stream-based variant arrives when LogApplier lands.
-    pub async fn wait_for(&mut self, target: u64, timeout: Duration) -> Result<bool, ShardLogError> {
+    pub async fn wait_for(
+        &mut self,
+        target: u64,
+        timeout: Duration,
+    ) -> Result<bool, ShardLogError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let _ = self.next_batch()?;

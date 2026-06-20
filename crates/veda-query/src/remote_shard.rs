@@ -80,6 +80,9 @@ fn uuid_to_bytes(id: &Uuid) -> Vec<u8> {
     id.as_bytes().to_vec()
 }
 
+// `tonic::Status` is the gRPC-native error and flows directly into the tonic
+// service impls; boxing it here would force unwrapping at every call site.
+#[allow(clippy::result_large_err)]
 fn uuid_from_bytes(b: &[u8]) -> std::result::Result<Uuid, Status> {
     let arr: [u8; 16] = b
         .try_into()
@@ -123,12 +126,15 @@ impl ShardSearchService {
         self.shards.insert((collection.into(), shard_id), searcher);
     }
 
-    fn route(&self, collection: &str, shard_id: u32) -> std::result::Result<&Arc<LocalShardSearcher>, Status> {
+    #[allow(clippy::result_large_err)]
+    fn route(
+        &self,
+        collection: &str,
+        shard_id: u32,
+    ) -> std::result::Result<&Arc<LocalShardSearcher>, Status> {
         self.shards
             .get(&(collection.to_owned(), shard_id))
-            .ok_or_else(|| {
-                Status::not_found(format!("shard {collection}:{shard_id} not hosted"))
-            })
+            .ok_or_else(|| Status::not_found(format!("shard {collection}:{shard_id} not hosted")))
     }
 }
 

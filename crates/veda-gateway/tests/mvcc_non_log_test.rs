@@ -13,7 +13,7 @@
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::build_router;
@@ -89,7 +89,8 @@ async fn mvcc_search_at_zero_via_non_log_path_returns_zero_hits() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(
-        body["count"], json!(0),
+        body["count"],
+        json!(0),
         "search at ts=0 must see no records; body={body}"
     );
 
@@ -105,5 +106,9 @@ async fn mvcc_search_at_zero_via_non_log_path_returns_zero_hits() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["count"], json!(2), "default search should see both; body={body}");
+    assert_eq!(
+        body["count"],
+        json!(2),
+        "default search should see both; body={body}"
+    );
 }

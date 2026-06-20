@@ -172,9 +172,9 @@ impl ColumnAccumulator {
             (ColumnType::Uuid, FieldValue::String(s)) => {
                 // Tolerate string-form UUIDs (the JSONL path stores
                 // them that way for __record_id__).
-                let u: Uuid = s.parse().map_err(|e| {
-                    VedaError::Storage(format!("columnar: uuid parse failed: {e}"))
-                })?;
+                let u: Uuid = s
+                    .parse()
+                    .map_err(|e| VedaError::Storage(format!("columnar: uuid parse failed: {e}")))?;
                 self.bytes.extend_from_slice(u.as_bytes());
                 self.null_bits.push(false);
             }
@@ -193,7 +193,7 @@ impl ColumnAccumulator {
         if self.column_type.fixed_width().is_none() {
             self.offsets.push(self.bytes.len() as u64);
         } else if let Some(w) = self.column_type.fixed_width() {
-            self.bytes.extend(std::iter::repeat(0u8).take(w));
+            self.bytes.extend(std::iter::repeat_n(0u8, w));
         }
         self.null_bits.push(true);
     }
@@ -283,7 +283,11 @@ impl ColumnarWriter {
     /// Add row N: the record's UUID + zero or more `(field, value)`
     /// pairs. Rows must be appended in increasing doc_id order.
     /// Fields not provided for this row are recorded as null.
-    pub fn push(&mut self, id: Uuid, fields: &HashMap<String, (ColumnType, FieldValue)>) -> Result<()> {
+    pub fn push(
+        &mut self,
+        id: Uuid,
+        fields: &HashMap<String, (ColumnType, FieldValue)>,
+    ) -> Result<()> {
         self.ids.push(id);
         // Backfill any new fields seen for the first time with leading nulls.
         let row_idx = self.ids.len() - 1;
@@ -316,7 +320,7 @@ impl ColumnarWriter {
         record: &veda_core::record::Record,
         schema: &veda_core::schema::CollectionSchema,
     ) -> Result<u32> {
-        use veda_core::record::{FieldValue, EXPIRES_AT_FIELD};
+        use veda_core::record::{EXPIRES_AT_FIELD, FieldValue};
         use veda_core::types::FieldType;
 
         let mut fields: HashMap<String, (ColumnType, FieldValue)> = HashMap::new();
@@ -432,9 +436,8 @@ impl ColumnarStoredFields {
         let columns_dir = segment_dir.join(COLUMNS_DIR);
         // ID column
         let id_path = columns_dir.join(ID_COL);
-        let id_file = fs::File::open(&id_path).map_err(|e| {
-            VedaError::Storage(format!("columnar: open id col {id_path:?}: {e}"))
-        })?;
+        let id_file = fs::File::open(&id_path)
+            .map_err(|e| VedaError::Storage(format!("columnar: open id col {id_path:?}: {e}")))?;
         let id_mmap = unsafe { Mmap::map(&id_file)? };
         let row_count = (id_mmap.len() / 16) as u64;
         let mut uuid_to_doc_id = HashMap::with_capacity(row_count as usize);
@@ -469,11 +472,9 @@ impl ColumnarStoredFields {
                 // otherwise mmap for zero-copy access.
                 let col_data = if meta.compressed {
                     let compressed_bytes = fs::read(&col_path)?;
-                    let decompressed = zstd::decode_all(compressed_bytes.as_slice())
-                        .map_err(|e| {
-                            VedaError::Storage(format!(
-                                "columnar: zstd decompress {field}: {e}"
-                            ))
+                    let decompressed =
+                        zstd::decode_all(compressed_bytes.as_slice()).map_err(|e| {
+                            VedaError::Storage(format!("columnar: zstd decompress {field}: {e}"))
                         })?;
                     ColData::Owned(decompressed)
                 } else {
@@ -583,8 +584,11 @@ impl ColumnarStoredFields {
                 let start = col.offsets.get(i).copied().ok_or_else(|| {
                     VedaError::Storage(format!("columnar: doc_id {doc_id} out of range"))
                 })? as usize;
-                let end = col.offsets.get(i + 1).copied().unwrap_or(col.col_data.len() as u64)
-                    as usize;
+                let end = col
+                    .offsets
+                    .get(i + 1)
+                    .copied()
+                    .unwrap_or(col.col_data.len() as u64) as usize;
                 let s = std::str::from_utf8(&data[start..end])
                     .map_err(|e| VedaError::Storage(format!("columnar utf8: {e}")))?
                     .to_owned();
@@ -632,15 +636,33 @@ mod tests {
         let id0 = Uuid::new_v4();
         let id1 = Uuid::new_v4();
         let mut row0 = HashMap::new();
-        row0.insert("chunk_id".to_owned(), (ColumnType::Int64, FieldValue::Int64(42)));
-        row0.insert("score".to_owned(), (ColumnType::Float32, FieldValue::Float32(0.87)));
-        row0.insert("active".to_owned(), (ColumnType::Bool, FieldValue::Bool(true)));
+        row0.insert(
+            "chunk_id".to_owned(),
+            (ColumnType::Int64, FieldValue::Int64(42)),
+        );
+        row0.insert(
+            "score".to_owned(),
+            (ColumnType::Float32, FieldValue::Float32(0.87)),
+        );
+        row0.insert(
+            "active".to_owned(),
+            (ColumnType::Bool, FieldValue::Bool(true)),
+        );
         w.push(id0, &row0).unwrap();
 
         let mut row1 = HashMap::new();
-        row1.insert("chunk_id".to_owned(), (ColumnType::Int64, FieldValue::Int64(99)));
-        row1.insert("score".to_owned(), (ColumnType::Float32, FieldValue::Float32(-1.5)));
-        row1.insert("active".to_owned(), (ColumnType::Bool, FieldValue::Bool(false)));
+        row1.insert(
+            "chunk_id".to_owned(),
+            (ColumnType::Int64, FieldValue::Int64(99)),
+        );
+        row1.insert(
+            "score".to_owned(),
+            (ColumnType::Float32, FieldValue::Float32(-1.5)),
+        );
+        row1.insert(
+            "active".to_owned(),
+            (ColumnType::Bool, FieldValue::Bool(false)),
+        );
         w.push(id1, &row1).unwrap();
 
         w.seal().unwrap();
@@ -681,7 +703,10 @@ mod tests {
         let mut row2 = HashMap::new();
         row2.insert(
             "content".to_owned(),
-            (ColumnType::String, FieldValue::String("Adobe Acrobat".to_owned())),
+            (
+                ColumnType::String,
+                FieldValue::String("Adobe Acrobat".to_owned()),
+            ),
         );
         w.push(Uuid::new_v4(), &row2).unwrap();
         w.seal().unwrap();
@@ -737,10 +762,7 @@ mod tests {
         let r = ColumnarStoredFields::open(seg).unwrap();
         let m0 = r.get_scalar_map(0).unwrap();
         assert_eq!(m0.get("a"), Some(&FieldValue::Int32(7)));
-        assert_eq!(
-            m0.get("b"),
-            Some(&FieldValue::String("hi".to_owned()))
-        );
+        assert_eq!(m0.get("b"), Some(&FieldValue::String("hi".to_owned())));
         let m1 = r.get_scalar_map(1).unwrap();
         assert!(m1.is_empty());
     }
@@ -813,8 +835,7 @@ mod tests {
         let seg_comp = tmp_comp.path();
 
         let n = 200usize;
-        let repetitive_text =
-            "abcdefghijklmnopqrstuvwxyz ".repeat(40); // ~1 080 bytes per record
+        let repetitive_text = "abcdefghijklmnopqrstuvwxyz ".repeat(40); // ~1 080 bytes per record
 
         let build = |seg: &Path, compress: bool| {
             let mut w = if compress {
@@ -827,7 +848,10 @@ mod tests {
                 let mut fields = HashMap::new();
                 fields.insert(
                     "body".to_owned(),
-                    (ColumnType::String, FieldValue::String(repetitive_text.clone())),
+                    (
+                        ColumnType::String,
+                        FieldValue::String(repetitive_text.clone()),
+                    ),
                 );
                 w.push(id, &fields).unwrap();
             }
@@ -838,10 +862,10 @@ mod tests {
         build(seg_comp, true);
 
         let plain_col = seg_plain.join("columns").join("body.col");
-        let comp_col  = seg_comp.join("columns").join("body.col");
+        let comp_col = seg_comp.join("columns").join("body.col");
 
         let plain_size = fs::metadata(&plain_col).unwrap().len();
-        let comp_size  = fs::metadata(&comp_col).unwrap().len();
+        let comp_size = fs::metadata(&comp_col).unwrap().len();
 
         // Expect at least 50% reduction on highly repetitive input.
         assert!(

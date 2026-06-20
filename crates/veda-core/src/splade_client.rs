@@ -149,7 +149,10 @@ impl SpladeClient {
         if !status.is_success() {
             return Err(VedaError::Index(format!(
                 "splade: HTTP {status}: {}",
-                String::from_utf8_lossy(&bytes).chars().take(300).collect::<String>()
+                String::from_utf8_lossy(&bytes)
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
             )));
         }
         parse_response(&bytes, self.config.vocab_size)

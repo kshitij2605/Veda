@@ -11,7 +11,7 @@
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::build_router;
@@ -84,10 +84,16 @@ async fn source_records_survive_crash_during_reindex() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "source GET: {}", resp.text().await.unwrap());
+    assert_eq!(
+        resp.status(),
+        200,
+        "source GET: {}",
+        resp.text().await.unwrap()
+    );
     let body: Value = resp.json().await.unwrap();
     assert_eq!(
-        body["total"], json!(3),
+        body["total"],
+        json!(3),
         "all 3 source records must survive a mid-reindex crash; got {body}"
     );
 }

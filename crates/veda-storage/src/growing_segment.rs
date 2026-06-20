@@ -167,7 +167,12 @@ impl GrowingSegment {
         // empty list. Validates dimension and max_vectors against schema.
         for field_def in self.schema.multi_vector_fields() {
             let name = field_def.name();
-            if let FieldType::MultiVector { dimension, max_vectors, .. } = field_def.field_type() {
+            if let FieldType::MultiVector {
+                dimension,
+                max_vectors,
+                ..
+            } = field_def.field_type()
+            {
                 let rows = match record.get(name) {
                     Some(FieldValue::MultiVector(rows)) => {
                         if *max_vectors > 0 && rows.len() as u32 > *max_vectors {
@@ -218,8 +223,8 @@ impl GrowingSegment {
                                 dimension
                             )));
                         }
-                        added_bytes += sv.nnz()
-                            * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>());
+                        added_bytes +=
+                            sv.nnz() * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>());
                         sv.clone()
                     }
                     Some(_) => {
@@ -299,6 +304,7 @@ impl GrowingSegment {
     /// - It has no commit_ts (legacy/non-MVCC, always visible), OR
     /// - Its commit_ts <= read_ts AND no later commit_ts for the
     ///   same record.id() exists (later versions supersede).
+    ///
     /// Tombstones (delete_bitmap) supersede too.
     pub fn is_visible_at(&self, doc_id: u32, read_ts: u128) -> bool {
         if self.delete_bitmap.is_deleted(doc_id) {
@@ -322,13 +328,13 @@ impl GrowingSegment {
                 continue;
             }
             let Some(other_ts) = *slot else { continue };
-            if other_ts <= read_ts && other_ts > commit_ts {
-                if let Some(other_rec) = self.records.get(other_id)
-                    && other_rec.id() == rid
-                    && !self.delete_bitmap.is_deleted(other_id as u32)
-                {
-                    return false;
-                }
+            if other_ts <= read_ts
+                && other_ts > commit_ts
+                && let Some(other_rec) = self.records.get(other_id)
+                && other_rec.id() == rid
+                && !self.delete_bitmap.is_deleted(other_id as u32)
+            {
+                return false;
             }
         }
         true
@@ -421,8 +427,7 @@ impl GrowingSegment {
                 heap.push(OrdF32Entry { dist, doc_id });
             }
         }
-        let mut results: Vec<(u32, f32)> =
-            heap.into_iter().map(|e| (e.doc_id, e.dist)).collect();
+        let mut results: Vec<(u32, f32)> = heap.into_iter().map(|e| (e.doc_id, e.dist)).collect();
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(results)
     }
@@ -477,8 +482,7 @@ impl GrowingSegment {
             }
         }
 
-        let mut results: Vec<(u32, f32)> =
-            heap.into_iter().map(|e| (e.doc_id, e.dist)).collect();
+        let mut results: Vec<(u32, f32)> = heap.into_iter().map(|e| (e.doc_id, e.dist)).collect();
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(results)
     }
@@ -495,13 +499,17 @@ impl GrowingSegment {
         filter: Option<&RoaringBitmap>,
         truncate: Option<u32>,
     ) -> Result<Vec<(u32, f32)>> {
-        let vecs = self.vectors.get(field).ok_or_else(|| {
-            VedaError::FieldNotFound(format!("vector field '{field}' not found"))
-        })?;
+        let vecs = self
+            .vectors
+            .get(field)
+            .ok_or_else(|| VedaError::FieldNotFound(format!("vector field '{field}' not found")))?;
         if k == 0 {
             return Ok(Vec::new());
         }
-        let n = truncate.map(|t| t as usize).unwrap_or(query.len()).min(query.len());
+        let n = truncate
+            .map(|t| t as usize)
+            .unwrap_or(query.len())
+            .min(query.len());
         let distance_fn = select_distance_fn(metric);
         let mut heap: BinaryHeap<OrdF32Entry> = BinaryHeap::new();
         for (doc_id, vec) in vecs.iter().enumerate() {
@@ -525,8 +533,7 @@ impl GrowingSegment {
                 heap.push(OrdF32Entry { dist, doc_id });
             }
         }
-        let mut results: Vec<(u32, f32)> =
-            heap.into_iter().map(|e| (e.doc_id, e.dist)).collect();
+        let mut results: Vec<(u32, f32)> = heap.into_iter().map(|e| (e.doc_id, e.dist)).collect();
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(results)
     }
@@ -543,9 +550,10 @@ impl GrowingSegment {
         metric: DistanceMetric,
         filter: Option<&RoaringBitmap>,
     ) -> Result<Vec<(u32, f32)>> {
-        let vecs = self.vectors.get(field).ok_or_else(|| {
-            VedaError::FieldNotFound(format!("vector field '{field}' not found"))
-        })?;
+        let vecs = self
+            .vectors
+            .get(field)
+            .ok_or_else(|| VedaError::FieldNotFound(format!("vector field '{field}' not found")))?;
 
         if k == 0 {
             return Ok(Vec::new());
@@ -585,8 +593,7 @@ impl GrowingSegment {
         }
 
         // Drain heap into sorted vec (ascending distance).
-        let mut results: Vec<(u32, f32)> =
-            heap.into_iter().map(|e| (e.doc_id, e.dist)).collect();
+        let mut results: Vec<(u32, f32)> = heap.into_iter().map(|e| (e.doc_id, e.dist)).collect();
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(results)

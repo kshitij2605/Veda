@@ -37,6 +37,11 @@ pub trait DistanceProvider: Sync {
     /// it for the traversal itself.
     fn len(&self) -> usize;
 
+    /// Whether the provider exposes zero documents.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Metric the provider was constructed with. Surfaces through to
     /// `HnswIndex::metric()` so callers can pick a downstream rerank.
     fn metric(&self) -> DistanceMetric;

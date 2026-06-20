@@ -6,7 +6,7 @@
 //!   - GET /v1/collections/{name}/field-stats (cardinality, null count, numeric min/max/avg)
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use veda_gateway::rest::{build_router, state::AppState};
@@ -50,8 +50,15 @@ async fn setup_collection(base: &str) -> String {
                 { "name": "price",    "type": "float64", "filterable": true }
             ]
         }))
-        .send().await.unwrap();
-    assert_eq!(r.status(), 201, "create failed: {}", r.text().await.unwrap());
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        201,
+        "create failed: {}",
+        r.text().await.unwrap()
+    );
 
     let records = json!({ "records": [
         { "category": "electronics", "price": 100.0 },
@@ -63,8 +70,15 @@ async fn setup_collection(base: &str) -> String {
     let r = client()
         .post(format!("{base}/v1/collections/{col}/insert"))
         .json(&records)
-        .send().await.unwrap();
-    assert_eq!(r.status(), 201, "insert failed: {}", r.text().await.unwrap());
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        201,
+        "insert failed: {}",
+        r.text().await.unwrap()
+    );
 
     col.to_owned()
 }
@@ -77,8 +91,12 @@ async fn test_aggregate_sum_group_by() {
     let col = setup_collection(&base).await;
 
     let resp = client()
-        .get(format!("{base}/v1/collections/{col}/aggregate?field=price&metric=sum&group_by=category"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/{col}/aggregate?field=price&metric=sum&group_by=category"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
     let body: Value = resp.json().await.unwrap();
@@ -86,7 +104,8 @@ async fn test_aggregate_sum_group_by() {
     assert_eq!(groups.len(), 2);
 
     // Build a map key -> value
-    let map: std::collections::HashMap<&str, f64> = groups.iter()
+    let map: std::collections::HashMap<&str, f64> = groups
+        .iter()
         .map(|g| (g["key"].as_str().unwrap(), g["value"].as_f64().unwrap()))
         .collect();
 
@@ -100,13 +119,18 @@ async fn test_aggregate_count_group_by() {
     let col = setup_collection(&base).await;
 
     let resp = client()
-        .get(format!("{base}/v1/collections/{col}/aggregate?field=category&metric=count&group_by=category"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/{col}/aggregate?field=category&metric=count&group_by=category"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
     let body: Value = resp.json().await.unwrap();
     let groups = body["groups"].as_array().unwrap();
-    let map: std::collections::HashMap<&str, f64> = groups.iter()
+    let map: std::collections::HashMap<&str, f64> = groups
+        .iter()
         .map(|g| (g["key"].as_str().unwrap(), g["value"].as_f64().unwrap()))
         .collect();
 
@@ -123,8 +147,12 @@ async fn test_aggregate_no_group_by() {
 
     // count
     let resp = client()
-        .get(format!("{base}/v1/collections/{col}/aggregate?field=price&metric=count"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/{col}/aggregate?field=price&metric=count"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     let groups = body["groups"].as_array().unwrap();
@@ -133,8 +161,12 @@ async fn test_aggregate_no_group_by() {
 
     // sum
     let resp = client()
-        .get(format!("{base}/v1/collections/{col}/aggregate?field=price&metric=sum"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/{col}/aggregate?field=price&metric=sum"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     let val = body["groups"][0]["value"].as_f64().unwrap();
@@ -142,8 +174,12 @@ async fn test_aggregate_no_group_by() {
 
     // avg
     let resp = client()
-        .get(format!("{base}/v1/collections/{col}/aggregate?field=price&metric=avg"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/{col}/aggregate?field=price&metric=avg"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     let val = body["groups"][0]["value"].as_f64().unwrap();
@@ -151,8 +187,12 @@ async fn test_aggregate_no_group_by() {
 
     // min
     let resp = client()
-        .get(format!("{base}/v1/collections/{col}/aggregate?field=price&metric=min"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/{col}/aggregate?field=price&metric=min"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     let val = body["groups"][0]["value"].as_f64().unwrap();
@@ -160,8 +200,12 @@ async fn test_aggregate_no_group_by() {
 
     // max
     let resp = client()
-        .get(format!("{base}/v1/collections/{col}/aggregate?field=price&metric=max"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/{col}/aggregate?field=price&metric=max"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     let val = body["groups"][0]["value"].as_f64().unwrap();
@@ -178,8 +222,12 @@ async fn test_histogram() {
     // 4 bins over [10, 200] → width ≈ 47.5 each
     // [10,57.5)→books(10,20,30)=3, [57.5,105)→electronics(100)=1, [105,152.5)→0, [152.5,200]→electronics(200)=1
     let resp = client()
-        .get(format!("{base}/v1/collections/{col}/histogram?field=price&bins=4"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/{col}/histogram?field=price&bins=4"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
     let body: Value = resp.json().await.unwrap();
@@ -206,7 +254,9 @@ async fn test_histogram_default_bins() {
     // No bins param → default 10
     let resp = client()
         .get(format!("{base}/v1/collections/{col}/histogram?field=price"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["bins"].as_array().unwrap().len(), 10);
@@ -220,8 +270,12 @@ async fn test_field_stats_numeric() {
     let col = setup_collection(&base).await;
 
     let resp = client()
-        .get(format!("{base}/v1/collections/{col}/field-stats?field=price"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/{col}/field-stats?field=price"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
     let body: Value = resp.json().await.unwrap();
@@ -243,8 +297,12 @@ async fn test_field_stats_string() {
     let col = setup_collection(&base).await;
 
     let resp = client()
-        .get(format!("{base}/v1/collections/{col}/field-stats?field=category"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/{col}/field-stats?field=category"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
     let body: Value = resp.json().await.unwrap();
@@ -268,13 +326,22 @@ async fn test_aggregate_with_filter() {
     // expected sum for books = 60
     let resp = client()
         .get(format!("{base}/v1/collections/{col}/aggregate"))
-        .query(&[("field", "price"), ("metric", "sum"), ("filter", "category = 'books'")])
-        .send().await.unwrap();
+        .query(&[
+            ("field", "price"),
+            ("metric", "sum"),
+            ("filter", "category = 'books'"),
+        ])
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
     let body: Value = resp.json().await.unwrap();
     let val = body["groups"][0]["value"].as_f64().unwrap();
-    assert!((val - 60.0).abs() < 0.001, "filtered sum expected 60, got {val}");
+    assert!(
+        (val - 60.0).abs() < 0.001,
+        "filtered sum expected 60, got {val}"
+    );
 }
 
 #[tokio::test]
@@ -285,14 +352,23 @@ async fn test_histogram_with_filter() {
     // filter: only electronics (2 records: 100, 200)
     let resp = client()
         .get(format!("{base}/v1/collections/{col}/histogram"))
-        .query(&[("field", "price"), ("bins", "2"), ("filter", "category = 'electronics'")])
-        .send().await.unwrap();
+        .query(&[
+            ("field", "price"),
+            ("bins", "2"),
+            ("filter", "category = 'electronics'"),
+        ])
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
     let body: Value = resp.json().await.unwrap();
     let bins = body["bins"].as_array().unwrap();
     let total: u64 = bins.iter().map(|b| b["count"].as_u64().unwrap_or(0)).sum();
-    assert_eq!(total, 2, "filtered histogram total should be 2, got {total}");
+    assert_eq!(
+        total, 2,
+        "filtered histogram total should be 2, got {total}"
+    );
 }
 
 // ── 6. error cases ────────────────────────────────────────────────────────────
@@ -301,8 +377,12 @@ async fn test_histogram_with_filter() {
 async fn test_aggregate_nonexistent_collection() {
     let (base, _tmp) = start_test_server().await;
     let resp = client()
-        .get(format!("{base}/v1/collections/no_such_col/aggregate?field=price&metric=sum"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/no_such_col/aggregate?field=price&metric=sum"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 404);
 }
 
@@ -313,8 +393,12 @@ async fn test_aggregate_numeric_metric_on_string_field() {
 
     // sum on a string field → 400
     let resp = client()
-        .get(format!("{base}/v1/collections/{col}/aggregate?field=category&metric=sum"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/{col}/aggregate?field=category&metric=sum"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 400, "expected 400 for sum on string field");
 }
 
@@ -322,8 +406,12 @@ async fn test_aggregate_numeric_metric_on_string_field() {
 async fn test_histogram_nonexistent_collection() {
     let (base, _tmp) = start_test_server().await;
     let resp = client()
-        .get(format!("{base}/v1/collections/no_such_col/histogram?field=price"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/no_such_col/histogram?field=price"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 404);
 }
 
@@ -331,7 +419,11 @@ async fn test_histogram_nonexistent_collection() {
 async fn test_field_stats_nonexistent_collection() {
     let (base, _tmp) = start_test_server().await;
     let resp = client()
-        .get(format!("{base}/v1/collections/no_such_col/field-stats?field=price"))
-        .send().await.unwrap();
+        .get(format!(
+            "{base}/v1/collections/no_such_col/field-stats?field=price"
+        ))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 404);
 }

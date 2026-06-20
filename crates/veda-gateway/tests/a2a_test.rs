@@ -10,7 +10,7 @@
 //! we only need the deterministic, LLM-free paths.
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use veda_gateway::rest::{build_router, state::AppState};
@@ -36,7 +36,9 @@ async fn test_a2a_agent_card_default_agent() {
 
     let resp = client()
         .get(format!("{base}/v1/a2a/veda-agent/card"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let card: Value = resp.json().await.unwrap();
 
@@ -67,7 +69,9 @@ async fn test_a2a_agent_card_unknown_agent_404() {
     let (base, _tmp) = start_test_server().await;
     let resp = client()
         .get(format!("{base}/v1/a2a/no-such-agent/card"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 404);
 }
 
@@ -87,7 +91,9 @@ async fn test_a2a_message_send_without_llm_returns_503() {
                 }
             }
         }))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 503, "{}", resp.text().await.unwrap());
 }
 
@@ -102,7 +108,9 @@ async fn test_a2a_unknown_method_returns_jsonrpc_minus_32601() {
             "method": "tasks/get",
             "params": {}
         }))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     // Unknown method is a JSON-RPC error returned with HTTP 200.
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let body: Value = resp.json().await.unwrap();

@@ -59,14 +59,12 @@ impl JsonlStoredFields {
     /// if it cares.
     pub fn open(dir: &Path, expected_rows: u64) -> Result<Self> {
         let path = dir.join(RECORDS_FILE);
-        let file = fs::File::open(&path).map_err(|e| {
-            VedaError::Storage(format!("failed to open {path:?}: {e}"))
-        })?;
+        let file = fs::File::open(&path)
+            .map_err(|e| VedaError::Storage(format!("failed to open {path:?}: {e}")))?;
         let mmap = unsafe { Mmap::map(&file)? };
 
         let mut offsets: Vec<u64> = Vec::with_capacity(expected_rows as usize + 1);
-        let mut uuid_index: HashMap<Uuid, u32> =
-            HashMap::with_capacity(expected_rows as usize);
+        let mut uuid_index: HashMap<Uuid, u32> = HashMap::with_capacity(expected_rows as usize);
 
         offsets.push(0);
         let bytes: &[u8] = &mmap[..];

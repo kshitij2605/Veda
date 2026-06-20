@@ -88,7 +88,11 @@ fn crc_mismatch_dropped_on_reopen() {
     // body, CRC mismatch on replay.
     let log_path = tmp.path().join(format!("{:012}.log", 1));
     use std::io::{Read, Seek, SeekFrom, Write};
-    let mut f = OpenOptions::new().read(true).write(true).open(&log_path).unwrap();
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&log_path)
+        .unwrap();
     let len = f.metadata().unwrap().len();
     f.seek(SeekFrom::Start(len - 1)).unwrap();
     let mut last = [0u8; 1];

@@ -14,9 +14,9 @@
 //!   DELETE /v1/admin/synthetics/{id}         — delete one definition
 //!   GET    /v1/admin/synthetics/{id}/results — recent results + summary
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Serialize;
 
 use crate::advisor::synthetic::{ProbeResult, SyntheticProbe, SyntheticSummary};
@@ -136,7 +136,7 @@ pub async fn get_synthetic_results(
             return Err(err(
                 StatusCode::NOT_FOUND,
                 format!("no synthetic probe with id '{id}'"),
-            ))
+            ));
         }
     };
     let results = advisor.synthetic_results.lock().await;

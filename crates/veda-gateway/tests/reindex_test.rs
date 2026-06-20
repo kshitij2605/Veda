@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::build_router;
@@ -49,13 +49,21 @@ async fn reindex_in_non_raft_mode_returns_target_status_no_raft() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "reindex: {}", resp.text().await.unwrap());
+    assert_eq!(
+        resp.status(),
+        200,
+        "reindex: {}",
+        resp.text().await.unwrap()
+    );
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["target"], json!("docs@v2"));
     // Non-Raft mode: status reflects the no-SM path.
     // Status string now reports copy count too: "no_raft (copied N records)".
     let status = body["status"].as_str().unwrap();
-    assert!(status.starts_with("no_raft"), "status must start with 'no_raft', got {status}");
+    assert!(
+        status.starts_with("no_raft"),
+        "status must start with 'no_raft', got {status}"
+    );
 }
 
 #[tokio::test]
@@ -75,7 +83,12 @@ async fn reindex_with_existing_v2_bumps_to_v3() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 201, "create v2: {}", resp.text().await.unwrap());
+    assert_eq!(
+        resp.status(),
+        201,
+        "create v2: {}",
+        resp.text().await.unwrap()
+    );
 
     let resp = c
         .post(format!("{base}/v1/collections/logs@v2/reindex"))
@@ -169,19 +182,28 @@ async fn reindex_copies_source_records_to_sibling() {
     assert_eq!(body["target"], json!("reindex_copy@v2"));
     // Status reports the copy count.
     assert!(
-        body["status"].as_str().unwrap().contains("copied 3 records"),
+        body["status"]
+            .as_str()
+            .unwrap()
+            .contains("copied 3 records"),
         "status should report copy count; got {body}"
     );
 
     // List the sibling — must hold all 3 records.
     let resp = c
-        .get(format!("{base}/v1/collections/reindex_copy@v2/records?limit=10"))
+        .get(format!(
+            "{base}/v1/collections/reindex_copy@v2/records?limit=10"
+        ))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["total"], json!(3), "sibling should hold all 3 source records; got {body}");
+    assert_eq!(
+        body["total"],
+        json!(3),
+        "sibling should hold all 3 source records; got {body}"
+    );
 }
 
 #[tokio::test]
@@ -229,13 +251,20 @@ async fn reindex_rechunks_with_supplied_chunker_strategy() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "reindex: {}", resp.text().await.unwrap());
+    assert_eq!(
+        resp.status(),
+        200,
+        "reindex: {}",
+        resp.text().await.unwrap()
+    );
 
     // The reconstructed parent text is the three chunks
     // concatenated with newlines. FixedSize(30) splits it into
     // multiple new chunks; sibling holds the rechunked version.
     let resp = c
-        .get(format!("{base}/v1/collections/rechunk_pipe@v2/records?limit=50"))
+        .get(format!(
+            "{base}/v1/collections/rechunk_pipe@v2/records?limit=50"
+        ))
         .send()
         .await
         .unwrap();
@@ -253,7 +282,8 @@ async fn reindex_rechunks_with_supplied_chunker_strategy() {
     let records = body["records"].as_array().unwrap();
     for rec in records {
         assert_eq!(
-            rec["fields"]["parent_doc_id"], json!("doc_a"),
+            rec["fields"]["parent_doc_id"],
+            json!("doc_a"),
             "parent_doc_id should be preserved on re-chunk; got {rec}"
         );
         assert!(
@@ -296,7 +326,12 @@ async fn reindex_re_embed_without_embedding_endpoint_returns_424() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 424, "expected 424 FAILED_DEPENDENCY, got {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        424,
+        "expected 424 FAILED_DEPENDENCY, got {}",
+        resp.status()
+    );
     let body: Value = resp.json().await.unwrap();
     assert!(body["error"].as_str().unwrap().contains("embedding"));
 }

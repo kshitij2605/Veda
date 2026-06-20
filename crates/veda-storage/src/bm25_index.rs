@@ -107,13 +107,11 @@ impl AnalyzerConfig {
 
 /// English stopwords (ISO 639-1 "en", matching the Lucene/ES default set).
 static ENGLISH_STOPWORDS: &[&str] = &[
-    "a", "an", "the", "and", "or", "but", "if", "in", "on", "at", "to",
-    "for", "of", "with", "by", "from", "is", "are", "was", "were", "be",
-    "been", "being", "have", "has", "had", "do", "does", "did", "will",
-    "would", "could", "should", "may", "might", "shall", "can", "not",
-    "no", "nor", "as", "up", "out", "so", "yet", "both", "either",
-    "that", "this", "these", "those", "i", "me", "my", "we", "our",
-    "you", "your", "he", "she", "it", "they", "them", "their",
+    "a", "an", "the", "and", "or", "but", "if", "in", "on", "at", "to", "for", "of", "with", "by",
+    "from", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does",
+    "did", "will", "would", "could", "should", "may", "might", "shall", "can", "not", "no", "nor",
+    "as", "up", "out", "so", "yet", "both", "either", "that", "this", "these", "those", "i", "me",
+    "my", "we", "our", "you", "your", "he", "she", "it", "they", "them", "their",
 ];
 
 /// Per-segment BM25 inverted index.
@@ -397,14 +395,12 @@ fn phrase_match_with_slop(per_term: &[Vec<u32>], slop: u32) -> bool {
     if per_term.is_empty() {
         return false;
     }
-    let m = per_term.len();
     // Anchors are positions of the first term.
     'anchor: for &anchor in &per_term[0] {
         let mut prev = anchor;
         let mut total_gap: u32 = 0;
-        for i in 1..m {
-            // Find smallest position in per_term[i] that is > prev.
-            let pos_list = &per_term[i];
+        for pos_list in per_term.iter().skip(1) {
+            // Find smallest position in this term's list that is > prev.
             // Binary search for the first element > prev.
             let idx = pos_list.partition_point(|&p| p <= prev);
             if idx >= pos_list.len() {
@@ -795,8 +791,14 @@ mod tests {
 
     #[test]
     fn lindera_name_parses() {
-        assert_eq!(TokenizerKind::from_name("lindera"), Some(TokenizerKind::Lindera));
-        assert_eq!(TokenizerKind::from_name("kuromoji"), Some(TokenizerKind::Lindera));
+        assert_eq!(
+            TokenizerKind::from_name("lindera"),
+            Some(TokenizerKind::Lindera)
+        );
+        assert_eq!(
+            TokenizerKind::from_name("kuromoji"),
+            Some(TokenizerKind::Lindera)
+        );
         assert_eq!(TokenizerKind::from_name("ja"), Some(TokenizerKind::Lindera));
     }
 
@@ -806,7 +808,11 @@ mod tests {
         // Each CJK char becomes a unigram, but NO bigrams. Plus "adobe".
         assert!(toks.contains(&"adobe".to_owned()));
         // No bigrams like "ラン" should appear.
-        assert!(!toks.iter().any(|t| t.chars().filter(|c| is_cjk(*c)).count() == 2));
+        assert!(
+            !toks
+                .iter()
+                .any(|t| t.chars().filter(|c| is_cjk(*c)).count() == 2)
+        );
     }
 
     #[test]
@@ -843,7 +849,8 @@ mod tests {
     #[test]
     fn stemming_matches_singular_and_plural() {
         // With English stemming, a doc containing "foxes" must be found by querying "fox".
-        let mut idx = Bm25Index::with_analyzer(TokenizerKind::Whitespace, AnalyzerConfig::english());
+        let mut idx =
+            Bm25Index::with_analyzer(TokenizerKind::Whitespace, AnalyzerConfig::english());
         idx.insert(0, "the quick brown foxes jumped");
         idx.insert(1, "a lazy dog");
         let hits = idx.search("fox", 10);
@@ -891,7 +898,8 @@ mod tests {
     fn analyzer_config_persists_and_applies_at_query_time() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("bm25.bin");
-        let mut idx = Bm25Index::with_analyzer(TokenizerKind::Whitespace, AnalyzerConfig::english());
+        let mut idx =
+            Bm25Index::with_analyzer(TokenizerKind::Whitespace, AnalyzerConfig::english());
         idx.insert(0, "running runners run");
         idx.save(&p).unwrap();
         let idx2 = Bm25Index::load(&p).unwrap();
@@ -910,7 +918,10 @@ mod tests {
         let text = "The quick brown Fox";
         let old = run_tokenizer(TokenizerKind::Whitespace, text);
         let new = run_analyzer(TokenizerKind::Whitespace, &AnalyzerConfig::none(), text);
-        assert_eq!(old, new, "none() analyzer must be byte-identical to the old tokenizer");
+        assert_eq!(
+            old, new,
+            "none() analyzer must be byte-identical to the old tokenizer"
+        );
     }
 
     // ── Feature B: phrase / proximity query tests ──────────────────────
@@ -919,8 +930,8 @@ mod tests {
     fn phrase_query_requires_adjacency() {
         let mut idx = Bm25Index::with_analyzer(TokenizerKind::Whitespace, AnalyzerConfig::none());
         idx.insert(0, "the quick brown fox jumps");
-        idx.insert(1, "the brown quick fox");          // same words, wrong order
-        idx.insert(2, "quick brown");                  // adjacent but missing 'fox'
+        idx.insert(1, "the brown quick fox"); // same words, wrong order
+        idx.insert(2, "quick brown"); // adjacent but missing 'fox'
         let hits = idx.search_phrase("quick brown fox", 0, 10); // slop=0 => exact adjacency
         let ids: Vec<u32> = hits.iter().map(|(id, _)| *id).collect();
         assert!(ids.contains(&0), "doc 0 has the phrase adjacent");
@@ -932,12 +943,26 @@ mod tests {
     fn proximity_query_allows_slop() {
         let mut idx = Bm25Index::with_analyzer(TokenizerKind::Whitespace, AnalyzerConfig::none());
         idx.insert(0, "quick brown fox");
-        idx.insert(1, "quick lazy brown fox");  // one extra word between quick and brown
+        idx.insert(1, "quick lazy brown fox"); // one extra word between quick and brown
         // slop=1 allows one intervening position between consecutive query terms.
-        let ids: Vec<u32> = idx.search_phrase("quick brown", 1, 10).iter().map(|(id,_)| *id).collect();
-        assert!(ids.contains(&0) && ids.contains(&1), "slop=1 matches both: {ids:?}");
-        let ids0: Vec<u32> = idx.search_phrase("quick brown", 0, 10).iter().map(|(id,_)| *id).collect();
-        assert!(ids0.contains(&0) && !ids0.contains(&1), "slop=0 excludes the gapped doc: {ids0:?}");
+        let ids: Vec<u32> = idx
+            .search_phrase("quick brown", 1, 10)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(
+            ids.contains(&0) && ids.contains(&1),
+            "slop=1 matches both: {ids:?}"
+        );
+        let ids0: Vec<u32> = idx
+            .search_phrase("quick brown", 0, 10)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(
+            ids0.contains(&0) && !ids0.contains(&1),
+            "slop=0 excludes the gapped doc: {ids0:?}"
+        );
     }
 
     #[test]
@@ -948,17 +973,29 @@ mod tests {
         idx.insert(0, "alpha beta gamma");
         idx.save(&p).unwrap();
         let idx2 = Bm25Index::load(&p).unwrap();
-        assert!(idx2.search_phrase("beta gamma", 0, 10).iter().any(|(id,_)| *id == 0));
+        assert!(
+            idx2.search_phrase("beta gamma", 0, 10)
+                .iter()
+                .any(|(id, _)| *id == 0)
+        );
     }
 
     #[test]
     fn stopword_gap_blocks_false_phrase() {
         // With stopword removal, positions must still increment for the removed word,
         // so a phrase spanning a removed stopword is NOT falsely adjacent.
-        let mut idx = Bm25Index::with_analyzer(TokenizerKind::Whitespace, AnalyzerConfig::english());
-        idx.insert(0, "quick the brown");   // 'the' is a stopword between quick and brown
+        let mut idx =
+            Bm25Index::with_analyzer(TokenizerKind::Whitespace, AnalyzerConfig::english());
+        idx.insert(0, "quick the brown"); // 'the' is a stopword between quick and brown
         // 'quick brown' as an exact phrase (slop 0) should NOT match because 'the' occupied a position.
-        let ids: Vec<u32> = idx.search_phrase("quick brown", 0, 10).iter().map(|(id,_)| *id).collect();
-        assert!(!ids.contains(&0), "removed stopword must leave a position gap (Lucene positionIncrement): {ids:?}");
+        let ids: Vec<u32> = idx
+            .search_phrase("quick brown", 0, 10)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(
+            !ids.contains(&0),
+            "removed stopword must leave a position gap (Lucene positionIncrement): {ids:?}"
+        );
     }
 }

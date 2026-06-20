@@ -53,8 +53,7 @@ fn seal_one_good_segment(manager: &mut SegmentManager) {
 #[test]
 fn partial_segment_without_metadata_json_is_skipped() {
     let dir = TempDir::new().unwrap();
-    let mut manager =
-        SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
+    let mut manager = SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
     seal_one_good_segment(&mut manager);
     assert_eq!(manager.sealed_segments().len(), 1);
 
@@ -65,8 +64,7 @@ fn partial_segment_without_metadata_json_is_skipped() {
     // Intentionally NO metadata.json — simulates mid-seal crash.
 
     // Build a fresh manager pointing at the same dir and recover.
-    let mut recover =
-        SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
+    let mut recover = SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
     let loaded = recover.load_sealed_segments().unwrap();
     assert_eq!(loaded, 1);
     assert_eq!(recover.sealed_segments().len(), 1);
@@ -75,8 +73,7 @@ fn partial_segment_without_metadata_json_is_skipped() {
 #[test]
 fn segment_with_corrupt_metadata_is_skipped() {
     let dir = TempDir::new().unwrap();
-    let mut manager =
-        SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
+    let mut manager = SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
     seal_one_good_segment(&mut manager);
 
     let shard_dir = dir.path().join("shard_0");
@@ -85,8 +82,7 @@ fn segment_with_corrupt_metadata_is_skipped() {
     // metadata.json is present but unparseable.
     fs::write(bad.join("metadata.json"), b"not json").unwrap();
 
-    let mut recover =
-        SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
+    let mut recover = SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
     let loaded = recover.load_sealed_segments().unwrap();
     assert_eq!(loaded, 1);
 }
@@ -94,8 +90,7 @@ fn segment_with_corrupt_metadata_is_skipped() {
 #[test]
 fn segment_with_missing_records_jsonl_is_skipped() {
     let dir = TempDir::new().unwrap();
-    let mut manager =
-        SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
+    let mut manager = SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
     seal_one_good_segment(&mut manager);
 
     let shard_dir = dir.path().join("shard_0");
@@ -121,8 +116,7 @@ fn segment_with_missing_records_jsonl_is_skipped() {
     )
     .unwrap();
 
-    let mut recover =
-        SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
+    let mut recover = SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
     let loaded = recover.load_sealed_segments().unwrap();
     assert_eq!(loaded, 1);
 }
@@ -130,8 +124,7 @@ fn segment_with_missing_records_jsonl_is_skipped() {
 #[test]
 fn unrelated_dirs_are_ignored() {
     let dir = TempDir::new().unwrap();
-    let mut manager =
-        SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
+    let mut manager = SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
     seal_one_good_segment(&mut manager);
 
     let shard_dir = dir.path().join("shard_0");
@@ -140,8 +133,7 @@ fn unrelated_dirs_are_ignored() {
     fs::create_dir_all(shard_dir.join("tmp_compact")).unwrap();
     fs::write(shard_dir.join("note.txt"), b"hello").unwrap();
 
-    let mut recover =
-        SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
+    let mut recover = SegmentManager::new(schema(), 0, dir.path(), 512 * 1024 * 1024).unwrap();
     let loaded = recover.load_sealed_segments().unwrap();
     assert_eq!(loaded, 1);
 }

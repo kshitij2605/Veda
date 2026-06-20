@@ -35,38 +35,40 @@ pub mod snapshot;
 pub mod spike_attribution;
 pub mod synthetic;
 
-pub use engine::{run_tick, spawn_advisor, AdvisorState};
+pub use engine::{AdvisorState, run_tick, spawn_advisor};
 
 pub use slo::{
-    catalog_default_slos, default_fast_burn, default_slow_burn, BurnConfig, SloDef, SloKind,
-    SloRegistry, SloState, SloStatus,
+    BurnConfig, SloDef, SloKind, SloRegistry, SloState, SloStatus, catalog_default_slos,
+    default_fast_burn, default_slow_burn,
 };
 
 pub use synthetic::{
-    run_probe, ProbeKind, ProbeResult, SyntheticProbe, SyntheticRegistry, SyntheticResults,
-    SyntheticSummary,
+    ProbeKind, ProbeResult, SyntheticProbe, SyntheticRegistry, SyntheticResults, SyntheticSummary,
+    run_probe,
 };
 
 pub use recall_probe::{
-    probe_recall, run_recall_probes, spawn_recall_prober, IndexParams, RecallResults, RecallSample,
+    IndexParams, RecallResults, RecallSample, probe_recall, run_recall_probes, spawn_recall_prober,
 };
 
 pub use faithfulness::{FaithfulnessResults, FaithfulnessSample};
 
-pub use forecast::{compute_forecasts, linear_fit, Forecast, TrendFit};
+pub use forecast::{Forecast, TrendFit, compute_forecasts, linear_fit};
 
-pub use changepoint::{compute_change_points, detect_change_point, ChangeKind, ChangePoint};
+pub use changepoint::{ChangeKind, ChangePoint, compute_change_points, detect_change_point};
 
-pub use spike_attribution::{analyze_log_rate, attribute, Driver, SpikeAttribution};
+pub use spike_attribution::{Driver, SpikeAttribution, analyze_log_rate, attribute};
 
 pub use incidents::{
-    cluster_incidents, compute_incidents, run_incident_correlation, spawn_incident_correlator,
-    Incident, IncidentStore,
+    Incident, IncidentStore, cluster_incidents, compute_incidents, run_incident_correlation,
+    spawn_incident_correlator,
 };
 
-pub use rca::{correlate, correlate_incident, IncidentRef, LogLine, QueryLine, RcaBundle, ResourceState};
+pub use rca::{
+    IncidentRef, LogLine, QueryLine, RcaBundle, ResourceState, correlate, correlate_incident,
+};
 
 pub use snapshot::{
-    collect, parse_prom_counter, CollectionSnapshot, GlobalSnapshot, HealthSnapshot,
-    NodeSnapshot, OpsSnapshot, QuerySnapshot, SnapshotHistory,
+    CollectionSnapshot, GlobalSnapshot, HealthSnapshot, NodeSnapshot, OpsSnapshot, QuerySnapshot,
+    SnapshotHistory, collect, parse_prom_counter,
 };

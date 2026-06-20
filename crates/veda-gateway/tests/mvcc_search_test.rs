@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Once;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::build_router;
@@ -86,7 +86,11 @@ async fn search_at_ts_zero_returns_empty_results() {
         .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["count"], json!(0), "at=0 should filter every hit: {body}");
+    assert_eq!(
+        body["count"],
+        json!(0),
+        "at=0 should filter every hit: {body}"
+    );
 }
 
 // Note: a positive-case test (search at far-future returns

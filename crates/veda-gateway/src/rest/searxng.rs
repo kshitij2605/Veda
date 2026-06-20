@@ -106,7 +106,10 @@ impl SearxngClient {
         }
 
         let json: serde_json::Value = resp.json().await.map_err(|e| {
-            SearchError::new("SEARCH_PARSE", format!("searxng response parse failed: {e}"))
+            SearchError::new(
+                "SEARCH_PARSE",
+                format!("searxng response parse failed: {e}"),
+            )
         })?;
 
         let mut results = parse_search_response(&json);
@@ -174,12 +177,15 @@ mod tests {
         });
         let r = parse_search_response(&json);
         assert_eq!(r.len(), 2);
-        assert_eq!(r[0], WebResult {
-            title: "A".to_owned(),
-            url: "https://a.com".to_owned(),
-            snippet: "body a".to_owned(),
-            engine: Some("google".to_owned()),
-        });
+        assert_eq!(
+            r[0],
+            WebResult {
+                title: "A".to_owned(),
+                url: "https://a.com".to_owned(),
+                snippet: "body a".to_owned(),
+                engine: Some("google".to_owned()),
+            }
+        );
         assert_eq!(r[1].engine, None);
     }
 

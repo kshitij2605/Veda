@@ -24,7 +24,10 @@ fn schema() -> CollectionSchema {
 
 fn record(values: [f32; 2]) -> Record {
     let mut r = Record::new();
-    r.set("v", FieldValue::Vector(DenseVector::new(vec![values[0], values[1]])));
+    r.set(
+        "v",
+        FieldValue::Vector(DenseVector::new(vec![values[0], values[1]])),
+    );
     r
 }
 
@@ -52,7 +55,11 @@ fn search_at_past_ts_filters_future_versions() {
     };
     let (hits, _t) = searcher.search_shard(0, &query).unwrap();
     // Only the record committed at ts=100 is visible at read_ts=150.
-    assert_eq!(hits.len(), 1, "expected 1 visible hit at read_ts=150, got {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected 1 visible hit at read_ts=150, got {hits:?}"
+    );
 }
 
 #[test]
@@ -114,7 +121,11 @@ fn search_supersession_drops_older_version_at_high_read_ts() {
     // For cosine: query [1,0] vs [0.5,0.5] normalised = ~0.293.
     // For cosine: query [1,0] vs [1.0,0] = 0. So v1 would give dist=0
     // but the supersession means we get v2's distance instead.
-    assert!(hits[0].distance > 0.1, "expected v2's distance, got {}", hits[0].distance);
+    assert!(
+        hits[0].distance > 0.1,
+        "expected v2's distance, got {}",
+        hits[0].distance
+    );
 }
 
 #[test]

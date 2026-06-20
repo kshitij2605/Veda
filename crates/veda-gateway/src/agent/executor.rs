@@ -19,9 +19,7 @@ use tracing::Instrument;
 use futures::StreamExt;
 
 use veda_core::genai_semconv as gen_ai;
-use veda_core::llm_client::{
-    ChatMessage, ChatModel, CompletionOptions, ToolDef,
-};
+use veda_core::llm_client::{ChatMessage, ChatModel, CompletionOptions, ToolDef};
 
 use super::catalog::{ToolCatalog, ToolContext};
 use super::model::{Agent, AgentStep, ConversationMessage};
@@ -141,7 +139,10 @@ the provided tools to answer; do not invent collection names or results.",
 /// collections and the modalities each can be searched with, derived from
 /// the live schemas + embedding registry. Async because it reads
 /// `AppState`'s locks.
-pub async fn collections_modality_summary(state: &AppState, tenant: &crate::tenant::TenantId) -> String {
+pub async fn collections_modality_summary(
+    state: &AppState,
+    tenant: &crate::tenant::TenantId,
+) -> String {
     use veda_core::embedding::Modality;
     use veda_core::types::FieldType;
 
@@ -265,6 +266,7 @@ fn truncate_for_model(s: &str, cap: usize) -> String {
 /// GenAI semconv `gen_ai.system` / `gen_ai.request.model` attributes; they
 /// are emitted purely for tracing (the existing `RunMetrics` timing/tokens
 /// are unaffected).
+#[allow(clippy::too_many_arguments)]
 pub async fn run<M: ChatModel>(
     model: &M,
     catalog: &ToolCatalog,
@@ -278,8 +280,17 @@ pub async fn run<M: ChatModel>(
     model_name: &str,
 ) -> RunResult {
     run_core(
-        model, catalog, ctx, agent, system_prompt, history, user_input, max_steps,
-        provider, model_name, None,
+        model,
+        catalog,
+        ctx,
+        agent,
+        system_prompt,
+        history,
+        user_input,
+        max_steps,
+        provider,
+        model_name,
+        None,
     )
     .await
 }
@@ -294,6 +305,7 @@ pub async fn run<M: ChatModel>(
 /// FINAL answer is streamed via the model's `complete_stream` (real token
 /// streaming for [`LlmClient`], a single delta for the default-impl
 /// fakes). Either way the answer arrives as ≥1 `AnswerDelta`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_streaming<M: ChatModel>(
     model: &M,
     catalog: &ToolCatalog,
@@ -308,8 +320,17 @@ pub async fn run_streaming<M: ChatModel>(
     event_tx: tokio::sync::mpsc::Sender<StreamEvent>,
 ) -> RunResult {
     run_core(
-        model, catalog, ctx, agent, system_prompt, history, user_input, max_steps,
-        provider, model_name, Some(event_tx),
+        model,
+        catalog,
+        ctx,
+        agent,
+        system_prompt,
+        history,
+        user_input,
+        max_steps,
+        provider,
+        model_name,
+        Some(event_tx),
     )
     .await
 }
@@ -446,10 +467,7 @@ async fn run_core<M: ChatModel>(
             Ok(c) => {
                 llm_ms += llm_start.elapsed().as_secs_f64() * 1000.0;
                 // Record the response attributes onto the chat span.
-                chat_span.record(
-                    gen_ai::GEN_AI_USAGE_INPUT_TOKENS,
-                    c.prompt_tokens as i64,
-                );
+                chat_span.record(gen_ai::GEN_AI_USAGE_INPUT_TOKENS, c.prompt_tokens as i64);
                 chat_span.record(
                     gen_ai::GEN_AI_USAGE_OUTPUT_TOKENS,
                     c.completion_tokens as i64,
@@ -458,10 +476,7 @@ async fn run_core<M: ChatModel>(
                     // The semconv key is an array; tracing has no array
                     // field type, so a single/comma-joined string is
                     // recorded under the array key (acceptable for v1).
-                    chat_span.record(
-                        gen_ai::GEN_AI_RESPONSE_FINISH_REASONS,
-                        reason.as_str(),
-                    );
+                    chat_span.record(gen_ai::GEN_AI_RESPONSE_FINISH_REASONS, reason.as_str());
                 }
                 c
             }
@@ -519,7 +534,9 @@ async fn run_core<M: ChatModel>(
                                 Ok(delta) => {
                                     if !delta.content.is_empty() {
                                         acc.push_str(&delta.content);
-                                        emit(StreamEvent::AnswerDelta { text: delta.content });
+                                        emit(StreamEvent::AnswerDelta {
+                                            text: delta.content,
+                                        });
                                     }
                                     // Usage rides the terminal chunk.
                                     stream_prompt_tokens =
@@ -560,7 +577,9 @@ async fn run_core<M: ChatModel>(
             } else {
                 blocking_answer
             };
-            steps.push(AgentStep::Reasoning { text: answer.clone() });
+            steps.push(AgentStep::Reasoning {
+                text: answer.clone(),
+            });
             new_messages.push(ChatMessage::text("assistant", answer.clone()));
             return RunResult {
                 response: answer,
@@ -575,12 +594,12 @@ async fn run_core<M: ChatModel>(
         }
 
         // The model wants to act. Record any interleaved reasoning text.
-        if let Some(text) = &completion.content {
-            if !text.trim().is_empty() {
-                emit(StreamEvent::Reasoning { text: text.clone() });
-                steps.push(AgentStep::Reasoning { text: text.clone() });
-                last_content = Some(text.clone());
-            }
+        if let Some(text) = &completion.content
+            && !text.trim().is_empty()
+        {
+            emit(StreamEvent::Reasoning { text: text.clone() });
+            steps.push(AgentStep::Reasoning { text: text.clone() });
+            last_content = Some(text.clone());
         }
 
         // Push the assistant message carrying the tool_calls so the model
@@ -800,14 +819,17 @@ mod tests {
             let c = if let Some(c) = &self.always {
                 c.clone()
             } else {
-                self.queue.borrow_mut().pop_front().unwrap_or_else(|| ToolCompletion {
-                    content: Some("done".to_owned()),
-                    tool_calls: Vec::new(),
-                    finish_reason: Some("stop".to_owned()),
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    total_tokens: 0,
-                })
+                self.queue
+                    .borrow_mut()
+                    .pop_front()
+                    .unwrap_or_else(|| ToolCompletion {
+                        content: Some("done".to_owned()),
+                        tool_calls: Vec::new(),
+                        finish_reason: Some("stop".to_owned()),
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                    })
             };
             if c.tool_calls.is_empty() {
                 *self.last_final.borrow_mut() = c.content.clone();
@@ -879,7 +901,11 @@ mod tests {
 
     fn text_schema(name: &str) -> CollectionSchema {
         CollectionSchema::builder(name)
-            .add_field(FieldDefinition::vector("embedding", 4, DistanceMetric::Cosine))
+            .add_field(FieldDefinition::vector(
+                "embedding",
+                4,
+                DistanceMetric::Cosine,
+            ))
             .add_field(FieldDefinition::new("title", FieldType::String).with_filterable(true))
             .shard_count(1)
             .build()
@@ -953,8 +979,16 @@ mod tests {
         ]);
 
         let result = run(
-            &model, &cat, &ctx, &agent, "sys", &[], "what collections exist?", DEFAULT_MAX_STEPS,
-            "openai", "test-model",
+            &model,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "what collections exist?",
+            DEFAULT_MAX_STEPS,
+            "openai",
+            "test-model",
         )
         .await;
 
@@ -983,7 +1017,9 @@ mod tests {
             .steps
             .iter()
             .find_map(|s| match s {
-                AgentStep::ToolResult { result, is_error, .. } => Some((result, *is_error)),
+                AgentStep::ToolResult {
+                    result, is_error, ..
+                } => Some((result, *is_error)),
                 _ => None,
             })
             .unwrap();
@@ -999,7 +1035,10 @@ mod tests {
     fn answer_chunks_reproduce_input_and_split_on_whitespace() {
         assert!(answer_chunks("").is_empty());
         let chunks = answer_chunks("Hello there world");
-        assert!(chunks.len() >= 2, "should split into multiple chunks: {chunks:?}");
+        assert!(
+            chunks.len() >= 2,
+            "should split into multiple chunks: {chunks:?}"
+        );
         assert_eq!(chunks.concat(), "Hello there world");
         // A no-whitespace answer is a single chunk.
         assert_eq!(answer_chunks("oneword"), vec!["oneword".to_owned()]);
@@ -1028,8 +1067,15 @@ mod tests {
         // Baseline blocking run.
         let baseline = run(
             &FakeModel::scripted(script()),
-            &cat, &ctx, &agent, "sys", &[], "what collections exist?", DEFAULT_MAX_STEPS,
-            "openai", "test-model",
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "what collections exist?",
+            DEFAULT_MAX_STEPS,
+            "openai",
+            "test-model",
         )
         .await;
 
@@ -1037,8 +1083,16 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
         let streamed = run_streaming(
             &FakeModel::scripted(script()),
-            &cat, &ctx, &agent, "sys", &[], "what collections exist?", DEFAULT_MAX_STEPS,
-            "openai", "test-model", tx,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "what collections exist?",
+            DEFAULT_MAX_STEPS,
+            "openai",
+            "test-model",
+            tx,
         )
         .await;
 
@@ -1062,7 +1116,15 @@ mod tests {
             .expect("a tool_call event");
         let tr = events
             .iter()
-            .position(|e| matches!(e, StreamEvent::ToolResult { is_error: false, .. }))
+            .position(|e| {
+                matches!(
+                    e,
+                    StreamEvent::ToolResult {
+                        is_error: false,
+                        ..
+                    }
+                )
+            })
             .expect("a tool_result event");
         let first_answer = events
             .iter()
@@ -1081,7 +1143,11 @@ mod tests {
             .collect();
         assert_eq!(answer, streamed.response);
         assert!(
-            events.iter().filter(|e| matches!(e, StreamEvent::AnswerDelta { .. })).count() >= 1,
+            events
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::AnswerDelta { .. }))
+                .count()
+                >= 1,
             "answer must arrive as ≥1 delta"
         );
     }
@@ -1114,8 +1180,17 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
         let streamed = run_streaming(
-            &model, &cat, &ctx, &agent, "sys", &[], "what collections exist?", DEFAULT_MAX_STEPS,
-            "openai", "test-model", tx,
+            &model,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "what collections exist?",
+            DEFAULT_MAX_STEPS,
+            "openai",
+            "test-model",
+            tx,
         )
         .await;
 
@@ -1146,7 +1221,13 @@ mod tests {
             "tool_call event must still be emitted"
         );
         assert!(
-            events.iter().any(|e| matches!(e, StreamEvent::ToolResult { is_error: false, .. })),
+            events.iter().any(|e| matches!(
+                e,
+                StreamEvent::ToolResult {
+                    is_error: false,
+                    ..
+                }
+            )),
             "tool_result event must still be emitted"
         );
     }
@@ -1169,8 +1250,16 @@ mod tests {
         ]);
 
         let result = run(
-            &model, &cat, &ctx, &agent, "sys", &[], "what collections?", DEFAULT_MAX_STEPS,
-            "openai", "test-model",
+            &model,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "what collections?",
+            DEFAULT_MAX_STEPS,
+            "openai",
+            "test-model",
         )
         .await;
 
@@ -1182,11 +1271,17 @@ mod tests {
         // LLM time was measured; tool time is non-negative; their sum fits
         // within the whole-run span (with generous slack for bookkeeping).
         assert!(m.llm_ms > 0.0, "llm_ms should be > 0, got {}", m.llm_ms);
-        assert!(m.tool_ms >= 0.0, "tool_ms should be >= 0, got {}", m.tool_ms);
+        assert!(
+            m.tool_ms >= 0.0,
+            "tool_ms should be >= 0, got {}",
+            m.tool_ms
+        );
         assert!(
             m.llm_ms + m.tool_ms <= m.total_ms + 5.0,
             "llm_ms ({}) + tool_ms ({}) should be <= total_ms ({}) + slack",
-            m.llm_ms, m.tool_ms, m.total_ms
+            m.llm_ms,
+            m.tool_ms,
+            m.total_ms
         );
         // Tokens match the summed RunResult totals (5+5 + 3+7 = 20).
         assert_eq!(m.total_tokens, result.total_tokens);
@@ -1231,14 +1326,26 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
         let result = run_streaming(
-            &model, &cat, &ctx, &agent, "sys", &[], "what collections?", DEFAULT_MAX_STEPS,
-            "openai", "test-model", tx,
+            &model,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "what collections?",
+            DEFAULT_MAX_STEPS,
+            "openai",
+            "test-model",
+            tx,
         )
         .await;
         // Drain so the channel doesn't hold anything (sender already dropped).
         while rx.try_recv().is_ok() {}
 
-        let ttft = result.metrics.ttft_ms.expect("streaming run must record ttft_ms");
+        let ttft = result
+            .metrics
+            .ttft_ms
+            .expect("streaming run must record ttft_ms");
         assert!(ttft > 0.0, "ttft_ms should be > 0, got {ttft}");
         // TTFT precedes the final answer, so it can't exceed the whole run.
         assert!(
@@ -1258,11 +1365,22 @@ mod tests {
 
         let model = FakeModel::scripted(vec![final_completion("Immediate answer.")]);
         let result = run(
-            &model, &cat, &ctx, &agent, "sys", &[], "hi", DEFAULT_MAX_STEPS,
-            "openai", "test-model",
+            &model,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "hi",
+            DEFAULT_MAX_STEPS,
+            "openai",
+            "test-model",
         )
         .await;
-        assert!(result.metrics.ttft_ms.is_none(), "blocking run must leave ttft_ms None");
+        assert!(
+            result.metrics.ttft_ms.is_none(),
+            "blocking run must leave ttft_ms None"
+        );
     }
 
     #[tokio::test]
@@ -1282,8 +1400,16 @@ mod tests {
 
         let max_steps = 3;
         let result = run(
-            &model, &cat, &ctx, &agent, "sys", &[], "loop forever", max_steps,
-            "openai", "test-model",
+            &model,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "loop forever",
+            max_steps,
+            "openai",
+            "test-model",
         )
         .await;
 
@@ -1296,7 +1422,10 @@ mod tests {
             .iter()
             .filter(|s| matches!(s, AgentStep::ToolCall { .. }))
             .count();
-        assert!(dispatched <= max_steps, "dispatched {dispatched} > {max_steps}");
+        assert!(
+            dispatched <= max_steps,
+            "dispatched {dispatched} > {max_steps}"
+        );
         assert!(!result.response.is_empty());
     }
 
@@ -1318,8 +1447,16 @@ mod tests {
         ]);
 
         let result = run(
-            &model, &cat, &ctx, &agent, "sys", &[], "describe something", DEFAULT_MAX_STEPS,
-            "openai", "test-model",
+            &model,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "describe something",
+            DEFAULT_MAX_STEPS,
+            "openai",
+            "test-model",
         )
         .await;
 
@@ -1327,9 +1464,10 @@ mod tests {
         assert!(!result.hit_limit_or_error);
         assert_eq!(result.response, "Sorry, I could not parse that.");
         // A ToolResult step with is_error=true is recorded.
-        let err_step = result.steps.iter().any(|s| {
-            matches!(s, AgentStep::ToolResult { is_error: true, .. })
-        });
+        let err_step = result
+            .steps
+            .iter()
+            .any(|s| matches!(s, AgentStep::ToolResult { is_error: true, .. }));
         assert!(err_step, "expected an error tool-result step");
     }
 
@@ -1357,8 +1495,16 @@ mod tests {
         let agent = test_agent(vec![]);
 
         let result = run(
-            &ErrModel, &cat, &ctx, &agent, "sys", &[], "hello", DEFAULT_MAX_STEPS,
-            "openai", "test-model",
+            &ErrModel,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "hello",
+            DEFAULT_MAX_STEPS,
+            "openai",
+            "test-model",
         )
         .await;
         assert!(result.hit_limit_or_error);
@@ -1411,7 +1557,10 @@ mod tests {
         let scoped = crate::tenant::scope(&tenant, "media");
         let schema = CollectionSchema::builder(&scoped)
             .add_field(FieldDefinition::vector_with_model(
-                "vec", 4, DistanceMetric::Cosine, "mm",
+                "vec",
+                4,
+                DistanceMetric::Cosine,
+                "mm",
             ))
             .shard_count(1)
             .build()
@@ -1548,8 +1697,7 @@ mod tests {
             .iter()
             .filter(|s| {
                 s.name == "chat"
-                    && s.fields.get("gen_ai.request.model").map(String::as_str)
-                        == Some("gpt-test")
+                    && s.fields.get("gen_ai.request.model").map(String::as_str) == Some("gpt-test")
             })
             .collect();
         for c in &chat_spans {
@@ -1573,7 +1721,9 @@ mod tests {
         let tool_turn = chat_spans
             .iter()
             .find(|s| {
-                s.fields.get("gen_ai.response.finish_reasons").map(String::as_str)
+                s.fields
+                    .get("gen_ai.response.finish_reasons")
+                    .map(String::as_str)
                     == Some("tool_calls")
             })
             .expect("a `chat` span for the tool-call turn should exist");
@@ -1598,7 +1748,9 @@ mod tests {
         let final_turn = chat_spans
             .iter()
             .find(|s| {
-                s.fields.get("gen_ai.response.finish_reasons").map(String::as_str)
+                s.fields
+                    .get("gen_ai.response.finish_reasons")
+                    .map(String::as_str)
                     == Some("stop")
             })
             .expect("a `chat` span for the final-answer turn should exist");
@@ -1623,8 +1775,7 @@ mod tests {
             .iter()
             .find(|s| {
                 s.name == "execute_tool"
-                    && s.fields.get("gen_ai.tool.call.id").map(String::as_str)
-                        == Some("call_1")
+                    && s.fields.get("gen_ai.tool.call.id").map(String::as_str) == Some("call_1")
             })
             .expect("an `execute_tool` span should be emitted");
         assert_eq!(
@@ -1643,17 +1794,12 @@ mod tests {
         // Two model turns → two `chat` spans; one dispatch → one tool span.
         // Counted from THIS run's marker-filtered spans so a parallel test's
         // spans observed by the collector cannot inflate the totals.
-        assert_eq!(
-            chat_spans.len(),
-            2,
-            "expected one chat span per LLM turn"
-        );
+        assert_eq!(chat_spans.len(), 2, "expected one chat span per LLM turn");
         assert_eq!(
             all.iter()
                 .filter(|s| {
                     s.name == "execute_tool"
-                        && s.fields.get("gen_ai.tool.call.id").map(String::as_str)
-                            == Some("call_1")
+                        && s.fields.get("gen_ai.tool.call.id").map(String::as_str) == Some("call_1")
                 })
                 .count(),
             1

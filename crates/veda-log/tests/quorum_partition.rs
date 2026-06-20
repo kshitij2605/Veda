@@ -86,6 +86,9 @@ fn entry(seq_id: u64) -> LogEntryV2 {
     }
 }
 
+// Test helper: the 3-tuple return is local to this file; a type alias would
+// add indirection without reuse.
+#[allow(clippy::type_complexity)]
 fn build_followers(
     n: usize,
 ) -> (
@@ -116,7 +119,9 @@ async fn append_fails_no_quorum_when_two_of_three_partitioned() {
     parts[2].partition().await;
     let ens = LogEnsemble::new(vec![1, 2, 3], 2, 1, 1); // Qa=2
     let writer = LogWriter::new(ens, as_dyn);
-    let result = writer.append_batch(vec![entry(1), entry(2), entry(3)]).await;
+    let result = writer
+        .append_batch(vec![entry(1), entry(2), entry(3)])
+        .await;
     match result {
         Err(EnsembleError::NoQuorum { acked, qa, .. }) => {
             assert!(acked < qa, "expected acked < Qa, got acked={acked} qa={qa}");
@@ -147,29 +152,35 @@ async fn append_succeeds_after_partition_heals() {
 #[tokio::test]
 async fn minority_acked_entry_fences_on_heal_via_truncate() {
     // 3 followers. Initial epoch=1, Qa=2.
-    let (_tmps, parts, as_dyn) = build_followers(3);
+    let (_tmps, _parts, as_dyn) = build_followers(3);
     // Phase 1: majority append 1..=3.
     let ens1 = LogEnsemble::new(vec![1, 2, 3], 2, 1, 1);
     let majority: Vec<Arc<dyn LogFollower>> = vec![as_dyn[0].clone(), as_dyn[1].clone()];
     let writer1 = LogWriter::new(ens1.clone(), majority);
-    writer1.append_batch((1..=3).map(entry).collect()).await.unwrap();
+    writer1
+        .append_batch((1..=3).map(entry).collect())
+        .await
+        .unwrap();
 
     // Phase 2: simulate the old writer racing one minority-only
     // entry to follower 2 (would happen if the old writer
     // crashed mid-batch).
     let minority: Vec<Arc<dyn LogFollower>> = vec![as_dyn[2].clone()];
-    let writer_stray = LogWriter::new(
-        LogEnsemble::new(vec![1, 2, 3], 1, 1, 1),
-        minority,
-    );
-    writer_stray.append_batch((1..=4).map(entry).collect()).await.unwrap();
+    let writer_stray = LogWriter::new(LogEnsemble::new(vec![1, 2, 3], 1, 1, 1), minority);
+    writer_stray
+        .append_batch((1..=4).map(entry).collect())
+        .await
+        .unwrap();
     assert_eq!(as_dyn[2].last_durable_seq().await.unwrap(), 4);
 
     // Phase 3: new writer at epoch=2 runs open_and_recover.
     let ens2 = LogEnsemble::new(vec![1, 2, 3], 2, 2, 2);
     let writer2 = LogWriter::new(ens2, as_dyn.clone());
     let safe = writer2.open_and_recover().await.unwrap();
-    assert!(safe >= 3 && safe <= 4, "safe_seq should be 3 or 4, got {safe}");
+    assert!(
+        (3..=4).contains(&safe),
+        "safe_seq should be 3 or 4, got {safe}"
+    );
 
     // After truncate, every follower's durable_seq ≤ safe_seq.
     for f in as_dyn.iter() {

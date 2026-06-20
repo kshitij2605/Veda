@@ -29,12 +29,12 @@ pub(crate) enum Token {
     Null,
 
     // Operators
-    Eq,      // =
-    Ne,      // !=
-    Gt,      // >
-    Gte,     // >=
-    Lt,      // <
-    Lte,     // <=
+    Eq,  // =
+    Ne,  // !=
+    Gt,  // >
+    Gte, // >=
+    Lt,  // <
+    Lte, // <=
 
     // Punctuation
     LParen,
@@ -145,7 +145,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             while i < len && chars[i].is_ascii_digit() {
                 i += 1;
             }
-            let is_float = i < len && chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit();
+            let is_float =
+                i < len && chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit();
             if is_float {
                 i += 1; // skip dot
                 while i < len && chars[i].is_ascii_digit() {
@@ -234,11 +235,7 @@ impl FilterParser {
     }
 
     fn advance(&mut self) -> Token {
-        let tok = self
-            .tokens
-            .get(self.pos)
-            .cloned()
-            .unwrap_or(Token::Eof);
+        let tok = self.tokens.get(self.pos).cloned().unwrap_or(Token::Eof);
         self.pos += 1;
         tok
     }
@@ -312,7 +309,7 @@ impl FilterParser {
             other => {
                 return Err(VedaError::Query(format!(
                     "expected field name, got {other:?}"
-                )))
+                )));
             }
         };
         let mut field = first;
@@ -327,7 +324,7 @@ impl FilterParser {
                 other => {
                     return Err(VedaError::Query(format!(
                         "expected identifier after '.', got {other:?}"
-                    )))
+                    )));
                 }
             }
         }
@@ -442,7 +439,7 @@ impl FilterParser {
                     other => {
                         return Err(VedaError::Query(format!(
                             "LIKE expects string literal, got {other:?}"
-                        )))
+                        )));
                     }
                 };
                 let starts = pattern.starts_with('%');

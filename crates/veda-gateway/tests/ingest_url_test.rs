@@ -8,7 +8,7 @@
 //!   - `VEDA_CRAWL4AI_ENDPOINT` unset → clean 503 (no panic).
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,10 +59,10 @@ struct CrawlSpy {
 /// `{ "url", "markdown": "<string>", "success": true }`, and records the
 /// request body + whether an Authorization bearer was present.
 async fn start_mock_crawl4ai() -> (String, CrawlSpy, tokio::task::JoinHandle<()>) {
+    use axum::Router;
     use axum::extract::State as AxState;
     use axum::http::HeaderMap;
     use axum::routing::post;
-    use axum::Router;
 
     let spy = CrawlSpy::default();
 
@@ -88,9 +88,7 @@ async fn start_mock_crawl4ai() -> (String, CrawlSpy, tokio::task::JoinHandle<()>
         }))
     }
 
-    let router = Router::new()
-        .route("/md", post(md))
-        .with_state(spy.clone());
+    let router = Router::new().route("/md", post(md)).with_state(spy.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}");
@@ -102,9 +100,9 @@ async fn start_mock_crawl4ai() -> (String, CrawlSpy, tokio::task::JoinHandle<()>
 /// so a wiring test can assert the SSRF guard short-circuits BEFORE any
 /// crawl is attempted (hit count stays 0).
 async fn start_counting_crawl4ai() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    use axum::Router;
     use axum::extract::State as AxState;
     use axum::routing::post;
-    use axum::Router;
 
     let hits = Arc::new(AtomicUsize::new(0));
 
@@ -145,10 +143,16 @@ async fn create_web_collection(base: &str, name: &str) {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 201, "create collection failed: {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        201,
+        "create collection failed: {:?}",
+        resp.text().await
+    );
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_ingest_url_chunks_embeds_and_inserts_with_source_url() {
     let (crawl_url, spy, _crawl_handle) = start_mock_crawl4ai().await;
     let (base, _tmp) = start_gateway().await;
@@ -188,17 +192,28 @@ async fn test_ingest_url_chunks_embeds_and_inserts_with_source_url() {
     assert_eq!(status, 201, "ingest-url failed: {body}");
     assert_eq!(body["pages"], 1);
     let inserted = body["chunks_inserted"].as_u64().unwrap();
-    assert!(inserted >= 1, "expected at least one chunk inserted: {body}");
+    assert!(
+        inserted >= 1,
+        "expected at least one chunk inserted: {body}"
+    );
     assert_eq!(body["per_url"][0]["title"], "Veda Docs");
 
     // The client must hit `POST /md` with a single `url` string (NOT an
     // `urls` array) and forward the bearer token.
-    let sent = spy.body.lock().unwrap().clone().expect("crawl4ai /md was not called");
+    let sent = spy
+        .body
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("crawl4ai /md was not called");
     assert_eq!(
         sent["url"], "https://example.com/doc",
         "client must POST a single `url` string to /md: {sent}"
     );
-    assert!(sent.get("urls").is_none(), "client must not send an `urls` array: {sent}");
+    assert!(
+        sent.get("urls").is_none(),
+        "client must not send an `urls` array: {sent}"
+    );
     assert!(
         spy.had_bearer.load(Ordering::SeqCst),
         "client must forward the bearer token to crawl4ai"
@@ -213,7 +228,11 @@ async fn test_ingest_url_chunks_embeds_and_inserts_with_source_url() {
     assert_eq!(list.status(), 200);
     let list_body: Value = list.json().await.unwrap();
     let records = list_body["records"].as_array().unwrap();
-    assert_eq!(records.len() as u64, inserted, "record count mismatch: {list_body}");
+    assert_eq!(
+        records.len() as u64,
+        inserted,
+        "record count mismatch: {list_body}"
+    );
     for rec in records {
         assert_eq!(
             rec["fields"]["source_url"], "https://example.com/doc",
@@ -227,6 +246,7 @@ async fn test_ingest_url_chunks_embeds_and_inserts_with_source_url() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_ingest_url_not_configured_returns_503() {
     let (base, _tmp) = start_gateway().await;
     create_web_collection(&base, "web_col_unset").await;
@@ -254,6 +274,7 @@ async fn test_ingest_url_not_configured_returns_503() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_ingest_url_ssrf_blocked_returns_403_without_crawling() {
     // The mock crawl4ai is fully configured and counts hits; the SSRF
     // guard must reject the private target URL and short-circuit so the

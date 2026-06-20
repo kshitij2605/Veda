@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::auth::Role;
@@ -28,8 +28,14 @@ async fn start_server() -> (String, tempfile::TempDir) {
 async fn start_auth_server() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let mut users = HashMap::new();
-    users.insert("admin".to_owned(), UserRecord::with_password("admin", Role::Admin));
-    users.insert("viewer".to_owned(), UserRecord::with_password("viewer", Role::Viewer));
+    users.insert(
+        "admin".to_owned(),
+        UserRecord::with_password("admin", Role::Admin),
+    );
+    users.insert(
+        "viewer".to_owned(),
+        UserRecord::with_password("viewer", Role::Viewer),
+    );
     let app_state = AppState::with_auth_and_users(tmp.path(), "test-jwt-secret", users);
     let router = build_router(app_state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -68,7 +74,17 @@ async fn depmap_returns_expected_nodes_and_edges() {
 
     let nodes = body["nodes"].as_array().expect("nodes array");
     let ids: Vec<&str> = nodes.iter().filter_map(|n| n["id"].as_str()).collect();
-    for must in ["gateway", "query", "shards", "index", "embedding", "llm", "rerank", "blob", "nats"] {
+    for must in [
+        "gateway",
+        "query",
+        "shards",
+        "index",
+        "embedding",
+        "llm",
+        "rerank",
+        "blob",
+        "nats",
+    ] {
         assert!(ids.contains(&must), "node `{must}` present; got {ids:?}");
     }
 
@@ -112,5 +128,10 @@ async fn depmap_requires_admin_role() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "admin must be allowed: {:?}", r.text().await);
+    assert_eq!(
+        r.status(),
+        200,
+        "admin must be allowed: {:?}",
+        r.text().await
+    );
 }

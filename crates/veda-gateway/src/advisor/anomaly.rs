@@ -203,8 +203,7 @@ fn rate_series(history: &SnapshotHistory, metric: &str) -> Vec<f64> {
     // `series` only yields f64, so encode a missing counter as NaN and
     // skip any interval that touches a NaN endpoint.
     let times = history.series(|s| s.taken_at_ms as f64);
-    let counts =
-        history.series(|s| s.counters.get(metric).copied().unwrap_or(f64::NAN));
+    let counts = history.series(|s| s.counters.get(metric).copied().unwrap_or(f64::NAN));
     let mut out = Vec::new();
     for i in 1..times.len() {
         let (prev, now) = (counts[i - 1], counts[i]);
@@ -227,7 +226,11 @@ fn rate_series(history: &SnapshotHistory, metric: &str) -> Vec<f64> {
 /// RSS-in-MiB series, skipping snapshots where RSS is unknown.
 fn rss_series(history: &SnapshotHistory) -> Vec<f64> {
     history
-        .series(|s| s.rss_bytes.map(|b| b as f64 / 1_048_576.0).unwrap_or(f64::NAN))
+        .series(|s| {
+            s.rss_bytes
+                .map(|b| b as f64 / 1_048_576.0)
+                .unwrap_or(f64::NAN)
+        })
         .into_iter()
         .filter(|v| !v.is_nan())
         .collect()
@@ -304,14 +307,19 @@ mod tests {
     use super::*;
     use crate::advisor::config::RuleConfig;
     use crate::advisor::snapshot::{
-        GlobalSnapshot, HealthSnapshot, OpsSnapshot, QuerySnapshot, SnapshotHistory,
-        DEFAULT_HISTORY_CAP,
+        DEFAULT_HISTORY_CAP, GlobalSnapshot, HealthSnapshot, OpsSnapshot, QuerySnapshot,
+        SnapshotHistory,
     };
     use std::collections::HashMap;
 
     /// Build a snapshot carrying a chosen p95 latency, RSS, and an
     /// arbitrary set of counters at a given timestamp.
-    fn snap(taken_at_ms: i64, p95_ms: f64, rss_bytes: Option<u64>, counters: &[(&str, f64)]) -> OpsSnapshot {
+    fn snap(
+        taken_at_ms: i64,
+        p95_ms: f64,
+        rss_bytes: Option<u64>,
+        counters: &[(&str, f64)],
+    ) -> OpsSnapshot {
         let mut c = HashMap::new();
         for (k, v) in counters {
             c.insert((*k).to_owned(), *v);
@@ -435,7 +443,10 @@ mod tests {
         // 30 samples wobbling tightly around 100; current also ~100.
         let h = latency_history(30, |i| 100.0 + (i % 3) as f64 * 0.5 - 0.5);
         let hits = detect_anomalies(&h, &AdvisorConfig::default());
-        assert!(find(&hits, "anomaly_search_latency").is_none(), "hits: {hits:?}");
+        assert!(
+            find(&hits, "anomaly_search_latency").is_none(),
+            "hits: {hits:?}"
+        );
     }
 
     #[test]
@@ -463,7 +474,13 @@ mod tests {
     #[test]
     fn extreme_spike_fires_high() {
         // Tight baseline ~100 (small spread), then an enormous jump → ≥5σ.
-        let h = latency_history(30, |i| if i == 29 { 5000.0 } else { 100.0 + (i % 2) as f64 });
+        let h = latency_history(30, |i| {
+            if i == 29 {
+                5000.0
+            } else {
+                100.0 + (i % 2) as f64
+            }
+        });
         let hits = detect_anomalies(&h, &AdvisorConfig::default());
         let hit = find(&hits, "anomaly_search_latency").expect("latency anomaly fired");
         assert_eq!(hit.severity, Severity::High);
@@ -472,7 +489,13 @@ mod tests {
     #[test]
     fn warmup_suppresses_fire() {
         // Only 10 samples (< default 20) even with a blatant spike → no fire.
-        let h = latency_history(10, |i| if i == 9 { 5000.0 } else { 100.0 + (i % 2) as f64 });
+        let h = latency_history(10, |i| {
+            if i == 9 {
+                5000.0
+            } else {
+                100.0 + (i % 2) as f64
+            }
+        });
         let hits = detect_anomalies(&h, &AdvisorConfig::default());
         assert!(find(&hits, "anomaly_search_latency").is_none());
     }
@@ -487,19 +510,31 @@ mod tests {
 
     #[test]
     fn disabled_or_muted_suppressed() {
-        let h = latency_history(30, |i| if i == 29 { 200.0 } else { 100.0 + (i % 3) as f64 * 0.4 });
+        let h = latency_history(30, |i| {
+            if i == 29 {
+                200.0
+            } else {
+                100.0 + (i % 3) as f64 * 0.4
+            }
+        });
 
         let mut disabled = AdvisorConfig::default();
         disabled.rules.insert(
             "anomaly_search_latency".into(),
-            RuleConfig { enabled: false, ..Default::default() },
+            RuleConfig {
+                enabled: false,
+                ..Default::default()
+            },
         );
         assert!(find(&detect_anomalies(&h, &disabled), "anomaly_search_latency").is_none());
 
         let mut muted = AdvisorConfig::default();
         muted.rules.insert(
             "anomaly_search_latency".into(),
-            RuleConfig { muted: true, ..Default::default() },
+            RuleConfig {
+                muted: true,
+                ..Default::default()
+            },
         );
         assert!(find(&detect_anomalies(&h, &muted), "anomaly_search_latency").is_none());
     }
@@ -514,9 +549,18 @@ mod tests {
         for i in 0..31 {
             // steady 10/interval for the baseline, 1000 on the last step.
             if i > 0 {
-                total += if i == 30 { 1000.0 } else { 10.0 + (i % 2) as f64 };
+                total += if i == 30 {
+                    1000.0
+                } else {
+                    10.0 + (i % 2) as f64
+                };
             }
-            h.push(snap(1000 + i as i64 * 1000, 0.0, None, &[("veda_errors_total", total)]));
+            h.push(snap(
+                1000 + i as i64 * 1000,
+                0.0,
+                None,
+                &[("veda_errors_total", total)],
+            ));
         }
         let hits = detect_anomalies(&h, &AdvisorConfig::default());
         let hit = find(&hits, "anomaly_error_rate").expect("error-rate anomaly fired");

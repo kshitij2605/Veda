@@ -101,8 +101,7 @@ impl HnswBuilder {
 
             for &neighbor_id in &neighbors {
                 // Add the new node as a neighbor of each selected neighbor.
-                let mut n_neighbors: Vec<u32> =
-                    graph.get_neighbors(neighbor_id, layer).to_vec();
+                let mut n_neighbors: Vec<u32> = graph.get_neighbors(neighbor_id, layer).to_vec();
                 n_neighbors.push(id);
 
                 // If the neighbor now has too many connections, prune.
@@ -118,9 +117,8 @@ impl HnswBuilder {
                             (nid, dist)
                         })
                         .collect();
-                    scored.sort_by(|a, b| {
-                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    scored
+                        .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
                     scored.truncate(max_conn);
                     n_neighbors = scored.into_iter().map(|(nid, _)| nid).collect();
                 }

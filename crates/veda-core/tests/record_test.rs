@@ -101,10 +101,7 @@ fn test_normalize_produces_unit_vector() {
     let mut v = DenseVector::new(vec![3.0, 4.0]);
     v.normalize();
     let norm: f32 = v.as_slice().iter().map(|x| x * x).sum::<f32>().sqrt();
-    assert!(
-        (norm - 1.0).abs() < 1e-5,
-        "expected norm ~1.0, got {norm}"
-    );
+    assert!((norm - 1.0).abs() < 1e-5, "expected norm ~1.0, got {norm}");
 }
 
 #[test]
@@ -238,18 +235,15 @@ fn test_field_value_serde_roundtrip() {
         FieldValue::String("test".to_string()),
         FieldValue::Int32(42),
         FieldValue::Int64(123_456_789),
-        FieldValue::Float32(3.14),
-        FieldValue::Float64(2.718_281_828),
+        FieldValue::Float32(1.5),
+        FieldValue::Float64(2.25),
         FieldValue::Bool(true),
         FieldValue::Timestamp(1_700_000_000_000),
         FieldValue::Vector(DenseVector::new(vec![1.0, 2.0, 3.0])),
         FieldValue::Json(serde_json::json!({"key": "value"})),
         FieldValue::BlobRef("s3://bucket/obj".to_string()),
         FieldValue::Uuid(Uuid::new_v4()),
-        FieldValue::Array(vec![
-            FieldValue::Int32(1),
-            FieldValue::Int32(2),
-        ]),
+        FieldValue::Array(vec![FieldValue::Int32(1), FieldValue::Int32(2)]),
         FieldValue::Null,
     ];
 

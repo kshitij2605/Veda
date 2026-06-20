@@ -83,8 +83,7 @@ fn test_euclidean_metric() {
 
     let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
     let results = idx.search(&query, 5).unwrap();
-    let truth =
-        ground_truth_search(&vecs, &query, 5, DistanceMetric::Euclidean, &HashSet::new());
+    let truth = ground_truth_search(&vecs, &query, 5, DistanceMetric::Euclidean, &HashSet::new());
 
     assert_eq!(results.len(), 5);
     for (r, t) in results.iter().zip(truth.iter()) {
@@ -104,8 +103,13 @@ fn test_dot_product_metric() {
 
     let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
     let results = idx.search(&query, 5).unwrap();
-    let truth =
-        ground_truth_search(&vecs, &query, 5, DistanceMetric::DotProduct, &HashSet::new());
+    let truth = ground_truth_search(
+        &vecs,
+        &query,
+        5,
+        DistanceMetric::DotProduct,
+        &HashSet::new(),
+    );
 
     assert_eq!(results.len(), 5);
     for (r, t) in results.iter().zip(truth.iter()) {
@@ -127,8 +131,7 @@ fn test_manhattan_metric() {
 
     let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
     let results = idx.search(&query, 5).unwrap();
-    let truth =
-        ground_truth_search(&vecs, &query, 5, DistanceMetric::Manhattan, &HashSet::new());
+    let truth = ground_truth_search(&vecs, &query, 5, DistanceMetric::Manhattan, &HashSet::new());
 
     assert_eq!(results.len(), 5);
     for (r, t) in results.iter().zip(truth.iter()) {

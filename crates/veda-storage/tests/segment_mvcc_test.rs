@@ -2,8 +2,8 @@
 
 use veda_core::record::{FieldValue, Record};
 use veda_core::schema::CollectionSchema;
-use veda_core::types::{DistanceMetric, FieldType};
 use veda_core::schema::FieldDefinition;
+use veda_core::types::{DistanceMetric, FieldType};
 use veda_storage::segment_manager::SegmentManager;
 
 fn schema() -> CollectionSchema {
@@ -17,7 +17,10 @@ fn schema() -> CollectionSchema {
 
 fn record(label: &str) -> Record {
     let mut r = Record::new();
-    r.set("v", FieldValue::Vector(veda_core::vector::DenseVector::new(vec![1.0, 0.0])));
+    r.set(
+        "v",
+        FieldValue::Vector(veda_core::vector::DenseVector::new(vec![1.0, 0.0])),
+    );
     r.set("label", FieldValue::String(label.to_owned()));
     r
 }
@@ -29,7 +32,10 @@ fn insert_mvcc_requires_enable_mvcc() {
     let r = record("a");
     let err = sm.insert_mvcc(100, r).unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("enable_mvcc"), "expected enable_mvcc hint, got {msg}");
+    assert!(
+        msg.contains("enable_mvcc"),
+        "expected enable_mvcc hint, got {msg}"
+    );
 }
 
 #[test]
@@ -42,7 +48,10 @@ fn insert_mvcc_then_read_at_ts_returns_visible_version() {
     sm.insert_mvcc(100, r).unwrap();
     // Re-use the same UUID: simulate updating the same logical row.
     let mut r2 = Record::with_id(rid);
-    r2.set("v", FieldValue::Vector(veda_core::vector::DenseVector::new(vec![1.0, 0.0])));
+    r2.set(
+        "v",
+        FieldValue::Vector(veda_core::vector::DenseVector::new(vec![1.0, 0.0])),
+    );
     r2.set("label", FieldValue::String("v2".to_owned()));
     sm.insert_mvcc(200, r2).unwrap();
 
@@ -85,7 +94,10 @@ fn mvcc_gc_runs_when_safe_ts_advances() {
     let rid = r.id();
     for ts in [100u128, 200, 300] {
         let mut clone = Record::with_id(rid);
-        clone.set("v", FieldValue::Vector(veda_core::vector::DenseVector::new(vec![1.0, 0.0])));
+        clone.set(
+            "v",
+            FieldValue::Vector(veda_core::vector::DenseVector::new(vec![1.0, 0.0])),
+        );
         clone.set("label", FieldValue::String(format!("upd{ts}")));
         sm.insert_mvcc(ts, clone).unwrap();
     }
@@ -108,7 +120,10 @@ fn mvcc_durable_survives_drop_and_reopen() {
         rid = r.id();
         sm.insert_mvcc(100, r).unwrap();
         let mut r2 = Record::with_id(rid);
-        r2.set("v", FieldValue::Vector(veda_core::vector::DenseVector::new(vec![1.0, 0.0])));
+        r2.set(
+            "v",
+            FieldValue::Vector(veda_core::vector::DenseVector::new(vec![1.0, 0.0])),
+        );
         r2.set("label", FieldValue::String("v2".into()));
         sm.insert_mvcc(200, r2).unwrap();
     }
@@ -152,7 +167,10 @@ fn mvcc_durable_replays_set_safe_ts() {
     let rid = r1.id();
     sm2.insert_mvcc(100, r1).unwrap();
     let mut r2 = Record::with_id(rid);
-    r2.set("v", FieldValue::Vector(veda_core::vector::DenseVector::new(vec![1.0, 0.0])));
+    r2.set(
+        "v",
+        FieldValue::Vector(veda_core::vector::DenseVector::new(vec![1.0, 0.0])),
+    );
     r2.set("label", FieldValue::String("b".into()));
     sm2.insert_mvcc(900, r2).unwrap();
     let dropped = sm2.mvcc_gc().unwrap();

@@ -10,7 +10,7 @@
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::{build_router, state::AppState};
@@ -50,7 +50,12 @@ async fn create_ttl_collection(base: &str, name: &str) {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 201, "create collection: {}", r.text().await.unwrap());
+    assert_eq!(
+        r.status(),
+        201,
+        "create collection: {}",
+        r.text().await.unwrap()
+    );
 }
 
 // ── 1. Search excludes expired records ──────────────────────────────────────
@@ -73,7 +78,12 @@ async fn ttl_search_excludes_expired() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 201, "insert expired: {}", r.text().await.unwrap());
+    assert_eq!(
+        r.status(),
+        201,
+        "insert expired: {}",
+        r.text().await.unwrap()
+    );
 
     // Insert non-expired record (expires_at in the future).
     let r = client()
@@ -102,7 +112,12 @@ async fn ttl_search_excludes_expired() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 201, "insert no-ttl: {}", r.text().await.unwrap());
+    assert_eq!(
+        r.status(),
+        201,
+        "insert no-ttl: {}",
+        r.text().await.unwrap()
+    );
 
     // Search — query close to [1,0,0,0] should rank all 3 candidates.
     let r = client()
@@ -196,13 +211,16 @@ async fn ttl_get_excludes_expired() {
     assert_eq!(r.status(), 201);
     let body: Value = r.json().await.unwrap();
     // The non-log insert path always returns the IDs of inserted records.
-    let expired_id: String = body["ids"][0].as_str()
+    let expired_id: String = body["ids"][0]
+        .as_str()
         .expect("insert must return an id")
         .to_owned();
 
     // GET by ID for an expired record must return 404.
     let r = client()
-        .get(format!("{base}/v1/collections/ttl_get1/records/{expired_id}"))
+        .get(format!(
+            "{base}/v1/collections/ttl_get1/records/{expired_id}"
+        ))
         .send()
         .await
         .unwrap();

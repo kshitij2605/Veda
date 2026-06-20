@@ -8,7 +8,7 @@ use veda_core::schema::{CollectionSchema, FieldDefinition};
 use veda_core::types::{DistanceMetric, FieldType};
 use veda_core::vector::DenseVector;
 use veda_query::distributed::{DistributedQueryExecutor, ShardSearcher};
-use veda_query::fusion::{FusionStrategy, MultiVectorQuery, FieldQuery};
+use veda_query::fusion::{FieldQuery, FusionStrategy, MultiVectorQuery};
 use veda_query::search::{ScoredRecord, SearchTimings, VectorSearchRequest};
 
 const DIM: u32 = 32;
@@ -39,13 +39,7 @@ impl MockShardSearcher {
         }
     }
 
-    fn add_records(
-        &mut self,
-        count: usize,
-        dim: usize,
-        field: &str,
-        category: Option<&str>,
-    ) {
+    fn add_records(&mut self, count: usize, dim: usize, field: &str, category: Option<&str>) {
         let mut rng = rand::thread_rng();
         let segment_id = Uuid::new_v4();
         for i in 0..count {
@@ -63,12 +57,7 @@ impl MockShardSearcher {
     }
 
     /// Add records with multiple vector fields.
-    fn add_multi_field_records(
-        &mut self,
-        count: usize,
-        dim: usize,
-        fields: &[&str],
-    ) {
+    fn add_multi_field_records(&mut self, count: usize, dim: usize, fields: &[&str]) {
         let mut rng = rand::thread_rng();
         let segment_id = Uuid::new_v4();
         for i in 0..count {
@@ -108,10 +97,10 @@ impl ShardSearcher for MockShardSearcher {
 
         for record in &self.records {
             // Filter by category if set.
-            if let Some(ref cat) = filter_category {
-                if record.category.as_deref() != Some(cat.as_str()) {
-                    continue;
-                }
+            if let Some(ref cat) = filter_category
+                && record.category.as_deref() != Some(cat.as_str())
+            {
+                continue;
             }
 
             if let Some(vec) = record.vectors.get(&request.field) {
@@ -168,7 +157,7 @@ fn test_single_shard_search() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -211,7 +200,7 @@ fn test_multi_shard_fanout() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -264,7 +253,7 @@ fn test_multi_shard_with_filter() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: Some("category = 'electronics'".into()),
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -360,7 +349,7 @@ fn test_empty_shard() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -395,7 +384,7 @@ fn test_k_larger_than_total() {
         k: 1000,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -428,9 +417,7 @@ fn test_schema_single_field() -> CollectionSchema {
             DIM,
             DistanceMetric::Euclidean,
         ))
-        .add_field(
-            FieldDefinition::new("category", FieldType::String).with_filterable(true),
-        )
+        .add_field(FieldDefinition::new("category", FieldType::String).with_filterable(true))
         .build()
         .unwrap()
 }
@@ -464,7 +451,7 @@ fn test_local_shard_searcher_growing_segment() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -517,7 +504,7 @@ fn test_local_shard_searcher_with_sealed_segments() {
         k: 20,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };
@@ -555,13 +542,9 @@ fn test_distributed_with_local_shards() {
     let mut rng = rand::thread_rng();
 
     for shard_id in 0..2u32 {
-        let mut sm = SegmentManager::new(
-            schema.clone(),
-            shard_id,
-            tmp_dir.path(),
-            1024 * 1024 * 1024,
-        )
-        .unwrap();
+        let mut sm =
+            SegmentManager::new(schema.clone(), shard_id, tmp_dir.path(), 1024 * 1024 * 1024)
+                .unwrap();
 
         for _ in 0..75 {
             let mut record = Record::new();
@@ -581,7 +564,7 @@ fn test_distributed_with_local_shards() {
         k: 10,
         metric: DistanceMetric::Euclidean,
         filter: None,
-    truncate_to: None,
+        truncate_to: None,
         read_ts: None,
         filter_expr: None,
     };

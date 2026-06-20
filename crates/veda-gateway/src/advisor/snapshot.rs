@@ -249,10 +249,7 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
                 sealed_segments,
                 growing_records,
                 total_records: coll_records,
-                compaction_in_progress: compaction_flags
-                    .get(scoped_name)
-                    .copied()
-                    .unwrap_or(false),
+                compaction_in_progress: compaction_flags.get(scoped_name).copied().unwrap_or(false),
             });
         }
     }
@@ -267,11 +264,7 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
         let ts = *inner.replica_safe_ts.read().await;
         // Sentinel 0 means "no gating active"; report None so later
         // lag math doesn't treat 0 as a real watermark.
-        if ts == 0 {
-            None
-        } else {
-            Some(ts)
-        }
+        if ts == 0 { None } else { Some(ts) }
     };
 
     // --- health probes (reuse admin probe logic) ---------------------
@@ -311,26 +304,32 @@ pub async fn collect(state: &AppState, now_ms: i64) -> OpsSnapshot {
         (Some(t), Some(f)) if t > 0 => Some((t.saturating_sub(f)) as f64 / t as f64 * 100.0),
         _ => None,
     };
-    let (cpu_total_jiffies, cpu_busy_jiffies) =
-        match std::fs::read_to_string("/proc/stat").ok().and_then(|s| parse_proc_stat_cpu(&s)) {
-            Some((total, busy)) => (Some(total), Some(busy)),
-            None => (None, None),
-        };
+    let (cpu_total_jiffies, cpu_busy_jiffies) = match std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|s| parse_proc_stat_cpu(&s))
+    {
+        Some((total, busy)) => (Some(total), Some(busy)),
+        None => (None, None),
+    };
     let num_cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    let (load1, load5, load15) =
-        match std::fs::read_to_string("/proc/loadavg").ok().and_then(|s| parse_loadavg(&s)) {
-            Some((a, b, c)) => (Some(a), Some(b), Some(c)),
-            None => (None, None, None),
-        };
+    let (load1, load5, load15) = match std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|s| parse_loadavg(&s))
+    {
+        Some((a, b, c)) => (Some(a), Some(b), Some(c)),
+        None => (None, None, None),
+    };
     let open_fds = read_open_fds();
     let fd_limit = read_fd_limit();
-    let (mem_total_bytes, mem_available_bytes) =
-        match std::fs::read_to_string("/proc/meminfo").ok().map(|s| parse_meminfo(&s)) {
-            Some((t, a)) => (t, a),
-            None => (None, None),
-        };
+    let (mem_total_bytes, mem_available_bytes) = match std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .map(|s| parse_meminfo(&s))
+    {
+        Some((t, a)) => (t, a),
+        None => (None, None),
+    };
 
     // --- prometheus counters -----------------------------------------
     let mut counters = HashMap::new();
@@ -412,11 +411,7 @@ async fn collect_index_health(state: &AppState) -> Vec<IndexSnapshot> {
                     .map(|f| index_type_str(f.index_type()))
                     .unwrap_or("none")
                     .to_owned();
-                (
-                    scoped.clone(),
-                    tenant::display_name(scoped).to_owned(),
-                    it,
-                )
+                (scoped.clone(), tenant::display_name(scoped).to_owned(), it)
             })
             .collect()
     };
@@ -453,9 +448,7 @@ async fn collect_index_health(state: &AppState) -> Vec<IndexSnapshot> {
             index_type,
             p95_ms,
             recall: recall_sample.map(|s| s.recall_at_k),
-            params: recall_sample
-                .map(|s| s.params.clone())
-                .unwrap_or_default(),
+            params: recall_sample.map(|s| s.params.clone()).unwrap_or_default(),
         });
     }
     out.sort_by(|a, b| a.collection.cmp(&b.collection));
@@ -657,9 +650,9 @@ fn statvfs_usage(path: &str) -> Option<(u64, u64)> {
         stat.f_frsize
     } else {
         stat.f_bsize
-    } as u64;
-    let total = (stat.f_blocks as u64).checked_mul(bsize)?;
-    let free = (stat.f_bavail as u64).checked_mul(bsize)?;
+    };
+    let total = stat.f_blocks.checked_mul(bsize)?;
+    let free = stat.f_bavail.checked_mul(bsize)?;
     Some((total, free))
 }
 
@@ -753,9 +746,15 @@ pub fn parse_meminfo(text: &str) -> (Option<u64>, Option<u64>) {
     let mut avail = None;
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
-            total = rest.split_whitespace().next().and_then(|t| t.parse::<u64>().ok());
+            total = rest
+                .split_whitespace()
+                .next()
+                .and_then(|t| t.parse::<u64>().ok());
         } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            avail = rest.split_whitespace().next().and_then(|t| t.parse::<u64>().ok());
+            avail = rest
+                .split_whitespace()
+                .next()
+                .and_then(|t| t.parse::<u64>().ok());
         }
     }
     (total.map(|kb| kb * 1024), avail.map(|kb| kb * 1024))
@@ -810,10 +809,10 @@ pub fn parse_prom_counter(text: &str, metric: &str) -> f64 {
             _ => continue,
         };
         // value_part is " <value> [timestamp]"; take the first token.
-        if let Some(tok) = value_part.split_whitespace().next() {
-            if let Ok(v) = tok.parse::<f64>() {
-                total += v;
-            }
+        if let Some(tok) = value_part.split_whitespace().next()
+            && let Ok(v) = tok.parse::<f64>()
+        {
+            total += v;
         }
     }
     total
@@ -889,11 +888,7 @@ impl SnapshotHistory {
     /// Second-most-recent snapshot.
     pub fn previous(&self) -> Option<&OpsSnapshot> {
         let n = self.buf.len();
-        if n < 2 {
-            None
-        } else {
-            self.buf.get(n - 2)
-        }
+        if n < 2 { None } else { self.buf.get(n - 2) }
     }
 
     /// Per-second delta of a named counter between the previous
@@ -929,7 +924,7 @@ impl SnapshotHistory {
     where
         F: Fn(&OpsSnapshot) -> f64,
     {
-        self.buf.iter().map(|s| f(s)).collect()
+        self.buf.iter().map(f).collect()
     }
 }
 
@@ -1014,7 +1009,7 @@ mod tests {
     #[tokio::test]
     async fn collect_assembles_index_health_from_log_and_recall() {
         use crate::advisor::recall_probe::{IndexParams, RecallSample};
-        use crate::rest::query_log::{append_blocking, QueryLogEntry};
+        use crate::rest::query_log::{QueryLogEntry, append_blocking};
 
         let tmp = tempfile::tempdir().unwrap();
         let state = AppState::new(tmp.path());
@@ -1252,7 +1247,7 @@ veda_records_total 7
         // user=100 nice=0 system=200 idle=700 iowait=... etc.
         let text = "cpu  100 0 200 700 50 0 10 0 0 0\ncpu0 1 2 3 4\n";
         let (total, busy) = parse_proc_stat_cpu(text).expect("cpu line parsed");
-        assert_eq!(total, 100 + 0 + 200 + 700 + 50 + 10);
+        assert_eq!(total, 100 + 200 + 700 + 50 + 10);
         // busy = total - (idle 700 + iowait 50).
         assert_eq!(busy, total - (700 + 50));
     }
@@ -1307,7 +1302,12 @@ Max locked memory         65536                65536                bytes
         // absent row → None.
         assert!(parse_limits_nofile("Max cpu time unlimited unlimited\n").is_none());
         // unlimited soft → None (not a finite cap).
-        assert!(parse_limits_nofile("Max open files            unlimited            unlimited            files\n").is_none());
+        assert!(
+            parse_limits_nofile(
+                "Max open files            unlimited            unlimited            files\n"
+            )
+            .is_none()
+        );
     }
 
     fn snap_with_cpu(taken_at_ms: i64, total: Option<u64>, busy: Option<u64>) -> OpsSnapshot {
@@ -1362,7 +1362,10 @@ Max locked memory         65536                65536                bytes
             let pct = snap.disk_used_pct.expect("disk_used_pct");
             assert!((0.0..=100.0).contains(&pct), "disk_used_pct {pct}");
             assert!(snap.load1.is_some(), "load1");
-            assert!(snap.open_fds.map(|n| n > 0).unwrap_or(false), "open_fds > 0");
+            assert!(
+                snap.open_fds.map(|n| n > 0).unwrap_or(false),
+                "open_fds > 0"
+            );
             assert!(snap.mem_total_bytes.is_some(), "mem_total_bytes");
             assert!(snap.cpu_total_jiffies.is_some(), "cpu_total_jiffies");
         }

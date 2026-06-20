@@ -29,19 +29,19 @@ use std::path::Path;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
+use crate::advisor::anomaly::detect_anomalies;
 use crate::advisor::config::AdvisorConfig;
 use crate::advisor::event::{EventStore, ReconcileResult};
-use crate::advisor::notify::Notifier;
-use crate::advisor::remediation::{run_remediation, LiveDispatcher, RateLimiter};
-use crate::advisor::rules::{catalog, run_rules, Rule, RuleHit};
 use crate::advisor::event::{RemediationAction, Scope, Severity};
-use crate::advisor::slo::{SloKind, SloRegistry, SloState, SloStatus};
-use crate::advisor::synthetic::{run_probe, SyntheticRegistry, SyntheticResults};
-use crate::advisor::recall_probe::RecallResults;
 use crate::advisor::faithfulness::FaithfulnessResults;
 use crate::advisor::incidents::IncidentStore;
-use crate::advisor::snapshot::{collect, OpsSnapshot, SnapshotHistory, DEFAULT_HISTORY_CAP};
-use crate::advisor::anomaly::detect_anomalies;
+use crate::advisor::notify::Notifier;
+use crate::advisor::recall_probe::RecallResults;
+use crate::advisor::remediation::{LiveDispatcher, RateLimiter, run_remediation};
+use crate::advisor::rules::{Rule, RuleHit, catalog, run_rules};
+use crate::advisor::slo::{SloKind, SloRegistry, SloState, SloStatus};
+use crate::advisor::snapshot::{DEFAULT_HISTORY_CAP, OpsSnapshot, SnapshotHistory, collect};
+use crate::advisor::synthetic::{SyntheticRegistry, SyntheticResults, run_probe};
 use crate::logs::{LogCategory, categorize::CategorizeOptions};
 use crate::rest::state::AppState;
 
@@ -124,9 +124,11 @@ impl AdvisorState {
             recall_results: Mutex::new(crate::advisor::recall_probe::RecallResults::load(
                 &data_dir.join(crate::advisor::recall_probe::RECALL_RESULTS_FILE),
             )),
-            faithfulness_results: Mutex::new(crate::advisor::faithfulness::FaithfulnessResults::load(
-                &data_dir.join(crate::advisor::faithfulness::FAITHFULNESS_RESULTS_FILE),
-            )),
+            faithfulness_results: Mutex::new(
+                crate::advisor::faithfulness::FaithfulnessResults::load(
+                    &data_dir.join(crate::advisor::faithfulness::FAITHFULNESS_RESULTS_FILE),
+                ),
+            ),
             incidents: Mutex::new(crate::advisor::incidents::IncidentStore::load(
                 &data_dir.join(crate::advisor::incidents::INCIDENTS_FILE),
             )),
@@ -300,9 +302,7 @@ fn slo_observation(kind: &SloKind, snap: &OpsSnapshot, prev: Option<&OpsSnapshot
         // Synthetic / Recall / Faithfulness observations come from the
         // advisor's result stores, not the snapshot, so the caller gathers
         // them separately (see `run_tick`).
-        SloKind::Synthetic { .. } | SloKind::Recall { .. } | SloKind::Faithfulness { .. } => {
-            (0, 0)
-        }
+        SloKind::Synthetic { .. } | SloKind::Recall { .. } | SloKind::Faithfulness { .. } => (0, 0),
     }
 }
 
@@ -338,11 +338,7 @@ pub async fn run_due_probes(state: &AppState, now_ms: u64) {
         probes
             .into_iter()
             .filter(|p| {
-                let last_ts = results
-                    .recent(&p.id)
-                    .last()
-                    .map(|r| r.ts_ms)
-                    .unwrap_or(0);
+                let last_ts = results.recent(&p.id).last().map(|r| r.ts_ms).unwrap_or(0);
                 let interval_ms = p.interval_secs.saturating_mul(1_000);
                 last_ts == 0 || now_ms.saturating_sub(last_ts) >= interval_ms
             })
@@ -500,12 +496,12 @@ pub async fn run_tick(state: &AppState) -> ReconcileResult {
                     let results = advisor.recall_results.lock().await;
                     defs.iter()
                         .filter_map(|d| match &d.kind {
-                            SloKind::Recall { collection, .. } => results
-                                .latest_recall(collection)
-                                .map(|s| {
+                            SloKind::Recall { collection, .. } => {
+                                results.latest_recall(collection).map(|s| {
                                     let good = (s.recall_at_k * 1000.0).round() as u64;
                                     (d.id.clone(), (good.min(1000), 1000u64))
-                                }),
+                                })
+                            }
                             _ => None,
                         })
                         .collect()
@@ -769,7 +765,15 @@ mod tests {
         let mut history = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
         history.push(tripping.clone());
 
-        let r1 = reconcile_hits(&tripping, &history, &mut events, &cfg, &cat, Vec::new(), 1000);
+        let r1 = reconcile_hits(
+            &tripping,
+            &history,
+            &mut events,
+            &cfg,
+            &cat,
+            Vec::new(),
+            1000,
+        );
         assert_eq!(r1.opened.len(), 1, "expected one opened event");
         assert_eq!(r1.opened[0].rule_id, "compaction_backlog");
         assert_eq!(events.open_events().len(), 1);
@@ -805,7 +809,15 @@ mod tests {
         let mut history = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
         history.push(tripping.clone());
 
-        let r = reconcile_hits(&tripping, &history, &mut events, &cfg, &cat, Vec::new(), 1000);
+        let r = reconcile_hits(
+            &tripping,
+            &history,
+            &mut events,
+            &cfg,
+            &cat,
+            Vec::new(),
+            1000,
+        );
         assert!(r.opened.is_empty(), "muted rule must not open an event");
         assert!(events.open_events().is_empty());
     }
@@ -816,10 +828,9 @@ mod tests {
         let window = 30_000i64; // 30s tick window.
         let cats = vec![
             category("err1", "ERROR", now - 5_000), // within window → fire
-            category("warn1", "WARN", now - 1_000),  // within window → fire
+            category("warn1", "WARN", now - 1_000), // within window → fire
         ];
-        let hits =
-            detect_new_error_categories(&cats, &AdvisorConfig::default(), now, window);
+        let hits = detect_new_error_categories(&cats, &AdvisorConfig::default(), now, window);
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|h| h.rule_id == "new_error_category"));
         assert!(hits.iter().all(|h| h.scope == Scope::Global));
@@ -833,8 +844,7 @@ mod tests {
         let window = 30_000i64;
         // first_seen well before the window → not new.
         let cats = vec![category("err_old", "ERROR", now - 90_000)];
-        let hits =
-            detect_new_error_categories(&cats, &AdvisorConfig::default(), now, window);
+        let hits = detect_new_error_categories(&cats, &AdvisorConfig::default(), now, window);
         assert!(hits.is_empty());
     }
 
@@ -844,8 +854,7 @@ mod tests {
         let window = 30_000i64;
         // recent, but INFO severity → not alert-worthy.
         let cats = vec![category("info1", "INFO", now - 1_000)];
-        let hits =
-            detect_new_error_categories(&cats, &AdvisorConfig::default(), now, window);
+        let hits = detect_new_error_categories(&cats, &AdvisorConfig::default(), now, window);
         assert!(hits.is_empty());
     }
 
@@ -858,14 +867,20 @@ mod tests {
         let mut disabled = AdvisorConfig::default();
         disabled.rules.insert(
             "new_error_category".into(),
-            RuleConfig { enabled: false, ..Default::default() },
+            RuleConfig {
+                enabled: false,
+                ..Default::default()
+            },
         );
         assert!(detect_new_error_categories(&cats, &disabled, now, window).is_empty());
 
         let mut muted = AdvisorConfig::default();
         muted.rules.insert(
             "new_error_category".into(),
-            RuleConfig { muted: true, ..Default::default() },
+            RuleConfig {
+                muted: true,
+                ..Default::default()
+            },
         );
         assert!(detect_new_error_categories(&cats, &muted, now, window).is_empty());
     }
@@ -892,7 +907,13 @@ mod tests {
     fn slo_observation_latency_counts_under_threshold() {
         let mut snap = base_snapshot(1000);
         snap.query.recent_latencies_ms = vec![10.0, 20.0, 2000.0, 50.0]; // 1 over 100ms
-        let (good, total) = slo_observation(&SloKind::Latency { threshold_ms: 100.0 }, &snap, None);
+        let (good, total) = slo_observation(
+            &SloKind::Latency {
+                threshold_ms: 100.0,
+            },
+            &snap,
+            None,
+        );
         assert_eq!((good, total), (3, 4));
     }
 
@@ -922,7 +943,10 @@ mod tests {
         // burn = 0.9 / 0.01 = 90x ≥ fast threshold 14.4 → breaching_fast.
         slo_state.record(&def.id, 100, 1000, now_ms_u);
         let status = slo_state.status(&def, now_ms_u);
-        assert!(status.breaching_fast, "expected fast breach, got {status:?}");
+        assert!(
+            status.breaching_fast,
+            "expected fast breach, got {status:?}"
+        );
 
         let mut snap = base_snapshot(10_000_000);
         snap.slo_statuses = vec![status];
@@ -934,14 +958,27 @@ mod tests {
         let mut history = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
         history.push(snap.clone());
 
-        let r = reconcile_hits(&snap, &history, &mut events, &cfg, &cat, Vec::new(), 10_000_000);
+        let r = reconcile_hits(
+            &snap,
+            &history,
+            &mut events,
+            &cfg,
+            &cat,
+            Vec::new(),
+            10_000_000,
+        );
         let fast = r
             .opened
             .iter()
             .find(|e| e.rule_id == "slo_burn_rate_fast")
             .expect("slo_burn_rate_fast must open an event");
         assert_eq!(fast.scope, Scope::Slo("api".into()));
-        assert!(events.open_events().iter().any(|e| e.id == "slo_burn_rate_fast:slo:api"));
+        assert!(
+            events
+                .open_events()
+                .iter()
+                .any(|e| e.id == "slo_burn_rate_fast:slo:api")
+        );
     }
 
     #[test]
@@ -1049,17 +1086,27 @@ mod tests {
         let mut history = SnapshotHistory::new(DEFAULT_HISTORY_CAP);
         history.push(snap.clone());
 
-        let r = reconcile_hits(&snap, &history, &mut events, &cfg, &cat, Vec::new(), 10_000_000);
+        let r = reconcile_hits(
+            &snap,
+            &history,
+            &mut events,
+            &cfg,
+            &cat,
+            Vec::new(),
+            10_000_000,
+        );
         let hit = r
             .opened
             .iter()
             .find(|e| e.rule_id == "synthetic_failing")
             .expect("synthetic_failing must open an event");
         assert_eq!(hit.scope, Scope::Synthetic("health".into()));
-        assert!(events
-            .open_events()
-            .iter()
-            .any(|e| e.id == "synthetic_failing:synthetic:health"));
+        assert!(
+            events
+                .open_events()
+                .iter()
+                .any(|e| e.id == "synthetic_failing:synthetic:health")
+        );
     }
 
     #[test]

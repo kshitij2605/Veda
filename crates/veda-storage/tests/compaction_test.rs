@@ -3,7 +3,9 @@ use veda_core::record::{FieldValue, Record};
 use veda_core::schema::{CollectionSchema, FieldDefinition};
 use veda_core::types::{DistanceMetric, FieldType};
 use veda_core::vector::DenseVector;
-use veda_storage::compaction::{compact_segments, select_segments_for_compaction, CompactionConfig};
+use veda_storage::compaction::{
+    CompactionConfig, compact_segments, select_segments_for_compaction,
+};
 use veda_storage::segment::{SegmentMetadata, SegmentReader, SegmentWriter};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -127,16 +129,13 @@ fn test_selection_segment_count_threshold() {
 
     let mut segments: Vec<(SegmentMetadata, SegmentReader)> = Vec::new();
     for i in 0..5u32 {
-        let (meta, d) =
-            create_sealed_segment(dir.path(), &format!("seg{i}"), &schema, i * 20, 20);
+        let (meta, d) = create_sealed_segment(dir.path(), &format!("seg{i}"), &schema, i * 20, 20);
         let reader = SegmentReader::open(&d).unwrap();
         segments.push((meta, reader));
     }
 
-    let refs: Vec<(SegmentMetadata, &SegmentReader)> = segments
-        .iter()
-        .map(|(m, r)| (m.clone(), r))
-        .collect();
+    let refs: Vec<(SegmentMetadata, &SegmentReader)> =
+        segments.iter().map(|(m, r)| (m.clone(), r)).collect();
 
     let config = CompactionConfig {
         min_segments: 3,
@@ -181,16 +180,13 @@ fn test_selection_respects_max_merge() {
 
     let mut segments: Vec<(SegmentMetadata, SegmentReader)> = Vec::new();
     for i in 0..10u32 {
-        let (meta, d) =
-            create_sealed_segment(dir.path(), &format!("seg{i}"), &schema, i * 10, 10);
+        let (meta, d) = create_sealed_segment(dir.path(), &format!("seg{i}"), &schema, i * 10, 10);
         let reader = SegmentReader::open(&d).unwrap();
         segments.push((meta, reader));
     }
 
-    let refs: Vec<(SegmentMetadata, &SegmentReader)> = segments
-        .iter()
-        .map(|(m, r)| (m.clone(), r))
-        .collect();
+    let refs: Vec<(SegmentMetadata, &SegmentReader)> =
+        segments.iter().map(|(m, r)| (m.clone(), r)).collect();
 
     let config = CompactionConfig {
         min_segments: 3,

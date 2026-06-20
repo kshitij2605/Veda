@@ -247,11 +247,7 @@ pub async fn correlate_incident(ctx: &ToolContext<'_>, args: serde_json::Value) 
 pub fn is_ops_tool(id: &str) -> bool {
     matches!(
         id,
-        "get_insights"
-            | "get_logs"
-            | "get_resources"
-            | "get_slo_status"
-            | "correlate_incident"
+        "get_insights" | "get_logs" | "get_resources" | "get_slo_status" | "correlate_incident"
     )
 }
 
@@ -260,7 +256,7 @@ mod tests {
     use super::*;
     use crate::advisor::event::{RemediationAction, Scope};
     use crate::advisor::rules::RuleHit;
-    use crate::advisor::slo::{default_fast_burn, default_slow_burn, SloDef, SloKind};
+    use crate::advisor::slo::{SloDef, SloKind, default_fast_burn, default_slow_burn};
     use crate::agent::catalog::ToolContext;
     use crate::logs::buffer::LogRecord;
     use crate::rest::state::AppState;
@@ -443,8 +439,7 @@ mod tests {
         let state = AppState::new(tmp.path());
         let tenant = crate::tenant::TenantId::default_tenant();
         let ctx = ToolContext::new(&state, &tenant);
-        let out =
-            correlate_incident(&ctx, serde_json::json!({ "event_id": "nope:global" })).await;
+        let out = correlate_incident(&ctx, serde_json::json!({ "event_id": "nope:global" })).await;
         assert!(!out.is_error);
         assert!(out.content["bundle"].is_null());
     }

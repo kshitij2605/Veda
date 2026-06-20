@@ -34,6 +34,7 @@
 //! `HnswIndex::load` can ingest — i.e. NIM does the cuVS→HNSW
 //! conversion server-side via `cuvs::to_hnsw()`.
 
+#[cfg(feature = "gpu_nim")]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -112,7 +113,11 @@ pub fn build_on_nim(
         DistanceMetric::Cosine => "cosine",
         DistanceMetric::Euclidean => "euclidean",
         DistanceMetric::DotProduct => "dotproduct",
-        m => return Err(VedaError::Index(format!("gpu_nim: unsupported metric {m:?}"))),
+        m => {
+            return Err(VedaError::Index(format!(
+                "gpu_nim: unsupported metric {m:?}"
+            )));
+        }
     };
     let mut req = client
         .post(&url)
@@ -151,7 +156,8 @@ pub fn build_on_nim(
 ) -> Result<Vec<u8>> {
     Err(VedaError::Index(
         "gpu_nim: build_on_nim called but the gpu_nim cargo feature is off; \
-         rebuild with --features veda-index/gpu_nim".into(),
+         rebuild with --features veda-index/gpu_nim"
+            .into(),
     ))
 }
 

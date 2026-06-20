@@ -7,12 +7,12 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::auth::Role;
 use veda_gateway::rest::build_router;
-use veda_gateway::rest::state::{hash_password, AppState, UserRecord};
+use veda_gateway::rest::state::{AppState, UserRecord, hash_password};
 
 async fn start_with(users: HashMap<String, UserRecord>) -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
@@ -44,7 +44,12 @@ async fn login_with_argon2_hashed_password_returns_token() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "login should succeed: {:?}", r.text().await);
+    assert_eq!(
+        r.status(),
+        200,
+        "login should succeed: {:?}",
+        r.text().await
+    );
     let body: Value = r.json().await.unwrap();
     assert!(body["token"].as_str().is_some());
 
@@ -111,7 +116,12 @@ async fn login_with_legacy_plaintext_record_still_works() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "legacy plaintext should still verify: {:?}", r.text().await);
+    assert_eq!(
+        r.status(),
+        200,
+        "legacy plaintext should still verify: {:?}",
+        r.text().await
+    );
 }
 
 #[test]

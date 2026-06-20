@@ -312,7 +312,7 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "slice length mismatch");
     #[cfg(feature = "simsimd")]
     {
-        return crate::simd_simsimd::dot_product(a, b);
+        crate::simd_simsimd::dot_product(a, b)
     }
     #[cfg(not(feature = "simsimd"))]
     {
@@ -331,7 +331,7 @@ pub fn l2_squared(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "slice length mismatch");
     #[cfg(feature = "simsimd")]
     {
-        return crate::simd_simsimd::l2_squared(a, b);
+        crate::simd_simsimd::l2_squared(a, b)
     }
     #[cfg(not(feature = "simsimd"))]
     {
@@ -368,7 +368,7 @@ pub fn i8_dot_product(a: &[i8], b: &[i8]) -> i32 {
     debug_assert_eq!(a.len(), b.len(), "slice length mismatch");
     #[cfg(feature = "simsimd")]
     {
-        return crate::simd_simsimd::i8_dot_product(a, b);
+        crate::simd_simsimd::i8_dot_product(a, b)
     }
     #[cfg(not(feature = "simsimd"))]
     {
@@ -386,7 +386,7 @@ pub fn i8_dot_product(a: &[i8], b: &[i8]) -> i32 {
 pub fn l2_norm_squared(a: &[f32]) -> f32 {
     #[cfg(feature = "simsimd")]
     {
-        return crate::simd_simsimd::l2_norm_squared(a);
+        crate::simd_simsimd::l2_norm_squared(a)
     }
     #[cfg(not(feature = "simsimd"))]
     {
@@ -408,7 +408,7 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "slice length mismatch");
     #[cfg(feature = "simsimd")]
     {
-        return crate::simd_simsimd::cosine_distance(a, b);
+        crate::simd_simsimd::cosine_distance(a, b)
     }
     #[cfg(not(feature = "simsimd"))]
     {
@@ -427,7 +427,7 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(feature = "simsimd")]
     {
-        return crate::simd_simsimd::euclidean_distance(a, b);
+        crate::simd_simsimd::euclidean_distance(a, b)
     }
     #[cfg(not(feature = "simsimd"))]
     {
@@ -452,7 +452,11 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
 /// the path to a libxsmm-style GEMM kernel that would give another
 /// 5-10x on top of this.
 #[inline]
-pub fn maxsim_distance<F>(query_rows: &[Vec<f32>], doc_rows: &[Vec<f32>], per_row_distance: F) -> f32
+pub fn maxsim_distance<F>(
+    query_rows: &[Vec<f32>],
+    doc_rows: &[Vec<f32>],
+    per_row_distance: F,
+) -> f32
 where
     F: Fn(&[f32], &[f32]) -> f32,
 {
@@ -488,10 +492,7 @@ where
 /// For the BLIS-style GEMM kernel (the real Mixedbread-equivalent
 /// speedup), use [`maxsim_distance_cosine_gemm`].
 #[inline]
-pub fn maxsim_distance_cosine_normalized(
-    query_rows: &[Vec<f32>],
-    doc_rows: &[Vec<f32>],
-) -> f32 {
+pub fn maxsim_distance_cosine_normalized(query_rows: &[Vec<f32>], doc_rows: &[Vec<f32>]) -> f32 {
     if query_rows.is_empty() || doc_rows.is_empty() {
         return f32::MAX;
     }
@@ -640,10 +641,7 @@ pub fn maxsim_distance_l2sq_gemm(query_rows: &[Vec<f32>], doc_rows: &[Vec<f32>])
 /// register-blocked sgemm — same algorithmic class as BLIS, BLAS
 /// SGEMM, libxsmm. Pure Rust, no FFI.
 #[inline]
-pub fn maxsim_distance_cosine_gemm(
-    query_rows: &[Vec<f32>],
-    doc_rows: &[Vec<f32>],
-) -> f32 {
+pub fn maxsim_distance_cosine_gemm(query_rows: &[Vec<f32>], doc_rows: &[Vec<f32>]) -> f32 {
     if query_rows.is_empty() || doc_rows.is_empty() {
         return f32::MAX;
     }
@@ -788,14 +786,8 @@ mod tests {
         let some = vec![vec![1.0_f32, 2.0]];
         assert_eq!(maxsim_distance(&empty, &some, cosine_distance), f32::MAX);
         assert_eq!(maxsim_distance(&some, &empty, cosine_distance), f32::MAX);
-        assert_eq!(
-            maxsim_distance_cosine_normalized(&empty, &some),
-            f32::MAX
-        );
-        assert_eq!(
-            maxsim_distance_cosine_normalized(&some, &empty),
-            f32::MAX
-        );
+        assert_eq!(maxsim_distance_cosine_normalized(&empty, &some), f32::MAX);
+        assert_eq!(maxsim_distance_cosine_normalized(&some, &empty), f32::MAX);
         assert_eq!(maxsim_distance_cosine_gemm(&empty, &some), f32::MAX);
         assert_eq!(maxsim_distance_cosine_gemm(&some, &empty), f32::MAX);
     }
@@ -837,12 +829,8 @@ mod tests {
         // Random-ish i8 vectors of various lengths covering the
         // SIMD-block + remainder paths.
         for &n in &[1, 7, 31, 32, 33, 64, 65, 128, 1024] {
-            let a: Vec<i8> = (0..n)
-                .map(|i| ((i as i32 * 31 + 7) % 255 - 127) as i8)
-                .collect();
-            let b: Vec<i8> = (0..n)
-                .map(|i| ((i as i32 * 19 + 11) % 255 - 127) as i8)
-                .collect();
+            let a: Vec<i8> = (0..n).map(|i| ((i * 31 + 7) % 255 - 127) as i8).collect();
+            let b: Vec<i8> = (0..n).map(|i| ((i * 19 + 11) % 255 - 127) as i8).collect();
             let scalar = i8_dot_scalar(&a, &b);
             let public = i8_dot_product(&a, &b);
             assert_eq!(

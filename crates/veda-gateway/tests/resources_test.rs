@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::auth::Role;
@@ -32,8 +32,14 @@ async fn start_server() -> (String, tempfile::TempDir) {
 async fn start_auth_server() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let mut users = HashMap::new();
-    users.insert("admin".to_owned(), UserRecord::with_password("admin", Role::Admin));
-    users.insert("viewer".to_owned(), UserRecord::with_password("viewer", Role::Viewer));
+    users.insert(
+        "admin".to_owned(),
+        UserRecord::with_password("admin", Role::Admin),
+    );
+    users.insert(
+        "viewer".to_owned(),
+        UserRecord::with_password("viewer", Role::Viewer),
+    );
     let app_state = AppState::with_auth_and_users(tmp.path(), "test-jwt-secret", users);
     let router = build_router(app_state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -72,7 +78,15 @@ async fn resources_returns_stable_shape() {
     let body: Value = r.json().await.unwrap();
 
     // Top-level keys are always present.
-    for key in ["disk", "cpu_pct", "load", "num_cpus", "fds", "memory", "rss_bytes"] {
+    for key in [
+        "disk",
+        "cpu_pct",
+        "load",
+        "num_cpus",
+        "fds",
+        "memory",
+        "rss_bytes",
+    ] {
         assert!(body.get(key).is_some(), "missing key '{key}' in {body}");
     }
     // Nested object shapes.
@@ -95,7 +109,10 @@ async fn resources_returns_stable_shape() {
     // num_cpus is always a positive integer.
     assert!(body["num_cpus"].as_u64().unwrap() >= 1, "num_cpus < 1");
     // Empty advisor history -> no previous snapshot -> cpu_pct is null.
-    assert!(body["cpu_pct"].is_null(), "cpu_pct must be null on empty history");
+    assert!(
+        body["cpu_pct"].is_null(),
+        "cpu_pct must be null on empty history"
+    );
 }
 
 #[tokio::test]
@@ -121,5 +138,10 @@ async fn resources_requires_admin_role() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "admin must be allowed: {:?}", r.text().await);
+    assert_eq!(
+        r.status(),
+        200,
+        "admin must be allowed: {:?}",
+        r.text().await
+    );
 }

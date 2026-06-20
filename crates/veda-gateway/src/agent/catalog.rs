@@ -268,10 +268,12 @@ mod tests {
 
     fn text_schema(name: &str) -> CollectionSchema {
         CollectionSchema::builder(name)
-            .add_field(FieldDefinition::vector("embedding", 4, DistanceMetric::Cosine))
-            .add_field(
-                FieldDefinition::new("title", FieldType::String).with_filterable(true),
-            )
+            .add_field(FieldDefinition::vector(
+                "embedding",
+                4,
+                DistanceMetric::Cosine,
+            ))
+            .add_field(FieldDefinition::new("title", FieldType::String).with_filterable(true))
             .shard_count(1)
             .build()
             .unwrap()
@@ -295,7 +297,10 @@ mod tests {
 
         // Insert one record directly into the growing segment.
         let mut rec = Record::new();
-        rec.set("embedding", FieldValue::Vector(DenseVector::new(vec![1.0, 0.0, 0.0, 0.0])));
+        rec.set(
+            "embedding",
+            FieldValue::Vector(DenseVector::new(vec![1.0, 0.0, 0.0, 0.0])),
+        );
         rec.set("title", FieldValue::String("hello world".to_owned()));
         let id = rec.id();
         {
@@ -389,7 +394,11 @@ mod tests {
     #[test]
     fn to_mcp_entry_shape() {
         let cat = ToolCatalog::new();
-        let spec = cat.builtin_specs().iter().find(|s| s.id == "search").unwrap();
+        let spec = cat
+            .builtin_specs()
+            .iter()
+            .find(|s| s.id == "search")
+            .unwrap();
         let entry = spec.to_mcp_entry();
         assert_eq!(entry["name"], "search");
         assert_eq!(entry["description"], serde_json::json!(spec.description));
@@ -407,7 +416,11 @@ mod tests {
     fn to_mcp_entry_annotations_reflect_mutation() {
         let cat = ToolCatalog::new();
         // upsert_record is the one mutating/destructive builtin.
-        let spec = cat.builtin_specs().iter().find(|s| s.id == "upsert_record").unwrap();
+        let spec = cat
+            .builtin_specs()
+            .iter()
+            .find(|s| s.id == "upsert_record")
+            .unwrap();
         let ann = spec.to_mcp_entry()["annotations"].clone();
         assert_eq!(ann["readOnlyHint"], false);
         assert_eq!(ann["destructiveHint"], true);
@@ -445,9 +458,16 @@ mod tests {
         let state = AppState::new(tmp.path());
         let tenant = crate::tenant::TenantId::default_tenant();
         let ctx = ToolContext::new(&state, &tenant);
-        let out = cat.dispatch(&ctx, "does_not_exist", serde_json::json!({})).await;
+        let out = cat
+            .dispatch(&ctx, "does_not_exist", serde_json::json!({}))
+            .await;
         assert!(out.is_error);
-        assert!(out.content["error"].as_str().unwrap().contains("unknown tool"));
+        assert!(
+            out.content["error"]
+                .as_str()
+                .unwrap()
+                .contains("unknown tool")
+        );
     }
 
     #[tokio::test]
@@ -487,7 +507,9 @@ mod tests {
         let (state, tenant, _id) = seeded_state(tmp.path(), "docs").await;
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
-        let out = cat.dispatch(&ctx, "list_collections", serde_json::json!({})).await;
+        let out = cat
+            .dispatch(&ctx, "list_collections", serde_json::json!({}))
+            .await;
         assert!(!out.is_error, "outcome: {:?}", out.content);
         let cols = out.content["collections"].as_array().unwrap();
         assert!(cols.iter().any(|c| c.as_str() == Some("docs")));
@@ -501,13 +523,21 @@ mod tests {
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
         let out = cat
-            .dispatch(&ctx, "describe_collection", serde_json::json!({ "name": "docs" }))
+            .dispatch(
+                &ctx,
+                "describe_collection",
+                serde_json::json!({ "name": "docs" }),
+            )
             .await;
         assert!(!out.is_error, "outcome: {:?}", out.content);
         assert_eq!(out.content["name"], "docs");
         assert_eq!(out.content["record_count"], 1);
         let fields = out.content["fields"].as_array().unwrap();
-        assert!(fields.iter().any(|f| f["name"] == "embedding" && f["type"] == "vector"));
+        assert!(
+            fields
+                .iter()
+                .any(|f| f["name"] == "embedding" && f["type"] == "vector")
+        );
     }
 
     #[tokio::test]
@@ -547,7 +577,11 @@ mod tests {
 
     fn rls_schema(name: &str) -> CollectionSchema {
         CollectionSchema::builder(name)
-            .add_field(FieldDefinition::vector("embedding", 4, DistanceMetric::Cosine))
+            .add_field(FieldDefinition::vector(
+                "embedding",
+                4,
+                DistanceMetric::Cosine,
+            ))
             .add_field(FieldDefinition::new("owner", FieldType::String).with_filterable(true))
             .rls_owner_field(Some("owner".to_owned()))
             .shard_count(1)
@@ -574,7 +608,10 @@ mod tests {
         let mut ids = Vec::new();
         for owner in ["alice", "bob"] {
             let mut rec = Record::new();
-            rec.set("embedding", FieldValue::Vector(DenseVector::new(vec![1.0, 0.0, 0.0, 0.0])));
+            rec.set(
+                "embedding",
+                FieldValue::Vector(DenseVector::new(vec![1.0, 0.0, 0.0, 0.0])),
+            );
             rec.set("owner", FieldValue::String(owner.to_owned()));
             let id = rec.id();
             ids.push(id);
@@ -638,7 +675,11 @@ mod tests {
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
         let out = cat
-            .dispatch(&ctx, "route", serde_json::json!({ "query": "what is HNSW indexing?" }))
+            .dispatch(
+                &ctx,
+                "route",
+                serde_json::json!({ "query": "what is HNSW indexing?" }),
+            )
             .await;
         assert!(!out.is_error, "outcome: {:?}", out.content);
         assert!(out.content["strategy"].is_string());
@@ -659,9 +700,7 @@ mod tests {
 
     /// Seed: electronics(100,200), books(10,20,30) — mirrors the REST
     /// aggregate integration test fixture.
-    async fn seeded_agg_state(
-        tmp: &std::path::Path,
-    ) -> (AppState, crate::tenant::TenantId) {
+    async fn seeded_agg_state(tmp: &std::path::Path) -> (AppState, crate::tenant::TenantId) {
         let state = AppState::new(tmp);
         let tenant = crate::tenant::TenantId::default_tenant();
         let scoped = crate::tenant::scope(&tenant, "agg");
@@ -704,9 +743,13 @@ mod tests {
 
         // count, no group -> single bucket of 5.
         let out = cat
-            .dispatch(&ctx, "aggregate", serde_json::json!({
-                "collection": "agg", "field": "price", "metric": "count"
-            }))
+            .dispatch(
+                &ctx,
+                "aggregate",
+                serde_json::json!({
+                    "collection": "agg", "field": "price", "metric": "count"
+                }),
+            )
             .await;
         assert!(!out.is_error, "count: {:?}", out.content);
         let groups = out.content["groups"].as_array().unwrap();
@@ -715,9 +758,13 @@ mod tests {
 
         // sum, no group -> 360.
         let out = cat
-            .dispatch(&ctx, "aggregate", serde_json::json!({
-                "collection": "agg", "field": "price", "metric": "sum"
-            }))
+            .dispatch(
+                &ctx,
+                "aggregate",
+                serde_json::json!({
+                    "collection": "agg", "field": "price", "metric": "sum"
+                }),
+            )
             .await;
         assert!(!out.is_error, "sum: {:?}", out.content);
         assert_eq!(out.content["groups"][0]["value"], 360.0);
@@ -731,9 +778,13 @@ mod tests {
         let ctx = ToolContext::new(&state, &tenant);
 
         let out = cat
-            .dispatch(&ctx, "aggregate", serde_json::json!({
-                "collection": "agg", "field": "price", "metric": "avg", "group_by": "category"
-            }))
+            .dispatch(
+                &ctx,
+                "aggregate",
+                serde_json::json!({
+                    "collection": "agg", "field": "price", "metric": "avg", "group_by": "category"
+                }),
+            )
             .await;
         assert!(!out.is_error, "avg group_by: {:?}", out.content);
         let groups = out.content["groups"].as_array().unwrap();
@@ -752,9 +803,13 @@ mod tests {
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
         let out = cat
-            .dispatch(&ctx, "aggregate", serde_json::json!({
-                "collection": "agg", "field": "price", "metric": "median"
-            }))
+            .dispatch(
+                &ctx,
+                "aggregate",
+                serde_json::json!({
+                    "collection": "agg", "field": "price", "metric": "median"
+                }),
+            )
             .await;
         assert!(out.is_error);
         assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
@@ -769,9 +824,13 @@ mod tests {
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
         let out = cat
-            .dispatch(&ctx, "filter_query", serde_json::json!({
-                "collection": "agg", "filter": "category = 'books'"
-            }))
+            .dispatch(
+                &ctx,
+                "filter_query",
+                serde_json::json!({
+                    "collection": "agg", "filter": "category = 'books'"
+                }),
+            )
             .await;
         assert!(!out.is_error, "filter: {:?}", out.content);
         assert_eq!(out.content["count"], 3);
@@ -786,9 +845,13 @@ mod tests {
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
         let out = cat
-            .dispatch(&ctx, "filter_query", serde_json::json!({
-                "collection": "agg", "filter": "price >= 0", "limit": 2
-            }))
+            .dispatch(
+                &ctx,
+                "filter_query",
+                serde_json::json!({
+                    "collection": "agg", "filter": "price >= 0", "limit": 2
+                }),
+            )
             .await;
         assert!(!out.is_error, "{:?}", out.content);
         assert_eq!(out.content["count"], 2);
@@ -803,9 +866,13 @@ mod tests {
         // alice sees only her own row.
         let alice_ctx = ToolContext::new(&state, &tenant).with_user(Some("alice"));
         let out = cat
-            .dispatch(&alice_ctx, "filter_query", serde_json::json!({
-                "collection": "secrets", "filter": "owner != ''"
-            }))
+            .dispatch(
+                &alice_ctx,
+                "filter_query",
+                serde_json::json!({
+                    "collection": "secrets", "filter": "owner != ''"
+                }),
+            )
             .await;
         assert!(!out.is_error, "alice: {:?}", out.content);
         assert_eq!(out.content["count"], 1);
@@ -814,9 +881,13 @@ mod tests {
         // admin (user=None) sees both.
         let admin_ctx = ToolContext::new(&state, &tenant);
         let out = cat
-            .dispatch(&admin_ctx, "filter_query", serde_json::json!({
-                "collection": "secrets", "filter": "owner != ''"
-            }))
+            .dispatch(
+                &admin_ctx,
+                "filter_query",
+                serde_json::json!({
+                    "collection": "secrets", "filter": "owner != ''"
+                }),
+            )
             .await;
         assert!(!out.is_error, "admin: {:?}", out.content);
         assert_eq!(out.content["count"], 2);
@@ -840,9 +911,13 @@ mod tests {
 
         // Both.
         let out = cat
-            .dispatch(&ctx, "search", serde_json::json!({
-                "collection": "docs", "query": "hi", "query_image_b64": "AAAA"
-            }))
+            .dispatch(
+                &ctx,
+                "search",
+                serde_json::json!({
+                    "collection": "docs", "query": "hi", "query_image_b64": "AAAA"
+                }),
+            )
             .await;
         assert!(out.is_error);
         assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
@@ -851,7 +926,11 @@ mod tests {
     #[test]
     fn search_spec_is_multimodal() {
         let cat = ToolCatalog::new();
-        let spec = cat.builtin_specs().iter().find(|s| s.id == "search").unwrap();
+        let spec = cat
+            .builtin_specs()
+            .iter()
+            .find(|s| s.id == "search")
+            .unwrap();
         let props = &spec.input_schema["properties"];
         assert!(props["query"].is_object());
         assert!(props["query_image_b64"].is_object());
@@ -865,7 +944,7 @@ mod tests {
 
     #[test]
     fn build_query_body_maps_dense_modes() {
-        use crate::agent::tools::builtins::{build_query_body, SearchMode};
+        use crate::agent::tools::builtins::{SearchMode, build_query_body};
         for mode in [SearchMode::Auto, SearchMode::Dense] {
             let qb = build_query_body(mode, "embedding", vec![1.0, 0.0], false).unwrap();
             let v = qb.vector.expect("dense leg set");
@@ -879,7 +958,7 @@ mod tests {
 
     #[test]
     fn build_query_body_sparse_unsupported_message() {
-        use crate::agent::tools::builtins::{build_query_body, SearchMode};
+        use crate::agent::tools::builtins::{SearchMode, build_query_body};
         // No sparse field on the collection -> clear "requires" error.
         let err = build_query_body(SearchMode::Sparse, "embedding", vec![1.0], false).unwrap_err();
         assert!(err.contains("sparse"), "msg: {err}");

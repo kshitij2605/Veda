@@ -111,10 +111,7 @@ impl VectorStorageWriter {
         // Write raw f32 bytes (little-endian on LE platforms, which is the
         // standard target for this project).
         let byte_slice = unsafe {
-            std::slice::from_raw_parts(
-                vector.as_ptr() as *const u8,
-                std::mem::size_of_val(vector),
-            )
+            std::slice::from_raw_parts(vector.as_ptr() as *const u8, std::mem::size_of_val(vector))
         };
         self.writer.write_all(byte_slice)?;
 

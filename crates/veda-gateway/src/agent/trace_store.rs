@@ -219,12 +219,24 @@ fn trace_record_map(
             .unwrap_or(serde_json::Value::Null)
     };
     let mut m = serde_json::Map::new();
-    m.insert(PROMPT_FIELD.to_owned(), serde_json::Value::String(f.prompt.clone()));
-    m.insert(RESPONSE_FIELD.to_owned(), serde_json::Value::String(f.response.clone()));
-    m.insert(TOOL_IDS_FIELD.to_owned(), serde_json::Value::String(f.tool_ids.clone()));
+    m.insert(
+        PROMPT_FIELD.to_owned(),
+        serde_json::Value::String(f.prompt.clone()),
+    );
+    m.insert(
+        RESPONSE_FIELD.to_owned(),
+        serde_json::Value::String(f.response.clone()),
+    );
+    m.insert(
+        TOOL_IDS_FIELD.to_owned(),
+        serde_json::Value::String(f.tool_ids.clone()),
+    );
     m.insert(FAITHFULNESS_FIELD.to_owned(), num(f.faithfulness));
     m.insert(COST_USD_FIELD.to_owned(), num(f.cost_usd));
-    m.insert(CACHE_HIT_FIELD.to_owned(), serde_json::Value::Bool(f.cache_hit));
+    m.insert(
+        CACHE_HIT_FIELD.to_owned(),
+        serde_json::Value::Bool(f.cache_hit),
+    );
     m.insert(
         GUARDRAIL_FLAGGED_FIELD.to_owned(),
         serde_json::Value::Bool(f.guardrail_flagged),
@@ -559,7 +571,12 @@ pub async fn cluster_traces(
     let mut items: Vec<(String, Vec<f32>, i64, String)> = Vec::with_capacity(traces.len());
     for t in &traces {
         match client.embed_text(&t.prompt).await {
-            Ok(emb) => items.push((t.prompt.clone(), emb, t.faithfulness.to_bits() as i64, "WARN".to_owned())),
+            Ok(emb) => items.push((
+                t.prompt.clone(),
+                emb,
+                t.faithfulness.to_bits() as i64,
+                "WARN".to_owned(),
+            )),
             Err(e) => {
                 tracing::debug!(error = %e, "llm trace: cluster embed failed; empty");
                 return Vec::new();
@@ -578,14 +595,18 @@ pub async fn cluster_traces(
             let mut sum = 0.0;
             let mut n = 0u64;
             for ex in &c.examples {
-                if let Some(t) = traces.iter().find(|t| &t.prompt == ex) {
-                    if t.faithfulness >= 0.0 {
-                        sum += t.faithfulness;
-                        n += 1;
-                    }
+                if let Some(t) = traces.iter().find(|t| &t.prompt == ex)
+                    && t.faithfulness >= 0.0
+                {
+                    sum += t.faithfulness;
+                    n += 1;
                 }
             }
-            let avg_faithfulness = if n > 0 { sum / n as f64 } else { FAITHFULNESS_NONE };
+            let avg_faithfulness = if n > 0 {
+                sum / n as f64
+            } else {
+                FAITHFULNESS_NONE
+            };
             TraceCluster {
                 representative: c.representative,
                 size: c.count,
@@ -628,7 +649,10 @@ fn float_field(rec: &Record, name: &str) -> f64 {
 }
 
 fn bool_field(rec: &Record, name: &str) -> bool {
-    matches!(rec.get(name), Some(veda_core::record::FieldValue::Bool(true)))
+    matches!(
+        rec.get(name),
+        Some(veda_core::record::FieldValue::Bool(true))
+    )
 }
 
 #[cfg(test)]
@@ -662,7 +686,12 @@ mod tests {
         let schema = trace_schema("t1::_llm_traces", 8).expect("schema builds");
         assert!(schema.get_field(FAITHFULNESS_FIELD).unwrap().filterable());
         assert!(schema.get_field(CACHE_HIT_FIELD).unwrap().filterable());
-        assert!(schema.get_field(GUARDRAIL_FLAGGED_FIELD).unwrap().filterable());
+        assert!(
+            schema
+                .get_field(GUARDRAIL_FLAGGED_FIELD)
+                .unwrap()
+                .filterable()
+        );
         assert!(schema.get_field(TS_FIELD).unwrap().filterable());
         assert!(
             schema.get_field(EXPIRES_AT_FIELD).unwrap().filterable(),
@@ -670,9 +699,16 @@ mod tests {
         );
         let vec_field = schema.get_field(EMBEDDING_FIELD).expect("embedding field");
         match vec_field.field_type() {
-            FieldType::Vector { dimension, auto_embed, .. } => {
+            FieldType::Vector {
+                dimension,
+                auto_embed,
+                ..
+            } => {
                 assert_eq!(*dimension, 8);
-                assert!(auto_embed.is_some(), "embedding field must carry auto_embed config");
+                assert!(
+                    auto_embed.is_some(),
+                    "embedding field must carry auto_embed config"
+                );
             }
             other => panic!("expected vector field type, got {other:?}"),
         }
@@ -684,7 +720,10 @@ mod tests {
         let schema = trace_schema("t1::_llm_traces", dim).expect("schema builds");
         let raw = trace_record_map(&fields(), DEFAULT_TRACE_TTL_SECS, vec![0.1, 0.2, 0.3, 0.4]);
         let rec = crate::rest::records::parse_record_public(&raw, &schema).expect("record parses");
-        assert_eq!(string_field(&rec, PROMPT_FIELD), "what index does veda use?");
+        assert_eq!(
+            string_field(&rec, PROMPT_FIELD),
+            "what index does veda use?"
+        );
         assert_eq!(string_field(&rec, RESPONSE_FIELD), "Veda uses HNSW.");
         assert_eq!(string_field(&rec, TOOL_IDS_FIELD), "search,aggregate");
         assert!((float_field(&rec, FAITHFULNESS_FIELD) - 0.91).abs() < 1e-9);
@@ -742,7 +781,10 @@ mod tests {
         let state = AppState::new(tmp.path());
         let tenant = TenantId::default_tenant();
         let hits = search_traces(&state, &tenant, "anything", DEFAULT_LIMIT).await;
-        assert!(hits.is_empty(), "no embedder/collection → empty, never an error");
+        assert!(
+            hits.is_empty(),
+            "no embedder/collection → empty, never an error"
+        );
     }
 
     #[tokio::test]
@@ -819,10 +861,22 @@ mod tests {
         let scoped = tenant::scope(&tenant, TRACE_COLLECTION);
         let managers = state.inner.segment_managers.read().await;
         let shard_map = managers.get(&scoped).expect("trace collection exists");
-        let sealed_total: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
-        let growing_total: u32 = shard_map.values().map(|sm| sm.growing_segment().count()).sum();
-        assert_eq!(sealed_total, 0, "storing {N} traces must not seal per write (got {sealed_total})");
-        assert_eq!(growing_total as usize, N, "all {N} traces must live in the growing segment");
+        let sealed_total: usize = shard_map
+            .values()
+            .map(|sm| sm.sealed_segments().len())
+            .sum();
+        let growing_total: u32 = shard_map
+            .values()
+            .map(|sm| sm.growing_segment().count())
+            .sum();
+        assert_eq!(
+            sealed_total, 0,
+            "storing {N} traces must not seal per write (got {sealed_total})"
+        );
+        assert_eq!(
+            growing_total as usize, N,
+            "all {N} traces must live in the growing segment"
+        );
     }
 
     // ── Retention TTL (privacy) ─────────────────────────────────────────
@@ -886,13 +940,21 @@ mod tests {
         assert!(state.inner.schemas.read().await.contains_key(&scoped));
 
         // Now insert the EXPIRED trace with an explicit past `_expires_at`.
-        let schema = state.inner.schemas.read().await.get(&scoped).cloned().unwrap();
+        let schema = state
+            .inner
+            .schemas
+            .read()
+            .await
+            .get(&scoped)
+            .cloned()
+            .unwrap();
         // ttl small enough that ts(secs=1) + ttl is still in the past.
         let raw = trace_record_map(&expired, 10, vec![1.0f32, 0.0, 0.0, 0.0]);
         // Sanity: the stamped expiry is in the past.
-        assert!(
-            matches!(raw.get(EXPIRES_AT_FIELD), Some(serde_json::Value::Number(_))),
-        );
+        assert!(matches!(
+            raw.get(EXPIRES_AT_FIELD),
+            Some(serde_json::Value::Number(_))
+        ),);
         let record = crate::rest::records::parse_record_public(&raw, &schema).unwrap();
         assert!(
             record.is_expired_at(now_secs),
@@ -961,7 +1023,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = AppState::new(tmp.path());
         let tenant = TenantId::default_tenant();
-        assert!(search_traces(&state, &tenant, "   ", DEFAULT_LIMIT).await.is_empty());
+        assert!(
+            search_traces(&state, &tenant, "   ", DEFAULT_LIMIT)
+                .await
+                .is_empty()
+        );
         assert!(search_traces(&state, &tenant, "q", 0).await.is_empty());
         assert!(cluster_traces(&state, &tenant, 0, None).await.is_empty());
     }

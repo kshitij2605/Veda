@@ -35,9 +35,9 @@
 //!   GET    /v1/eval-sets/{id}/runs                     recent runs
 //!   POST   /v1/eval-sets/{id}/cases/from-conversation  flywheel
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::grounding::{Citation, Grounding};
@@ -63,13 +63,22 @@ const DEFAULT_RECALL_BAR: f64 = 0.8;
 const DEFAULT_FAITHFULNESS_BAR: f64 = 0.8;
 
 fn not_found(msg: impl Into<String>) -> GatewayError {
-    (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg.into() }))
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse { error: msg.into() }),
+    )
 }
 fn service_unavailable(msg: impl Into<String>) -> GatewayError {
-    (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error: msg.into() }))
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse { error: msg.into() }),
+    )
 }
 fn bad_request(msg: impl Into<String>) -> GatewayError {
-    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: msg.into() }))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: msg.into() }),
+    )
 }
 
 // ── Data model ───────────────────────────────────────────────────────────
@@ -302,8 +311,7 @@ fn score_case(
     recall_bar: f64,
     faithfulness_bar: f64,
 ) -> CaseResult {
-    let retrieved_chunk_ids: Vec<String> =
-        citations.iter().map(|c| c.chunk_id.clone()).collect();
+    let retrieved_chunk_ids: Vec<String> = citations.iter().map(|c| c.chunk_id.clone()).collect();
     let recall = recall_at_k(&retrieved_chunk_ids, &case.expected_chunk_ids);
     let faithfulness = grounding.and_then(|g| g.faithfulness);
     let answer_relevancy = gold_cosine.or_else(|| grounding.and_then(|g| g.answer_relevancy));
@@ -571,7 +579,13 @@ pub async fn run_eval(
             let turn_agent_id = turn_agent_id.clone();
             async move {
                 match agents::run_agent_turn(
-                    state, tenant, user, &turn_agent_id, &[], &case.query, None,
+                    state,
+                    tenant,
+                    user,
+                    &turn_agent_id,
+                    &[],
+                    &case.query,
+                    None,
                 )
                 .await
                 {

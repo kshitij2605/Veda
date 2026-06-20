@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
-use jsonwebtoken::{decode, decode_header, jwk::JwkSet, DecodingKey, Validation};
+use jsonwebtoken::{DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
@@ -132,7 +132,10 @@ pub struct OidcContext {
 impl OidcContext {
     pub fn new(config: OidcConfig) -> Self {
         let cache = JwksCache::new(config.jwks_url.clone(), config.jwks_ttl);
-        Self { config, jwks: cache }
+        Self {
+            config,
+            jwks: cache,
+        }
     }
 }
 
@@ -305,7 +308,7 @@ fn map_role(claims: &OidcClaims, roles_claim: &str) -> Role {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 
     fn rsa_keypair() -> (EncodingKey, DecodingKey, String) {
         let priv_pem = include_str!("testdata/jwt_test_priv.pem");

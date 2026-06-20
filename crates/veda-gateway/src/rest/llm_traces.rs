@@ -16,8 +16,8 @@
 //! `_llm_traces` collection, no embedder) returns an empty result with
 //! `200`, never an error.
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::trace_store::{self, TraceCluster, TraceHit};
@@ -77,7 +77,6 @@ pub async fn cluster_traces(
     Query(q): Query<TraceClustersQuery>,
 ) -> Json<TraceClustersResponse> {
     let limit = q.limit.unwrap_or(trace_store::DEFAULT_LIMIT);
-    let clusters =
-        trace_store::cluster_traces(&state, &tenant, limit, q.faithfulness_max).await;
+    let clusters = trace_store::cluster_traces(&state, &tenant, limit, q.faithfulness_max).await;
     Json(TraceClustersResponse { clusters })
 }

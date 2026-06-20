@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::advisor::event::{RemediationAction, Scope, Severity};
@@ -34,8 +34,14 @@ async fn start_server() -> (String, AppState, tempfile::TempDir) {
 async fn start_auth_server() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let mut users = HashMap::new();
-    users.insert("admin".to_owned(), UserRecord::with_password("admin", Role::Admin));
-    users.insert("viewer".to_owned(), UserRecord::with_password("viewer", Role::Viewer));
+    users.insert(
+        "admin".to_owned(),
+        UserRecord::with_password("admin", Role::Admin),
+    );
+    users.insert(
+        "viewer".to_owned(),
+        UserRecord::with_password("viewer", Role::Viewer),
+    );
     let app_state = AppState::with_auth_and_users(tmp.path(), "test-jwt-secret", users);
     let router = build_router(app_state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -153,7 +159,12 @@ async fn incidents_returns_clusters() {
     // The disk-pressure incident is present and High severity.
     let disk = incidents
         .iter()
-        .find(|i| i["representative"].as_str().unwrap().contains("Disk pressure"))
+        .find(|i| {
+            i["representative"]
+                .as_str()
+                .unwrap()
+                .contains("Disk pressure")
+        })
         .expect("disk pressure incident present");
     assert_eq!(disk["max_severity"], json!("high"));
 
@@ -189,7 +200,12 @@ async fn incidents_requires_admin_role() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "admin must be allowed: {:?}", r.text().await);
+    assert_eq!(
+        r.status(),
+        200,
+        "admin must be allowed: {:?}",
+        r.text().await
+    );
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@
 //!
 //! Fix: snap `end` (and the next `pos`) down to a char boundary.
 
-use veda_core::chunking::{chunk_markdown, ChunkingStrategy};
+use veda_core::chunking::{ChunkingStrategy, chunk_markdown};
 
 #[test]
 fn fixed_size_chunker_handles_japanese_without_panic() {
@@ -14,7 +14,10 @@ fn fixed_size_chunker_handles_japanese_without_panic() {
     // chunk_size at a value that doesn't divide cleanly by 3
     // is guaranteed to land in the middle of a char.
     let text: String = "東京都は日本の首都です。".repeat(50);
-    let strategy = ChunkingStrategy::FixedSize { chunk_size: 100, chunk_overlap: 0 };
+    let strategy = ChunkingStrategy::FixedSize {
+        chunk_size: 100,
+        chunk_overlap: 0,
+    };
     // Must not panic.
     let chunks = chunk_markdown(&text, &strategy);
     assert!(!chunks.is_empty(), "should produce at least one chunk");
@@ -30,7 +33,10 @@ fn fixed_size_chunker_handles_japanese_without_panic() {
 #[test]
 fn fixed_size_chunker_handles_mixed_ascii_japanese_emoji() {
     let text = "Hello, 世界! 🌏 This is a mix. ".repeat(80);
-    let strategy = ChunkingStrategy::FixedSize { chunk_size: 50, chunk_overlap: 5 };
+    let strategy = ChunkingStrategy::FixedSize {
+        chunk_size: 50,
+        chunk_overlap: 5,
+    };
     let chunks = chunk_markdown(&text, &strategy);
     assert!(!chunks.is_empty());
     // Reassemble and confirm characters survived intact (every
@@ -45,7 +51,10 @@ fn fixed_size_chunker_handles_chunk_size_smaller_than_one_char() {
     // chunk_size = 2 < the 3-byte width of '空'. The chunker must
     // still produce ≥1 chunk per char, not infinite loop, not panic.
     let text = "空白空白";
-    let strategy = ChunkingStrategy::FixedSize { chunk_size: 2, chunk_overlap: 0 };
+    let strategy = ChunkingStrategy::FixedSize {
+        chunk_size: 2,
+        chunk_overlap: 0,
+    };
     let chunks = chunk_markdown(text, &strategy);
     assert!(!chunks.is_empty());
     // Should still cover the full text.
@@ -73,7 +82,9 @@ fn sentence_chunker_overlap_handles_japanese_without_panic() {
 
 #[test]
 fn sentence_chunker_overlap_handles_emoji_boundaries() {
-    let text = "Hello world! 🌏 This is fine. Another sentence! 🎉 More text here. Final bit! 🚀 Done.".repeat(10);
+    let text =
+        "Hello world! 🌏 This is fine. Another sentence! 🎉 More text here. Final bit! 🚀 Done."
+            .repeat(10);
     let strategy = ChunkingStrategy::Sentence {
         max_chunk_size: 60,
         chunk_overlap: 15,
@@ -93,7 +104,12 @@ fn sentence_chunker_splits_on_cjk_full_stop() {
         chunk_overlap: 0,
     };
     let chunks = chunk_markdown(text, &strategy);
-    assert!(chunks.len() >= 3, "should split on CJK full stop, got {} chunks: {:?}", chunks.len(), chunks.iter().map(|c| &c.text).collect::<Vec<_>>());
+    assert!(
+        chunks.len() >= 3,
+        "should split on CJK full stop, got {} chunks: {:?}",
+        chunks.len(),
+        chunks.iter().map(|c| &c.text).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -104,5 +120,9 @@ fn sentence_chunker_splits_on_fullwidth_question_mark() {
         chunk_overlap: 0,
     };
     let chunks = chunk_markdown(text, &strategy);
-    assert!(chunks.len() >= 3, "should split on fullwidth punctuation, got {} chunks", chunks.len());
+    assert!(
+        chunks.len() >= 3,
+        "should split on fullwidth punctuation, got {} chunks",
+        chunks.len()
+    );
 }

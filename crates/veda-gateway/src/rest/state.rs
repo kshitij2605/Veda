@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::sync::RwLock;
 use veda_core::embedding::{EmbeddingModelConfig, EmbeddingModelRegistry, Modality};
 use veda_core::llm_client::LlmConfig;
-use veda_core::splade_client::{SpladeClient, SpladeClientConfig};
 use veda_core::schema::CollectionSchema;
+use veda_core::splade_client::{SpladeClient, SpladeClientConfig};
 use veda_query::distributed::DistributedQueryExecutor;
-use metrics_exporter_prometheus::PrometheusHandle;
 use veda_storage::blob_store::{BlobStore, LocalBlobStore, ObjectBlobStore, ObjectStoreConfig};
 use veda_storage::segment_manager::SegmentManager;
 
@@ -60,7 +60,7 @@ impl UserRecord {
 /// parameters. Returns a PHC string suitable for storage. Use
 /// [`verify_credentials`] to check a candidate against this value.
 pub fn hash_password(plaintext: &str) -> String {
-    use argon2::password_hash::{rand_core::OsRng, SaltString};
+    use argon2::password_hash::{SaltString, rand_core::OsRng};
     use argon2::{Argon2, PasswordHasher};
 
     let salt = SaltString::generate(&mut OsRng);
@@ -95,9 +95,11 @@ pub fn verify_credentials(stored: &str, candidate: &str, username: &str) -> bool
     if ok {
         // One-shot per username so operators see it but a brute-
         // force attempt doesn't spam logs.
-        static PLAINTEXT_WARN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-            std::sync::OnceLock::new();
-        let set = PLAINTEXT_WARN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+        static PLAINTEXT_WARN: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashSet<String>>,
+        > = std::sync::OnceLock::new();
+        let set =
+            PLAINTEXT_WARN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
         let mut guard = set.lock().unwrap();
         if guard.insert(username.to_owned()) {
             tracing::warn!(
@@ -257,8 +259,7 @@ pub struct AppStateInner {
     /// text embedder; then holds the `(category, pattern, embedding)`
     /// triples so each check is one embed + N cosines. Best-effort — stays
     /// `None` when nothing can embed text.
-    pub guardrail_patterns:
-        tokio::sync::Mutex<Option<crate::agent::guardrails::EmbeddedPatterns>>,
+    pub guardrail_patterns: tokio::sync::Mutex<Option<crate::agent::guardrails::EmbeddedPatterns>>,
 }
 
 /// Build a swappable TSO + the matching `dyn Tso` handle that
@@ -302,13 +303,16 @@ impl AppState {
                 splade_client: RwLock::new(None),
                 llm_config: RwLock::new(None),
                 data_dir: data_dir.to_owned(),
-                flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
+                flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT")
+                    .ok()
+                    .or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: false,
                 jwt_secret: "default-test-secret".to_owned(),
                 auth_mode: RwLock::new(AuthMode::Disabled),
                 users: HashMap::new(),
                 blob_store: RwLock::new(Arc::new(
-                    LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
+                    LocalBlobStore::new(&data_dir.join("blobs"))
+                        .expect("failed to create local blob store"),
                 )),
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
@@ -318,9 +322,9 @@ impl AppState {
                 raft_rest_peers: RwLock::new(HashMap::new()),
                 tso: tso_pair.0.clone(),
                 tso_swapper: tso_pair.1.clone(),
-                txn_coordinator: Arc::new(
-                    veda_coordinator::percolator::TxnCoordinator::new(tso_pair.0.clone()),
-                ),
+                txn_coordinator: Arc::new(veda_coordinator::percolator::TxnCoordinator::new(
+                    tso_pair.0.clone(),
+                )),
                 open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
@@ -344,8 +348,8 @@ impl AppState {
     /// In both cases the value is stored as an Argon2id hash, not
     /// cleartext.
     pub fn with_auth(data_dir: &Path, jwt_secret: &str) -> Self {
-        let admin_user = std::env::var("VEDA_BOOTSTRAP_ADMIN_USERNAME")
-            .unwrap_or_else(|_| "admin".to_owned());
+        let admin_user =
+            std::env::var("VEDA_BOOTSTRAP_ADMIN_USERNAME").unwrap_or_else(|_| "admin".to_owned());
         let admin_password = match std::env::var("VEDA_BOOTSTRAP_ADMIN_PASSWORD") {
             Ok(p) if !p.is_empty() => p,
             _ => {
@@ -371,13 +375,16 @@ impl AppState {
                 splade_client: RwLock::new(None),
                 llm_config: RwLock::new(None),
                 data_dir: data_dir.to_owned(),
-                flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
+                flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT")
+                    .ok()
+                    .or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: true,
                 jwt_secret: jwt_secret.to_owned(),
                 auth_mode: RwLock::new(AuthMode::Static),
                 users,
                 blob_store: RwLock::new(Arc::new(
-                    LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
+                    LocalBlobStore::new(&data_dir.join("blobs"))
+                        .expect("failed to create local blob store"),
                 )),
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
@@ -387,9 +394,9 @@ impl AppState {
                 raft_rest_peers: RwLock::new(HashMap::new()),
                 tso: tso_pair.0.clone(),
                 tso_swapper: tso_pair.1.clone(),
-                txn_coordinator: Arc::new(
-                    veda_coordinator::percolator::TxnCoordinator::new(tso_pair.0.clone()),
-                ),
+                txn_coordinator: Arc::new(veda_coordinator::percolator::TxnCoordinator::new(
+                    tso_pair.0.clone(),
+                )),
                 open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
@@ -421,13 +428,16 @@ impl AppState {
                 splade_client: RwLock::new(None),
                 llm_config: RwLock::new(None),
                 data_dir: data_dir.to_owned(),
-                flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT").ok().or_else(|| Some("http://flashparse:8000".to_owned())),
+                flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT")
+                    .ok()
+                    .or_else(|| Some("http://flashparse:8000".to_owned())),
                 auth_enabled: true,
                 jwt_secret: jwt_secret.to_owned(),
                 auth_mode: RwLock::new(AuthMode::Static),
                 users,
                 blob_store: RwLock::new(Arc::new(
-                    LocalBlobStore::new(&data_dir.join("blobs")).expect("failed to create local blob store")
+                    LocalBlobStore::new(&data_dir.join("blobs"))
+                        .expect("failed to create local blob store"),
                 )),
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
@@ -437,9 +447,9 @@ impl AppState {
                 raft_rest_peers: RwLock::new(HashMap::new()),
                 tso: tso_pair.0.clone(),
                 tso_swapper: tso_pair.1.clone(),
-                txn_coordinator: Arc::new(
-                    veda_coordinator::percolator::TxnCoordinator::new(tso_pair.0.clone()),
-                ),
+                txn_coordinator: Arc::new(veda_coordinator::percolator::TxnCoordinator::new(
+                    tso_pair.0.clone(),
+                )),
                 open_txn_handles: RwLock::new(HashMap::new()),
                 shard_logs: Arc::new(ShardLogRegistry::new(data_dir.join("_logs"))),
                 replica_safe_ts: RwLock::new(0),
@@ -488,17 +498,14 @@ impl AppState {
         log_buffer: Arc<LogBuffer>,
     ) -> Self {
         let mut state = Self::new(data_dir);
-        let inner = Arc::get_mut(&mut state.inner)
-            .expect("no other references to AppStateInner");
+        let inner = Arc::get_mut(&mut state.inner).expect("no other references to AppStateInner");
         inner.prometheus_handle = Some(prometheus_handle);
         inner.log_buffer = log_buffer;
         state
     }
 
     /// Get a reference to the embedding model registry for configuration.
-    pub fn embedding_registry(
-        &self,
-    ) -> &RwLock<EmbeddingModelRegistry> {
+    pub fn embedding_registry(&self) -> &RwLock<EmbeddingModelRegistry> {
         &self.inner.embedding_registry
     }
 
@@ -622,8 +629,7 @@ impl AppState {
             .unwrap_or(2)
             .max(1);
         tokio::spawn(async move {
-            let mut ticker =
-                tokio::time::interval(std::time::Duration::from_secs(interval));
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
@@ -654,12 +660,10 @@ impl AppState {
                 let m = rx.borrow_and_update().clone();
                 metrics::gauge!("veda_raft_term").set(m.current_term as f64);
                 metrics::gauge!("veda_raft_leader_id").set(m.current_leader.unwrap_or(0) as f64);
-                metrics::gauge!("veda_raft_last_applied_index").set(
-                    m.last_applied.map(|l| l.index).unwrap_or(0) as f64
-                );
-                metrics::gauge!("veda_raft_last_log_index").set(
-                    m.last_log_index.unwrap_or(0) as f64
-                );
+                metrics::gauge!("veda_raft_last_applied_index")
+                    .set(m.last_applied.map(|l| l.index).unwrap_or(0) as f64);
+                metrics::gauge!("veda_raft_last_log_index")
+                    .set(m.last_log_index.unwrap_or(0) as f64);
                 let is_leader = matches!(m.state, veda_coordinator::RaftServerState::Leader);
                 metrics::gauge!("veda_raft_is_leader").set(if is_leader { 1.0 } else { 0.0 });
                 if rx.changed().await.is_err() {
@@ -760,9 +764,8 @@ impl AppState {
             Some(c) => c,
             None => return,
         };
-        let leased = std::sync::Arc::new(
-            veda_coordinator::meta_leased_tso::MetaLeasedTso::new(coord),
-        );
+        let leased =
+            std::sync::Arc::new(veda_coordinator::meta_leased_tso::MetaLeasedTso::new(coord));
         leased.start_renewer().await;
         self.inner.tso_swapper.swap(leased).await;
         tracing::info!("TSO swapped to MetaLeasedTso bound to raft coordinator");
@@ -786,8 +789,8 @@ impl AppState {
         let peers_env = std::env::var("VEDA_RAFT_PEERS").unwrap_or_default();
         let peers = veda_coordinator::raft_tonic::parse_peers_env(&peers_env);
         if !peers.is_empty() {
-            let listen = std::env::var("VEDA_RAFT_LISTEN")
-                .unwrap_or_else(|_| "0.0.0.0:6341".to_owned());
+            let listen =
+                std::env::var("VEDA_RAFT_LISTEN").unwrap_or_else(|_| "0.0.0.0:6341".to_owned());
             let listen_addr = match listen.parse::<std::net::SocketAddr>() {
                 Ok(a) => a,
                 Err(e) => {
@@ -801,7 +804,15 @@ impl AppState {
             let bootstrap = std::env::var("VEDA_RAFT_BOOTSTRAP")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            match RaftCoordinator::start_multi_node(node_id, &raft_dir, listen_addr, peers.clone(), bootstrap).await {
+            match RaftCoordinator::start_multi_node(
+                node_id,
+                &raft_dir,
+                listen_addr,
+                peers.clone(),
+                bootstrap,
+            )
+            .await
+            {
                 Ok(coord) => {
                     let mut guard = self.inner.raft.write().await;
                     *guard = Some(coord);
@@ -839,14 +850,15 @@ impl AppState {
                 tracing::error!(error = %e, "failed to start raft coordinator");
             }
         }
-
     }
 
     /// Load an OpenAI-compatible LLM endpoint from `VEDA_LLM_*` env
     /// vars. No-op when unset — LLM-backed UI affordances then hide
     /// (cluster labels, failure classification, NL→DSL).
     pub async fn load_llm_from_env(&self) {
-        let Some(cfg) = LlmConfig::from_env() else { return };
+        let Some(cfg) = LlmConfig::from_env() else {
+            return;
+        };
         let endpoint = cfg.endpoint.clone();
         let model = cfg.model.clone();
         let mut guard = self.inner.llm_config.write().await;
@@ -942,7 +954,11 @@ impl AppState {
                             name: model,
                             endpoint: endpoint.clone(),
                             api_key: mm_api_key.clone(),
-                            supported_modalities: vec![Modality::Text, Modality::Image, Modality::Video],
+                            supported_modalities: vec![
+                                Modality::Text,
+                                Modality::Image,
+                                Modality::Video,
+                            ],
                             output_dimension: dim,
                             max_input_size_bytes: 20 * 1024 * 1024,
                             timeout_seconds: 60,
@@ -989,9 +1005,9 @@ impl AppState {
     ///
     /// Returns the number of collections recovered.
     pub async fn recover_collections_from_disk(&self) -> usize {
-        use veda_storage::segment_manager::SegmentManager;
         use veda_query::distributed::DistributedQueryExecutor;
         use veda_query::local_shard::LocalShardSearcher;
+        use veda_storage::segment_manager::SegmentManager;
 
         let data_dir = &self.inner.data_dir;
         let Ok(entries) = std::fs::read_dir(data_dir) else {
@@ -1077,7 +1093,11 @@ impl AppState {
                 shard_managers.insert(shard_id, sm);
             }
 
-            self.inner.schemas.write().await.insert(name.clone(), schema);
+            self.inner
+                .schemas
+                .write()
+                .await
+                .insert(name.clone(), schema);
             self.inner
                 .segment_managers
                 .write()
@@ -1099,7 +1119,10 @@ impl AppState {
     /// If `VEDA_BLOB_BACKEND` is set, creates an `ObjectBlobStore` and swaps it
     /// into the RwLock (replacing the default `LocalBlobStore`).
     pub async fn load_blob_store_from_env(&self) {
-        let backend = match std::env::var("VEDA_BLOB_BACKEND").ok().filter(|s| !s.is_empty()) {
+        let backend = match std::env::var("VEDA_BLOB_BACKEND")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
             Some(b) => b,
             None => {
                 tracing::info!("VEDA_BLOB_BACKEND not set, keeping local blob store");
@@ -1111,12 +1134,10 @@ impl AppState {
             backend,
             endpoint: std::env::var("VEDA_BLOB_ENDPOINT")
                 .unwrap_or_else(|_| "http://minio:9000".to_owned()),
-            bucket: std::env::var("VEDA_BLOB_BUCKET")
-                .unwrap_or_else(|_| "veda-blobs".to_owned()),
+            bucket: std::env::var("VEDA_BLOB_BUCKET").unwrap_or_else(|_| "veda-blobs".to_owned()),
             access_key: std::env::var("VEDA_BLOB_ACCESS_KEY").unwrap_or_default(),
             secret_key: std::env::var("VEDA_BLOB_SECRET_KEY").unwrap_or_default(),
-            region: std::env::var("VEDA_BLOB_REGION")
-                .unwrap_or_else(|_| "us-east-1".to_owned()),
+            region: std::env::var("VEDA_BLOB_REGION").unwrap_or_else(|_| "us-east-1".to_owned()),
         };
 
         match ObjectBlobStore::new(&config) {

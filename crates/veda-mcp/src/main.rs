@@ -48,14 +48,13 @@ async fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = forward_message(&client, &endpoint, token, &line).await {
-            if stdout.write_all(response.as_bytes()).await.is_err()
+        if let Some(response) = forward_message(&client, &endpoint, token, &line).await
+            && (stdout.write_all(response.as_bytes()).await.is_err()
                 || stdout.write_all(b"\n").await.is_err()
-                || stdout.flush().await.is_err()
-            {
-                eprintln!("veda-mcp: stdout closed, exiting");
-                break;
-            }
+                || stdout.flush().await.is_err())
+        {
+            eprintln!("veda-mcp: stdout closed, exiting");
+            break;
         }
     }
 

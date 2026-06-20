@@ -141,11 +141,7 @@ impl TimeWindowPlan {
     ///
     /// Veda does **not** detect scenes itself — feed this output from
     /// PySceneDetect / ffmpeg-scenedetect / a VLM-based detector.
-    pub fn scene_aligned_windows(
-        &self,
-        scene_cuts_ms: &[u64],
-        total_ms: u64,
-    ) -> Vec<(u64, u64)> {
+    pub fn scene_aligned_windows(&self, scene_cuts_ms: &[u64], total_ms: u64) -> Vec<(u64, u64)> {
         if total_ms == 0 {
             return Vec::new();
         }
@@ -362,9 +358,7 @@ pub fn contextualize_chunks(
             {
                 chunk.text = format!("{ctx}\n\n{}", chunk.text);
                 // Replace placeholder tag with completed marker.
-                chunk
-                    .content_types
-                    .retain(|t| t != "contextual_pending");
+                chunk.content_types.retain(|t| t != "contextual_pending");
                 if !chunk.content_types.iter().any(|t| t == "contextualised") {
                     chunk.content_types.push("contextualised".to_owned());
                 }
@@ -391,8 +385,7 @@ fn chunk_hierarchical(
     let coarse_chunks = chunk_fixed_size(text, coarse_size, 0);
     let fine_chunks = chunk_fixed_size(text, fine_size, fine_overlap);
 
-    let mut out: Vec<TextChunk> =
-        Vec::with_capacity(coarse_chunks.len() + fine_chunks.len());
+    let mut out: Vec<TextChunk> = Vec::with_capacity(coarse_chunks.len() + fine_chunks.len());
 
     for mut c in coarse_chunks {
         c.index = out.len();
@@ -480,7 +473,8 @@ fn chunk_fixed_size(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<
         // Snap the final cut to a char boundary as well (the
         // word-boundary search may have produced a byte offset
         // inside a multibyte char if the text contains no spaces).
-        let actual_end = floor_char_boundary(text, actual_end).max(ceil_char_boundary(text, pos + 1));
+        let actual_end =
+            floor_char_boundary(text, actual_end).max(ceil_char_boundary(text, pos + 1));
         let slice = &text[pos..actual_end];
         chunks.push(TextChunk {
             text: slice.to_owned(),
@@ -508,13 +502,16 @@ fn split_sentences(text: &str) -> Vec<&str> {
     let mut start = 0;
 
     let chars: Vec<(usize, char)> = text.char_indices().collect();
-    for (_idx, &(byte_pos, ch)) in chars.iter().enumerate() {
+    for &(byte_pos, ch) in chars.iter() {
         let is_boundary = match ch {
             '.' | '?' | '!' => {
                 // ASCII punctuation: must be followed by whitespace, newline, or end-of-text.
                 let next_byte = byte_pos + ch.len_utf8();
                 next_byte >= text.len()
-                    || text.as_bytes().get(next_byte).map_or(true, |&b| b == b' ' || b == b'\n')
+                    || text
+                        .as_bytes()
+                        .get(next_byte)
+                        .is_none_or(|&b| b == b' ' || b == b'\n')
             }
             '\u{3002}' | '\u{FF1F}' | '\u{FF01}' => {
                 // CJK sentence-enders are self-delimiting (no trailing space in Japanese/Chinese).
@@ -669,16 +666,16 @@ fn chunk_markdown_heading(
         // Track headings.
         for line in section.lines().take(3) {
             let trimmed = line.trim();
-            if trimmed.starts_with("### ") {
+            if let Some(rest) = trimmed.strip_prefix("### ") {
                 if current_heading_path.len() > 2 {
                     current_heading_path.truncate(2);
                 }
-                current_heading_path.push(trimmed[4..].trim().to_owned());
-            } else if trimmed.starts_with("## ") {
+                current_heading_path.push(rest.trim().to_owned());
+            } else if let Some(rest) = trimmed.strip_prefix("## ") {
                 current_heading_path.truncate(1);
-                current_heading_path.push(trimmed[3..].trim().to_owned());
-            } else if trimmed.starts_with("# ") {
-                current_heading_path = vec![trimmed[2..].trim().to_owned()];
+                current_heading_path.push(rest.trim().to_owned());
+            } else if let Some(rest) = trimmed.strip_prefix("# ") {
+                current_heading_path = vec![rest.trim().to_owned()];
             }
         }
 
@@ -702,7 +699,8 @@ fn chunk_markdown_heading(
             let paragraphs: Vec<&str> = trimmed.split("\n\n").collect();
             let mut current_text = String::new();
             for para in paragraphs {
-                if !current_text.is_empty() && current_text.len() + para.len() + 2 > max_chunk_size {
+                if !current_text.is_empty() && current_text.len() + para.len() + 2 > max_chunk_size
+                {
                     raw_pieces.push(RawPiece {
                         text: current_text.clone(),
                         heading_path: current_heading_path.clone(),
@@ -733,11 +731,13 @@ fn chunk_markdown_heading(
 /// Compute word-overlap similarity between two text segments (Jaccard-like).
 /// Returns a value between 0.0 (no overlap) and 1.0 (identical word sets).
 fn text_similarity(a: &str, b: &str) -> f32 {
-    let words_a: std::collections::HashSet<&str> = a.split_whitespace()
+    let words_a: std::collections::HashSet<&str> = a
+        .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|w| w.len() > 2) // skip short words like "a", "to", "is"
         .collect();
-    let words_b: std::collections::HashSet<&str> = b.split_whitespace()
+    let words_b: std::collections::HashSet<&str> = b
+        .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|w| w.len() > 2)
         .collect();
@@ -749,7 +749,11 @@ fn text_similarity(a: &str, b: &str) -> f32 {
     let intersection = words_a.intersection(&words_b).count();
     let union = words_a.union(&words_b).count();
 
-    if union == 0 { 0.0 } else { intersection as f32 / union as f32 }
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f32 / union as f32
+    }
 }
 
 fn chunk_semantic(
@@ -843,7 +847,11 @@ struct RecursiveCtx {
     page_number: usize,
 }
 
-fn chunk_markdown_recursive(text: &str, max_chunk_size: usize, chunk_overlap: usize) -> Vec<TextChunk> {
+fn chunk_markdown_recursive(
+    text: &str,
+    max_chunk_size: usize,
+    chunk_overlap: usize,
+) -> Vec<TextChunk> {
     let mut ctx = RecursiveCtx {
         max_chunk_size,
         heading_path: Vec::new(),
@@ -909,11 +917,11 @@ fn split_keeping_separator(text: &str, sep: &str) -> Vec<String> {
     let mut remaining = text;
 
     // For heading separators that start with \n, the first part may not start with the separator.
-    if let Some(idx) = remaining.find(sep) {
-        if idx > 0 {
-            parts.push(remaining[..idx].to_owned());
-            remaining = &remaining[idx..];
-        }
+    if let Some(idx) = remaining.find(sep)
+        && idx > 0
+    {
+        parts.push(remaining[..idx].to_owned());
+        remaining = &remaining[idx..];
     }
 
     while !remaining.is_empty() {
@@ -974,8 +982,8 @@ fn extract_heading_text(part: &str, prefix: &str) -> Option<String> {
     // The part may start with "\n# Heading\n..." or "# Heading\n..."
     for line in part.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with(prefix) {
-            return Some(trimmed[prefix.len()..].trim().to_owned());
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest.trim().to_owned());
         }
         // Also handle "# Heading" at the very start.
         if trimmed.starts_with(&prefix[..prefix.len()]) {
@@ -1036,7 +1044,11 @@ fn build_chunks_with_overlap(
             }
         }
 
-        let start_offset = if text.is_empty() { offset } else { offset.saturating_sub(text.len()) };
+        let start_offset = if text.is_empty() {
+            offset
+        } else {
+            offset.saturating_sub(text.len())
+        };
         text.push_str(&piece.text);
 
         chunks.push(TextChunk {
@@ -1087,6 +1099,9 @@ mod multibyte_tests {
             chunk_overlap: 30,
         };
         let chunks = chunk_markdown(&text, &strat);
-        assert!(chunks.len() > 1, "should produce multiple chunks under tight budget");
+        assert!(
+            chunks.len() > 1,
+            "should produce multiple chunks under tight budget"
+        );
     }
 }

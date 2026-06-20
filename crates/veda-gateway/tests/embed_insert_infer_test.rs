@@ -14,7 +14,7 @@
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::build_router;
@@ -61,10 +61,17 @@ async fn embed_insert_without_request_auto_embed_clear_error_when_schema_has_non
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 400, "without schema config nor request map, should be 400");
+    assert_eq!(
+        r.status(),
+        400,
+        "without schema config nor request map, should be 400"
+    );
     let body: Value = r.json().await.unwrap();
     let err = body["error"].as_str().unwrap_or("");
-    assert!(err.contains("auto_embed"), "error should mention auto_embed: {err}");
+    assert!(
+        err.contains("auto_embed"),
+        "error should mention auto_embed: {err}"
+    );
     assert!(
         err.contains("source_field") || err.contains("auto_embed configured"),
         "error should explain how to fix: {err}"
@@ -107,7 +114,12 @@ async fn embed_insert_inferred_mapping_from_schema_auto_embed() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 201, "create with schema auto_embed: {:?}", r.text().await);
+    assert_eq!(
+        r.status(),
+        201,
+        "create with schema auto_embed: {:?}",
+        r.text().await
+    );
 
     let r = c
         .post(format!("{base}/v1/collections/with_schema_ae/embed-insert"))
@@ -182,5 +194,8 @@ async fn embed_insert_explicit_request_auto_embed_overrides_schema() {
         status == 201 || status == 400 || status == 502,
         "unexpected status {status}: {body}"
     );
-    assert!(!body.contains("missing field"), "explicit map shouldn't 422: {body}");
+    assert!(
+        !body.contains("missing field"),
+        "explicit map shouldn't 422: {body}"
+    );
 }

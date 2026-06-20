@@ -13,11 +13,11 @@
 //! categories ranked by how much they grew. Advisory only — nothing here
 //! mutates state.
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use serde::Deserialize;
 
-use crate::advisor::spike_attribution::{analyze_log_rate, SpikeAttribution};
+use crate::advisor::spike_attribution::{SpikeAttribution, analyze_log_rate};
 use crate::rest::state::AppState;
 
 /// Default spike window (seconds) — matches the advisor snapshot window.

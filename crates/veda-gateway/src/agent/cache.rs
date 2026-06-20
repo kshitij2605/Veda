@@ -99,12 +99,7 @@ pub fn distance_to_similarity(distance: f32) -> f32 {
 /// and the current time `now_ms`, decide whether to serve the cache.
 /// Returns `Some(similarity)` on a hit, `None` on a miss (below threshold
 /// or expired). Pure + directly testable.
-pub fn cache_decision(
-    distance: f32,
-    threshold: f32,
-    expires_at: i64,
-    now_ms: i64,
-) -> Option<f32> {
+pub fn cache_decision(distance: f32, threshold: f32, expires_at: i64, now_ms: i64) -> Option<f32> {
     let similarity = distance_to_similarity(distance);
     if similarity < threshold {
         return None;
@@ -134,9 +129,7 @@ pub fn cache_schema(scoped_name: &str, dimension: u32) -> Result<CollectionSchem
         .add_field(FieldDefinition::new(RESPONSE_FIELD, FieldType::String))
         .add_field(FieldDefinition::new(MODEL_FIELD, FieldType::String).with_filterable(true))
         .add_field(FieldDefinition::new(TS_FIELD, FieldType::Int64).with_filterable(true))
-        .add_field(
-            FieldDefinition::new(EXPIRES_AT_FIELD, FieldType::Int64).with_filterable(true),
-        )
+        .add_field(FieldDefinition::new(EXPIRES_AT_FIELD, FieldType::Int64).with_filterable(true))
         .add_field(
             FieldDefinition::vector(EMBEDDING_FIELD, dimension, DistanceMetric::Cosine)
                 .with_auto_embed(AutoEmbedConfig {
@@ -159,12 +152,18 @@ fn entry_record_map(
     embedding: Vec<f32>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut m = serde_json::Map::new();
-    m.insert(PROMPT_FIELD.to_owned(), serde_json::Value::String(prompt.to_owned()));
+    m.insert(
+        PROMPT_FIELD.to_owned(),
+        serde_json::Value::String(prompt.to_owned()),
+    );
     m.insert(
         RESPONSE_FIELD.to_owned(),
         serde_json::Value::String(response.to_owned()),
     );
-    m.insert(MODEL_FIELD.to_owned(), serde_json::Value::String(model.to_owned()));
+    m.insert(
+        MODEL_FIELD.to_owned(),
+        serde_json::Value::String(model.to_owned()),
+    );
     m.insert(TS_FIELD.to_owned(), serde_json::Value::Number(ts.into()));
     m.insert(
         EXPIRES_AT_FIELD.to_owned(),
@@ -467,14 +466,26 @@ mod tests {
     fn cache_schema_marks_model_filterable_and_vector_dim() {
         let schema = cache_schema("t1::_llm_cache", 8).expect("schema builds");
         let model_field = schema.get_field(MODEL_FIELD).expect("model field");
-        assert!(model_field.filterable(), "model must be filterable for per-model lookup");
-        let expires_field = schema.get_field(EXPIRES_AT_FIELD).expect("expires_at field");
+        assert!(
+            model_field.filterable(),
+            "model must be filterable for per-model lookup"
+        );
+        let expires_field = schema
+            .get_field(EXPIRES_AT_FIELD)
+            .expect("expires_at field");
         assert!(expires_field.filterable(), "expires_at must be filterable");
         let vec_field = schema.get_field(EMBEDDING_FIELD).expect("embedding field");
         match vec_field.field_type() {
-            FieldType::Vector { dimension, auto_embed, .. } => {
+            FieldType::Vector {
+                dimension,
+                auto_embed,
+                ..
+            } => {
                 assert_eq!(*dimension, 8);
-                assert!(auto_embed.is_some(), "embedding field must carry auto_embed config");
+                assert!(
+                    auto_embed.is_some(),
+                    "embedding field must carry auto_embed config"
+                );
             }
             other => panic!("expected vector field type, got {other:?}"),
         }
@@ -493,7 +504,10 @@ mod tests {
             vec![0.1, 0.2, 0.3, 0.4],
         );
         let rec = crate::rest::records::parse_record_public(&raw, &schema).expect("record parses");
-        assert_eq!(string_field(&rec, PROMPT_FIELD), "what index does veda use?");
+        assert_eq!(
+            string_field(&rec, PROMPT_FIELD),
+            "what index does veda use?"
+        );
         assert_eq!(string_field(&rec, RESPONSE_FIELD), "Veda uses HNSW.");
         assert_eq!(string_field(&rec, MODEL_FIELD), "gpt-4o-mini");
         assert_eq!(int_field(&rec, TS_FIELD), 12345);
@@ -518,9 +532,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = AppState::new(tmp.path());
         let tenant = TenantId::default_tenant();
-        let hit = lookup(&state, &tenant, "gpt-4o-mini", "anything", DEFAULT_SIMILARITY_THRESHOLD)
-            .await;
-        assert!(hit.is_none(), "no embedder/collection → miss (None), never an error");
+        let hit = lookup(
+            &state,
+            &tenant,
+            "gpt-4o-mini",
+            "anything",
+            DEFAULT_SIMILARITY_THRESHOLD,
+        )
+        .await;
+        assert!(
+            hit.is_none(),
+            "no embedder/collection → miss (None), never an error"
+        );
     }
 
     #[tokio::test]
@@ -588,7 +611,9 @@ mod tests {
         };
         let sealed = {
             let executors = state.inner.query_executors.read().await;
-            let executor = executors.get(&scoped).expect("executor exists for cache collection");
+            let executor = executors
+                .get(&scoped)
+                .expect("executor exists for cache collection");
             executor.search(&request).expect("search runs").0.results
         };
         let growing = super::super::index::search_live_growing(&state, &scoped, &request).await;
@@ -633,8 +658,14 @@ mod tests {
         let scoped = tenant::scope(&tenant, CACHE_COLLECTION);
         let managers = state.inner.segment_managers.read().await;
         let shard_map = managers.get(&scoped).expect("cache collection exists");
-        let sealed_total: usize = shard_map.values().map(|sm| sm.sealed_segments().len()).sum();
-        let growing_total: u32 = shard_map.values().map(|sm| sm.growing_segment().count()).sum();
+        let sealed_total: usize = shard_map
+            .values()
+            .map(|sm| sm.sealed_segments().len())
+            .sum();
+        let growing_total: u32 = shard_map
+            .values()
+            .map(|sm| sm.growing_segment().count())
+            .sum();
         assert_eq!(
             sealed_total, 0,
             "storing {N} tiny entries must not seal a segment per write (got {sealed_total} sealed)"
@@ -651,7 +682,9 @@ mod tests {
         let state = AppState::new(tmp.path());
         let tenant = TenantId::default_tenant();
         assert!(
-            lookup(&state, &tenant, "m", "   ", DEFAULT_SIMILARITY_THRESHOLD).await.is_none()
+            lookup(&state, &tenant, "m", "   ", DEFAULT_SIMILARITY_THRESHOLD)
+                .await
+                .is_none()
         );
         // Empty prompt/response store is a no-op (returns before embedding).
         store(&state, &tenant, "m", "   ", "resp", 1).await;

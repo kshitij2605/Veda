@@ -8,7 +8,7 @@
 use std::net::SocketAddr;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::build_router;
@@ -61,7 +61,11 @@ async fn two_tenants_with_same_collection_name_are_isolated() {
         .send()
         .await
         .unwrap();
-    assert_eq!(b.status(), 201, "tenant B should be able to create its own 'docs'");
+    assert_eq!(
+        b.status(),
+        201,
+        "tenant B should be able to create its own 'docs'"
+    );
 
     // A's list returns ["docs"]
     let body: Value = c

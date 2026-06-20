@@ -10,15 +10,15 @@
 //! connectors framework (`/v1/admin/connectors/{id}/run`) can drive the
 //! exact same path without duplicating it.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use super::crawl4ai::Crawl4aiClient;
 use super::document::parse_chunking_strategy;
-use super::ingest_common::{ingest_markdown, SourceMeta};
+use super::ingest_common::{SourceMeta, ingest_markdown};
 use super::state::AppState;
 use super::url_guard::check_url_allowed;
 use crate::tenant::{self, Tenant};
@@ -79,7 +79,11 @@ pub struct IngestUrlError {
     pub message: String,
 }
 
-fn err(status: StatusCode, code: &str, message: String) -> (StatusCode, Json<IngestUrlErrorResponse>) {
+fn err(
+    status: StatusCode,
+    code: &str,
+    message: String,
+) -> (StatusCode, Json<IngestUrlErrorResponse>) {
     (
         status,
         Json(IngestUrlErrorResponse {
@@ -209,13 +213,20 @@ pub async fn crawl_and_ingest(
             title: page.title.clone(),
             expires_at,
         };
-        let result = ingest_markdown(state, collection_name, schema, &page.markdown, &meta, strategy)
-            .await
-            .map_err(|(status, msg)| CrawlIngestError {
-                status,
-                code: "INGEST_FAILED",
-                message: msg,
-            })?;
+        let result = ingest_markdown(
+            state,
+            collection_name,
+            schema,
+            &page.markdown,
+            &meta,
+            strategy,
+        )
+        .await
+        .map_err(|(status, msg)| CrawlIngestError {
+            status,
+            code: "INGEST_FAILED",
+            message: msg,
+        })?;
         total += result.chunks_inserted;
         per_url.push(PerUrlResult {
             url: page.url,
@@ -260,7 +271,8 @@ pub async fn ingest_url(
         urls.extend(list.iter().filter(|s| !s.is_empty()).cloned());
     }
 
-    let strategy = parse_chunking_strategy(req.chunker.as_deref(), req.chunk_size, req.chunk_overlap);
+    let strategy =
+        parse_chunking_strategy(req.chunker.as_deref(), req.chunk_size, req.chunk_overlap);
 
     let expires_at = req.ttl_secs.map(|ttl| {
         let now = std::time::SystemTime::now()

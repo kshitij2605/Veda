@@ -107,7 +107,9 @@ pub struct MvccValue {
 
 impl MvccValue {
     pub fn put(payload: Bytes) -> Self {
-        Self { payload: Some(payload) }
+        Self {
+            payload: Some(payload),
+        }
     }
     pub fn tombstone() -> Self {
         Self { payload: None }
@@ -157,7 +159,12 @@ impl MvccStore {
     /// the per-key cap is hit AND no version is past safe_ts,
     /// the insert fails — the caller (or operator) needs to
     /// advance safe_ts.
-    pub fn put(&mut self, user_key: &[u8], commit_ts: Ts, value: MvccValue) -> Result<(), MvccError> {
+    pub fn put(
+        &mut self,
+        user_key: &[u8],
+        commit_ts: Ts,
+        value: MvccValue,
+    ) -> Result<(), MvccError> {
         let k = MvccKey::new(user_key.to_vec(), commit_ts);
         let count = *self.counts.get(user_key).unwrap_or(&0);
         if count >= self.max_versions_per_key {
@@ -193,10 +200,9 @@ impl MvccStore {
         // Forward iter from probe: first hit (if any) with the
         // same user_key has the largest commit_ts ≤ read_ts (due
         // to inverse_ts encoding).
-        for (k, v) in self.store.range(probe..) {
-            if k.user_key != user_key {
-                break;
-            }
+        if let Some((k, v)) = self.store.range(probe..).next()
+            && k.user_key == user_key
+        {
             return v.payload.clone();
         }
         None
@@ -234,19 +240,18 @@ impl MvccStore {
     /// writes this atomically to a `mvcc.snap` file and then
     /// truncates the WAL.
     pub fn snapshot_entries(&self) -> (Vec<(MvccKey, MvccValue)>, Ts) {
-        let entries: Vec<(MvccKey, MvccValue)> =
-            self.store.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<(MvccKey, MvccValue)> = self
+            .store
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         (entries, self.safe_ts)
     }
 
     /// Phase F WAL checkpoint inverse: install the entries (and
     /// safe_ts) into a fresh `MvccStore`. Used by replay when a
     /// `mvcc.snap` file exists.
-    pub fn install_snapshot_entries(
-        &mut self,
-        entries: Vec<(MvccKey, MvccValue)>,
-        safe_ts: Ts,
-    ) {
+    pub fn install_snapshot_entries(&mut self, entries: Vec<(MvccKey, MvccValue)>, safe_ts: Ts) {
         self.store.clear();
         self.counts.clear();
         for (k, v) in entries {
@@ -292,11 +297,8 @@ impl MvccStore {
         for uk in user_keys {
             let lo = MvccKey::lo(&uk);
             let hi = MvccKey::hi(&uk);
-            let versions: Vec<MvccKey> = self
-                .store
-                .range(lo..=hi)
-                .map(|(k, _)| k.clone())
-                .collect();
+            let versions: Vec<MvccKey> =
+                self.store.range(lo..=hi).map(|(k, _)| k.clone()).collect();
             // Iterate newest-first. Keep `> safe`; keep the
             // first `≤ safe` as the floor; drop the rest.
             let mut floor_found = false;
@@ -337,11 +339,14 @@ impl MvccStore {
             .filter(|(k, _)| k.commit_ts() <= self.safe_ts)
             .map(|(k, _)| k.clone())
             .collect();
-        let victim = candidates.into_iter().last().ok_or(MvccError::TooManyVersions {
-            user_key: user_key.to_vec(),
-            cap: self.max_versions_per_key,
-            safe_ts: self.safe_ts,
-        })?;
+        let victim = candidates
+            .into_iter()
+            .last()
+            .ok_or(MvccError::TooManyVersions {
+                user_key: user_key.to_vec(),
+                cap: self.max_versions_per_key,
+                safe_ts: self.safe_ts,
+            })?;
         self.store.remove(&victim);
         if let Some(c) = self.counts.get_mut(user_key) {
             *c = c.saturating_sub(1);
@@ -374,15 +379,21 @@ mod tests {
         // MvccKey (descending order).
         let early = MvccKey::new("k".as_bytes().to_vec(), 100);
         let late = MvccKey::new("k".as_bytes().to_vec(), 200);
-        assert!(late < early, "late commit must sort before early: {late:?} >= {early:?}");
+        assert!(
+            late < early,
+            "late commit must sort before early: {late:?} >= {early:?}"
+        );
     }
 
     #[test]
     fn put_get_at_returns_newest_visible() {
         let mut s = MvccStore::new();
-        s.put_payload(b"k", 100, Bytes::from_static(b"v100")).unwrap();
-        s.put_payload(b"k", 200, Bytes::from_static(b"v200")).unwrap();
-        s.put_payload(b"k", 300, Bytes::from_static(b"v300")).unwrap();
+        s.put_payload(b"k", 100, Bytes::from_static(b"v100"))
+            .unwrap();
+        s.put_payload(b"k", 200, Bytes::from_static(b"v200"))
+            .unwrap();
+        s.put_payload(b"k", 300, Bytes::from_static(b"v300"))
+            .unwrap();
         assert_eq!(s.get_at(b"k", 150).as_deref(), Some(&b"v100"[..]));
         assert_eq!(s.get_at(b"k", 250).as_deref(), Some(&b"v200"[..]));
         assert_eq!(s.get_at(b"k", 999).as_deref(), Some(&b"v300"[..]));
@@ -396,7 +407,10 @@ mod tests {
         s.put_payload(b"k", 100, Bytes::from_static(b"v")).unwrap();
         s.delete(b"k", 200).unwrap();
         assert_eq!(s.get_at(b"k", 150).as_deref(), Some(&b"v"[..]));
-        assert!(s.get_at(b"k", 250).is_none(), "after tombstone must be None");
+        assert!(
+            s.get_at(b"k", 250).is_none(),
+            "after tombstone must be None"
+        );
     }
 
     #[test]
@@ -404,7 +418,8 @@ mod tests {
         let mut s = MvccStore::new();
         for ts in [100, 200, 300, 400] {
             let body = format!("v{ts}");
-            s.put_payload(b"k", ts, Bytes::from(body.into_bytes())).unwrap();
+            s.put_payload(b"k", ts, Bytes::from(body.into_bytes()))
+                .unwrap();
         }
         assert_eq!(s.total_versions(), 4);
         s.set_safe_ts(250);
@@ -466,11 +481,13 @@ mod tests {
         // even when those writes happen "after" (in wall-clock
         // sense) but before the reader queries.
         let mut s = MvccStore::new();
-        s.put_payload(b"k", 100, Bytes::from_static(b"v100")).unwrap();
+        s.put_payload(b"k", 100, Bytes::from_static(b"v100"))
+            .unwrap();
         // Reader's snapshot opens at ts=200.
         let snap_ts: Ts = 200;
         // Concurrent writer races a new version at ts=300.
-        s.put_payload(b"k", 300, Bytes::from_static(b"v300")).unwrap();
+        s.put_payload(b"k", 300, Bytes::from_static(b"v300"))
+            .unwrap();
         // Reader still observes v100 (the only version ≤ 200).
         assert_eq!(s.get_at(b"k", snap_ts).as_deref(), Some(&b"v100"[..]));
         // A reader at ts=350 sees v300.
@@ -480,9 +497,12 @@ mod tests {
     #[test]
     fn multiple_keys_isolated_in_store() {
         let mut s = MvccStore::new();
-        s.put_payload(b"a", 100, Bytes::from_static(b"a100")).unwrap();
-        s.put_payload(b"b", 100, Bytes::from_static(b"b100")).unwrap();
-        s.put_payload(b"a", 200, Bytes::from_static(b"a200")).unwrap();
+        s.put_payload(b"a", 100, Bytes::from_static(b"a100"))
+            .unwrap();
+        s.put_payload(b"b", 100, Bytes::from_static(b"b100"))
+            .unwrap();
+        s.put_payload(b"a", 200, Bytes::from_static(b"a200"))
+            .unwrap();
         assert_eq!(s.get_at(b"a", 250).as_deref(), Some(&b"a200"[..]));
         assert_eq!(s.get_at(b"b", 250).as_deref(), Some(&b"b100"[..]));
     }

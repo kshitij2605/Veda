@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Once;
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use veda_gateway::rest::build_router;
@@ -101,7 +101,10 @@ async fn log_primary_insert_then_read_finds_record() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
         .collect();
-    assert!(!log_files.is_empty(), "expected at least one .log file in {log_dir:?}");
+    assert!(
+        !log_files.is_empty(),
+        "expected at least one .log file in {log_dir:?}"
+    );
 }
 
 #[tokio::test]

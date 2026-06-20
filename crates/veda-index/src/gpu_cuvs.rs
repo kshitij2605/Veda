@@ -135,7 +135,9 @@ impl VectorIndex for CagraIndex {
     fn build(&mut self, vectors: &[&[f32]]) -> Result<()> {
         let n = vectors.len();
         if n == 0 {
-            return Err(VedaError::Index("gpu_cuvs: cannot build over empty vector set".into()));
+            return Err(VedaError::Index(
+                "gpu_cuvs: cannot build over empty vector set".into(),
+            ));
         }
         let dim = self.dimension as usize;
         // Validate dimensions match.
@@ -211,8 +213,14 @@ impl VectorIndex for CagraIndex {
         let search_params = SearchParams::new()
             .map_err(|e| VedaError::Index(format!("cuvs SearchParams init failed: {e:?}")))?;
 
-        idx.search(res, &search_params, &queries_dev, &neighbors_dev, &distances_dev)
-            .map_err(|e| VedaError::Index(format!("cuvs CAGRA search failed: {e:?}")))?;
+        idx.search(
+            res,
+            &search_params,
+            &queries_dev,
+            &neighbors_dev,
+            &distances_dev,
+        )
+        .map_err(|e| VedaError::Index(format!("cuvs CAGRA search failed: {e:?}")))?;
 
         // Copy results back to host.
         neighbors_dev
@@ -226,7 +234,10 @@ impl VectorIndex for CagraIndex {
         let distances_row = distances_host.slice(s![0, ..]);
         let mut results = Vec::with_capacity(k);
         for (id, dist) in neighbors_row.iter().zip(distances_row.iter()) {
-            results.push(SearchResult { id: *id, distance: *dist });
+            results.push(SearchResult {
+                id: *id,
+                distance: *dist,
+            });
         }
         Ok(results)
     }
@@ -336,6 +347,9 @@ mod tests {
         let q = data.remove(0);
         let hits = idx.search(&q, 5).expect("CAGRA search should succeed");
         assert_eq!(hits.len(), 5);
-        assert_eq!(hits[0].id, 0, "self should be nearest neighbor; got {hits:?}");
+        assert_eq!(
+            hits[0].id, 0,
+            "self should be nearest neighbor; got {hits:?}"
+        );
     }
 }

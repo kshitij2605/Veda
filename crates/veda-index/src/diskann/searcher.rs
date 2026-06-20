@@ -29,9 +29,7 @@ pub fn greedy_search(
 
     loop {
         // Find the best (closest) candidate not yet expanded.
-        let next = candidates
-            .iter()
-            .find(|&&(id, _)| !expanded.contains(&id));
+        let next = candidates.iter().find(|&&(id, _)| !expanded.contains(&id));
         let (c_id, _) = match next {
             Some(&c) => c,
             None => break,
@@ -50,17 +48,13 @@ pub fn greedy_search(
             // Insert if candidates not full, or if better than the worst.
             if candidates.len() < l_search {
                 let pos = candidates
-                    .binary_search_by(|&(_, d)| {
-                        d.partial_cmp(&n_dist).unwrap_or(Ordering::Equal)
-                    })
+                    .binary_search_by(|&(_, d)| d.partial_cmp(&n_dist).unwrap_or(Ordering::Equal))
                     .unwrap_or_else(|pos| pos);
                 candidates.insert(pos, (neighbor, n_dist));
             } else if n_dist < candidates.last().unwrap().1 {
                 candidates.pop();
                 let pos = candidates
-                    .binary_search_by(|&(_, d)| {
-                        d.partial_cmp(&n_dist).unwrap_or(Ordering::Equal)
-                    })
+                    .binary_search_by(|&(_, d)| d.partial_cmp(&n_dist).unwrap_or(Ordering::Equal))
                     .unwrap_or_else(|pos| pos);
                 candidates.insert(pos, (neighbor, n_dist));
             }

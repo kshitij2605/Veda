@@ -107,7 +107,11 @@ pub(crate) fn merge_top_k(
     k: usize,
 ) -> Vec<ScoredRecord> {
     sealed.extend(growing);
-    sealed.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+    sealed.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     sealed.truncate(k);
     sealed
 }

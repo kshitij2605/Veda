@@ -6,7 +6,6 @@ use roaring::RoaringBitmap;
 use crate::hnsw::distance_provider::DistanceProvider;
 use crate::hnsw::graph::HnswGraph;
 use crate::traits::SearchResult;
-use veda_core::types::DistanceMetric;
 
 /// Strategy for filtered search based on filter selectivity.
 enum FilterStrategy {
@@ -130,7 +129,11 @@ impl HnswSearcher {
             });
         }
 
-        while let Some(MinCandidate { id: c_id, distance: c_dist }) = candidates.pop() {
+        while let Some(MinCandidate {
+            id: c_id,
+            distance: c_dist,
+        }) = candidates.pop()
+        {
             // If the nearest candidate is farther than the farthest in results, stop.
             let farthest_dist = results.peek().map(|r| r.distance).unwrap_or(f32::MAX);
             if c_dist > farthest_dist {
@@ -241,15 +244,8 @@ impl HnswSearcher {
             FilterStrategy::PreFilter => {
                 // High selectivity: most candidates pass the filter.
                 let adjusted_ef = ef * 2;
-                let results = Self::search_layer(
-                    query,
-                    entry_points,
-                    adjusted_ef,
-                    layer,
-                    graph,
-                    dp,
-                    deleted,
-                );
+                let results =
+                    Self::search_layer(query, entry_points, adjusted_ef, layer, graph, dp, deleted);
                 results
                     .into_iter()
                     .filter(|&(id, _)| filter.contains(id))
@@ -257,23 +253,22 @@ impl HnswSearcher {
                     .map(|(id, distance)| SearchResult { id, distance })
                     .collect()
             }
-            FilterStrategy::InAlgorithm => {
-                Self::search_layer_in_algorithm_filter(
-                    graph, dp, query, entry_points, ef, layer, deleted, filter, k,
-                )
-            }
+            FilterStrategy::InAlgorithm => Self::search_layer_in_algorithm_filter(
+                graph,
+                dp,
+                query,
+                entry_points,
+                ef,
+                layer,
+                deleted,
+                filter,
+                k,
+            ),
             FilterStrategy::PostFilter => {
                 // Low selectivity: oversample heavily, then filter.
                 let adjusted_ef = ef * 20;
-                let results = Self::search_layer(
-                    query,
-                    entry_points,
-                    adjusted_ef,
-                    layer,
-                    graph,
-                    dp,
-                    deleted,
-                );
+                let results =
+                    Self::search_layer(query, entry_points, adjusted_ef, layer, graph, dp, deleted);
                 let filtered: Vec<SearchResult> = results
                     .into_iter()
                     .filter(|&(id, _)| filter.contains(id))
@@ -378,11 +373,9 @@ impl HnswSearcher {
 
                 let n_dist = dp.distance(query, neighbor_id);
 
-                let farthest_working =
-                    working.peek().map(|r| r.distance).unwrap_or(f32::MAX);
+                let farthest_working = working.peek().map(|r| r.distance).unwrap_or(f32::MAX);
 
-                let passes_filter =
-                    !deleted.contains(&neighbor_id) && filter.contains(neighbor_id);
+                let passes_filter = !deleted.contains(&neighbor_id) && filter.contains(neighbor_id);
 
                 // ACORN-1-style expansion (arXiv:2403.04871, shipped by
                 // Qdrant 1.16 Nov 2025 / Weaviate 1.27 / Vespa Sep 2025).
@@ -434,7 +427,11 @@ impl HnswSearcher {
                 distance: c.distance,
             })
             .collect();
-        result_vec.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+        result_vec.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+        });
         result_vec.truncate(k);
         result_vec
     }
@@ -474,7 +471,11 @@ impl HnswSearcher {
                 distance: c.distance,
             })
             .collect();
-        result_vec.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+        result_vec.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+        });
         result_vec
     }
 }

@@ -50,7 +50,10 @@ impl RangeIndex {
     /// Because f64 comparisons can be tricky, this checks for bitwise
     /// equality via `to_bits`.
     pub fn search_eq(&self, value: f64) -> RoaringBitmap {
-        assert!(self.sorted, "RangeIndex::build() must be called before queries");
+        assert!(
+            self.sorted,
+            "RangeIndex::build() must be called before queries"
+        );
         let mut result = RoaringBitmap::new();
         // Find the start of the range where entries could equal `value`.
         let start = self.entries.partition_point(|e| e.0 < value);
@@ -66,7 +69,10 @@ impl RangeIndex {
 
     /// Return doc IDs with value in `[min, max]` (inclusive on both ends).
     pub fn search_range(&self, min: f64, max: f64) -> RoaringBitmap {
-        assert!(self.sorted, "RangeIndex::build() must be called before queries");
+        assert!(
+            self.sorted,
+            "RangeIndex::build() must be called before queries"
+        );
         let mut result = RoaringBitmap::new();
         let start = self.entries.partition_point(|e| e.0 < min);
         for entry in &self.entries[start..] {
@@ -80,7 +86,10 @@ impl RangeIndex {
 
     /// Return doc IDs with value strictly greater than `value`.
     pub fn search_gt(&self, value: f64) -> RoaringBitmap {
-        assert!(self.sorted, "RangeIndex::build() must be called before queries");
+        assert!(
+            self.sorted,
+            "RangeIndex::build() must be called before queries"
+        );
         let mut result = RoaringBitmap::new();
         let start = self.entries.partition_point(|e| e.0 <= value);
         for entry in &self.entries[start..] {
@@ -91,7 +100,10 @@ impl RangeIndex {
 
     /// Return doc IDs with value greater than or equal to `value`.
     pub fn search_gte(&self, value: f64) -> RoaringBitmap {
-        assert!(self.sorted, "RangeIndex::build() must be called before queries");
+        assert!(
+            self.sorted,
+            "RangeIndex::build() must be called before queries"
+        );
         let mut result = RoaringBitmap::new();
         let start = self.entries.partition_point(|e| e.0 < value);
         for entry in &self.entries[start..] {
@@ -102,7 +114,10 @@ impl RangeIndex {
 
     /// Return doc IDs with value strictly less than `value`.
     pub fn search_lt(&self, value: f64) -> RoaringBitmap {
-        assert!(self.sorted, "RangeIndex::build() must be called before queries");
+        assert!(
+            self.sorted,
+            "RangeIndex::build() must be called before queries"
+        );
         let mut result = RoaringBitmap::new();
         let end = self.entries.partition_point(|e| e.0 < value);
         for entry in &self.entries[..end] {
@@ -113,7 +128,10 @@ impl RangeIndex {
 
     /// Return doc IDs with value less than or equal to `value`.
     pub fn search_lte(&self, value: f64) -> RoaringBitmap {
-        assert!(self.sorted, "RangeIndex::build() must be called before queries");
+        assert!(
+            self.sorted,
+            "RangeIndex::build() must be called before queries"
+        );
         let mut result = RoaringBitmap::new();
         let end = self.entries.partition_point(|e| e.0 <= value);
         for entry in &self.entries[..end] {

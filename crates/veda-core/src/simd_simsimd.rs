@@ -41,9 +41,7 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
 }
 
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    SpatialSimilarity::sqeuclidean(a, b)
-        .unwrap_or(0.0)
-        .sqrt() as f32
+    SpatialSimilarity::sqeuclidean(a, b).unwrap_or(0.0).sqrt() as f32
 }
 
 pub fn l2_squared(a: &[f32], b: &[f32]) -> f32 {

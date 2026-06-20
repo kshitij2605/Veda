@@ -113,18 +113,13 @@ impl SegmentManager {
         // 1. Load snapshot (if any) — gets us to the last
         //    checkpoint point.
         let _snap_n = crate::mvcc_wal::MvccWal::load_snapshot_into(&snap_path, &mut store)
-            .map_err(|e| {
-                veda_core::error::VedaError::Index(format!("mvcc snap load: {e}"))
-            })?;
+            .map_err(|e| veda_core::error::VedaError::Index(format!("mvcc snap load: {e}")))?;
         // 2. Replay WAL on top — picks up everything after the
         //    last checkpoint.
-        let (_applied, _dropped) =
-            crate::mvcc_wal::MvccWal::replay_into(&path, &mut store).map_err(|e| {
-                veda_core::error::VedaError::Index(format!("mvcc replay: {e}"))
-            })?;
-        let wal = crate::mvcc_wal::MvccWal::open(&path).map_err(|e| {
-            veda_core::error::VedaError::Index(format!("mvcc wal open: {e}"))
-        })?;
+        let (_applied, _dropped) = crate::mvcc_wal::MvccWal::replay_into(&path, &mut store)
+            .map_err(|e| veda_core::error::VedaError::Index(format!("mvcc replay: {e}")))?;
+        let wal = crate::mvcc_wal::MvccWal::open(&path)
+            .map_err(|e| veda_core::error::VedaError::Index(format!("mvcc wal open: {e}")))?;
         self.mvcc = Some(store);
         self.mvcc_wal = Some(wal);
         Ok(())
@@ -140,9 +135,9 @@ impl SegmentManager {
             return Ok(None);
         };
         let snap_path = mvcc_snap_path(wal.path());
-        let n = wal.checkpoint(store, &snap_path).map_err(|e| {
-            veda_core::error::VedaError::Index(format!("mvcc checkpoint: {e}"))
-        })?;
+        let n = wal
+            .checkpoint(store, &snap_path)
+            .map_err(|e| veda_core::error::VedaError::Index(format!("mvcc checkpoint: {e}")))?;
         Ok(Some(n))
     }
 
@@ -177,27 +172,22 @@ impl SegmentManager {
     /// `Err` if `enable_mvcc()` hasn't been called.
     pub fn insert_mvcc(&mut self, commit_ts: u128, record: Record) -> Result<()> {
         let mvcc = self.mvcc.as_mut().ok_or_else(|| {
-            veda_core::error::VedaError::Index(
-                "insert_mvcc requires enable_mvcc()".into(),
-            )
+            veda_core::error::VedaError::Index("insert_mvcc requires enable_mvcc()".into())
         })?;
         let key = record.id().as_bytes().to_vec();
         let payload = bytes::Bytes::from(
             serde_json::to_vec(&record)
                 .map_err(|e| veda_core::error::VedaError::Index(format!("serde: {e}")))?,
         );
-        mvcc.put_payload(&key, commit_ts, payload.clone()).map_err(|e| {
-            veda_core::error::VedaError::Index(format!("mvcc.put: {e}"))
-        })?;
+        mvcc.put_payload(&key, commit_ts, payload.clone())
+            .map_err(|e| veda_core::error::VedaError::Index(format!("mvcc.put: {e}")))?;
         if let Some(wal) = self.mvcc_wal.as_mut() {
             wal.append(&crate::mvcc_wal::MvccWalEntry::Put {
                 user_key: key,
                 commit_ts,
                 payload,
             })
-            .map_err(|e| {
-                veda_core::error::VedaError::Index(format!("mvcc wal append: {e}"))
-            })?;
+            .map_err(|e| veda_core::error::VedaError::Index(format!("mvcc wal append: {e}")))?;
         }
         // Phase F: write into the growing segment with the
         // commit_ts so per-version visibility filtering works
@@ -212,22 +202,17 @@ impl SegmentManager {
     /// MVCC-aware tombstone. Same shape as `insert_mvcc`.
     pub fn delete_mvcc(&mut self, commit_ts: u128, record_id: &uuid::Uuid) -> Result<()> {
         let mvcc = self.mvcc.as_mut().ok_or_else(|| {
-            veda_core::error::VedaError::Index(
-                "delete_mvcc requires enable_mvcc()".into(),
-            )
+            veda_core::error::VedaError::Index("delete_mvcc requires enable_mvcc()".into())
         })?;
         let key = record_id.as_bytes().to_vec();
-        mvcc.delete(&key, commit_ts).map_err(|e| {
-            veda_core::error::VedaError::Index(format!("mvcc.delete: {e}"))
-        })?;
+        mvcc.delete(&key, commit_ts)
+            .map_err(|e| veda_core::error::VedaError::Index(format!("mvcc.delete: {e}")))?;
         if let Some(wal) = self.mvcc_wal.as_mut() {
             wal.append(&crate::mvcc_wal::MvccWalEntry::Delete {
                 user_key: key,
                 commit_ts,
             })
-            .map_err(|e| {
-                veda_core::error::VedaError::Index(format!("mvcc wal append: {e}"))
-            })?;
+            .map_err(|e| veda_core::error::VedaError::Index(format!("mvcc wal append: {e}")))?;
         }
         // Tombstone the growing segment too.
         let _ = self.delete_record(*record_id)?;
@@ -251,8 +236,7 @@ impl SegmentManager {
             if let Some(wal) = self.mvcc_wal.as_mut() {
                 // Best-effort: if the WAL append fails we still
                 // advanced the in-memory watermark. Log + go.
-                if let Err(e) = wal.append(&crate::mvcc_wal::MvccWalEntry::SetSafeTs { ts })
-                {
+                if let Err(e) = wal.append(&crate::mvcc_wal::MvccWalEntry::SetSafeTs { ts }) {
                     tracing::warn!(error = %e, ts = ts, "mvcc wal set_safe_ts append failed");
                 }
             }
@@ -328,7 +312,11 @@ impl SegmentManager {
     /// Number of records across all segments (growing + sealed).
     pub fn total_records(&self) -> u64 {
         let growing = self.growing.count() as u64;
-        let sealed: u64 = self.sealed_segments.iter().map(|s| s.metadata.row_count).sum();
+        let sealed: u64 = self
+            .sealed_segments
+            .iter()
+            .map(|s| s.metadata.row_count)
+            .sum();
         growing + sealed
     }
 
@@ -374,7 +362,11 @@ impl SegmentManager {
     /// Records without `_expires_at` are always returned (backward compat).
     pub fn lookup_record_at(&self, id: uuid::Uuid, now_secs: i64) -> Option<Record> {
         let rec = self.lookup_record(id)?;
-        if rec.is_expired_at(now_secs) { None } else { Some(rec) }
+        if rec.is_expired_at(now_secs) {
+            None
+        } else {
+            Some(rec)
+        }
     }
 
     /// Scan all segments and mark every record whose `_expires_at <= now_secs`
@@ -597,11 +589,7 @@ impl SegmentManager {
 
             // Skip segments we already have loaded.
             let seg_dir = entry.path();
-            if self
-                .sealed_segments
-                .iter()
-                .any(|s| s.dir == seg_dir)
-            {
+            if self.sealed_segments.iter().any(|s| s.dir == seg_dir) {
                 continue;
             }
 
@@ -655,13 +643,17 @@ impl SegmentManager {
             return Ok(0);
         }
 
-        let readers: Vec<&SegmentReader> = selected.iter().map(|&i| &self.sealed_segments[i].reader).collect();
+        let readers: Vec<&SegmentReader> = selected
+            .iter()
+            .map(|&i| &self.sealed_segments[i].reader)
+            .collect();
         let output_dir = self.base_dir.join(format!("segment_{}", Uuid::new_v4()));
 
         let result = compact_segments(&readers, &self.schema, &output_dir)?;
 
         // Remove merged segments.
-        let merged_ids: std::collections::HashSet<Uuid> = result.merged_segment_ids.iter().copied().collect();
+        let merged_ids: std::collections::HashSet<Uuid> =
+            result.merged_segment_ids.iter().copied().collect();
         let removed_count = merged_ids.len();
 
         // Remove old segment directories.
@@ -675,7 +667,8 @@ impl SegmentManager {
             let _ = fs::remove_dir_all(dir);
         }
 
-        self.sealed_segments.retain(|h| !merged_ids.contains(&h.metadata.id));
+        self.sealed_segments
+            .retain(|h| !merged_ids.contains(&h.metadata.id));
 
         // Add the new merged segment.
         let new_reader = SegmentReader::open(&output_dir)?;

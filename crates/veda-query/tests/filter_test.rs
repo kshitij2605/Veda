@@ -88,13 +88,23 @@ fn test_parse_starts_with() {
 #[test]
 fn test_parse_is_null() {
     let expr = FilterParser::parse("active IS NULL").unwrap();
-    assert_eq!(expr, FilterExpr::IsNull { field: "active".into() });
+    assert_eq!(
+        expr,
+        FilterExpr::IsNull {
+            field: "active".into()
+        }
+    );
 }
 
 #[test]
 fn test_parse_is_not_null() {
     let expr = FilterParser::parse("active IS NOT NULL").unwrap();
-    assert_eq!(expr, FilterExpr::IsNotNull { field: "active".into() });
+    assert_eq!(
+        expr,
+        FilterExpr::IsNotNull {
+            field: "active".into()
+        }
+    );
 }
 
 #[test]
