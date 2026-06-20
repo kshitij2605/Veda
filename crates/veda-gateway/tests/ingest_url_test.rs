@@ -47,31 +47,58 @@ async fn start_gateway() -> (String, tempfile::TempDir) {
     (base, tmp)
 }
 
-/// A mock crawl4ai server: `POST /crawl` returns one result with canned
-/// markdown + a title, mirroring `{ "results": [ {url, markdown, metadata} ] }`.
-async fn start_mock_crawl4ai() -> (String, tokio::task::JoinHandle<()>) {
+/// Captures what the client sent to the mock crawl4ai `/md` endpoint so a
+/// test can assert the request contract (single `url` field + bearer).
+#[derive(Clone, Default)]
+struct CrawlSpy {
+    body: Arc<Mutex<Option<Value>>>,
+    had_bearer: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A mock crawl4ai server: `POST /md` returns the real per-URL shape
+/// `{ "url", "markdown": "<string>", "success": true }`, and records the
+/// request body + whether an Authorization bearer was present.
+async fn start_mock_crawl4ai() -> (String, CrawlSpy, tokio::task::JoinHandle<()>) {
+    use axum::extract::State as AxState;
+    use axum::http::HeaderMap;
     use axum::routing::post;
     use axum::Router;
 
-    async fn crawl() -> axum::Json<Value> {
+    let spy = CrawlSpy::default();
+
+    async fn md(
+        AxState(spy): AxState<CrawlSpy>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        *spy.body.lock().unwrap() = Some(body);
+        spy.had_bearer.store(
+            headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.starts_with("Bearer "))
+                .unwrap_or(false),
+            Ordering::SeqCst,
+        );
         axum::Json(json!({
-            "results": [{
-                "url": "https://example.com/doc",
-                "markdown": "# Veda\n\nVeda is a multimodal vector database. It supports many modalities.\n\n## Indexing\n\nVeda offers HNSW, IVF-PQ, and DiskANN indexes for approximate nearest neighbour search.",
-                "metadata": { "title": "Veda Docs" }
-            }]
+            "url": "https://example.com/doc",
+            "markdown": "# Veda\n\nVeda is a multimodal vector database. It supports many modalities.\n\n## Indexing\n\nVeda offers HNSW, IVF-PQ, and DiskANN indexes for approximate nearest neighbour search.",
+            "title": "Veda Docs",
+            "success": true
         }))
     }
 
-    let router = Router::new().route("/crawl", post(crawl));
+    let router = Router::new()
+        .route("/md", post(md))
+        .with_state(spy.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}");
     let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    (url, handle)
+    (url, spy, handle)
 }
 
-/// A mock crawl4ai server that counts how many `POST /crawl` it receives,
+/// A mock crawl4ai server that counts how many `POST /md` it receives,
 /// so a wiring test can assert the SSRF guard short-circuits BEFORE any
 /// crawl is attempted (hit count stays 0).
 async fn start_counting_crawl4ai() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
@@ -81,15 +108,15 @@ async fn start_counting_crawl4ai() -> (String, Arc<AtomicUsize>, tokio::task::Jo
 
     let hits = Arc::new(AtomicUsize::new(0));
 
-    async fn crawl(AxState(hits): AxState<Arc<AtomicUsize>>) -> axum::Json<Value> {
+    async fn md(AxState(hits): AxState<Arc<AtomicUsize>>) -> axum::Json<Value> {
         hits.fetch_add(1, Ordering::SeqCst);
         axum::Json(json!({
-            "results": [{ "url": "https://example.com/doc", "markdown": "# x\n\nbody", "metadata": { "title": "X" } }]
+            "url": "https://example.com/doc", "markdown": "# x\n\nbody", "title": "X", "success": true
         }))
     }
 
     let router = Router::new()
-        .route("/crawl", post(crawl))
+        .route("/md", post(md))
         .with_state(hits.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -123,7 +150,7 @@ async fn create_web_collection(base: &str, name: &str) {
 
 #[tokio::test]
 async fn test_ingest_url_chunks_embeds_and_inserts_with_source_url() {
-    let (crawl_url, _crawl_handle) = start_mock_crawl4ai().await;
+    let (crawl_url, spy, _crawl_handle) = start_mock_crawl4ai().await;
     let (base, _tmp) = start_gateway().await;
     create_web_collection(&base, "web_col").await;
 
@@ -134,6 +161,7 @@ async fn test_ingest_url_chunks_embeds_and_inserts_with_source_url() {
     // SAFETY: serialized on CRAWL_ENV_LOCK; no concurrent crawl-env access.
     unsafe {
         std::env::set_var("VEDA_CRAWL4AI_ENDPOINT", &crawl_url);
+        std::env::set_var("VEDA_CRAWL4AI_TOKEN", "test-token");
     }
 
     let resp = client()
@@ -153,6 +181,7 @@ async fn test_ingest_url_chunks_embeds_and_inserts_with_source_url() {
 
     unsafe {
         std::env::remove_var("VEDA_CRAWL4AI_ENDPOINT");
+        std::env::remove_var("VEDA_CRAWL4AI_TOKEN");
     }
     drop(_guard);
 
@@ -161,6 +190,19 @@ async fn test_ingest_url_chunks_embeds_and_inserts_with_source_url() {
     let inserted = body["chunks_inserted"].as_u64().unwrap();
     assert!(inserted >= 1, "expected at least one chunk inserted: {body}");
     assert_eq!(body["per_url"][0]["title"], "Veda Docs");
+
+    // The client must hit `POST /md` with a single `url` string (NOT an
+    // `urls` array) and forward the bearer token.
+    let sent = spy.body.lock().unwrap().clone().expect("crawl4ai /md was not called");
+    assert_eq!(
+        sent["url"], "https://example.com/doc",
+        "client must POST a single `url` string to /md: {sent}"
+    );
+    assert!(sent.get("urls").is_none(), "client must not send an `urls` array: {sent}");
+    assert!(
+        spy.had_bearer.load(Ordering::SeqCst),
+        "client must forward the bearer token to crawl4ai"
+    );
 
     // Verify the records were inserted and carry source_url.
     let list = client()

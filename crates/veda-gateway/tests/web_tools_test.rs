@@ -43,28 +43,37 @@ async fn start_mock_searxng() -> (String, tokio::task::JoinHandle<()>) {
     (url, handle)
 }
 
-/// A mock crawl4ai server: `POST /crawl` returns one result with canned
-/// markdown + a title.
-async fn start_mock_crawl4ai() -> (String, tokio::task::JoinHandle<()>) {
+/// A mock crawl4ai server: `POST /md` returns the real per-URL shape
+/// `{ "url", "markdown": "<string>", "success": true }`, recording the
+/// request body so the test can assert the single-`url` contract.
+async fn start_mock_crawl4ai() -> (String, Arc<Mutex<Option<Value>>>, tokio::task::JoinHandle<()>) {
+    use axum::extract::State as AxState;
     use axum::routing::post;
     use axum::Router;
 
-    async fn crawl() -> axum::Json<Value> {
+    let seen: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+
+    async fn md(
+        AxState(seen): AxState<Arc<Mutex<Option<Value>>>>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        *seen.lock().unwrap() = Some(body);
         axum::Json(json!({
-            "results": [{
-                "url": "https://veda.dev",
-                "markdown": "# Veda\n\nVeda is a multimodal vector database.",
-                "metadata": { "title": "Veda" }
-            }]
+            "url": "https://veda.dev",
+            "markdown": "# Veda\n\nVeda is a multimodal vector database.",
+            "title": "Veda",
+            "success": true
         }))
     }
 
-    let router = Router::new().route("/crawl", post(crawl));
+    let router = Router::new()
+        .route("/md", post(md))
+        .with_state(seen.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}");
     let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    (url, handle)
+    (url, seen, handle)
 }
 
 // ── SearxngClient ────────────────────────────────────────────────────────
@@ -156,7 +165,7 @@ async fn web_search_tool_unset_is_clean_not_configured() {
 
 #[tokio::test]
 async fn fetch_url_tool_dispatches_and_returns_markdown() {
-    let (crawl_url, _h) = start_mock_crawl4ai().await;
+    let (crawl_url, seen, _h) = start_mock_crawl4ai().await;
     let tmp = tempfile::tempdir().unwrap();
     let state = AppState::new(tmp.path());
     let tenant = TenantId::default_tenant();
@@ -181,6 +190,11 @@ async fn fetch_url_tool_dispatches_and_returns_markdown() {
     assert_eq!(out.content["title"], "Veda");
     assert!(out.content["markdown"].as_str().unwrap().contains("multimodal vector database"));
     assert_eq!(out.content["truncated"], false);
+
+    // The client must hit `POST /md` with a single `url` string.
+    let sent = seen.lock().unwrap().clone().expect("crawl4ai /md was not called");
+    assert_eq!(sent["url"], "https://veda.dev", "client must POST single `url` to /md: {sent}");
+    assert!(sent.get("urls").is_none(), "client must not send `urls` array: {sent}");
 }
 
 #[tokio::test]
@@ -193,12 +207,12 @@ async fn fetch_url_tool_ssrf_blocked_without_crawling() {
     use axum::Router;
 
     let hits = Arc::new(AtomicUsize::new(0));
-    async fn crawl(AxState(hits): AxState<Arc<AtomicUsize>>) -> axum::Json<Value> {
+    async fn md(AxState(hits): AxState<Arc<AtomicUsize>>) -> axum::Json<Value> {
         hits.fetch_add(1, Ordering::SeqCst);
-        axum::Json(json!({ "results": [{ "url": "x", "markdown": "# x" }] }))
+        axum::Json(json!({ "url": "x", "markdown": "# x", "success": true }))
     }
     let router = Router::new()
-        .route("/crawl", post(crawl))
+        .route("/md", post(md))
         .with_state(hits.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let crawl_url = format!("http://{}", listener.local_addr().unwrap());

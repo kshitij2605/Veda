@@ -9,10 +9,12 @@
 //!     and callers return a clean "not configured" error.
 //!   - `VEDA_CRAWL4AI_TOKEN` — optional bearer token.
 //!
-//! crawl4ai's `POST {endpoint}/crawl` accepts `{ "urls": [...] }` and
-//! returns `{ "results": [{ "url", "markdown", "metadata": { "title" } }] }`.
-//! The `markdown` field can itself be either a string or an object with a
-//! `raw_markdown` / `fit_markdown` sub-field depending on version, so the
+//! crawl4ai's synchronous "URL → clean markdown" endpoint is
+//! `POST {endpoint}/md`, which accepts a single `{ "url": "...", "f": "fit" }`
+//! (`f` selects the markdown filter; `"fit"` = LLM-ready filtered markdown)
+//! and returns a top-level `{ "url", "markdown": "<string>", "success": true }`.
+//! The `markdown` field is normally a string but may, on some builds, be an
+//! object with a `fit_markdown` / `raw_markdown` / `markdown` sub-field, so the
 //! parser is defensive and extracts whichever string it finds.
 
 use std::time::Duration;
@@ -74,50 +76,17 @@ impl Crawl4aiClient {
         Some(Self::new(endpoint, token))
     }
 
-    /// Crawl a single URL and return its cleaned markdown.
+    /// Crawl a single URL and return its cleaned markdown via `POST /md`.
     pub async fn crawl(&self, url: &str) -> Result<CrawledPage, CrawlError> {
-        let mut pages = self.crawl_many(&[url.to_owned()], false, None).await?;
-        pages.pop().ok_or_else(|| {
-            CrawlError::new("CRAWL_EMPTY", format!("crawl4ai returned no result for {url}"))
-        })
-    }
+        let body = serde_json::json!({ "url": url, "f": "fit" });
 
-    /// Crawl one or more URLs. When `deep_crawl` is set, ask crawl4ai to
-    /// follow links up to `max_pages` (best-effort; crawl4ai caps it).
-    /// Returns one [`CrawledPage`] per result in the response.
-    pub async fn crawl_many(
-        &self,
-        urls: &[String],
-        deep_crawl: bool,
-        max_pages: Option<u32>,
-    ) -> Result<Vec<CrawledPage>, CrawlError> {
-        if urls.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut body = serde_json::json!({ "urls": urls });
-        if deep_crawl
-            && let Some(obj) = body.as_object_mut()
-        {
-            // crawl4ai's deep-crawl knobs live under crawler_config; pass
-            // the page cap through if given. Unknown fields are ignored by
-            // older server builds, so this is safe to always send.
-            obj.insert(
-                "crawler_config".to_owned(),
-                serde_json::json!({
-                    "deep_crawl_strategy": "bfs",
-                    "max_pages": max_pages.unwrap_or(10),
-                }),
-            );
-        }
-
-        let url = format!("{}/crawl", self.endpoint);
+        let endpoint = format!("{}/md", self.endpoint);
         let mut trace_headers = reqwest::header::HeaderMap::new();
         veda_core::trace_propagation::inject_current_context(&mut trace_headers);
 
         let mut req = self
             .http
-            .post(&url)
+            .post(&endpoint)
             .headers(trace_headers)
             .json(&body)
             // Crawls are slow (network + JS render). Be generous.
@@ -143,58 +112,71 @@ impl Crawl4aiClient {
             CrawlError::new("CRAWL_PARSE", format!("crawl4ai response parse failed: {e}"))
         })?;
 
-        let pages = parse_crawl_response(&json);
-        if pages.is_empty() {
-            return Err(CrawlError::new(
+        parse_md_response(&json, url).ok_or_else(|| {
+            CrawlError::new(
                 "CRAWL_EMPTY",
-                "crawl4ai returned no markdown for the requested URL(s)".to_owned(),
-            ));
+                format!("crawl4ai returned no markdown for {url}"),
+            )
+        })
+    }
+
+    /// Crawl one or more URLs, one [`CrawledPage`] per URL.
+    ///
+    /// crawl4ai's per-URL `/md` endpoint returns a single page; recursive
+    /// link-following (deep crawl) is served by the async `/crawl/job` API,
+    /// which is a documented follow-up and NOT wired up here. When
+    /// `deep_crawl` is requested we still fetch each provided URL via `/md`
+    /// (single page each) — `deep_crawl` / `max_pages` are accepted for API
+    /// compatibility but intentionally ignored.
+    pub async fn crawl_many(
+        &self,
+        urls: &[String],
+        _deep_crawl: bool,
+        _max_pages: Option<u32>,
+    ) -> Result<Vec<CrawledPage>, CrawlError> {
+        if urls.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut pages = Vec::with_capacity(urls.len());
+        for url in urls {
+            pages.push(self.crawl(url).await?);
         }
         Ok(pages)
     }
 }
 
-/// Defensively extract `CrawledPage`s from a crawl4ai response.
+/// Defensively extract a [`CrawledPage`] from a crawl4ai `/md` response.
 ///
-/// Handles the documented shape `{ "results": [ {url, markdown, metadata} ] }`
-/// as well as a bare top-level result object and a top-level array. The
+/// The documented shape is a top-level object
+/// `{ "url", "markdown": "<string>", "success": true, ... }`. The
 /// `markdown` value may be a string or an object containing
-/// `raw_markdown` / `fit_markdown` / `markdown`.
-fn parse_crawl_response(json: &serde_json::Value) -> Vec<CrawledPage> {
-    let results: Vec<&serde_json::Value> = if let Some(arr) = json.get("results").and_then(|v| v.as_array()) {
-        arr.iter().collect()
-    } else if let Some(arr) = json.as_array() {
-        arr.iter().collect()
-    } else {
-        vec![json]
-    };
-
-    let mut pages = Vec::new();
-    for r in results {
-        let Some(md) = extract_markdown(r) else {
-            continue;
-        };
-        if md.trim().is_empty() {
-            continue;
-        }
-        let url = r
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_owned();
-        let title = r
-            .get("metadata")
-            .and_then(|m| m.get("title"))
-            .or_else(|| r.get("title"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_owned());
-        pages.push(CrawledPage { url, title, markdown: md });
+/// `fit_markdown` / `raw_markdown` / `markdown`. The request `url` is used
+/// as a fallback when the response omits one. Returns `None` when no
+/// non-empty markdown is present.
+fn parse_md_response(json: &serde_json::Value, request_url: &str) -> Option<CrawledPage> {
+    let md = extract_markdown(json)?;
+    if md.trim().is_empty() {
+        return None;
     }
-    pages
+    let url = json
+        .get("url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(request_url)
+        .to_owned();
+    let title = json
+        .get("metadata")
+        .and_then(|m| m.get("title"))
+        .or_else(|| json.get("title"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    Some(CrawledPage { url, title, markdown: md })
 }
 
-/// Pull a markdown string out of a single result value, tolerating both
-/// `"markdown": "..."` and `"markdown": { "raw_markdown": "..." }`.
+/// Pull a markdown string out of a `/md` response value, tolerating both
+/// a top-level `"markdown": "..."` string and
+/// `"markdown": { "fit_markdown": "..." }`.
 fn extract_markdown(result: &serde_json::Value) -> Option<String> {
     let md = result.get("markdown")?;
     if let Some(s) = md.as_str() {
@@ -215,35 +197,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_results_array_with_string_markdown() {
+    fn parses_md_response_with_string_markdown() {
         let json = serde_json::json!({
-            "results": [
-                { "url": "https://a.com", "markdown": "# A\n\nbody", "metadata": { "title": "A" } }
-            ]
+            "url": "https://a.com",
+            "markdown": "# A\n\nbody",
+            "success": true
         });
-        let pages = parse_crawl_response(&json);
-        assert_eq!(pages.len(), 1);
-        assert_eq!(pages[0].url, "https://a.com");
-        assert_eq!(pages[0].title.as_deref(), Some("A"));
-        assert_eq!(pages[0].markdown, "# A\n\nbody");
+        let page = parse_md_response(&json, "https://a.com").unwrap();
+        assert_eq!(page.url, "https://a.com");
+        assert_eq!(page.markdown, "# A\n\nbody");
     }
 
     #[test]
-    fn parses_object_markdown_with_raw_field() {
+    fn parses_md_response_title_when_present() {
         let json = serde_json::json!({
-            "results": [
-                { "url": "https://b.com", "markdown": { "raw_markdown": "raw body" } }
-            ]
+            "url": "https://a.com",
+            "markdown": "# A\n\nbody",
+            "title": "A"
         });
-        let pages = parse_crawl_response(&json);
-        assert_eq!(pages.len(), 1);
-        assert_eq!(pages[0].markdown, "raw body");
-        assert!(pages[0].title.is_none());
+        let page = parse_md_response(&json, "https://a.com").unwrap();
+        assert_eq!(page.title.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn parses_object_markdown_with_fit_field() {
+        let json = serde_json::json!({
+            "url": "https://b.com",
+            "markdown": { "fit_markdown": "fit body", "raw_markdown": "raw body" }
+        });
+        let page = parse_md_response(&json, "https://b.com").unwrap();
+        assert_eq!(page.markdown, "fit body");
+        assert!(page.title.is_none());
+    }
+
+    #[test]
+    fn falls_back_to_request_url_when_response_omits_it() {
+        let json = serde_json::json!({ "markdown": "body" });
+        let page = parse_md_response(&json, "https://req.example").unwrap();
+        assert_eq!(page.url, "https://req.example");
     }
 
     #[test]
     fn skips_empty_markdown() {
-        let json = serde_json::json!({ "results": [ { "url": "x", "markdown": "   " } ] });
-        assert!(parse_crawl_response(&json).is_empty());
+        let json = serde_json::json!({ "url": "x", "markdown": "   " });
+        assert!(parse_md_response(&json, "x").is_none());
     }
 }
