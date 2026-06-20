@@ -215,6 +215,15 @@ services:
       CRAWL4AI_API_TOKEN: ${VEDA_CRAWL4AI_TOKEN:-}
       NO_PROXY: localhost,127.0.0.1,minio,nats,veda
       no_proxy: localhost,127.0.0.1,minio,nats,veda
+      # Egress through a forward proxy. On hosts with NO direct internet
+      # egress (e.g. behind a corporate proxy), set this so crawl4ai's
+      # in-process pinning egress-proxy tunnels the *pinned* target through
+      # the corporate proxy instead of dialling the IP directly (which would
+      # time out). SSRF resolve-and-pin still runs first, so only
+      # already-validated public targets are tunnelled. Empty = direct dial
+      # (the default). Requires a crawl4ai image whose egress_proxy honours
+      # CRAWL4AI_UPSTREAM_PROXY.
+      CRAWL4AI_UPSTREAM_PROXY: ${VEDA_CRAWL4AI_BROWSER_PROXY:-}
     # crawl4ai launches headless Chromium, which needs a larger /dev/shm.
     shm_size: "1gb"
     healthcheck:
