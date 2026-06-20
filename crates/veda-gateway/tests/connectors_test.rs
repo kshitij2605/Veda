@@ -82,23 +82,23 @@ async fn login(base: &str, user: &str, pass: &str) -> String {
     body["token"].as_str().unwrap().to_owned()
 }
 
-/// A mock crawl4ai server: `POST /crawl` returns one result with canned
-/// markdown + a title (same shape as the ingest_url mock).
+/// A mock crawl4ai server: `POST /md` returns the real per-URL shape
+/// `{ "url", "markdown": "<string>", "success": true }` (same endpoint the
+/// client uses).
 async fn start_mock_crawl4ai() -> (String, tokio::task::JoinHandle<()>) {
     use axum::routing::post;
     use axum::Router;
 
-    async fn crawl() -> axum::Json<Value> {
+    async fn md() -> axum::Json<Value> {
         axum::Json(json!({
-            "results": [{
-                "url": "https://example.com/doc",
-                "markdown": "# Veda\n\nVeda is a multimodal vector database. It supports many modalities.\n\n## Indexing\n\nVeda offers HNSW, IVF-PQ, and DiskANN indexes for approximate nearest neighbour search.",
-                "metadata": { "title": "Veda Docs" }
-            }]
+            "url": "https://example.com/doc",
+            "markdown": "# Veda\n\nVeda is a multimodal vector database. It supports many modalities.\n\n## Indexing\n\nVeda offers HNSW, IVF-PQ, and DiskANN indexes for approximate nearest neighbour search.",
+            "title": "Veda Docs",
+            "success": true
         }))
     }
 
-    let router = Router::new().route("/crawl", post(crawl));
+    let router = Router::new().route("/md", post(md));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}");
