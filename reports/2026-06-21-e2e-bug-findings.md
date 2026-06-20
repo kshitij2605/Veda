@@ -285,3 +285,7 @@ one release rebuild. Verified on gpu-host-a: `cargo clippy --workspace --all-tar
 Plus a `style` commit (`07033c0`): pre-existing committed `rerank.rs` failed clippy `doc_lazy_continuation` + rustfmt under Rust 1.96.0, blocking the global `--all-targets` / `fmt --check` gates; added a blank doc line and normalised formatting (not one of the four fixes, but required to make the gates pass).
 
 FF-pushed `feat/multimodal-omni-e2e -> main` (`fdffc9a..07033c0`). Release rebuilt and the `mm` server on :6340 restarted on the new binary; `/v1/admin/health` 200 and both text + multimodal embedders re-registered against localhost:8001.
+
+## Resolution note (post-report)
+
+**Finding LLM-1 (P1) RESOLVED.** Root cause: the campaign host run-script set VEDA_LLM_ENDPOINT=.../v1 (missing /chat/completions); LlmClient POSTs verbatim. It was masked until the .env-non-override fix (ea3292a) let the incomplete value win. Fixed the run-script to .../v1/chat/completions and restarted :6340; live converse with the default agent now returns a grounded answer (verified). Durable code hardening (LlmClient appends /chat/completions when absent) remains a P2 suggestion in the final report.
