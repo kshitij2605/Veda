@@ -56,6 +56,84 @@ impl UserRecord {
     }
 }
 
+/// PLAT-1: true when `VEDA_AUTH_MODE=static` is set in the
+/// environment. Used by the server-startup constructor to build an
+/// auth-enabled `AppState` (the async `load_auth_from_env` path can
+/// only flip the `auth_mode` RwLock, not the immutable auth fields).
+pub(crate) fn static_auth_requested() -> bool {
+    std::env::var("VEDA_AUTH_MODE")
+        .map(|m| m.eq_ignore_ascii_case("static"))
+        .unwrap_or(false)
+}
+
+/// PLAT-1: HS256 signing secret for static auth. Read from
+/// `VEDA_JWT_SECRET`; falls back to the legacy `default-test-secret`
+/// with a warn so insecure deployments are visible.
+pub(crate) fn jwt_secret_from_env() -> String {
+    match std::env::var("VEDA_JWT_SECRET") {
+        Ok(s) if !s.is_empty() => s,
+        _ => {
+            tracing::warn!(
+                "VEDA_JWT_SECRET not set with VEDA_AUTH_MODE=static — using an insecure default secret. Set VEDA_JWT_SECRET before any production use."
+            );
+            "default-test-secret".to_owned()
+        }
+    }
+}
+
+/// PLAT-1: seed the static-auth user store from the environment.
+///
+/// Always seeds an admin (`VEDA_BOOTSTRAP_ADMIN_USERNAME` /
+/// `VEDA_BOOTSTRAP_ADMIN_PASSWORD`, defaulting to `admin`/`admin`
+/// with a warn). Additional users may be declared via
+/// `VEDA_STATIC_USERS` as a comma-separated list of
+/// `username:password:role` triples, where role is one of
+/// `admin` | `editor` | `viewer` (case-insensitive; defaults to
+/// `viewer` on an unknown value). Malformed entries are skipped
+/// with a warn.
+pub(crate) fn seed_static_users_from_env() -> HashMap<String, UserRecord> {
+    let mut users = HashMap::new();
+
+    let admin_user =
+        std::env::var("VEDA_BOOTSTRAP_ADMIN_USERNAME").unwrap_or_else(|_| "admin".to_owned());
+    let admin_password = match std::env::var("VEDA_BOOTSTRAP_ADMIN_PASSWORD") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            tracing::warn!(
+                "VEDA_BOOTSTRAP_ADMIN_PASSWORD not set — seeding default admin/admin. Set this env var before any production use."
+            );
+            "admin".to_owned()
+        }
+    };
+    users.insert(
+        admin_user,
+        UserRecord::with_password(&admin_password, Role::Admin),
+    );
+
+    if let Ok(raw) = std::env::var("VEDA_STATIC_USERS") {
+        for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+            let parts: Vec<&str> = entry.split(':').collect();
+            if parts.len() != 3 {
+                tracing::warn!(entry = %entry, "VEDA_STATIC_USERS: expected user:password:role");
+                continue;
+            }
+            let (user, pass, role_str) = (parts[0], parts[1], parts[2]);
+            if user.is_empty() || pass.is_empty() {
+                tracing::warn!(entry = %entry, "VEDA_STATIC_USERS: empty username or password");
+                continue;
+            }
+            let role = match role_str.to_ascii_lowercase().as_str() {
+                "admin" => Role::Admin,
+                "editor" => Role::Editor,
+                _ => Role::Viewer,
+            };
+            users.insert(user.to_owned(), UserRecord::with_password(pass, role));
+        }
+    }
+
+    users
+}
+
 /// Hash a plaintext password with Argon2id and default OWASP-aligned
 /// parameters. Returns a PHC string suitable for storage. Use
 /// [`verify_credentials`] to check a candidate against this value.
@@ -497,7 +575,21 @@ impl AppState {
         prometheus_handle: PrometheusHandle,
         log_buffer: Arc<LogBuffer>,
     ) -> Self {
-        let mut state = Self::new(data_dir);
+        // PLAT-1 (2026-06-21): honor VEDA_AUTH_MODE=static at
+        // construction. The async load_auth_from_env can only flip
+        // the auth_mode RwLock; it cannot touch the immutable
+        // auth_enabled / users / jwt_secret fields baked into
+        // the Arc. Without seeding them here, VEDA_AUTH_MODE=static
+        // left auth_enabled=false (auth bypassed) and an empty user
+        // store (every login 401). Build the auth-enabled inner up
+        // front so the env path actually enforces auth.
+        let mut state = if static_auth_requested() {
+            let secret = jwt_secret_from_env();
+            let users = seed_static_users_from_env();
+            Self::with_auth_and_users(data_dir, &secret, users)
+        } else {
+            Self::new(data_dir)
+        };
         let inner = Arc::get_mut(&mut state.inner).expect("no other references to AppStateInner");
         inner.prometheus_handle = Some(prometheus_handle);
         inner.log_buffer = log_buffer;
@@ -1161,6 +1253,55 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes the auth-env tests (process-global VEDA_AUTH_* vars).
+    static AUTH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// PLAT-1 regression: `VEDA_AUTH_MODE=static` set via the
+    /// environment must produce an auth-ENABLED state with a seeded
+    /// admin and a usable JWT secret. Before the fix the env path only
+    /// flipped `auth_mode` while `auth_enabled` stayed false and the
+    /// user store stayed empty — so auth was silently bypassed and
+    /// every login returned 401.
+    #[test]
+    #[allow(clippy::await_holding_lock)]
+    fn plat1_static_auth_env_seeds_users_and_secret() {
+        let _guard = AUTH_ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized on AUTH_ENV_LOCK.
+        unsafe {
+            std::env::set_var("VEDA_AUTH_MODE", "static");
+            std::env::set_var("VEDA_JWT_SECRET", "plat1-secret");
+            std::env::set_var("VEDA_BOOTSTRAP_ADMIN_PASSWORD", "AdminPass123");
+            std::env::set_var("VEDA_STATIC_USERS", "alice:alicepw:editor,bob:bobpw:viewer");
+        }
+
+        assert!(static_auth_requested());
+        assert_eq!(jwt_secret_from_env(), "plat1-secret");
+
+        let users = seed_static_users_from_env();
+        // admin + alice + bob
+        assert_eq!(users.len(), 3);
+        assert_eq!(users.get("admin").unwrap().role, Role::Admin);
+        assert_eq!(users.get("alice").unwrap().role, Role::Editor);
+        assert_eq!(users.get("bob").unwrap().role, Role::Viewer);
+
+        // Build the same auth-enabled state the startup ctor builds and
+        // assert it actually enforces auth + verifies credentials.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::with_auth_and_users(tmp.path(), &jwt_secret_from_env(), users);
+        assert!(state.inner.auth_enabled, "auth must be enabled");
+        let admin = state.inner.users.get("admin").unwrap();
+        assert!(verify_credentials(&admin.password, "AdminPass123", "admin"));
+        assert!(!verify_credentials(&admin.password, "wrong", "admin"));
+
+        unsafe {
+            std::env::remove_var("VEDA_AUTH_MODE");
+            std::env::remove_var("VEDA_JWT_SECRET");
+            std::env::remove_var("VEDA_BOOTSTRAP_ADMIN_PASSWORD");
+            std::env::remove_var("VEDA_STATIC_USERS");
+        }
+        drop(_guard);
+    }
 
     /// Serializes the env-var-driven embedding-registration tests so they
     /// don't race on the process-global `EMBEDDING_*` / `MULTIMODAL_EMBEDDING_*`
