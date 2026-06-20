@@ -192,6 +192,25 @@ impl EmbeddingModelConfig {
                 timeout_seconds: 120,
                 batch_size: 4,
             },
+            // jina-v5-omni-small — unified omni-modal embedder spanning
+            // text, image, audio, and video in one vector space. 1024-d
+            // with Matryoshka truncation. The audio-capable default that
+            // backs Veda's omni ingest path.
+            Self {
+                name: "jina-v5-omni-small".to_owned(),
+                endpoint: String::new(),
+                api_key: String::new(),
+                supported_modalities: vec![
+                    Modality::Text,
+                    Modality::Image,
+                    Modality::Audio,
+                    Modality::Video,
+                ],
+                output_dimension: 1024,
+                max_input_size_bytes: 64 * 1024 * 1024,
+                timeout_seconds: 120,
+                batch_size: 4,
+            },
         ]
     }
 
@@ -378,5 +397,16 @@ mod preset_tests {
         let cfg = EmbeddingModelConfig::preset("qwen3-vl-embedding-2b").unwrap();
         assert!(cfg.supported_modalities.contains(&Modality::Text));
         assert!(cfg.supported_modalities.contains(&Modality::Image));
+    }
+
+    #[test]
+    fn jina_omni_preset_spans_all_modalities() {
+        let cfg = EmbeddingModelConfig::preset("jina-v5-omni-small")
+            .expect("jina-v5-omni-small preset must resolve");
+        assert_eq!(cfg.output_dimension, 1024);
+        assert!(cfg.supported_modalities.contains(&Modality::Text));
+        assert!(cfg.supported_modalities.contains(&Modality::Image));
+        assert!(cfg.supported_modalities.contains(&Modality::Audio));
+        assert!(cfg.supported_modalities.contains(&Modality::Video));
     }
 }
