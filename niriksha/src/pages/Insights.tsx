@@ -334,10 +334,17 @@ function EventList({
     <ul className="flex flex-col gap-2">
       {events.map((ev) => (
         <li key={`${ev.id}:${ev.opened_at_ms}`}>
-          <button
-            type="button"
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => onSelect(ev)}
-            className="w-full text-left rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2.5 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-hover)] transition-colors"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onSelect(ev)
+              }
+            }}
+            className="w-full text-left cursor-pointer rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-3 py-2.5 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-hover)] transition-colors"
           >
             <div className="flex items-center gap-2">
               <SeverityBadge severity={ev.severity} />
@@ -382,7 +389,7 @@ function EventList({
                   : `opened ${formatRelative(ev.opened_at_ms)}`}
               </span>
             </div>
-          </button>
+          </div>
         </li>
       ))}
     </ul>
