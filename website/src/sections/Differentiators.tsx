@@ -23,10 +23,14 @@ export function Differentiators() {
           // lg = 3-col) so it never leaves a lonely empty cell.
           const isLast = i === FEATURES.length - 1
           const n = FEATURES.length
-          const lgSpan = n % 3 === 1 ? 'lg:col-span-3' : n % 3 === 2 ? 'lg:col-span-2' : ''
           const smSpan = n % 2 === 1 ? 'sm:col-span-2' : ''
+          // lg fill: span the gap on the final 3-col row. When no lg span is
+          // needed but smSpan is set, reset to 1 col so sm:col-span-2 doesn't
+          // cascade up and wrongly widen the card on lg.
+          const lgSpan =
+            n % 3 === 1 ? 'lg:col-span-3' : n % 3 === 2 ? 'lg:col-span-2' : smSpan ? 'lg:col-span-1' : ''
           const span = isLast ? [smSpan, lgSpan].filter(Boolean).join(' ') : ''
-          const wide = span !== ''
+          const wide = n % 3 !== 0 && span !== ''
           return (
             <div
               key={f.title}
