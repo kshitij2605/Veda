@@ -8,13 +8,14 @@ import {
 } from '../api/collections'
 import type { CollectionSummary, SearchHit } from '../api/collections'
 
-const CLIP_MODEL = 'clip-vit-base-patch32'
 const VECTOR_FIELD = 'image_vec'
 
 /**
  * Cross-modal visual search. A text query (or an uploaded image) is embedded
- * by CLIP into the shared text+image space, then matched against a collection's
- * image vectors — so "a mountain landscape" finds mountain photos.
+ * into the shared text+image space, then matched against a collection's
+ * image vectors — so "a mountain landscape" finds mountain photos. The
+ * embedding model is auto-selected by the server (multimodal for any
+ * non-text modality), so no model is pinned here.
  */
 export function VisualSearch() {
   const [collection, setCollection] = useState('photos')
@@ -49,7 +50,7 @@ export function VisualSearch() {
     setError(null)
     setTookMs(null)
     try {
-      const { data } = await embedQuery({ text: text.trim(), model: CLIP_MODEL })
+      const { data } = await embedQuery({ text: text.trim() })
       await runSearch(data.values)
     } catch (err) {
       setError(errMsg(err))
@@ -65,7 +66,7 @@ export function VisualSearch() {
     setText('')
     try {
       const b64 = await fileToBase64(file)
-      const { data } = await embedQuery({ image_b64: b64, model: CLIP_MODEL })
+      const { data } = await embedQuery({ image_b64: b64 })
       await runSearch(data.values)
     } catch (err) {
       setError(errMsg(err))
