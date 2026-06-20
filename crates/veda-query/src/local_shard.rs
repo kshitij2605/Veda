@@ -732,12 +732,11 @@ impl ShardSearcher for LocalShardSearcher {
             let muvera_candidates: Option<RoaringBitmap> = self
                 .muvera_encoders
                 .get(&request.field)
-                .and_then(|enc| {
+                .zip(
                     self.muvera_fdes
                         .get(&handle.metadata.id)
-                        .and_then(|m| m.get(&request.field))
-                        .map(|fdes| (enc, fdes))
-                })
+                        .and_then(|m| m.get(&request.field)),
+                )
                 .map(|(enc, fdes)| {
                     let q_fde = enc.encode(&request.query_rows);
                     let q_norm: f32 = q_fde.iter().map(|x| x * x).sum::<f32>().sqrt();

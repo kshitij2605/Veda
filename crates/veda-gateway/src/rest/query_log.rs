@@ -316,7 +316,7 @@ pub async fn coverage(
     let orphan_count = total_chunks.saturating_sub(retrieved_chunks);
 
     let mut sorted: Vec<(String, u64)> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let denom = entries
         .iter()

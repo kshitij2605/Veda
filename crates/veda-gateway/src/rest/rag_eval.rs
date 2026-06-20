@@ -656,7 +656,7 @@ pub async fn list_runs(
             r.id = name.to_owned();
         }
     }
-    runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    runs.sort_by_key(|b| std::cmp::Reverse(b.created_at));
     Json(ListRunsResponse { runs })
 }
 
