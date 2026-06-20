@@ -82,6 +82,7 @@ An agent is a saved object you can create, update, and delete:
 
 - `tool_ids` is a whitelist of tools the agent may call; an empty list means **all** built-ins.
 - `model` optionally overrides the global LLM endpoint/model for that agent.
+- `memory`, `cache`, `guardrails`, and `trace` are opt-in flags (default `false`): [vector-backed memory](/docs/rag-aiops#vector-backed-agent-memory), a [semantic response cache](/docs/llm-observability#semantic-response-cache), [embedding-based safety guardrails](/docs/llm-observability#embedding-based-guardrails), and writing each run to the [searchable trace store](/docs/llm-observability#searchable-trace-store-failure-clustering).
 
 ```bash
 curl -X POST http://localhost:6340/v1/agents \

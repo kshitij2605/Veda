@@ -43,7 +43,7 @@ The three most expensive operations run on **separate, low-cadence tasks off the
 
 ## Detection
 
-**34 rules** span operational health, node resources, log content, SLO/reliability, the index advisor, capacity forecasting, and change-point — see the full [rule catalog](/docs/ops-advisor#the-rule-catalog). Detection comes in four flavours:
+**36 rules** span operational health, node resources, log content, SLO/reliability, the index advisor, capacity forecasting, change-point, and LLM-ops (cost budget + quality drift) — see the full [rule catalog](/docs/ops-advisor#the-rule-catalog). Detection comes in four flavours:
 
 - **Threshold/correlation rules** — e.g. `disk_space_low`, `high_error_rate`, `replica_lag`. Each resource/SLO/index rule skips cleanly when its signal is absent (no false alerts).
 - **Anomaly detection** — 7 EWMA / rolling mean+stddev detectors (`anomaly_search_latency`, `anomaly_error_rate`, `anomaly_rss`, …) firing above a configured sigma (default 3σ → Medium, ≥5σ → High) once warmed up.
@@ -141,7 +141,8 @@ Rule thresholds, alert channels, SLO/probe defs, the event store, and the SLO co
 
 | Guide | Covers |
 |---|---|
-| [Ops Advisor](/docs/ops-advisor) | The engine: snapshot → rules → events → channels → opt-in remediation; the full 34-rule catalog |
+| [Ops Advisor](/docs/ops-advisor) | The engine: snapshot → rules → events → channels → opt-in remediation; the full 36-rule catalog |
+| [LLM Observability](/docs/llm-observability) | Semantic response cache, embedding-based guardrails, the searchable trace store + failure clustering, TTFT / cost-budget / quality-drift / feedback |
 | [Log Insights](/docs/log-insights) | In-process log capture + trace correlation, semantic log categorization, logs-as-a-collection |
 | [Node Resource Signals](/docs/resource-signals) | Disk / CPU / load / fd / memory from `/proc` + `statvfs`, the resource rules |
 | [Service Reliability](/docs/service-reliability) | SLOs + error budgets + burn-rate, synthetic self-checks, the `veda-ops` triage agent |

@@ -132,6 +132,7 @@ The agentic layer and MCP surface. See [Agents & MCP](/docs/agents-mcp) for the 
 |---|---|---|
 | `GET` | `/v1/conversations` | List conversations |
 | `GET/DELETE` | `/v1/conversations/{id}` | Fetch / delete one conversation |
+| `POST` | `/v1/conversations/{id}/feedback` | Thumbs feedback `{ rating: up\|down, note? }` (see [LLM Observability](/docs/llm-observability)) |
 
 **Eval harness** — see [RAG & AIOps Intelligence](/docs/rag-aiops#eval-harness-the-production-trace-flywheel).
 
@@ -242,3 +243,12 @@ Captured-log and log-ingest surface. See [Log Insights](/docs/log-insights) for 
 | `GET` | `/v1/admin/logs/categories` | Semantic log categories — admin-only |
 | `GET` | `/v1/admin/slow-queries` | Slowest recent queries (`?collection=`, `?limit=`) — admin-only |
 | `POST` | `/v1/collections/{name}/ingest-logs` | Parse raw log lines into records (`{ lines, default_level?, ttl_secs? }`); same auth as `/insert` |
+
+## LLM Observability
+
+Admin-only LLM trace surface. See [LLM Observability](/docs/llm-observability) for the full guide.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/admin/llm-traces` | Semantic search over the `_llm_traces` store (`?q=&limit=`) |
+| `GET` | `/v1/admin/llm-traces/clusters` | Failure clustering — recurring failure modes (`category`, `representative`, `count`) |
