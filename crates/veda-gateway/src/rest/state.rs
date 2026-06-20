@@ -1157,3 +1157,76 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serializes the env-var-driven embedding-registration tests so they
+    /// don't race on the process-global `EMBEDDING_*` / `MULTIMODAL_EMBEDDING_*`
+    /// variables.
+    static EMBED_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// With a dedicated text model (`EMBEDDING_*`) plus the `jina-v5-omni-small`
+    /// multimodal preset (`MULTIMODAL_EMBEDDING_PRESET`), every non-text
+    /// modality (Image/Audio/Video) must resolve to the omni model while the
+    /// text default keeps resolving to the dedicated text model.
+    ///
+    /// This proves the registration ORDER (text first, omni second) preserves
+    /// the text default and that the omni preset — which lists Audio — makes
+    /// audio embeddings resolvable end to end. Uses mock endpoints (no live
+    /// HTTP).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn omni_preset_registers_audio_video_image_without_hijacking_text() {
+        let _guard = EMBED_ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized on EMBED_ENV_LOCK; no concurrent embedding-env access.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENDPOINT", "http://mock-text:9999/embed");
+            std::env::set_var("EMBEDDING_MODEL", "bge-m3");
+            std::env::set_var("EMBEDDING_DIMENSION", "1024");
+            std::env::set_var(
+                "MULTIMODAL_EMBEDDING_ENDPOINT",
+                "http://mock-omni:9999/embed",
+            );
+            std::env::set_var("MULTIMODAL_EMBEDDING_PRESET", "jina-v5-omni-small");
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+        state.load_embedding_from_env().await;
+
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENDPOINT");
+            std::env::remove_var("EMBEDDING_MODEL");
+            std::env::remove_var("EMBEDDING_DIMENSION");
+            std::env::remove_var("MULTIMODAL_EMBEDDING_ENDPOINT");
+            std::env::remove_var("MULTIMODAL_EMBEDDING_PRESET");
+        }
+        drop(_guard);
+
+        let registry = state.inner.embedding_registry.read().await;
+
+        let text = registry
+            .find_by_modality(Modality::Text)
+            .first()
+            .map(|m| m.name.clone());
+        assert_eq!(
+            text.as_deref(),
+            Some("bge-m3"),
+            "Text must resolve to the dedicated text model, not the omni model"
+        );
+
+        for modality in [Modality::Image, Modality::Audio, Modality::Video] {
+            let resolved = registry
+                .find_by_modality(modality)
+                .first()
+                .map(|m| m.name.clone());
+            assert_eq!(
+                resolved.as_deref(),
+                Some("jina-v5-omni-small"),
+                "{modality} must resolve to the omni model"
+            );
+        }
+    }
+}
