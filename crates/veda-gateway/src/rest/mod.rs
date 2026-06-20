@@ -36,6 +36,7 @@ pub mod llm_traces;
 pub mod log_rate_analysis;
 pub mod logs;
 pub mod mcp;
+pub mod media;
 pub mod metrics_middleware;
 #[cfg(feature = "profiling")]
 pub mod pprof;
@@ -463,6 +464,13 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/collections/{name}/ingest-url",
             post(ingest_url::ingest_url),
+        )
+        // Media ingestion — store an image/audio/video file as a blob, embed
+        // it via the omni multimodal model (one shared vector space), and
+        // insert one record. Tenant/RLS-scoped like process-document.
+        .route(
+            "/v1/collections/{name}/ingest-media",
+            post(media::ingest_media_route),
         )
         // Ops advisor ("Insights") — admin-only (extra require_admin
         // route layer on top of the shared auth middleware below).
