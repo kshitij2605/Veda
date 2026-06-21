@@ -457,3 +457,53 @@ encoder, not a Veda bug. No real UCF101 clips on host; no further action.
 - Bugs fixed: `3e68bee` (SPLADE index sort), `2a0e5ed` (cagra create-time reject).
   clippy/fmt clean, veda-core tests green on Rust 1.96.0; FF-pushed
   feat/multimodal-omni-e2e to main (`9263aa8..2a0e5ed`); server rebuilt + restarted.
+
+## P0 — at-scale dense recall fix
+
+Root cause: each sealed-segment ANN search returned only `request.k` (=10)
+candidates to the cross-segment merge, so true global neighbours that fell
+outside a segment's local top-k were truncated before the (correct) merge could
+re-rank them. The more sealed segments a bulk load produced, the worse it got.
+This is the defect behind the ES-vs-Veda benchmark recall gap (1.0 at 1 segment
+→ 0.265 at ~38 segments).
+
+Fixes (FF-pushed to main):
+- `91a9593` fix(query): oversample candidates per segment. Each per-segment
+  search now returns `max(k, ef_search)` candidates (default ef=200) to the
+  merge, which still truncates to k. `VectorSearchRequest.ef_search` +
+  `SearchRequest.num_candidates` expose the budget. HNSW cost unchanged (ef was
+  already 200); only the returned count widens.
+  (`crates/veda-query/src/local_shard.rs:931-944`,
+  `crates/veda-query/src/search.rs:42-52`,
+  `crates/veda-gateway/src/rest/search.rs:908-917`)
+- `46584f5` feat(storage,gateway): `SegmentManager::force_merge_all()` +
+  `POST /v1/collections/{name}/optimize`. Force-merges every shard's sealed
+  segments to one (bypassing the `max_merge_segments` cap), then rebuilds
+  executors. Returns `{collection, per_shard:[{shard_id, segments_before,
+  segments_after}]}`. Single-flight against the bg compactor (409 on contention).
+  (`crates/veda-storage/src/segment_manager.rs:685+`,
+  `crates/veda-gateway/src/rest/collections.rs`)
+- `c0da217` fix(gateway): after a bulk load, force-merge once a shard exceeds 8
+  sealed segments so fragmentation does not persist; and call `build_indexes()`
+  in `recover_collections_from_disk` (latent bug: recovered collections silently
+  used the brute-force fallback after a restart until the first rebuild).
+
+Regression test (`crates/veda-query/tests/recall_at_scale_test.rs`): builds the
+same corpus three ways (single segment; fragmented with per-segment k-trunc;
+fragmented with the oversample fix) and asserts the fix never retrieves worse
+than k-trunc and matches the single-segment baseline. Note: a synthetic uniform
+corpus does NOT reproduce the absolute collapse — with this HNSW, small segments
+are searched more thoroughly (ef/N higher) so fragmentation can even help; the
+collapse is a property of real, clustered embeddings where the large single
+graph is well-connected and the small per-segment graphs are not.
+
+Live spot-check (release binary on :6340, 6000 random 64-d vectors, cosine,
+4 MiB seal threshold → 7 sealed segments; ground truth = exact cosine top-10):
+- **BEFORE /optimize: recall@10 = 0.724** (7 HNSW segments)
+- `POST /optimize` → segments_before 7, segments_after 1
+- **AFTER /optimize: recall@10 = 1.000**
+
+So the oversample fix lifts fragmented recall, and `/optimize` (single graph)
+restores it fully. clippy `-D warnings` clean, `fmt --all --check` clean;
+`veda-storage` / `veda-query` (incl. recall test) / `veda-index` / `veda-gateway`
+test suites green on Rust 1.96.0. Server rebuilt (release) + restarted on :6340.
