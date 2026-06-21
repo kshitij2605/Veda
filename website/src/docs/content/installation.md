@@ -50,6 +50,8 @@ Veda generates embeddings through OpenAI-compatible endpoints:
 | `MULTIMODAL_EMBEDDING_MODEL` | `Qwen/Qwen3-VL-Embedding-2B` | Multimodal embedding model name |
 | `MULTIMODAL_EMBEDDING_DIMENSION` | `2048` | Multimodal embedding output dimension |
 
+For a **single cross-modal vector space**, point both `EMBEDDING_ENDPOINT` and `MULTIMODAL_EMBEDDING_ENDPOINT` at the same `jina-v5-omni-small` sidecar — one model embeds text, image, audio, and video into one 1024-d space, so a text query retrieves media directly. See [Multimodal & cross-modal](/docs/multimodal).
+
 ## Blob storage
 
 | Variable | Default | Description |

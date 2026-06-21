@@ -19,7 +19,7 @@ The threshold is deliberately high (0.97) so only genuinely equivalent prompts c
 
 Prompt-injection, jailbreaks, PII leakage, and unsafe content are the LLM-app threat surface. A keyword blocklist is brittle (attackers paraphrase); a trained classifier is heavy and out-of-lane for a vector DB. But "does this *mean* something like a known attack?" is, again, a cosine.
 
-Enabled via the `guardrails` flag, it screens **both the input and the output** for four categories — **prompt-injection / jailbreak / PII / unsafe** — by combining a **PII regex** (emails, phone numbers, card-shaped numbers) with **max-cosine to a curated bad-pattern embedding set** (trips at cosine **≥ 0.80**). Two modes:
+Enabled via the `guardrails` flag, it screens **both the input and the output** for four categories — **prompt-injection / jailbreak / PII / unsafe** — by combining a **PII regex** (emails, phone numbers, card-shaped numbers) with **max-cosine to a curated bad-pattern embedding set** (trips above a threshold, default **0.65**, recalibrated per embedder). The verdict always surfaces the strongest observed cosine in `score`, so sub-threshold near-misses are observable. Two modes:
 
 - **Flag** *(default)* — annotate the result and move on (the answer still returns);
 - **Block** — short-circuit the LLM with a refusal (the model is never called for a blocked input; a blocked output is replaced with a refusal).

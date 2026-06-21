@@ -18,9 +18,11 @@ All endpoints are served under `http://<host>:6340/v1`. Authenticated requests p
 |---|---|---|
 | `POST` | `/v1/collections/{name}/insert` | Insert records (flat field→value maps) |
 | `POST` | `/v1/collections/{name}/embed-insert` | Insert with server-side auto-embedding (`auto_embed` map) |
+| `POST` | `/v1/collections/{name}/ingest-media` | Multipart upload-and-embed for image/audio/video (`-F file=@…`) — infers modality, embeds, stores the blob, inserts; see [Multimodal](/docs/multimodal#upload-and-embed-ingest-media) |
 | `GET` | `/v1/collections/{name}/records` | List records (paginated; supports `?at=<ts>` snapshot reads) |
 | `GET` | `/v1/collections/{name}/records/{id}` | Fetch one record |
 | `POST` | `/v1/collections/{name}/search` | Search: `vector`, `bm25`, `sparse_vector`, `hybrid`, or `multi_vector` queries + `filter`, `rerank`, `explain`, `?at=<ts>` |
+| `POST` | `/v1/collections/{name}/seal` | Explicit seal/flush so declared index types build on sealed segments (also `VEDA_SEAL_THRESHOLD`) |
 | `GET` | `/v1/collections/{name}/coverage` | Field coverage statistics |
 
 ### Search request shape
@@ -99,7 +101,7 @@ Admin-only web data-source connectors (declarative, persisted, re-runnable). See
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/v1/embed` | Embed text (or multimodal input) directly; optional `model` override |
+| `POST` | `/v1/embed` | Embed `text` / `image_b64` / `audio_b64` / `video_b64` directly → `{model, modality, dimension, values, elapsed_ms}`; optional `model` override (see [Multimodal](/docs/multimodal#embedding-media-directly)) |
 | `POST` | `/v1/llm/complete` | LLM completion passthrough (used by Niriksha features) |
 | `POST` | `/v1/route` | Modality routing helper |
 
