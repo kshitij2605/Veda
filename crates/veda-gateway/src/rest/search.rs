@@ -48,6 +48,13 @@ pub struct SearchRequest {
     /// Collections without MVCC ignore the value.
     #[serde(default)]
     pub at: Option<String>,
+    /// Per-segment candidate budget (HNSW `ef`). Each sealed-segment ANN
+    /// search returns up to `max(limit, num_candidates)` candidates to the
+    /// cross-segment merge, so a fragmented collection does not drop true
+    /// neighbours via per-segment `limit`-truncation. `None` uses the index
+    /// default (200). Higher = better recall at slightly higher merge cost.
+    #[serde(default)]
+    pub num_candidates: Option<usize>,
 }
 
 fn default_limit() -> usize {
@@ -914,6 +921,7 @@ fn execute_single_vector(
         filter_expr: req.filter_expr.clone(),
         truncate_to: req.truncate_to,
         read_ts,
+        ef_search: req.num_candidates,
     };
 
     let (response, timings) = executor.search(&request).map_err(|e| {

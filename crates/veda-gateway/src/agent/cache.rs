@@ -270,6 +270,7 @@ pub async fn lookup(
         metric: DistanceMetric::Cosine,
         filter: Some(filter),
         filter_expr: None,
+        ef_search: None,
         truncate_to: None,
         read_ts: None,
     };
@@ -606,6 +607,7 @@ mod tests {
             metric: DistanceMetric::Cosine,
             filter: Some(format!("{MODEL_FIELD} = \"{model}\"")),
             filter_expr: None,
+            ef_search: None,
             truncate_to: None,
             read_ts: None,
         };

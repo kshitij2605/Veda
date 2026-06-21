@@ -208,6 +208,7 @@ impl DistributedQueryExecutor {
                 metric,
                 filter: filter.map(|s| s.to_owned()),
                 filter_expr: None,
+                ef_search: None,
                 truncate_to: None,
                 read_ts: None,
             };

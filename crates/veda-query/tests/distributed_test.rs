@@ -160,6 +160,7 @@ fn test_single_shard_search() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -203,6 +204,7 @@ fn test_multi_shard_fanout() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -256,6 +258,7 @@ fn test_multi_shard_with_filter() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -352,6 +355,7 @@ fn test_empty_shard() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -387,6 +391,7 @@ fn test_k_larger_than_total() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();
@@ -454,6 +459,7 @@ fn test_local_shard_searcher_growing_segment() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (results, _timings) = searcher.search_shard(0, &request).unwrap();
@@ -507,6 +513,7 @@ fn test_local_shard_searcher_with_sealed_segments() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (results, _timings) = searcher.search_shard(0, &request).unwrap();
@@ -567,6 +574,7 @@ fn test_distributed_with_local_shards() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = executor.search(&request).unwrap();

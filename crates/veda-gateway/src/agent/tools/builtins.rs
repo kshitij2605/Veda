@@ -520,6 +520,7 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
         filter_expr,
         truncate_to: None,
         read_ts: None,
+        ef_search: None,
     };
     let response = match executor.search(&request) {
         Ok((response, _)) => response,

@@ -81,6 +81,7 @@ fn test_unfiltered_search() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
@@ -121,6 +122,7 @@ fn test_filtered_search_category() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
@@ -169,6 +171,7 @@ fn test_filtered_search_range() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
@@ -209,6 +212,7 @@ fn test_combined_filter() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
@@ -274,6 +278,7 @@ fn test_sealed_segment_search() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
@@ -327,6 +332,7 @@ fn test_sealed_segment_filtered_search() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
@@ -397,6 +403,7 @@ fn test_multi_segment_merge() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) =
@@ -451,6 +458,7 @@ fn test_k_zero_returns_empty() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
@@ -477,6 +485,7 @@ fn test_k_larger_than_matching() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
@@ -505,6 +514,7 @@ fn test_no_segments_empty_result() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings): (veda_query::search::SearchResponse, _) =
@@ -547,6 +557,7 @@ fn test_sealed_segment_range_filter() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let sealed_segments: Vec<(SegmentReader, Box<dyn VectorIndex>)> =
@@ -588,6 +599,7 @@ fn test_filter_matches_nothing() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();
@@ -614,6 +626,7 @@ fn test_record_eval_ne_filter() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     let (response, _timings) = SearchExecutor::search(&request, Some(&gs), &[]).unwrap();

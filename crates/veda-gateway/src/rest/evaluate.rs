@@ -201,6 +201,7 @@ pub async fn evaluate(
                 metric,
                 filter: None,
                 filter_expr: None,
+                ef_search: None,
                 truncate_to: None,
                 read_ts: None,
             };

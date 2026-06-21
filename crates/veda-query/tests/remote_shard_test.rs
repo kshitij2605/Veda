@@ -110,6 +110,7 @@ async fn remote_shard_search_and_fetch_round_trip() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     // search_shard blocks on the runtime internally; run it off the
@@ -221,6 +222,7 @@ async fn distributed_executor_mixes_local_and_remote() {
         truncate_to: None,
         read_ts: None,
         filter_expr: None,
+        ef_search: None,
     };
 
     // The executor fans out synchronously; the remote searcher bridges to
