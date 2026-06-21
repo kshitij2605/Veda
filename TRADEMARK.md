@@ -1,14 +1,14 @@
 # Trademark Policy
 
 **"Veda", "Niriksha"**, and the associated logos (the "Marks") are trademarks of
-The Veda Authors. This policy explains how you may and may not use them.
+Kshitij Singh. This policy explains how you may and may not use them.
 
 > Software licenses (AGPL / FSL / commercial) cover the **code**. They do **not** grant any
 > right to use the Marks. Trademark is a separate, retained right — it's what stops someone
 > from taking the code and reselling it *under our name*.
 >
-> **Before publishing:** replace `The Veda Authors` with the legal owner and consider
-> **registering the marks** in your primary jurisdiction(s). Not legal advice.
+> Marks owner: **Kshitij Singh**. Consider **registering the marks** in your primary
+> jurisdiction(s) — see the project's trademark-registration notes. Not legal advice.
 
 ## You MAY (no permission needed)
 - Use the Marks in **plain text to refer to the project** accurately — "built with Veda",
@@ -32,4 +32,4 @@ anything that could imply it is the official project. (Reference: Redis → Valk
 fork could take the code but not the "Redis" name.)
 
 ## Questions / permission
-For uses not covered here, or to request permission, contact **trademarks@veda.example**.
+For uses not covered here, or to request permission, contact **puku1304@gmail.com**.

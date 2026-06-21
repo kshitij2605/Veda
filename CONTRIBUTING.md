@@ -2,11 +2,20 @@
 
 Thank you for your interest in contributing to Veda. This guide covers the development setup, coding standards, and pull request process.
 
+## License & Contributor License Agreement
+
+Veda is **dual-licensed**: the engine under **AGPL-3.0** and the Niriksha dashboard under
+**FSL-1.1-ALv2** (see [`LICENSING.md`](LICENSING.md)). Because the project also offers a
+**commercial license**, **all contributions require a signed Contributor License Agreement**
+(see [`CLA.md`](CLA.md)) so your code can be offered under both the open-source and the
+commercial license. The CLA bot prompts you on your first pull request; **you keep the
+copyright to your contributions**. (This is a CLA, not a DCO `Signed-off-by`.)
+
 ## Prerequisites
 
 | Tool | Minimum Version | Purpose |
 |---|---|---|
-| Rust | 1.75+ | Core engine |
+| Rust | 1.96.0 (pinned via `rust-toolchain.toml` — `rustup` auto-selects it) | Core engine |
 | Node.js | 22+ | Niriksha dashboard |
 | Python | 3.9+ | Python SDK and tests |
 | Docker | 24+ | Container builds and integration tests |
@@ -147,6 +156,7 @@ A checklist of how the change was tested:
 
 ### Requirements
 
+- Sign the Contributor License Agreement (the bot prompts you on your first PR).
 - All CI checks must pass before merging.
 - At least one approving review is required.
 - Squash-merge to keep `main` history clean.
