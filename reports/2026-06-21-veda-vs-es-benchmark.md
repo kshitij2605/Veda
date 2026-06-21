@@ -103,3 +103,64 @@ Veda SQ8 is a quantized **brute-force scan** over all codes per segment — so i
   - `GET _cat/indices/veda_bench_* -> (empty)` — no leftover bench indices
   - Total index count back to **207** (matches the documented prod baseline) — production untouched.
 - Veda was benchmarked on an **isolated instance** (port 6343, temp data dir), never the production 6340 instance; the child instance and temp data were cleaned up afterward; prod 6340 confirmed healthy.
+
+---
+
+## Post-fix re-run
+
+**Date:** 2026-06-21 (later same day)
+**Binary:** release build at `git 95df295`, including the P0 fix commits `91a9593` (oversample candidates per segment before cross-segment merge), `46584f5` (force-merge + `POST /v1/collections/{name}/optimize`), `c0da217` (consolidate after bulk load + build indexes on recovery).
+**Instance:** the **same** live release server on `127.0.0.1:6340` (`./target/release/veda-server ./veda-data-mm`), not an isolated child this time.
+**Data:** byte-identical reuse of the prior run's saved vectors — `veda-es-bench/corpus_vecs.npy` (30000x1024 f32, L2-normalized), `query_vecs.npy` (500x1024), and `gt_top10.npy` (exact GPU brute-force cosine top-10). No re-embedding; the ground truth is the same 30k exact GT used for the 0.265 number.
+**Collection:** fresh `bench_fixed`, single `vector` field (`dimension=1024, metric=cosine, index="hnsw"`), bulk-inserted via the same 500-record-batch `/insert` path. Settled at **41 sealed segments** after load (even more fragmented than the prior ~38).
+
+### Findings
+
+- **The oversample fix alone does NOT close the recall gap on fragmented data.** Fragmented recall@10 rose only from **0.265 -> 0.329**. It is still catastrophically below ES's 1.000. Per-segment HNSW already runs at `ef_search=200` and the fix now returns each segment's top-`max(k, ef_search)=200` to the cross-segment merge, but with 41 graphs each only approximately ranking, the union still misses ~67% of true top-10 neighbours.
+- **`num_candidates: 200` made no difference** (0.329 identical to default). Expected: the default `fetch_k` is already `max(k=10, DEFAULT_EF_SEARCH=200) = 200`, so an explicit `num_candidates: 200` produces the exact same per-segment fetch. The request knob only matters if you raise it well above 200.
+- **`/optimize` is the actual remedy and it works.** Force-merge reported `segments_before: 41 -> segments_after: 1`, confirmed by one `segment_*` dir on disk. Post-optimize recall@10 = **0.9974** — effectively matching ES's 1.000 (a single consolidated HNSW graph; the tiny 0.0026 shortfall is normal approximate-HNSW loss at `ef_search=200`, not fragmentation).
+- **Latency cost:** oversampling added no measurable cost while fragmented (server p50 ~43-47ms either way). After `/optimize`, server p50 actually rose to **54ms** — a single 30k-node HNSW traversed at `ef_search=200` visits more distinct nodes than the small per-segment graphs did, so consolidation trades a slightly higher (but recall-correct) query for the 3x recall gain. This is still ~7-8x slower than ES's 7ms `took` on the engine-time comparison. **The fix closes the recall gap; it does not close the latency gap.**
+- **`/optimize` is expensive:** the force-merge + synchronous HNSW rebuild of 30k x 1024 at `ef_construction=200` took on the order of ~9-10 minutes single-threaded (the `/optimize` HTTP call blocks for its full duration). It is an operator-run consolidation step, not a per-query path.
+
+### Comparison table
+
+| state | recall@10 | p50 latency (server) | segments |
+|---|---|---|---|
+| Veda BEFORE fix (prior run) | 0.265 | ~47 ms `ann` / 47 ms `took` | ~38 |
+| Veda AFTER fix, fragmented (default ef) | **0.329** | 47 ms `ann` / 47 ms `took` | 41 |
+| Veda AFTER fix, fragmented (`num_candidates: 200`) | **0.329** | 44 ms `ann` / 43 ms `took` | 41 |
+| Veda AFTER fix, post-`/optimize` | **0.9974** | 54 ms `ann` / 54 ms `took` | 1 |
+| Elasticsearch (prior run) | 1.000 | 7 ms `took` | 1 |
+
+(Client-side p50: fragmented 54 ms default / 49 ms nc200; post-optimize 62 ms. ES client p50 16 ms over remote TLS.)
+
+### Honest verdict
+
+The P0 dense-recall fix **does close the recall gap vs Elasticsearch on this real 30k clustered data — but only after running `/optimize`, not from the oversample change alone.** The per-segment oversampling lifts fragmented recall a negligible amount (0.265 -> 0.329, still ~0.33 vs ES 1.0), and `num_candidates` is a no-op at the default-200 setting; on a fragmented bulk load Veda remains far below ES. What actually fixes it is the new force-merge: `POST /optimize` consolidates the 41 segments into 1 and rebuilds the graph, after which recall is **0.9974 — a dead heat with ES on recall**. So the honest story is: fragmented Veda is still well below ES (the oversample fix is not a substitute for consolidation), and **`/optimize` is the required remedy** to reach ES-parity recall. The remaining gap is latency, not recall: even consolidated, Veda's engine p50 is ~54 ms vs ES's ~7 ms, and `/optimize` itself is a multi-minute operator operation. Recall gap: closed (via `/optimize`). Latency gap: not closed.
+
+## Latency optimization re-run (HNSW perf cycle)
+
+**Date:** 2026-06-21 (later). **Binary:** release at git `2914118`, incl. perf commits `cb6ee0f`
+(generation-stamped visited bitset + reusable heaps in `search_layer`), `083bd0d` (normalized
+cosine→dot internal distance + Algorithm-4 neighbour selection), `b346a67` (per-query `ef` threaded
+into traversal + default `ef_search` 200→96). Same 30k corpus / 500 queries / exact GT; fresh
+`bench_fixed` (39 sealed segments after load).
+
+| state | recall@10 | server p50 (ann) | segments |
+|---|---|---|---|
+| Veda after recall-fix, post-`/optimize` (prior run) | 0.9974 | 54 ms | 1 |
+| Veda after PERF cycle, fragmented (default `ef=96`) | 0.249 | 42 ms | 39 |
+| Veda after PERF cycle, fragmented (`num_candidates=200`, ef=200) | 0.296 | 62 ms | 39 |
+| **Veda after PERF cycle, post-`/optimize` (ef=96)** | **1.000** | **36.7 ms** | 1 |
+| Elasticsearch | 1.000 | 7 ms | 1 |
+
+### Verdict
+The perf cycle (per-query ef + default ef 200→96, normalized cosine→dot, Algorithm-4 neighbour
+selection, bitset visited + reusable heaps) cut consolidated single-segment latency **54 ms → 36.7 ms
+(~32%)** and lifted recall to **1.000** (the neighbour heuristic closed the last 0.0026). Real progress,
+but Veda is **still ~5× slower than Elasticsearch's ~7 ms**. The cheap query-side wins delivered less
+than the ~15–25 ms estimate, which points to the **deferred structural cost (#3): the `Vec<Vec<f32>>`
+vector store + `Vec<Vec<u32>>` adjacency** — pointer-chasing over ~120 MB at 30k is cache-hostile (and
+explains why Veda scales worse than ES). **Closing to ES-class latency requires the contiguous
+vector-slab + CSR-adjacency rewrite** (a separate, higher-risk cycle with an on-disk segment-format
+change). Status vs ES: **recall at parity (1.0); latency improved ~32% but the gap is not closed.**
