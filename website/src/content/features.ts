@@ -15,6 +15,7 @@ import {
   Radar,
   Globe,
   DatabaseZap,
+  Lock,
 } from 'lucide-react'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
@@ -61,14 +62,14 @@ export const FEATURES: Feature[] = [
     accent: 'var(--color-node-4)',
     title: 'Built-in document intelligence',
     blurb:
-      'A complete OCR pipeline (GLM-OCR + FlashParse) plus six chunking strategies turn raw documents into searchable vectors — zero external tooling.',
+      'Drop in a PDF, an Office file (DOCX / PPTX / XLSX), or a scan — Veda’s OCR pipeline (GLM-OCR + layout analysis) extracts the tables and images, chunks, and embeds it into searchable vectors in one API call. Zero external extraction tooling to stitch.',
   },
   {
     icon: Server,
     accent: 'var(--color-node-6)',
     title: 'Lightweight by default',
     blurb:
-      'Three mandatory services — Veda, MinIO, NATS — versus the five+ a Milvus cluster needs. docker compose up and you have a vector database in under 30 seconds.',
+      'Three mandatory services — Veda, MinIO, NATS — with no external coordinator, message broker, or metadata store to provision. docker compose up and you have a vector database in under 30 seconds.',
   },
   {
     icon: Activity,
@@ -132,5 +133,12 @@ export const FEATURES: Feature[] = [
     title: 'Semantic LLM cache & guardrails',
     blurb:
       'Veda turns its vector engine into the LLM layer: a near-duplicate prompt is served from a semantic cache with no LLM call, an unsafe prompt is blocked by embedding-similarity guardrails, and every run lands in a trace store you search and cluster by meaning — observe, optimize, and secure in one engine.',
+  },
+  {
+    icon: Lock,
+    accent: 'var(--color-node-5)',
+    title: 'Runs entirely on your infrastructure',
+    blurb:
+      'The embedder, OCR, reranker, web search, and the LLM endpoint are all self-hostable and swappable, so the whole stack can run air-gapped on your own hardware. No data leaves your trust boundary and nothing phones home — the privacy and sovereignty posture regulated and on-prem deployments need.',
   },
 ]
