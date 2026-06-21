@@ -348,3 +348,112 @@ warnings; binary 38 MB @ 09:29). Host run-script `start_veda_mm.sh` gained the n
 service env (FLASHPARSE / SPLADE x3 / `VEDA_SEAL_THRESHOLD=4194304`); existing lines
 (incl. `VEDA_LLM_ENDPOINT=.../v1/chat/completions` and the searxng port) preserved.
 `:6340` restarted on the new binary.
+
+## Follow-up Step 3 — index types / OCR / sparse / video
+
+Tested against the live multimodal server (`:6340`, final release binary built
+2026-06-21 10:18 from commits `3e68bee` + `2a0e5ed`; auth disabled). Embedders:
+omni `:8001` (dim 1024), SPLADE `:8002`, real FlashParse OCR `:8019`. Corpus for
+the index matrix: 200 hand-written, genuinely diverse English sentences (subject ×
+predicate grid), embedded once via `/v1/embed` and reused across all index
+collections so `flat` is a true brute-force ground truth. Recall is measured by
+**chunk content** (record UUIDs differ per collection, so the first matrix run that
+compared UUIDs gave a spurious 0.0 — methodology bug in the harness, not the DB).
+
+### 1. INDEX-TYPE MATRIX — the Phase-2.B "index types unreachable" limitation is CLOSED
+
+All 10 CPU index types build on sealed segments and search end-to-end. **Key
+finding on sealing:** the `/insert` handler already force-seals the growing segment
+after every batch (records.rs ~L263) and rebuilds the configured index in the
+background, so small datasets DO get a real index without the explicit `/seal`
+route. Consequently the new `POST /seal` route correctly returns
+`sealed_segments: 0` here — there is nothing left in the growing segment to seal
+(this is expected, not a bug). The configured index is verified built because the
+quantized/ANN types return measurably different (lower) recall than `flat`.
+
+| index_type        | builds? | recall@10 vs flat | p50 ms | p95 ms | notes |
+|-------------------|---------|-------------------|--------|--------|-------|
+| flat              | yes     | 1.000 (baseline)  | 0.64   | 6.75   | ground truth |
+| hnsw              | yes     | 1.000             | 0.44   | 5.80   | |
+| diskann           | yes     | 1.000             | 0.96   | 5.93   | |
+| ivfpq             | yes     | 0.970             | 2.11   | 8.63   | |
+| rabitq            | yes     | 0.900             | 0.94   | 2.31   | 1-bit, expected recall drop |
+| rabitq_rerank     | yes     | 1.000             | 1.04   | 6.01   | rerank recovers recall |
+| hnsw_rabitq       | yes     | 0.900             | 1.20   | 3.11   | |
+| rabitq_ext_rerank | yes     | 0.900             | 2.00   | 3.48   | |
+| sq4               | yes     | 0.990             | 0.93   | 6.78   | |
+| sq8               | yes     | 1.000             | 0.66   | 3.34   | highest-recall quantized |
+| cagra             | SKIP    | n/a               | n/a    | n/a    | GPU-only; see bug below |
+
+Recall values are stable across two independent runs (pre- and post-restart).
+
+#### BUG (fixed) — `cagra` silently produced an unsearchable collection
+With the `gpu_cuvs` cargo feature off (this is a CPU build), a `cagra` index was
+accepted at create-collection time, then `CagraIndex::build()` returned a
+feature-off error during the post-insert background `rebuild_executors`. That error
+was swallowed and the query-executor map was never populated, so the collection
+accepted inserts but every search returned **empty results** (recall 0.0, 0 ms) —
+a silently broken collection rather than a clear failure.
+- **Root cause:** no up-front guard; the GPU-only path only fails deep in the
+  async rebuild where the error is logged and dropped.
+- **Fix (`2a0e5ed`):** added `veda_index::gpu_cuvs::gpu_cuvs_available()`
+  (`cfg!(feature = "gpu_cuvs")`) and reject a `cagra` request at create time:
+  `field 'vec': index type 'cagra' requires a GPU build (compile with
+  --features veda-index/gpu_cuvs); this binary has no cuVS backend`. Verified live:
+  cagra create returns HTTP 400 with that message; `hnsw` create still returns 201.
+
+### 2. OCR process-document via REAL FlashParse (:8019) — WORKS
+
+Input: `2022統合報告書-11-12.pdf` (2-page source; FlashParse rendered 3 pages incl.
+a cover image page). multipart fields per `rest/document.rs`: `file`, `skip_captions`,
+`chunking_strategy=MarkdownRecursive`, `chunk_size=1500`, `chunk_overlap=0`.
+
+Result (~42 s end-to-end through the genuine glm-ocr + PP-DocLayoutV3 stack):
+- pages: 3, images_extracted: 4, tables_extracted: 0
+- chunks: 3 (markdown incl. a real `<table>` block from layout parsing)
+- records_inserted: 3, each embedded into the dense `vec` field (omni) AND the
+  SPLADE `svec` field (server-side auto-embed; svec_nnz 202 to 216 per chunk)
+- **searchable:** dense vector search returns 3 hits; BM25 returns 2 hits; sparse
+  (SPLADE) search with an in-doc query term ("大塚商会 在庫 顧客情報管理") returns 3 hits.
+
+This exercises the full OCR to markdown to chunk to (dense + SPLADE) embed to insert
+to search pipeline through real FlashParse. PASS.
+
+### 3. SPARSE / SPLADE — the Phase-2.B "SPLADE not configured" skip is CLOSED
+
+#### BUG (fixed) — SPLADE auto-embed inserts always failed on index ordering
+The SPLADE/TEI `/embed_sparse` contract returns entries ordered by **descending
+weight**, but `veda_core::sparse::SparseVec::new` requires indices **sorted
+ascending without duplicates**. `ingest_common.rs` fed raw SPLADE output straight
+into `SparseVec::new`, so every SPLADE auto-embed insert (process-document /
+ingest-url) failed with `field 'svec': Invalid schema: sparse vector indices must
+be sorted ascending without duplicates`. (Existing unit tests passed because they
+used already-ascending mock data.)
+- **Fix (`3e68bee`):** `splade_client::parse_response` now collects (index, value)
+  pairs and sorts ascending by index before returning, so the encoding always
+  satisfies the SparseVec invariant. Regression test
+  `parse_sorts_indices_ascending_for_sparsevec_invariant` feeds descending-weight
+  input and asserts ascending output that `SparseVec::new` accepts.
+- **Verified live two ways:** (a) explicit sparse insert + sparse_vector search on
+  a 100-passage English corpus gave SPARSE 4/5 top-1 hits, BM25 3/5; (b) the genuine
+  server-side SPLADE auto-embed path via process-document (section 2) populated
+  every chunk svec (200+ nnz) and returned sparse hits. Before the fix, both
+  inserts returned 400. Note: the hybrid query type is dense+BM25 (RRF) only — there
+  is no dense+sparse hybrid in the search API; sparse and BM25 are queried as their
+  own legs, both confirmed working.
+
+### 4. VIDEO — conclusion unchanged (no new investment)
+Quick live check: `/v1/embed` with `video_b64` on an existing host clip returned 200,
+dim 1024; text-to-video cosine approx 0.057 — the same low cross-modal magnitude,
+rank-correct behavior already documented. This is a model property of the omni
+encoder, not a Veda bug. No real UCF101 clips on host; no further action.
+
+### Status summary
+- Index types: 10/10 CPU types build + search end-to-end (recall 0.90 to 1.00 vs
+  flat); cagra correctly skipped (GPU-only) and now fails cleanly at create.
+- OCR process-document via real FlashParse: PASS (3 chunks, dense+sparse+bm25 searchable).
+- SPLADE sparse + BM25: PASS.
+- Video: model-property, no bug.
+- Bugs fixed: `3e68bee` (SPLADE index sort), `2a0e5ed` (cagra create-time reject).
+  clippy/fmt clean, veda-core tests green on Rust 1.96.0; FF-pushed
+  feat/multimodal-omni-e2e to main (`9263aa8..2a0e5ed`); server rebuilt + restarted.
