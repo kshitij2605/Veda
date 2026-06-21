@@ -2,7 +2,7 @@
 name = "veda-coordinator-raftrs"
 version = "0.0.1"
 edition = "2024"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 publish = false
 description = "DESIGN ARTIFACT — surface-area-only stub showing what a swap to tikv/raft-rs would touch. Not built. Not used. See documentation/consensus-swap-decision.md."
 

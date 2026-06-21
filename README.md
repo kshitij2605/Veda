@@ -736,4 +736,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, 
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE).
+Veda is **dual-licensed**. The engine is open source under [**AGPL-3.0**](LICENSE); the
+[Niriksha](niriksha/) dashboard is source-available under [**FSL-1.1-ALv2**](niriksha/LICENSE)
+(converts to Apache-2.0 after two years). A **commercial license** is available for
+proprietary embedding or managed-service use. See [LICENSING.md](LICENSING.md),
+[PRICING.md](PRICING.md), and [TRADEMARK.md](TRADEMARK.md). Contributions require the
+[CLA](CLA.md).
