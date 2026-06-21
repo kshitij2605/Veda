@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-06-21
+
+Multimodal E2E follow-up — closes the three caveats the v0.5.0 campaign left open (OCR, SPLADE sparse, and live index-type validation) by standing up the missing sidecars and landing the fixes they surfaced. Real **FlashParse** (GLM-OCR + PP-DocLayoutV3) validated `process-document` end-to-end (2-page PDF → 3 OCR'd pages in ~42s → 3 chunks incl. a real table + 4 images → embedded into **both** dense and SPLADE → all searchable); a real **SPLADE encoder** verified sparse search (4/5 top-1); and all **10 CPU index types** build + search end-to-end through the API (recall@10 vs flat: flat/hnsw/diskann/rabitq_rerank/sq8 1.00, sq4 0.99, ivfpq 0.97, rabitq/hnsw_rabitq/rabitq_ext_rerank 0.90; `cagra` SKIP — no cuVS in this build). See `reports/2026-06-21-e2e-report.md` (§7) and `reports/2026-06-21-e2e-bug-findings.md`.
+
+### Added
+- **`POST /v1/collections/{name}/seal` + `VEDA_SEAL_THRESHOLD`** — an explicit seal/flush route (and an env to tune the seal size threshold) so declared index types build on sealed segments and become testable/operable through the API on small data (closes the v0.5.0 "no seal route" limitation). Note: `/insert` already auto-seals + builds the index per batch; this route is for explicit control.
+
+### Fixed
+- **SPLADE sparse inserts no longer fail on descending term indices** *(P1)* — the SPLADE/TEI encoder returns term indices in **descending** order, but `SparseVec::new` requires **ascending**, so **every** SPLADE auto-embed insert failed; `parse_response` now sorts indices ascending. Sparse search verified 4/5 top-1 against a real `naver/splade-cocondenser-ensembledistil` encoder.
+- **`cagra` index now rejected at create time** *(P1)* — `cagra` was accepted at collection-create then silently failed in the background rebuild on builds without cuVS, leaving searches empty; it is now rejected at create with a **400** instead of failing late.
+- **`LlmClient` endpoint normalization** — `normalize_endpoint()` now appends `/chat/completions` when the configured LLM endpoint omits it, fixing the endpoint footgun that produced a 404 when an endpoint was set to `…/v1` (the v0.5.0 Finding #9 / LLM-1 class, now hardened in-repo).
+
 ## [0.5.0] - 2026-06-21
 
 Unified multimodal embedding — **one omni model for text, image, audio, and video** in a single cross-modal vector space, plus an upload-and-embed `/ingest-media` route and the audio/video arms of `/v1/embed`. Where Veda previously needed a text model plus a separate multimodal model, `jina-embeddings-v5-omni-small` now serves all four modalities at 1024-d, so a text query can retrieve audio/video/image records directly (and vice versa). Live-validated end-to-end on real data (OmniDocBench pages, ESC-50 audio, UCF101 video): the full ingest → embed → store → search → rerank → LLM-RAG path works for every modality, with **text↔audio retrieval strong** (dog/rain clips ranked correctly vs ground truth) and **text→video weak** (a model/frame-sampling quality limitation, not a pipeline defect). This release also lands the fixes surfaced by the multimodal E2E campaign (rerank protocol, static-auth enforcement, core-admin RBAC, web egress proxy, two Niriksha frontend bugs, and a batch of correctness/observability fixes). See `documentation/2026-06-21-multimodal-omni-audio-video.md` and `reports/2026-06-21-e2e-report.md`.
