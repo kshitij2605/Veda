@@ -173,7 +173,9 @@ fn recall_at_scale_many_hnsw_segments() {
     // search oversamples to the default ef (200) candidates before the merge
     // re-ranks + truncates.
     let (_, fixed_recall) = measure_recall(SEAL_MULTI, None);
-    eprintln!("RECALL_DEBUG multi(fixed oversample) segments={multi_segs} recall@{K}={fixed_recall:.4}");
+    eprintln!(
+        "RECALL_DEBUG multi(fixed oversample) segments={multi_segs} recall@{K}={fixed_recall:.4}"
+    );
 
     // The guarantee the fix provides: handing the cross-segment merge the full
     // per-segment working set (ef candidates) can only ADD true neighbours the

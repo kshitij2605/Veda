@@ -680,4 +680,37 @@ impl SegmentManager {
 
         Ok(removed_count)
     }
+
+    /// Force-merge **all** sealed segments into a single segment, bypassing
+    /// the `max_merge_segments` / `min_segments` caps that `compact_if_needed`
+    /// honours. Used by the `/optimize` endpoint to fully consolidate a
+    /// fragmented bulk load (e.g. ~38 small sealed segments) into one, so a
+    /// single ANN graph serves the whole shard. Returns the number of sealed
+    /// segments that existed before the merge (0 or 1 → no-op).
+    pub fn force_merge_all(&mut self) -> Result<usize> {
+        let before = self.sealed_segments.len();
+        if before <= 1 {
+            return Ok(before);
+        }
+
+        let readers: Vec<&SegmentReader> = self.sealed_segments.iter().map(|h| &h.reader).collect();
+        let output_dir = self.base_dir.join(format!("segment_{}", Uuid::new_v4()));
+        let result = compact_segments(&readers, &self.schema, &output_dir)?;
+
+        // Remove every old segment directory (all of them were merged).
+        let old_dirs: Vec<PathBuf> = self.sealed_segments.iter().map(|h| h.dir.clone()).collect();
+        for dir in &old_dirs {
+            let _ = fs::remove_dir_all(dir);
+        }
+        self.sealed_segments.clear();
+
+        let new_reader = SegmentReader::open(&output_dir)?;
+        self.sealed_segments.push(SealedSegmentHandle {
+            metadata: result.new_segment,
+            reader: new_reader,
+            dir: output_dir,
+        });
+
+        Ok(before)
+    }
 }

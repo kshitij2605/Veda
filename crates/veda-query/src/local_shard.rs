@@ -937,9 +937,11 @@ fn search_sealed_segment_ref(
     // `request.k` without losing them. Exact indexes (Flat/SQ8) just return
     // their top-`fetch_k` harmlessly. HNSW's cost is unchanged (ef is fixed);
     // only the returned count widens.
-    let fetch_k = request
-        .k
-        .max(request.ef_search.unwrap_or(crate::search::DEFAULT_EF_SEARCH));
+    let fetch_k = request.k.max(
+        request
+            .ef_search
+            .unwrap_or(crate::search::DEFAULT_EF_SEARCH),
+    );
     let raw_results = match allowed {
         Some(bm) => index.search_filtered(&request.query_vector, fetch_k, &bm)?,
         None => index.search(&request.query_vector, fetch_k)?,
