@@ -345,3 +345,50 @@ fn test_cold_tier_demote_unknown_segment_returns_none() {
         .unwrap();
     assert!(result.is_none());
 }
+
+#[test]
+fn test_force_merge_all_consolidates_to_one_segment() {
+    let dir = TempDir::new().unwrap();
+    let schema = test_schema();
+    // Tiny seal threshold so each batch seals into its own segment.
+    let mut mgr = SegmentManager::new(schema, 0, dir.path(), 1000).unwrap();
+
+    // Insert enough records to force many sealed segments.
+    for i in 0..300 {
+        mgr.insert(make_record(i)).unwrap();
+    }
+    mgr.seal_growing().unwrap();
+
+    let before = mgr.sealed_segments().len();
+    assert!(
+        before >= 5,
+        "expected several sealed segments before force-merge, got {before}"
+    );
+    let total = mgr.total_records();
+
+    // Force-merge bypasses the max_merge_segments cap and consolidates to one.
+    let reported_before = mgr.force_merge_all().unwrap();
+    assert_eq!(reported_before, before);
+    assert_eq!(
+        mgr.sealed_segments().len(),
+        1,
+        "force_merge_all should consolidate to a single segment"
+    );
+    // No records lost in the merge.
+    assert_eq!(mgr.total_records(), total);
+}
+
+#[test]
+fn test_force_merge_all_noop_on_single_segment() {
+    let dir = TempDir::new().unwrap();
+    let schema = test_schema();
+    let mut mgr = SegmentManager::new(schema, 0, dir.path(), 512 * 1024 * 1024).unwrap();
+    for i in 0..20 {
+        mgr.insert(make_record(i)).unwrap();
+    }
+    mgr.seal_growing().unwrap();
+    assert_eq!(mgr.sealed_segments().len(), 1);
+    // Already one segment → no-op, returns the existing count.
+    assert_eq!(mgr.force_merge_all().unwrap(), 1);
+    assert_eq!(mgr.sealed_segments().len(), 1);
+}

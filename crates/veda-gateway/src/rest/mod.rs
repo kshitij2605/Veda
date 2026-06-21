@@ -321,6 +321,13 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/collections/{name}/seal",
             post(collections::seal_collection),
         )
+        // Force-merge all sealed segments per shard down to one, then rebuild
+        // executors — operator-facing recall/latency optimize for a fragmented
+        // bulk load (akin to a Lucene force-merge).
+        .route(
+            "/v1/collections/{name}/optimize",
+            post(collections::optimize_collection),
+        )
         // Phase G: read / set the alias for a collection.
         .route(
             "/v1/admin/collections/{name}/alias",

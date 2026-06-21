@@ -187,6 +187,21 @@ pub struct SealResponse {
     pub per_shard: Vec<ShardSealResult>,
 }
 
+/// Per-shard outcome of a force-merge: sealed-segment count before and after
+/// consolidation.
+#[derive(Debug, Serialize)]
+pub struct ShardOptimizeResult {
+    pub shard_id: u32,
+    pub segments_before: usize,
+    pub segments_after: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OptimizeResponse {
+    pub collection: String,
+    pub per_shard: Vec<ShardOptimizeResult>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ListCollectionsResponse {
     pub collections: Vec<CollectionSummary>,
@@ -862,6 +877,117 @@ pub async fn seal_collection(
     Ok(Json(SealResponse {
         collection: name,
         sealed_segments: total_sealed,
+        per_shard,
+    }))
+}
+
+/// Force-merge every shard's sealed segments down to a single segment, then
+/// rebuild the query executors so one ANN graph per shard serves the whole
+/// collection.
+///
+/// A bulk load fragments a collection into many small sealed segments, and
+/// the cross-segment merge loses recall as the count grows. `/optimize`
+/// consolidates them (the operator-facing equivalent of a Lucene force-merge):
+/// each shard's segments are merged via the compaction path, bypassing the
+/// `max_merge_segments` cap, after which search runs a single graph at full
+/// recall. Scoped like the other collection routes (not admin-only).
+pub async fn optimize_collection(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(name): Path<String>,
+) -> Result<Json<OptimizeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(leader_url) = state.leader_rest_address().await {
+        return Err((
+            StatusCode::TEMPORARY_REDIRECT,
+            Json(ErrorResponse {
+                error: format!("optimize must be submitted to the raft leader at {leader_url}"),
+            }),
+        ));
+    }
+    let scoped = tenant::scope(&tenant, &name);
+
+    {
+        let schemas = state.inner.schemas.read().await;
+        if !schemas.contains_key(&scoped) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("collection '{name}' not found"),
+                }),
+            ));
+        }
+    }
+
+    // Single-flight against the background compactor: take the same
+    // per-collection compaction lock so a force-merge never races an
+    // insert-triggered compaction (overlapping segment-dir writes would
+    // corrupt state).
+    let lock = {
+        let mut locks = state.inner.compaction_locks.write().await;
+        locks
+            .entry(scoped.clone())
+            .or_insert_with(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
+    };
+    if lock
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "a compaction or optimize is already running for this collection".into(),
+            }),
+        ));
+    }
+    struct OptimizeGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for OptimizeGuard {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let _guard = OptimizeGuard(lock);
+
+    let mut per_shard: Vec<ShardOptimizeResult> = Vec::new();
+    {
+        let mut managers = state.inner.segment_managers.write().await;
+        let shard_map = managers.get_mut(&scoped).ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "no segment managers for collection".into(),
+                }),
+            )
+        })?;
+        for (shard_id, sm) in shard_map.iter_mut() {
+            let before = sm.force_merge_all().map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("force-merge failed: {e}"),
+                    }),
+                )
+            })?;
+            per_shard.push(ShardOptimizeResult {
+                shard_id: *shard_id,
+                segments_before: before,
+                segments_after: sm.sealed_segments().len(),
+            });
+        }
+    }
+
+    // Rebuild executors so the consolidated segment's ANN index replaces the
+    // per-segment indexes the searcher held.
+    crate::rest::records::rebuild_executors(&state, &scoped).await?;
+
+    per_shard.sort_by_key(|s| s.shard_id);
+    Ok(Json(OptimizeResponse {
+        collection: name,
         per_shard,
     }))
 }
