@@ -4,7 +4,7 @@ Veda is open source and free to self-host. Paid tiers add a commercial license, 
 enterprise features, and (later) managed hosting.
 
 > Indicative pricing for planning — finalize before publishing a public pricing page.
-> Contact **sales@veda.example**. The model below intentionally starts light: a solo team
+> Contact **puku1304@gmail.com**. The model below intentionally starts light: a solo team
 > can run tiers 1–2 today; the managed cloud (tier 3) is added only when revenue justifies
 > the operational cost.
 

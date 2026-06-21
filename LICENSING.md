@@ -4,10 +4,9 @@ Veda is **open source** and offered under a **dual-licensing** model. You can us
 for free under the open-source terms below, or buy a commercial license when those
 terms don't fit your use case.
 
-> **Before you publish this repo:** replace `The Veda Authors` with your legal name or
-> company, and replace the `licensing@veda.example` / `legal@veda.example` placeholders
-> with real contacts. This document is informational, **not legal advice** — have an
-> open-source attorney review the final licensing before launch.
+> This document is informational, **not legal advice**. Before launching, have an
+> open-source attorney review the dual-license + CLA setup. Licensor / copyright holder:
+> **Kshitij Singh** · commercial & licensing contact: **puku1304@gmail.com**.
 
 ---
 
@@ -29,7 +28,7 @@ you want to:
 - offer Veda **as a managed/hosted service** without releasing your modifications, or
 - otherwise use it without the AGPL's copyleft and network-source obligations.
 
-Contact **licensing@veda.example** for commercial terms.
+Contact **puku1304@gmail.com** for commercial terms.
 
 ## 2. Niriksha dashboard — FSL-1.1-ALv2 (Functional Source License)
 
@@ -40,7 +39,7 @@ You may use, copy, modify, and redistribute Niriksha **for any purpose except a
 "Competing Use"** — i.e. you may not repackage Niriksha's UX as a product or service that
 substitutes for or competes with Veda/Niriksha. Each released version **automatically
 becomes Apache-2.0 two years after its release**. For competing-use terms, contact
-**licensing@veda.example**.
+**puku1304@gmail.com**.
 
 *(Why a different, tighter license for the dashboard? The polished console is the part a
 competitor would most want to lift, so — like MongoDB Compass, RedisInsight, and Grafana
@@ -73,7 +72,7 @@ administered automatically via [cla-assistant.io](https://cla-assistant.io).
 
 ## Trademarks
 
-"Veda" and "Niriksha" (and associated logos) are trademarks of The Veda Authors. The code
+"Veda" and "Niriksha" (and associated logos) are trademarks of Kshitij Singh. The code
 licenses above grant **no** trademark rights — see [`TRADEMARK.md`](TRADEMARK.md). You can
 take the code, but you can't ship it under our name.
 

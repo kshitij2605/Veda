@@ -9,13 +9,13 @@ contributor to agree to this CLA before we can merge your contribution.
 > encouraged to administer signatures via [cla-assistant.io](https://cla-assistant.io)
 > (a GitHub bot that records agreement on each pull request). An **Entity/Corporate CLA**
 > is available for contributions made on behalf of an employer — contact
-> **legal@veda.example**.
+> **puku1304@gmail.com**.
 
 By submitting a contribution (code, docs, or other material) to this project, **You**
 agree to the following with respect to all past and future contributions You submit:
 
 ### 1. Copyright license
-You grant The Veda Authors and recipients of software distributed by the project a
+You grant Kshitij Singh and recipients of software distributed by the project a
 **perpetual, worldwide, non-exclusive, royalty-free, irrevocable copyright license** to
 reproduce, prepare derivative works of, publicly display, publicly perform, sublicense,
 and distribute Your contributions and such derivative works. **You agree that the project
@@ -55,5 +55,5 @@ licenses to the project; it does **not** transfer ownership of Your copyright.
 ---
 
 **How to sign:** the CLA-assistant bot will ask you to agree on your first pull request,
-or you may email a signed copy to **legal@veda.example**. By commenting your agreement or
+or you may email a signed copy to **puku1304@gmail.com**. By commenting your agreement or
 signing, You accept the terms above.
