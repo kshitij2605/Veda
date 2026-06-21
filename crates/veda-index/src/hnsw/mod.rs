@@ -27,6 +27,13 @@ use crate::traits::{SearchResult, VectorIndex};
 /// parameters).
 pub struct HnswIndex {
     graph: HnswGraph,
+    // TODO(perf): flat contiguous `Vec<f32>` slab + CSR adjacency layout.
+    // The current `Vec<Vec<f32>>` vectors and per-node `Vec<Vec<u32>>`
+    // neighbour lists (graph.rs) scatter every distance probe and edge
+    // walk across the heap, costing a cache miss per access on the search
+    // hot path. A single contiguous vector slab (id*dim slice) + CSR
+    // adjacency would be the biggest remaining structural win, but it is a
+    // rewrite plus an on-disk format change — deferred to a later cycle.
     /// Internal vector copies. For Cosine metric these are kept
     /// **L2-normalized** so traversal distance reduces to `1 - dot`
     /// (see `normalized` and `distance_provider::RawVectorsProvider`).

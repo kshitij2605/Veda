@@ -8,6 +8,10 @@ pub struct HnswNode {
     /// The level this node was assigned during insertion.
     pub level: usize,
     /// Neighbors per layer: `neighbors[layer]` is the list of neighbor IDs at that layer.
+    // TODO(perf): flat contiguous vector slab + CSR adjacency layout. This
+    // per-node `Vec<Vec<u32>>` scatters edge lists across the heap (a cache
+    // miss per neighbour walk); a CSR (offsets + flat neighbour array) would
+    // make traversal cache-friendly. Deferred — rewrite + on-disk format change.
     pub neighbors: Vec<Vec<u32>>,
 }
 
