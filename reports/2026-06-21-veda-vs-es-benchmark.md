@@ -164,3 +164,39 @@ vector store + `Vec<Vec<u32>>` adjacency** — pointer-chasing over ~120 MB at 3
 explains why Veda scales worse than ES). **Closing to ES-class latency requires the contiguous
 vector-slab + CSR-adjacency rewrite** (a separate, higher-risk cycle with an on-disk segment-format
 change). Status vs ES: **recall at parity (1.0); latency improved ~32% but the gap is not closed.**
+
+### ef sweep (confirmation run, same binary, fresh consolidated collection)
+
+A follow-up sweep on a second fresh 30k load consolidated to 1 segment, varying the per-query `ef`
+(`num_candidates`) on the new heuristic-built graph. Recall/latency are server-side (`took_ms` p50) over
+500 queries vs exact GT:
+
+| ef | recall@10 | server p50 | server p95 |
+|---|---|---|---|
+| 64 | **0.9998** | **21 ms** | 40 ms |
+| 80 | 1.000 | 26 ms | 50 ms |
+| **96 (default)** | **1.000** | **29–31 ms** | 56 ms |
+| 112 | 1.000 | 33 ms | 58 ms |
+| 128 | 1.000 | 38 ms | 75 ms |
+| 200 (old default) | 1.000 | 48–63 ms | 84–115 ms |
+| Elasticsearch | 1.000 | 7 ms | — |
+
+**Takeaways:**
+- On real L2-normalized embeddings the graph is far easier than the adversarial synthetic unit-test data:
+  recall is already 1.000 at ef=80 and **0.9998 at ef=64**. The default of **96** is a conservative
+  choice (recall exactly 1.0 with headroom); **ef=64 is a viable aggressive setting** that holds
+  recall ≥0.99 at **21 ms** — the bottom of the original 15–25 ms target band, and ~2.5× faster than the
+  54 ms baseline.
+- Latency scales almost linearly with ef here, confirming the layer-0 traversal budget (now correctly
+  plumbed per-query) is the dominant cost — exactly what fix A targets. Callers who want ES-class latency
+  on this data can pass `num_candidates: 64` today.
+- The remaining gap to ES's 7 ms at a fixed ef is structural (deferred #3, the contiguous-slab + CSR
+  rewrite), but the per-query `ef` knob now lets operators trade the last few points of recall for
+  latency without a rebuild.
+
+**Build-time cost (honest):** the Algorithm-4 neighbour selection makes `/optimize` (the synchronous
+single-threaded HNSW rebuild) materially slower than the prior plain-nearest-M builder — the diversity
+test is O(M²) in distance comps per node in the back-link prune, and over `Vec<Vec<f32>>` storage on a
+loaded box this confirmation run's rebuild took ~30 min vs the prior cycle's ~10 min. `/optimize` is a
+one-time operator step, not a query path, but this regression is real and is another argument for the
+contiguous-layout rewrite (which would also speed the build).
