@@ -1180,7 +1180,14 @@ impl AppState {
                     }
                 };
                 let _ = searcher_sm.load_sealed_segments();
-                let searcher = LocalShardSearcher::new(searcher_sm);
+                let mut searcher = LocalShardSearcher::new(searcher_sm);
+                // Build the real per-segment ANN indexes for the recovered
+                // sealed segments. Without this the searcher falls back to a
+                // brute-force scan until the first explicit rebuild — recovered
+                // collections would silently run the slow path after a restart.
+                if let Err(e) = searcher.build_indexes() {
+                    tracing::warn!(collection = %name, shard = shard_id, error = %e, "recover: build_indexes failed");
+                }
                 executor.register_shard(shard_id, Box::new(searcher));
                 shard_managers.insert(shard_id, sm);
             }
