@@ -18,10 +18,27 @@
 //! searcher can take a single parameter instead of generic bounds
 //! everywhere.
 
+use veda_core::simd;
 use veda_core::types::DistanceMetric;
 
 use crate::distance::compute_distance;
 use crate::quantization::rabitq::RaBitQuantizer;
+
+/// L2-normalize a vector in place into a fresh `Vec<f32>`.
+///
+/// Used by the Cosine HNSW path: the index keeps an internally
+/// normalized copy of every vector so traversal distance reduces to
+/// `1 - dot` (see [`RawVectorsProvider`]). A zero-norm vector is
+/// returned unchanged (its cosine distance is 1.0 by convention,
+/// which `1 - dot` with an all-zero vector also yields).
+pub fn l2_normalize(v: &[f32]) -> Vec<f32> {
+    let norm = simd::l2_norm_squared(v).sqrt();
+    if norm == 0.0 {
+        return v.to_vec();
+    }
+    let inv = 1.0 / norm;
+    v.iter().map(|&x| x * inv).collect()
+}
 
 /// Read-only view that answers `distance(query, doc_id)` for HNSW
 /// traversal. The graph code never sees the raw vectors — it only
@@ -50,20 +67,51 @@ pub trait DistanceProvider: Sync {
 /// Wraps a `&[Vec<f32>]` corpus and the distance metric to use. This
 /// is the historical path; semantically equivalent to the old
 /// `compute_distance(query, vectors[id], metric)` calls.
+///
+/// `normalized_cosine` is the Cosine fast path: when set, both the
+/// stored `vectors` and the query handed to [`Self::distance`] are
+/// assumed L2-normalized, so cosine distance reduces to `1 - dot`.
+/// This skips the two norm + one division that `simd::cosine_distance`
+/// recomputes on every call (~3× the FLOPs of a bare dot). The
+/// returned value and ranking are identical to the Cosine path within
+/// fp tolerance because for unit vectors `1 - dot == 1 - cos`.
 pub struct RawVectorsProvider<'a> {
     pub vectors: &'a [Vec<f32>],
     pub metric: DistanceMetric,
+    pub normalized_cosine: bool,
 }
 
 impl<'a> RawVectorsProvider<'a> {
+    /// Construct a provider over raw vectors with the given metric
+    /// (no normalization fast path).
     pub fn new(vectors: &'a [Vec<f32>], metric: DistanceMetric) -> Self {
-        Self { vectors, metric }
+        Self {
+            vectors,
+            metric,
+            normalized_cosine: false,
+        }
+    }
+
+    /// Construct a provider that treats `vectors` (and the query) as
+    /// L2-normalized and computes cosine distance as `1 - dot`. Only
+    /// valid for [`DistanceMetric::Cosine`].
+    pub fn new_normalized_cosine(vectors: &'a [Vec<f32>]) -> Self {
+        Self {
+            vectors,
+            metric: DistanceMetric::Cosine,
+            normalized_cosine: true,
+        }
     }
 }
 
 impl<'a> DistanceProvider for RawVectorsProvider<'a> {
     fn distance(&self, query: &[f32], doc_id: u32) -> f32 {
-        compute_distance(query, &self.vectors[doc_id as usize], self.metric)
+        let doc = &self.vectors[doc_id as usize];
+        if self.normalized_cosine {
+            1.0 - simd::dot_product(query, doc)
+        } else {
+            compute_distance(query, doc, self.metric)
+        }
     }
 
     fn len(&self) -> usize {

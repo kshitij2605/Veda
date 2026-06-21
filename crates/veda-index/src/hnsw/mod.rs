@@ -27,9 +27,16 @@ use crate::traits::{SearchResult, VectorIndex};
 /// parameters).
 pub struct HnswIndex {
     graph: HnswGraph,
+    /// Internal vector copies. For Cosine metric these are kept
+    /// **L2-normalized** so traversal distance reduces to `1 - dot`
+    /// (see `normalized` and `distance_provider::RawVectorsProvider`).
+    /// This is an index-internal representation only — the record store
+    /// is untouched, so `get_record` still returns original vectors.
     vectors: Vec<Vec<f32>>,
     metric: DistanceMetric,
     dimension: u32,
+    /// True iff `metric == Cosine`: enables the normalized-dot fast path.
+    normalized: bool,
     // Configuration
     m: usize,
     m_max0: usize,
@@ -57,7 +64,11 @@ struct HnswIndexData {
 impl HnswIndex {
     /// Create a new HNSW index with default parameters.
     ///
-    /// Defaults: m=16, m_max0=32, ef_construction=200, ef_search=200.
+    /// Defaults: m=16, m_max0=32, ef_construction=200, ef_search=96.
+    /// `ef_search=96` is the lowest fixed traversal budget that holds
+    /// recall@10 ≥ 0.99 on the at-scale single-segment benchmark while
+    /// roughly halving per-query work vs the old 200 default. Per-query
+    /// callers can still override via [`Self::search_with_ef`].
     pub fn new(metric: DistanceMetric, dimension: u32) -> Self {
         let m = 16;
         Self {
@@ -65,10 +76,11 @@ impl HnswIndex {
             vectors: Vec::new(),
             metric,
             dimension,
+            normalized: metric == DistanceMetric::Cosine,
             m,
             m_max0: 2 * m,
             ef_construction: 200,
-            ef_search: 200,
+            ef_search: 96,
             ml: 1.0 / (m as f64).ln(),
             deleted: HashSet::new(),
         }
@@ -87,6 +99,7 @@ impl HnswIndex {
             vectors: Vec::new(),
             metric,
             dimension,
+            normalized: metric == DistanceMetric::Cosine,
             m,
             m_max0: 2 * m,
             ef_construction,
@@ -94,6 +107,70 @@ impl HnswIndex {
             ml: 1.0 / (m as f64).ln(),
             deleted: HashSet::new(),
         }
+    }
+
+    /// Build the traversal `DistanceProvider` over the internal vectors,
+    /// selecting the normalized-dot fast path for Cosine indexes.
+    fn make_provider(&self) -> crate::hnsw::distance_provider::RawVectorsProvider<'_> {
+        use crate::hnsw::distance_provider::RawVectorsProvider;
+        if self.normalized {
+            RawVectorsProvider::new_normalized_cosine(&self.vectors)
+        } else {
+            RawVectorsProvider::new(&self.vectors, self.metric)
+        }
+    }
+
+    /// Prepare a query for traversal: L2-normalize for Cosine indexes
+    /// (so `1 - dot` matches cosine distance), pass through otherwise.
+    fn prepare_query(&self, query: &[f32]) -> Vec<f32> {
+        if self.normalized {
+            crate::hnsw::distance_provider::l2_normalize(query)
+        } else {
+            query.to_vec()
+        }
+    }
+
+    /// Core layer-0 traversal shared by `search` / `search_with_ef`,
+    /// parameterized by the per-query `ef` budget. `query_internal` must
+    /// already be query-prepared (normalized for Cosine).
+    fn search_internal(&self, query_internal: &[f32], k: usize, ef: usize) -> Vec<SearchResult> {
+        let ep = match self.graph.entry_point() {
+            Some(ep) => ep,
+            None => return Vec::new(),
+        };
+
+        let max_level = self.graph.max_level();
+        let mut ep_id = ep;
+        let dp = self.make_provider();
+        let mut ep_dist = dp.distance(query_internal, ep_id);
+
+        // Phase 1: Greedily descend from the top level down to layer 1.
+        if max_level > 0 {
+            for layer in (1..=max_level).rev() {
+                let (nearest_id, nearest_dist) =
+                    HnswSearcher::greedy_search(query_internal, ep_id, layer, &self.graph, &dp);
+                ep_id = nearest_id;
+                ep_dist = nearest_dist;
+            }
+        }
+
+        // Phase 2: Search at layer 0 with the requested ef (>= k).
+        let entry_points = vec![(ep_id, ep_dist)];
+        let results = HnswSearcher::search_layer(
+            query_internal,
+            &entry_points,
+            ef.max(k),
+            0,
+            &self.graph,
+            &dp,
+            &self.deleted,
+        );
+
+        results
+            .into_iter()
+            .take(k)
+            .map(|(id, distance)| SearchResult { id, distance })
+            .collect()
     }
 
     /// Set the ef_search parameter at runtime to tune the recall/speed trade-off.
@@ -116,7 +193,9 @@ impl VectorIndex for HnswIndex {
         self.vectors.clear();
         self.deleted.clear();
 
-        // Validate dimensions and store vectors.
+        // Validate dimensions and store vectors. For Cosine, store an
+        // L2-normalized copy so traversal distance is `1 - dot` (the
+        // record store keeps the originals — this copy is index-internal).
         for v in vectors {
             if v.len() as u32 != self.dimension {
                 return Err(VedaError::DimensionMismatch {
@@ -124,7 +203,12 @@ impl VectorIndex for HnswIndex {
                     actual: v.len() as u32,
                 });
             }
-            self.vectors.push(v.to_vec());
+            if self.normalized {
+                self.vectors
+                    .push(crate::hnsw::distance_provider::l2_normalize(v));
+            } else {
+                self.vectors.push(v.to_vec());
+            }
         }
 
         // Insert each vector into the HNSW graph.
@@ -135,6 +219,7 @@ impl VectorIndex for HnswIndex {
                 &mut self.graph,
                 &self.vectors,
                 self.metric,
+                self.normalized,
                 self.m,
                 self.m_max0,
                 self.ef_construction,
@@ -146,6 +231,10 @@ impl VectorIndex for HnswIndex {
     }
 
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
+        self.search_with_ef(query, k, self.ef_search)
+    }
+
+    fn search_with_ef(&self, query: &[f32], k: usize, ef: usize) -> Result<Vec<SearchResult>> {
         if query.len() as u32 != self.dimension {
             return Err(VedaError::DimensionMismatch {
                 expected: self.dimension,
@@ -157,47 +246,8 @@ impl VectorIndex for HnswIndex {
             return Ok(Vec::new());
         }
 
-        let ep = match self.graph.entry_point() {
-            Some(ep) => ep,
-            None => return Ok(Vec::new()),
-        };
-
-        let max_level = self.graph.max_level();
-        let mut ep_id = ep;
-        let dp =
-            crate::hnsw::distance_provider::RawVectorsProvider::new(&self.vectors, self.metric);
-        let mut ep_dist = dp.distance(query, ep_id);
-
-        // Phase 1: Greedily descend from the top level down to layer 1.
-        if max_level > 0 {
-            for layer in (1..=max_level).rev() {
-                let (nearest_id, nearest_dist) =
-                    HnswSearcher::greedy_search(query, ep_id, layer, &self.graph, &dp);
-                ep_id = nearest_id;
-                ep_dist = nearest_dist;
-            }
-        }
-
-        // Phase 2: Search at layer 0 with ef_search.
-        let entry_points = vec![(ep_id, ep_dist)];
-        let results = HnswSearcher::search_layer(
-            query,
-            &entry_points,
-            self.ef_search.max(k), // ef must be >= k
-            0,
-            &self.graph,
-            &dp,
-            &self.deleted,
-        );
-
-        // Return top-k results.
-        let results: Vec<SearchResult> = results
-            .into_iter()
-            .take(k)
-            .map(|(id, distance)| SearchResult { id, distance })
-            .collect();
-
-        Ok(results)
+        let q = self.prepare_query(query);
+        Ok(self.search_internal(&q, k, ef))
     }
 
     fn search_filtered(
@@ -222,17 +272,17 @@ impl VectorIndex for HnswIndex {
             None => return Ok(Vec::new()),
         };
 
+        let q = self.prepare_query(query);
         let max_level = self.graph.max_level();
         let mut ep_id = ep;
-        let dp =
-            crate::hnsw::distance_provider::RawVectorsProvider::new(&self.vectors, self.metric);
-        let mut ep_dist = dp.distance(query, ep_id);
+        let dp = self.make_provider();
+        let mut ep_dist = dp.distance(&q, ep_id);
 
         // Phase 1: Greedily descend from the top level down to layer 1.
         if max_level > 0 {
             for layer in (1..=max_level).rev() {
                 let (nearest_id, nearest_dist) =
-                    HnswSearcher::greedy_search(query, ep_id, layer, &self.graph, &dp);
+                    HnswSearcher::greedy_search(&q, ep_id, layer, &self.graph, &dp);
                 ep_id = nearest_id;
                 ep_dist = nearest_dist;
             }
@@ -243,7 +293,7 @@ impl VectorIndex for HnswIndex {
         let results = HnswSearcher::search_layer_filtered(
             &self.graph,
             &dp,
-            query,
+            &q,
             &entry_points,
             self.ef_search.max(k),
             0,
@@ -268,16 +318,25 @@ impl VectorIndex for HnswIndex {
             self.vectors
                 .resize(id as usize + 1, vec![0.0; self.dimension as usize]);
         }
-        self.vectors[id as usize] = vector.to_vec();
+        // Store the index-internal (normalized for Cosine) copy.
+        let stored = if self.normalized {
+            crate::hnsw::distance_provider::l2_normalize(vector)
+        } else {
+            vector.to_vec()
+        };
+        self.vectors[id as usize] = stored;
         self.deleted.remove(&id);
 
-        // Insert into the HNSW graph.
+        // Insert into the HNSW graph using the stored representation so
+        // build-time distances match the normalized search-time path.
+        let inserted = self.vectors[id as usize].clone();
         HnswBuilder::insert(
             id,
-            vector,
+            &inserted,
             &mut self.graph,
             &self.vectors,
             self.metric,
+            self.normalized,
             self.m,
             self.m_max0,
             self.ef_construction,
@@ -349,11 +408,26 @@ impl VectorIndex for HnswIndex {
             });
         }
 
+        let normalized = data.metric == DistanceMetric::Cosine;
+        // Re-normalize on load for Cosine so the internal `1 - dot` fast
+        // path is correct even for indexes persisted before normalized
+        // storage existed. Normalizing an already-unit vector is a no-op
+        // within fp tolerance, so this is safe + idempotent for new files.
+        let vectors = if normalized {
+            data.vectors
+                .iter()
+                .map(|v| crate::hnsw::distance_provider::l2_normalize(v))
+                .collect()
+        } else {
+            data.vectors
+        };
+
         Ok(Self {
             graph: data.graph,
-            vectors: data.vectors,
+            vectors,
             metric: data.metric,
             dimension: data.dimension,
+            normalized,
             m: data.m,
             m_max0: data.m_max0,
             ef_construction: data.ef_construction,

@@ -26,6 +26,19 @@ pub trait VectorIndex: Send + Sync {
     /// Returns results sorted by distance in ascending order (closest first).
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>>;
 
+    /// Search for the `k` nearest neighbors of `query` using a per-query
+    /// candidate budget `ef` (HNSW `ef_search` / IVF `nprobe`-equivalent).
+    ///
+    /// This decouples the traversal budget from the number of returned
+    /// results, letting callers tune the recall/latency trade-off per
+    /// query without mutating shared index state. The default
+    /// implementation ignores `ef` and delegates to [`Self::search`];
+    /// graph indexes (HNSW) override it to traverse at `ef.max(k)`.
+    fn search_with_ef(&self, query: &[f32], k: usize, ef: usize) -> Result<Vec<SearchResult>> {
+        let _ = ef;
+        self.search(query, k)
+    }
+
     /// Search with a filter bitmap. Only results whose IDs are in `filter`
     /// are returned.
     ///
