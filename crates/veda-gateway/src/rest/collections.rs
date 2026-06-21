@@ -82,6 +82,32 @@ pub struct CreateCollectionRequest {
     pub rls_owner_field: Option<String>,
 }
 
+/// Default growing-segment seal threshold: 512 MiB. Vector ANN indexes
+/// (HNSW / IVF-PQ / DiskANN / RaBitQ* / SQ) build only on *sealed*
+/// segments; until the growing segment hits this size, search brute-forces
+/// the unsealed data with Flat. The default is fine for production but far
+/// too large for small datasets / tests, which would otherwise never seal
+/// and never exercise their configured index type.
+pub(crate) const DEFAULT_SEAL_THRESHOLD_BYTES: usize = 512 * 1024 * 1024;
+
+/// Resolve the growing-segment seal threshold in bytes. Reads
+/// `VEDA_SEAL_THRESHOLD` (a byte count); falls back to
+/// [`DEFAULT_SEAL_THRESHOLD_BYTES`] when unset or unparseable. Lowering it
+/// (e.g. `VEDA_SEAL_THRESHOLD=4194304` for 4 MiB) lets small datasets seal
+/// so the collection's declared vector index actually builds.
+pub(crate) fn seal_threshold_bytes() -> usize {
+    parse_seal_threshold(std::env::var("VEDA_SEAL_THRESHOLD").ok())
+}
+
+/// Pure parse of the `VEDA_SEAL_THRESHOLD` value. A positive integer wins;
+/// anything else (absent, blank, non-numeric, zero) falls back to the
+/// default. Split out so it's testable without mutating the process env.
+fn parse_seal_threshold(raw: Option<String>) -> usize {
+    raw.and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_SEAL_THRESHOLD_BYTES)
+}
+
 fn default_shard_count() -> u32 {
     1
 }
@@ -143,6 +169,22 @@ pub struct CreateCollectionResponse {
     /// the create. Absent / null when no seeds were requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seeded: Option<usize>,
+}
+
+/// Per-shard outcome of a force-seal: how many segments that shard
+/// sealed (0 if its growing segment was empty).
+#[derive(Debug, Serialize)]
+pub struct ShardSealResult {
+    pub shard_id: u32,
+    pub sealed_segments: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SealResponse {
+    pub collection: String,
+    /// Total number of segments sealed across all shards.
+    pub sealed_segments: usize,
+    pub per_shard: Vec<ShardSealResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -425,22 +467,31 @@ pub(crate) async fn materialize_collection_locally(
     let mut executor = DistributedQueryExecutor::new();
     let mvcc_on = schema.effective_use_mvcc();
     for shard_id in 0..schema.shard_count() {
-        let mut sm =
-            SegmentManager::new(schema.clone(), shard_id, collection_dir, 512 * 1024 * 1024)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("failed to create segment manager: {e}"),
-                        }),
-                    )
-                })?;
+        let mut sm = SegmentManager::new(
+            schema.clone(),
+            shard_id,
+            collection_dir,
+            seal_threshold_bytes(),
+        )
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("failed to create segment manager: {e}"),
+                }),
+            )
+        })?;
         if mvcc_on {
             sm.enable_mvcc();
         }
         let searcher = LocalShardSearcher::new(
-            SegmentManager::new(schema.clone(), shard_id, collection_dir, 512 * 1024 * 1024)
-                .unwrap(),
+            SegmentManager::new(
+                schema.clone(),
+                shard_id,
+                collection_dir,
+                seal_threshold_bytes(),
+            )
+            .unwrap(),
         );
         executor.register_shard(shard_id, Box::new(searcher));
         shard_managers.insert(shard_id, sm);
@@ -729,6 +780,89 @@ pub async fn set_alias(
     Ok(Json(AliasResponse {
         alias: name,
         target: req.target,
+    }))
+}
+
+/// Force-seal the current growing segment(s) of every shard in a
+/// collection, then rebuild the query executors so the collection's
+/// configured vector index type is built on the freshly sealed segments.
+///
+/// Vector ANN indexes build only on sealed segments. With the default
+/// 512 MiB seal threshold a small dataset never seals on its own, so search
+/// always brute-forces the growing segment (Flat) and the declared index
+/// type (HNSW / IVF-PQ / RaBitQ / …) is unreachable. This endpoint forces
+/// the seal so the next search uses the real index. Pair it with a low
+/// `VEDA_SEAL_THRESHOLD` for testing, or call it explicitly after a bulk
+/// load. Scoped like the other collection routes (not admin-only).
+pub async fn seal_collection(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(name): Path<String>,
+) -> Result<Json<SealResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(leader_url) = state.leader_rest_address().await {
+        return Err((
+            StatusCode::TEMPORARY_REDIRECT,
+            Json(ErrorResponse {
+                error: format!("seal must be submitted to the raft leader at {leader_url}"),
+            }),
+        ));
+    }
+    let scoped = tenant::scope(&tenant, &name);
+
+    // Confirm the collection exists before touching segment managers.
+    {
+        let schemas = state.inner.schemas.read().await;
+        if !schemas.contains_key(&scoped) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("collection '{name}' not found"),
+                }),
+            ));
+        }
+    }
+
+    let mut per_shard: Vec<ShardSealResult> = Vec::new();
+    let mut total_sealed = 0usize;
+    {
+        let mut managers = state.inner.segment_managers.write().await;
+        let shard_map = managers.get_mut(&scoped).ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "no segment managers for collection".into(),
+                }),
+            )
+        })?;
+        for (shard_id, sm) in shard_map.iter_mut() {
+            let sealed = sm.seal_growing().map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("failed to seal segment: {e}"),
+                    }),
+                )
+            })?;
+            let n = usize::from(sealed.is_some());
+            total_sealed += n;
+            per_shard.push(ShardSealResult {
+                shard_id: *shard_id,
+                sealed_segments: n,
+            });
+        }
+    }
+
+    // Rebuild executors so the configured vector index type is built on the
+    // newly sealed segments (Flat fallback is replaced by the real index).
+    if total_sealed > 0 {
+        crate::rest::records::rebuild_executors(&state, &scoped).await?;
+    }
+
+    per_shard.sort_by_key(|s| s.shard_id);
+    Ok(Json(SealResponse {
+        collection: name,
+        sealed_segments: total_sealed,
+        per_shard,
     }))
 }
 
@@ -1523,5 +1657,36 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
         dimension,
         metric,
         model,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seal_threshold_parses_positive_override() {
+        // 4 MiB override is honored.
+        assert_eq!(parse_seal_threshold(Some("4194304".to_owned())), 4_194_304);
+        // Surrounding whitespace is tolerated.
+        assert_eq!(parse_seal_threshold(Some("  1024 ".to_owned())), 1024);
+    }
+
+    #[test]
+    fn seal_threshold_falls_back_to_default() {
+        // Unset, blank, non-numeric, and zero all fall back to the default.
+        assert_eq!(parse_seal_threshold(None), DEFAULT_SEAL_THRESHOLD_BYTES);
+        assert_eq!(
+            parse_seal_threshold(Some("".to_owned())),
+            DEFAULT_SEAL_THRESHOLD_BYTES
+        );
+        assert_eq!(
+            parse_seal_threshold(Some("not-a-number".to_owned())),
+            DEFAULT_SEAL_THRESHOLD_BYTES
+        );
+        assert_eq!(
+            parse_seal_threshold(Some("0".to_owned())),
+            DEFAULT_SEAL_THRESHOLD_BYTES
+        );
     }
 }

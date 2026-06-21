@@ -314,6 +314,13 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/collections/{name}/reindex",
             post(collections::reindex_collection),
         )
+        // Force-seal the growing segment(s) so the configured vector index
+        // type builds (small datasets otherwise never reach the seal
+        // threshold and always brute-force with Flat).
+        .route(
+            "/v1/collections/{name}/seal",
+            post(collections::seal_collection),
+        )
         // Phase G: read / set the alias for a collection.
         .route(
             "/v1/admin/collections/{name}/alias",
