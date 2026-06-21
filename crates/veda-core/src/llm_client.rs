@@ -41,7 +41,8 @@ impl LlmConfig {
     pub fn from_env() -> Option<Self> {
         let endpoint = std::env::var("VEDA_LLM_ENDPOINT")
             .ok()
-            .filter(|s| !s.is_empty())?;
+            .filter(|s| !s.is_empty())
+            .map(|e| normalize_endpoint(&e))?;
         let model = std::env::var("VEDA_LLM_MODEL").unwrap_or_else(|_| {
             // Sensible default for OpenAI-compatible deployments
             // where the model name is part of the URL or single-tenant
@@ -62,6 +63,22 @@ impl LlmConfig {
             model,
             timeout,
         })
+    }
+}
+
+/// Normalize an OpenAI-compatible chat endpoint so it always points at the
+/// `chat/completions` path. A common misconfiguration is supplying only the
+/// API base (e.g. `http://host:9000/v1`), which 404s because this client
+/// POSTs the body to the endpoint verbatim. If the endpoint already ends in
+/// `chat/completions` it is returned unchanged; otherwise `/chat/completions`
+/// is appended (collapsing any trailing slash). Full, already-correct URLs
+/// pass through untouched.
+pub fn normalize_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim_end_matches('/');
+    if trimmed.ends_with("/chat/completions") || trimmed.ends_with("chat/completions") {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}/chat/completions")
     }
 }
 
@@ -701,6 +718,37 @@ mod tests {
         // Guards the existing `complete()` wire format: {role, content}.
         let v = serde_json::to_value(ChatMessage::text("system", "be brief")).expect("serializes");
         assert_eq!(v, serde_json::json!({"role":"system","content":"be brief"}));
+    }
+
+    #[test]
+    fn normalize_endpoint_appends_chat_completions_to_api_base() {
+        // The common misconfiguration: only the `/v1` base is supplied.
+        assert_eq!(
+            normalize_endpoint("http://host:9000/v1"),
+            "http://host:9000/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn normalize_endpoint_leaves_full_url_unchanged() {
+        assert_eq!(
+            normalize_endpoint("http://host:9000/v1/chat/completions"),
+            "http://host:9000/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn normalize_endpoint_handles_trailing_slash() {
+        // Trailing slash on the base must not produce a double slash.
+        assert_eq!(
+            normalize_endpoint("http://host:9000/v1/"),
+            "http://host:9000/v1/chat/completions"
+        );
+        // Trailing slash on an already-correct URL is collapsed, not doubled.
+        assert_eq!(
+            normalize_endpoint("http://host:9000/v1/chat/completions/"),
+            "http://host:9000/v1/chat/completions"
+        );
     }
 
     #[test]
