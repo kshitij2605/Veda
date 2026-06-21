@@ -99,4 +99,10 @@ impl HnswGraph {
     pub fn node_count(&self) -> usize {
         self.nodes.iter().filter(|n| n.is_some()).count()
     }
+
+    /// Number of node slots (the highest node id + 1). Used to size the
+    /// dense visited bitset for traversal; always ≥ any valid node id.
+    pub fn slot_count(&self) -> usize {
+        self.nodes.len()
+    }
 }

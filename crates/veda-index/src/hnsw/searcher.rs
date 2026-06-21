@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
@@ -6,6 +7,62 @@ use roaring::RoaringBitmap;
 use crate::hnsw::distance_provider::DistanceProvider;
 use crate::hnsw::graph::HnswGraph;
 use crate::traits::SearchResult;
+
+/// Generation-stamped dense visited set + reusable candidate/result
+/// heaps, kept per-thread so `search_layer` allocates nothing on the hot
+/// path. `stamp[id] == generation` means "visited this call"; bumping
+/// `generation` resets the whole set in O(1) (no per-call zeroing).
+struct SearchScratch {
+    stamp: Vec<u32>,
+    generation: u32,
+    candidates: BinaryHeap<MinCandidate>,
+    results: BinaryHeap<MaxCandidate>,
+}
+
+impl SearchScratch {
+    fn new() -> Self {
+        Self {
+            stamp: Vec::new(),
+            generation: 0,
+            candidates: BinaryHeap::new(),
+            results: BinaryHeap::new(),
+        }
+    }
+
+    /// Begin a new traversal over `slots` nodes: grow + reset the visited
+    /// stamp and clear the reusable heaps. Returns the active generation.
+    fn begin(&mut self, slots: usize) -> u32 {
+        if self.stamp.len() < slots {
+            self.stamp.resize(slots, 0);
+        }
+        // Bump the generation; on wrap, zero the buffer once so a stale
+        // stamp from ~4 billion calls ago can't read as visited.
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.stamp.iter_mut().for_each(|s| *s = 0);
+            self.generation = 1;
+        }
+        self.candidates.clear();
+        self.results.clear();
+        self.generation
+    }
+
+    #[inline]
+    fn is_visited(&self, id: u32, cur_gen: u32) -> bool {
+        self.stamp.get(id as usize).is_some_and(|&s| s == cur_gen)
+    }
+
+    #[inline]
+    fn mark_visited(&mut self, id: u32, cur_gen: u32) {
+        if let Some(slot) = self.stamp.get_mut(id as usize) {
+            *slot = cur_gen;
+        }
+    }
+}
+
+thread_local! {
+    static SCRATCH: RefCell<SearchScratch> = RefCell::new(SearchScratch::new());
+}
 
 /// Strategy for filtered search based on filter selectivity.
 enum FilterStrategy {
@@ -113,69 +170,71 @@ impl HnswSearcher {
         dp: &dyn DistanceProvider,
         deleted: &HashSet<u32>,
     ) -> Vec<(u32, f32)> {
-        let mut visited: HashSet<u32> = HashSet::new();
-        let mut candidates: BinaryHeap<MinCandidate> = BinaryHeap::new();
-        let mut results: BinaryHeap<MaxCandidate> = BinaryHeap::new();
+        SCRATCH.with(|cell| {
+            let mut s = cell.borrow_mut();
+            let cur_gen = s.begin(graph.slot_count());
 
-        for &(ep_id, ep_dist) in entry_points {
-            visited.insert(ep_id);
-            candidates.push(MinCandidate {
-                id: ep_id,
-                distance: ep_dist,
-            });
-            results.push(MaxCandidate {
-                id: ep_id,
-                distance: ep_dist,
-            });
-        }
-
-        while let Some(MinCandidate {
-            id: c_id,
-            distance: c_dist,
-        }) = candidates.pop()
-        {
-            // If the nearest candidate is farther than the farthest in results, stop.
-            let farthest_dist = results.peek().map(|r| r.distance).unwrap_or(f32::MAX);
-            if c_dist > farthest_dist {
-                break;
+            for &(ep_id, ep_dist) in entry_points {
+                s.mark_visited(ep_id, cur_gen);
+                s.candidates.push(MinCandidate {
+                    id: ep_id,
+                    distance: ep_dist,
+                });
+                s.results.push(MaxCandidate {
+                    id: ep_id,
+                    distance: ep_dist,
+                });
             }
 
-            // Explore neighbors of c at this layer.
-            let neighbors = graph.get_neighbors(c_id, layer);
-            for &neighbor_id in neighbors {
-                if visited.contains(&neighbor_id) {
-                    continue;
+            while let Some(MinCandidate {
+                id: c_id,
+                distance: c_dist,
+            }) = s.candidates.pop()
+            {
+                // If the nearest candidate is farther than the farthest in results, stop.
+                let farthest_dist = s.results.peek().map(|r| r.distance).unwrap_or(f32::MAX);
+                if c_dist > farthest_dist {
+                    break;
                 }
-                visited.insert(neighbor_id);
 
-                let n_dist = dp.distance(query, neighbor_id);
+                // Explore neighbors of c at this layer.
+                let neighbors = graph.get_neighbors(c_id, layer);
+                for &neighbor_id in neighbors {
+                    if s.is_visited(neighbor_id, cur_gen) {
+                        continue;
+                    }
+                    s.mark_visited(neighbor_id, cur_gen);
 
-                let farthest_dist = results.peek().map(|r| r.distance).unwrap_or(f32::MAX);
+                    let n_dist = dp.distance(query, neighbor_id);
 
-                if results.len() < ef || n_dist < farthest_dist {
-                    candidates.push(MinCandidate {
-                        id: neighbor_id,
-                        distance: n_dist,
-                    });
-                    results.push(MaxCandidate {
-                        id: neighbor_id,
-                        distance: n_dist,
-                    });
-                    if results.len() > ef {
-                        results.pop();
+                    let farthest_dist = s.results.peek().map(|r| r.distance).unwrap_or(f32::MAX);
+
+                    if s.results.len() < ef || n_dist < farthest_dist {
+                        s.candidates.push(MinCandidate {
+                            id: neighbor_id,
+                            distance: n_dist,
+                        });
+                        s.results.push(MaxCandidate {
+                            id: neighbor_id,
+                            distance: n_dist,
+                        });
+                        if s.results.len() > ef {
+                            s.results.pop();
+                        }
                     }
                 }
             }
-        }
 
-        // Collect results, filter deleted, sort by distance ascending.
-        let mut result_vec: Vec<(u32, f32)> = results
-            .into_iter()
-            .filter(|c| !deleted.contains(&c.id))
-            .map(|c| (c.id, c.distance))
-            .collect();
-        result_vec.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-        result_vec
+            // Drain results, filter deleted, sort by distance ascending.
+            let mut result_vec: Vec<(u32, f32)> = s
+                .results
+                .drain()
+                .filter(|c| !deleted.contains(&c.id))
+                .map(|c| (c.id, c.distance))
+                .collect();
+            result_vec.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+            result_vec
+        })
     }
 
     /// Greedily traverse a layer to find the single nearest neighbor to the query.
