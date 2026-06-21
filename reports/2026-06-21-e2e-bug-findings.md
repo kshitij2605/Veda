@@ -289,3 +289,62 @@ FF-pushed `feat/multimodal-omni-e2e -> main` (`fdffc9a..07033c0`). Release rebui
 ## Resolution note (post-report)
 
 **Finding LLM-1 (P1) RESOLVED.** Root cause: the campaign host run-script set VEDA_LLM_ENDPOINT=.../v1 (missing /chat/completions); LlmClient POSTs verbatim. It was masked until the .env-non-override fix (ea3292a) let the incomplete value win. Fixed the run-script to .../v1/chat/completions and restarted :6340; live converse with the default agent now returns a grounded answer (verified). Durable code hardening (LlmClient appends /chat/completions when absent) remains a P2 suggestion in the final report.
+
+## Follow-up Step 2 — seal route + LlmClient
+
+Two follow-up fixes from the Phase 2.B / final-report P1/P2 list, batched into one
+clippy/fmt/test + one release rebuild. Verified on iitgpu11:
+`RUSTFLAGS=-Dwarnings cargo clippy --workspace --all-targets -- -D warnings` -> 0
+(`Finished` in 3m15s, 0 warnings); `cargo fmt --all --check` -> 0;
+`cargo test -p veda-core` (incl. lib) + `cargo test -p veda-gateway --test seal_test`
+-> green. (The full `-p veda-gateway` lib+integration run is green for every binary
+that ran, but the pre-existing `advisor::notify::tests::pagerduty_trigger_and_resolve_with_dedup_key`
+test hangs on a `std` channel `recv()` that expects 2 mock-server hits — unrelated to
+this work — so the umbrella run was scoped to the affected targets.)
+
+1. **Seal route + configurable seal threshold** (commit `ff4d6f7`). P1: vector ANN
+   indexes (HNSW / IVF-PQ / DiskANN / RaBitQ* / SQ) build only on SEALED segments, the
+   threshold was hardcoded 512 MiB, and there was no API to force a seal — so small
+   datasets stayed in a growing segment and always brute-forced with Flat, making the
+   declared index type unreachable on small data.
+   - `VEDA_SEAL_THRESHOLD` env (bytes; default 512 MiB) read via
+     `rest::collections::seal_threshold_bytes()` and threaded into every
+     `SegmentManager::new` site (create / recover / `rebuild_executors`). Lowering it
+     (campaign run-script now sets `4194304` = 4 MiB) lets small test data seal.
+   - **`POST /v1/collections/{name}/seal`** (`seal_collection`): normal collection-route
+     auth (not admin-only; sits next to `/reindex`). Force-seals every shard's growing
+     segment, then calls `rebuild_executors` (builds the configured index type on the
+     freshly sealed segments). Returns `{collection, sealed_segments, per_shard:[{shard_id, sealed_segments}]}`.
+     404 on unknown collection.
+   - **Index-type selection flow (how to test an index type):** the index type was ALREADY
+     fully settable — `FieldDef.index` on a vector field at create
+     (`"index": "hnsw"|"diskann"|"ivfpq"|"flat"|"rabitq"|"rabitq_rerank"|"hnsw_rabitq"|"cagra"|"rabitq_ext_rerank"|"sq4"|"sq8"`;
+     default HNSW) -> stored on the schema's `FieldDefinition.index_type` ->
+     `LocalShardSearcher::build_indexes()` reads `field_def.index_type()` and builds the
+     matching index per Hot sealed segment. The only missing piece was that small data
+     never sealed. So the exact flow to exercise an index type is now:
+     **create collection with `index` on the vector field -> insert -> `POST /seal`
+     (or auto-seal under a low `VEDA_SEAL_THRESHOLD`) -> search uses the real index.**
+   - Tests: `rest::collections::tests::{seal_threshold_parses_positive_override,
+     seal_threshold_falls_back_to_default}` (lib unit); `seal_test::{seal_route_seals_and_makes_index_searchable,
+     seal_route_unknown_collection_is_404}` (integration: create with `index:"rabitq"`
+     -> insert 3 -> seal -> vector search returns the nearest-neighbour record via the
+     built RaBitQ index).
+
+2. **LlmClient endpoint hardening** (commit `25e0f2a`). P2 from the LLM-1 resolution note:
+   `LlmClient` POSTs to `VEDA_LLM_ENDPOINT` verbatim, so a value missing
+   `/chat/completions` (e.g. `.../v1`) 404s. `normalize_endpoint()` now appends
+   `/chat/completions` when the configured endpoint does not already end in it
+   (collapsing a trailing slash); full URLs pass through unchanged. Applied once in
+   `LlmConfig::from_env`. Tests: `llm_client::tests::{normalize_endpoint_appends_chat_completions_to_api_base,
+   normalize_endpoint_leaves_full_url_unchanged, normalize_endpoint_handles_trailing_slash}`.
+
+3. **Guardrail finalize** — verify-only, no change. `DEFAULT_THRESHOLD = 0.65` and the
+   always-surfaced `score` are in place from commit `ea3292a`; the
+   `default_threshold_recalibrated_for_jina_omni` test passes.
+
+Release rebuilt (`cargo build --release -p veda-server`, `Finished` in 9m43s, 0
+warnings; binary 38 MB @ 09:29). Host run-script `start_veda_mm.sh` gained the new
+service env (FLASHPARSE / SPLADE x3 / `VEDA_SEAL_THRESHOLD=4194304`); existing lines
+(incl. `VEDA_LLM_ENDPOINT=.../v1/chat/completions` and the searxng port) preserved.
+`:6340` restarted on the new binary.
