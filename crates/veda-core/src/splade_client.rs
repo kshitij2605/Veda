@@ -173,8 +173,11 @@ fn parse_response(bytes: &[u8], vocab_size: u32) -> Result<SpladeEncoding> {
         .into_iter()
         .next()
         .ok_or_else(|| VedaError::Index("splade: empty response array".into()))?;
-    let mut indices = Vec::with_capacity(first.len());
-    let mut values = Vec::with_capacity(first.len());
+    // The TEI sparse contract orders entries by descending weight, but
+    // `SparseVec::new` requires indices sorted ascending without
+    // duplicates. Sort here so the encoding always satisfies that
+    // invariant regardless of the encoder's output order.
+    let mut pairs: Vec<(u32, f32)> = Vec::with_capacity(first.len());
     for e in first {
         if e.index >= vocab_size {
             return Err(VedaError::Index(format!(
@@ -182,9 +185,11 @@ fn parse_response(bytes: &[u8], vocab_size: u32) -> Result<SpladeEncoding> {
                 e.index, vocab_size
             )));
         }
-        indices.push(e.index);
-        values.push(e.value);
+        pairs.push((e.index, e.value));
     }
+    pairs.sort_by_key(|p| p.0);
+    let indices = pairs.iter().map(|p| p.0).collect();
+    let values = pairs.iter().map(|p| p.1).collect();
     Ok(SpladeEncoding { indices, values })
 }
 
@@ -230,5 +235,18 @@ mod tests {
         let body = br#"[[{"index": 999, "value": 0.5}]]"#;
         let err = parse_response(body, 32).unwrap_err();
         assert!(format!("{err}").contains("exceeds vocab_size"));
+    }
+
+    #[test]
+    fn parse_sorts_indices_ascending_for_sparsevec_invariant() {
+        // Real SPLADE/TEI output is ordered by descending weight, not by
+        // index. The parsed encoding must come back sorted ascending so
+        // `SparseVec::new` accepts it.
+        let body = br#"[[{"index": 20, "value": 2.9}, {"index": 5, "value": 1.4}, {"index": 11, "value": 0.6}]]"#;
+        let out = parse_response(body, 32).unwrap();
+        assert_eq!(out.indices, vec![5, 11, 20]);
+        assert_eq!(out.values, vec![1.4, 0.6, 2.9]);
+        // Must satisfy the SparseVec contract.
+        crate::sparse::SparseVec::new(out.indices, out.values).unwrap();
     }
 }
