@@ -48,10 +48,13 @@ pub struct VectorSearchRequest {
     pub ef_search: Option<usize>,
 }
 
-/// Default per-segment candidate budget when a request does not set
-/// `ef_search`. Matches the HNSW index default `ef_search` so per-segment
-/// search returns its full working set rather than a `k`-truncated slice.
-pub const DEFAULT_EF_SEARCH: usize = 200;
+/// Default per-segment candidate budget (HNSW `ef_search`) when a request
+/// does not set `ef_search`. This is both the layer-0 working-set size and
+/// the number of candidates each segment hands to the cross-segment merge.
+/// Lowered 200 → 96: the lowest fixed budget that holds recall@10 ≥ 0.99 on
+/// the at-scale single-segment benchmark, roughly halving per-query distance
+/// comparisons vs the old 200. Matches `HnswIndex`'s default `ef_search`.
+pub const DEFAULT_EF_SEARCH: usize = 96;
 
 /// A search request for a single sparse vector field.
 #[derive(Debug, Clone)]
