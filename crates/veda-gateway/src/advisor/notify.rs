@@ -389,7 +389,12 @@ mod tests {
                     .to_owned();
                 let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_owned();
                 let _ = tx.send((path, body));
-                let reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+                // `Connection: close` is required: the notifier's reqwest client
+                // keep-alives by default and would otherwise reuse this socket for
+                // the next request after we've dropped it at the end of the loop,
+                // racing the server-side close (flaky hang under load). Closing per
+                // response forces a fresh connection the `accept()` loop captures.
+                let reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
                 let _ = stream.write_all(reply.as_bytes());
                 let _ = stream.flush();
             }
@@ -433,12 +438,16 @@ mod tests {
         let sent = notifier.notify_transitions(&opened, &closed).await;
         assert_eq!(sent, 2);
 
-        let (_, body1) = rx.recv().unwrap();
+        let (_, body1) = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("notify mock: expected request was not captured");
         let v1: serde_json::Value = serde_json::from_str(&body1).unwrap();
         assert_eq!(v1["status"], "open");
         assert_eq!(v1["event"]["title"], "Compaction backlog on docs");
 
-        let (_, body2) = rx.recv().unwrap();
+        let (_, body2) = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("notify mock: expected request was not captured");
         let v2: serde_json::Value = serde_json::from_str(&body2).unwrap();
         assert_eq!(v2["status"], "closed");
     }
@@ -466,7 +475,9 @@ mod tests {
         assert_eq!(sent_high, 1, "high event must pass the gate");
 
         // Exactly one capture, and it's the High event.
-        let (_, body) = rx.recv().unwrap();
+        let (_, body) = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("notify mock: expected request was not captured");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["status"], "open");
         assert!(rx.try_recv().is_err(), "only the high event should be sent");
@@ -488,7 +499,9 @@ mod tests {
             .notify_transitions(&[ev(Severity::High, EventStatus::Open)], &[])
             .await;
 
-        let (_, body) = rx.recv().unwrap();
+        let (_, body) = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("notify mock: expected request was not captured");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         let text = v["text"].as_str().unwrap();
         assert!(text.contains("Compaction backlog on docs"));
@@ -511,7 +524,9 @@ mod tests {
             .notify_transitions(&[], &[ev(Severity::Medium, EventStatus::Closed)])
             .await;
 
-        let (_, body) = rx.recv().unwrap();
+        let (_, body) = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("notify mock: expected request was not captured");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v["text"].as_str().unwrap().contains("RESOLVED:"));
     }
@@ -534,7 +549,9 @@ mod tests {
         let closed = vec![ev(Severity::High, EventStatus::Closed)];
         notifier.notify_transitions(&opened, &closed).await;
 
-        let (path1, body1) = rx.recv().unwrap();
+        let (path1, body1) = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("notify mock: expected request was not captured");
         assert_eq!(path1, "/v2/enqueue");
         let v1: serde_json::Value = serde_json::from_str(&body1).unwrap();
         assert_eq!(v1["event_action"], "trigger");
@@ -542,7 +559,9 @@ mod tests {
         assert_eq!(v1["payload"]["severity"], "critical");
         assert_eq!(v1["routing_key"], "rk-123");
 
-        let (_, body2) = rx.recv().unwrap();
+        let (_, body2) = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("notify mock: expected request was not captured");
         let v2: serde_json::Value = serde_json::from_str(&body2).unwrap();
         assert_eq!(v2["event_action"], "resolve");
         assert_eq!(v2["dedup_key"], "compaction_backlog:collection:docs");
@@ -624,7 +643,9 @@ mod tests {
             .await;
         // Only slack succeeded; webhook failed but did not panic/propagate.
         assert_eq!(sent, 1);
-        let (_, body) = rx.recv().unwrap();
+        let (_, body) = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("notify mock: expected request was not captured");
         assert!(body.contains("Compaction backlog on docs"));
     }
 }
