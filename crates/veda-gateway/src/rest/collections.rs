@@ -1489,7 +1489,19 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
                     "hnsw_rabitq" | "hnsw_rabit_q" | "quantized_hnsw" => {
                         veda_core::types::IndexType::HnswRaBitQ
                     }
-                    "cagra" | "gpu_cagra" | "gpu" => veda_core::types::IndexType::Cagra,
+                    "cagra" | "gpu_cagra" | "gpu" => {
+                        // CAGRA needs the GPU cuVS backend. Without the
+                        // `gpu_cuvs` feature the index build fails after
+                        // insert, leaving an unsearchable collection.
+                        // Reject up-front with a clear error instead.
+                        if !veda_index::gpu_cuvs::gpu_cuvs_available() {
+                            return Err(format!(
+                                "field '{}': index type 'cagra' requires a GPU build (compile with --features veda-index/gpu_cuvs); this binary has no cuVS backend",
+                                f.name
+                            ));
+                        }
+                        veda_core::types::IndexType::Cagra
+                    }
                     "rabitq_ext_rerank" | "ext_rabitq_rerank" | "rabitq4_rerank" => {
                         veda_core::types::IndexType::RaBitQExtRerank
                     }

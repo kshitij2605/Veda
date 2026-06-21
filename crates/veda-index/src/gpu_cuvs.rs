@@ -121,6 +121,15 @@ impl CagraIndex {
     }
 }
 
+/// Whether this binary was compiled with the `gpu_cuvs` feature, i.e.
+/// whether the CAGRA GPU index can actually build and search. Callers
+/// (e.g. the gateway's create-collection validation) use this to reject
+/// a `cagra` index request up-front with a clear error instead of
+/// accepting it and silently producing an unsearchable collection.
+pub const fn gpu_cuvs_available() -> bool {
+    cfg!(feature = "gpu_cuvs")
+}
+
 #[allow(dead_code)]
 fn feature_off_error(op: &str) -> VedaError {
     VedaError::Index(format!(
