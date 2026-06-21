@@ -1,12 +1,12 @@
 # Multimodal & Cross-Modal Search
 
-Veda is multimodal-native: text, images, audio, video, and documents are first-class, not bolted on. The sharpest expression of that is a **unified omni embedder** — one model that projects all modalities into a *single* vector space, so a text query can retrieve audio, video, and image records directly (and vice versa).
+Veda is multimodal-native: text, images, audio, video, and documents are first-class. The new capability here is that **audio and video are now fully wired through the pipeline** — embed them directly, upload-and-embed them into a collection, and retrieve them cross-modally — so they're no longer second-class next to text and image. Veda adds the audio/video arms of `/v1/embed`, modality-aware request routing, and the `/ingest-media` upload route; the embedding vectors themselves are produced by whatever model you point Veda at.
 
-## The unified omni embedder
+Cross-modal retrieval (a text query returning audio/video/image records) works best with a **unified embedding model** — one model that maps every modality into the *same* vector space, so vectors from different modalities are directly comparable. Veda ships a preset for `jina-embeddings-v5-omni-small`, an off-the-shelf open model you run as a sidecar, which does exactly that.
 
-`jina-embeddings-v5-omni-small` is a single model that accepts **text, image, audio, and video** and projects all of them into the **same 1024-d cosine space**. With one encoder behind everything, there's no per-modality model juggling and — crucially — vectors from different modalities are **directly comparable**, which is what makes true cross-modal retrieval work.
+## A unified cross-modal space
 
-You opt into the unified space by pointing **both** the text and the multimodal embedding config at the same omni sidecar:
+`jina-embeddings-v5-omni-small` embeds **text, image, audio, and video** into the **same 1024-d cosine space**, so there's no per-modality model juggling and vectors across modalities are directly comparable. It's a third-party model — Veda doesn't train it; it registers it as a preset and routes each modality's request to it. Opt into the unified space by pointing **both** the text and the multimodal embedding config at the same omni sidecar:
 
 ```sh
 export EMBEDDING_ENDPOINT=http://localhost:8001

@@ -33,7 +33,7 @@ export const FEATURES: Feature[] = [
     accent: 'var(--color-node-2)',
     title: 'Multimodal-native pipeline',
     blurb:
-      'Upload a PDF, image, audio, or video — Veda parses it, chunks the text, and embeds every modality (optionally through one unified omni model, so a text query retrieves audio, video, and images from a single cross-modal space). Vectors, metadata, and blobs stored together — no external services to stitch.',
+      'Upload a PDF, image, audio, or video — Veda parses it, chunks the text, and routes every modality to its embedder; point it at one unified omni model and a text query retrieves audio, video, and images from a single cross-modal space. Vectors, metadata, and blobs stored together — no external services to stitch.',
   },
   {
     icon: Cpu,
