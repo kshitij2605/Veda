@@ -2,8 +2,7 @@ use std::collections::HashSet;
 
 use rand::Rng;
 
-use crate::distance::compute_distance;
-use crate::hnsw::distance_provider::RawVectorsProvider;
+use crate::hnsw::distance_provider::{DistanceProvider, RawVectorsProvider};
 use crate::hnsw::graph::HnswGraph;
 use crate::hnsw::searcher::HnswSearcher;
 use veda_core::types::DistanceMetric;
@@ -23,9 +22,94 @@ impl HnswBuilder {
         level.min(max_level_cap)
     }
 
+    /// Build the distance provider over the corpus, selecting the
+    /// normalized-dot fast path for Cosine indexes (matches the search path).
+    fn provider(
+        vectors: &[Vec<f32>],
+        metric: DistanceMetric,
+        normalized: bool,
+    ) -> RawVectorsProvider<'_> {
+        if normalized {
+            RawVectorsProvider::new_normalized_cosine(vectors)
+        } else {
+            RawVectorsProvider::new(vectors, metric)
+        }
+    }
+
+    /// Distance between two stored vectors by id, via the same metric /
+    /// normalized fast path the search uses.
+    fn dist_ids(dp: &dyn DistanceProvider, vectors: &[Vec<f32>], a: u32, b: u32) -> f32 {
+        dp.distance(&vectors[a as usize], b)
+    }
+
+    /// SELECT-NEIGHBORS-HEURISTIC (Malkov & Yashunin, Algorithm 4).
+    ///
+    /// Given a `base` node and `candidates` (id, distance-to-base) — which
+    /// need NOT be pre-sorted — greedily pick up to `m` diversified
+    /// neighbours: a candidate `c` is accepted only if it is closer to
+    /// `base` than to every already-selected neighbour. This prunes
+    /// redundant edges that all point into the same direction, yielding a
+    /// graph with better navigability (higher recall) and shorter search
+    /// paths (fewer distance comps / hops) than plain nearest-`m`.
+    fn select_neighbors_heuristic(
+        base: u32,
+        candidates: &[(u32, f32)],
+        m: usize,
+        dp: &dyn DistanceProvider,
+        vectors: &[Vec<f32>],
+    ) -> Vec<u32> {
+        // Work over candidates sorted nearest-first to the base.
+        let mut sorted: Vec<(u32, f32)> = candidates
+            .iter()
+            .copied()
+            .filter(|(c, _)| *c != base)
+            .collect();
+        sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut selected: Vec<u32> = Vec::with_capacity(m);
+        let mut pruned: Vec<u32> = Vec::new();
+        for (cand, dist_to_base) in &sorted {
+            if selected.len() >= m {
+                break;
+            }
+            // Accept `cand` only if it is closer to `base` than to any
+            // already-selected neighbour (the diversification test).
+            let mut good = true;
+            for &s in &selected {
+                let dist_to_sel = Self::dist_ids(dp, vectors, *cand, s);
+                if dist_to_sel < *dist_to_base {
+                    good = false;
+                    break;
+                }
+            }
+            if good {
+                selected.push(*cand);
+            } else {
+                pruned.push(*cand);
+            }
+        }
+
+        // keepPrunedConnections: if the diversity filter left us short of `m`,
+        // backfill with the closest pruned candidates (they were already
+        // distance-sorted). Keeps node degree near `m` so navigability /
+        // recall don't collapse on dense clusters where many candidates fail
+        // the diversity test.
+        if selected.len() < m {
+            for cand in pruned {
+                if selected.len() >= m {
+                    break;
+                }
+                selected.push(cand);
+            }
+        }
+        selected
+    }
+
     /// Insert a single vector into the HNSW graph.
     ///
-    /// Implements Algorithm 1 (INSERT) from the Malkov & Yashunin paper.
+    /// Implements Algorithm 1 (INSERT) from the Malkov & Yashunin paper,
+    /// using Algorithm 4 (SELECT-NEIGHBORS-HEURISTIC) for both the initial
+    /// neighbour selection and the back-link pruning.
     #[allow(clippy::too_many_arguments)]
     pub fn insert(
         id: u32,
@@ -33,6 +117,7 @@ impl HnswBuilder {
         graph: &mut HnswGraph,
         vectors: &[Vec<f32>],
         metric: DistanceMetric,
+        normalized: bool,
         m: usize,
         m_max0: usize,
         ef_construction: usize,
@@ -55,8 +140,8 @@ impl HnswBuilder {
 
         let current_max_level = graph.max_level();
         let mut ep_id = ep;
-        let dp = RawVectorsProvider::new(vectors, metric);
-        let mut ep_dist = compute_distance(vector, &vectors[ep_id as usize], metric);
+        let dp = Self::provider(vectors, metric, normalized);
+        let mut ep_dist = dp.distance(vector, ep_id);
 
         // Phase 1: Greedily traverse from the top level down to new_level + 1.
         // At each of these upper layers, we just find the single nearest neighbor.
@@ -87,14 +172,11 @@ impl HnswBuilder {
                 &deleted,
             );
 
-            // Select the M nearest neighbors from candidates.
             let max_connections = if layer == 0 { m_max0 } else { m };
-            let neighbors: Vec<u32> = candidates
-                .iter()
-                .filter(|(cid, _)| *cid != id)
-                .take(max_connections)
-                .map(|(cid, _)| *cid)
-                .collect();
+
+            // Algorithm 4: diversified neighbour selection over the candidate set.
+            let neighbors =
+                Self::select_neighbors_heuristic(id, &candidates, max_connections, &dp, vectors);
 
             // Set bidirectional connections.
             graph.set_neighbors(id, layer, neighbors.clone());
@@ -102,25 +184,26 @@ impl HnswBuilder {
             for &neighbor_id in &neighbors {
                 // Add the new node as a neighbor of each selected neighbor.
                 let mut n_neighbors: Vec<u32> = graph.get_neighbors(neighbor_id, layer).to_vec();
-                n_neighbors.push(id);
+                if !n_neighbors.contains(&id) {
+                    n_neighbors.push(id);
+                }
 
-                // If the neighbor now has too many connections, prune.
+                // If the neighbor now has too many connections, prune with the
+                // same diversifying heuristic (Algorithm 4) rather than a plain
+                // nearest-`max_conn` truncation.
                 let max_conn = if layer == 0 { m_max0 } else { m };
                 if n_neighbors.len() > max_conn {
-                    // Prune: keep only the max_conn nearest to the neighbor.
-                    let neighbor_vec = &vectors[neighbor_id as usize];
-                    let mut scored: Vec<(u32, f32)> = n_neighbors
+                    let scored: Vec<(u32, f32)> = n_neighbors
                         .iter()
-                        .map(|&nid| {
-                            let dist =
-                                compute_distance(neighbor_vec, &vectors[nid as usize], metric);
-                            (nid, dist)
-                        })
+                        .map(|&nid| (nid, Self::dist_ids(&dp, vectors, neighbor_id, nid)))
                         .collect();
-                    scored
-                        .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-                    scored.truncate(max_conn);
-                    n_neighbors = scored.into_iter().map(|(nid, _)| nid).collect();
+                    n_neighbors = Self::select_neighbors_heuristic(
+                        neighbor_id,
+                        &scored,
+                        max_conn,
+                        &dp,
+                        vectors,
+                    );
                 }
 
                 graph.set_neighbors(neighbor_id, layer, n_neighbors);

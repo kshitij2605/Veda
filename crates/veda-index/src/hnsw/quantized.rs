@@ -114,6 +114,11 @@ impl VectorIndex for QuantizedHnswIndex {
                 &mut self.graph,
                 &owned,
                 self.metric,
+                // `owned` holds raw (un-normalized) vectors here, so the
+                // normalized-cosine fast path must stay off — the builder
+                // would otherwise treat raw vectors as unit-norm. The
+                // diversified neighbour selection (Algorithm 4) still applies.
+                false,
                 self.m,
                 self.m_max0,
                 self.ef_construction,
