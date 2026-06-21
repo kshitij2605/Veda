@@ -18,6 +18,12 @@ use super::records::rebuild_executors;
 use super::state::AppState;
 use crate::tenant::{self, Tenant};
 
+/// After a bulk seal, if a shard still holds more than this many sealed
+/// segments (after the capped `compact_if_needed` pass), fully consolidate it
+/// with `force_merge_all`. Keeps a bulk load from leaving the collection
+/// permanently fragmented across the cross-segment merge.
+const FRAGMENTATION_FORCE_MERGE_THRESHOLD: usize = 8;
+
 // ── Request / Response types ─────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -411,6 +417,15 @@ pub async fn embed_insert(
                 Err(e) => {
                     tracing::warn!(error = %e, "compaction failed");
                 }
+            }
+            // `compact_if_needed` caps each pass at max_merge_segments (10), so a
+            // large bulk load can leave the shard fragmented into many sealed
+            // segments — which degrades the cross-segment merge. Once over the
+            // threshold, fully consolidate so a single ANN graph serves the shard.
+            if sm.sealed_segments().len() > FRAGMENTATION_FORCE_MERGE_THRESHOLD
+                && let Err(e) = sm.force_merge_all()
+            {
+                tracing::warn!(error = %e, "post-bulk force-merge failed");
             }
             metrics::gauge!(m::COMPACTION_IN_PROGRESS, "collection" => name.clone()).set(0.0);
         }
