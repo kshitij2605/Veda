@@ -4,15 +4,15 @@ Veda's AIOps layer is built **inside the database**, on the primitives Veda alre
 
 This page is the single overview. The deep-dive pages — [Ops Advisor](/docs/ops-advisor), [Log Insights](/docs/log-insights), [Node Resource Signals](/docs/resource-signals), [Service Reliability](/docs/service-reliability), [APM & Performance](/docs/apm-observability), and [RAG & AIOps Intelligence](/docs/rag-aiops) — carry the per-area detail.
 
-## The competitive thesis
+## Why it's semantic
 
-Elastic's AIOps is **statistical and template-based over text**: log-rate analysis bucketizes by message *templates*, anomaly detection runs population/time-series statistics, and the "explain a spike" feature counts term frequencies. **Veda's AIOps is semantic and embedding-based over every signal it owns** — logs, traces, queries, resources, retrieval quality, and incidents — in *one* engine. Because Veda owns the embedder, the log categorizer, the incident correlator, the cross-signal RCA bundle, *and* the agent, it answers questions a statistical engine can only approximate:
+Most AIOps is statistical and template-based over text: log-rate analysis bucketizes by message *template*, anomaly detection runs time-series statistics, and "explain a spike" counts term frequencies. **Veda's AIOps is semantic and embedding-based over every signal it owns** — logs, traces, queries, resources, retrieval quality, and incidents — in *one* engine. Because Veda owns the embedder, the log categorizer, the incident correlator, the cross-signal RCA bundle, *and* the agent, it answers questions a purely statistical engine can only approximate:
 
 - spike attribution names the **meaning-cluster** driving a spike ("*this kind of failure* rose"), not just which template's count went up — and can say a failure mode **is new**;
 - incidents **cluster by similarity** and flag **novelty** ("this pattern is unprecedented") by cosine distance to a history of past incidents, not by string match;
 - root-cause drafts are **grounded in Veda's own RAG** — the triage agent reasons over a cross-signal bundle (logs + queries + traces + resources + incident) joined locally, because Veda holds every one of those signals.
 
-A text-search engine that doesn't own the embeddings or the agent can't faithfully score grounding; a metrics store that doesn't own an embedder can't semantically cluster incidents. Veda can, because it *is* the whole pipeline.
+Faithfully scoring grounding needs the embeddings and the agent; semantically clustering incidents needs the embedder. Veda has both, because it *is* the whole pipeline.
 
 ## The Ops Advisor engine
 
@@ -149,16 +149,16 @@ Rule thresholds, alert channels, SLO/probe defs, the event store, and the SLO co
 | [APM & Performance](/docs/apm-observability) | Tracing, profiling, GenAI-semconv + cost, slow-query correlation, the index advisor |
 | [RAG & AIOps Intelligence](/docs/rag-aiops) | Citations + faithfulness, quality SLOs, eval harness, agent memory, streaming, incident correlation, forecasting, the RCA bundle |
 
-## Vs Elastic AIOps
+## Capabilities at a glance
 
-| Capability | Elastic AIOps | Veda |
-|---|---|---|
-| Anomaly detection | statistical | EWMA/σ over 7 series |
-| Log categorization | template-based | **semantic** — groups by *meaning*, not template |
-| Forecasting | ✓ | least-squares ETA + R² confidence guard |
-| Correlation / RCA | ✓ | **cross-signal bundle** joined locally (logs+queries+traces+resources+incident) |
-| AI assistant | ✓ | `veda-ops` triage agent, grounded in Veda's own RAG |
-| Change-point detection | ✓ | two-window level/trend shifts |
-| Spike attribution | statistical (term frequency) | **semantic** — names the *meaning-cluster*, flags `is_new` |
-| Incident dedup | ✓ | **semantic clustering** — collapses differently-worded events |
-| Incident novelty | — | **embedding novelty** (`1 − max_cosine_to_history`) — flags unprecedented patterns |
+| Capability | How Veda does it |
+|---|---|
+| Anomaly detection | EWMA/σ over 7 series |
+| Log categorization | **semantic** — groups by *meaning*, not template |
+| Forecasting | least-squares ETA + R² confidence guard |
+| Correlation / RCA | **cross-signal bundle** joined locally (logs + queries + traces + resources + incident) |
+| AI assistant | `veda-ops` triage agent, grounded in Veda's own RAG |
+| Change-point detection | two-window level / trend shifts |
+| Spike attribution | **semantic** — names the *meaning-cluster*, flags `is_new` |
+| Incident dedup | **semantic clustering** — collapses differently-worded events |
+| Incident novelty | **embedding novelty** (`1 − max_cosine_to_history`) — flags unprecedented patterns |

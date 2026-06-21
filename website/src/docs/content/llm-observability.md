@@ -10,7 +10,7 @@ LLM apps re-ask the same thing constantly — paraphrased, re-worded, but *meani
 
 Enabled via the `cache` agent flag. Before a run, the executor **embeds the prompt** and **vector-searches a per-tenant `_llm_cache` collection** for a near-duplicate:
 
-- on a **hit** (cosine **≥ 0.97**) it returns the cached response **without calling the LLM** — the response carries `cache_hit: true` and **`steps` is 0** (no reasoning, no tool calls, no model latency, no cost);
+- on a **hit** (cosine **≥ 0.97**) it returns the cached response **without calling the LLM** — the response carries `cache_hit: true` and **`steps` is 0** (no reasoning, no tool calls, no model latency, no cost). In a live test a repeated prompt came back **~2× faster with zero LLM tokens**;
 - on a **miss** it runs the agent normally and **stores** the `{prompt, response}` (embedded) back into `_llm_cache` for next time.
 
 The threshold is deliberately high (0.97) so only genuinely equivalent prompts collapse — a "related but different" question still runs. `veda_llm_cache_hits_total` / `veda_llm_cache_misses_total` make the hit-rate (and the spend you avoided) observable. The cache *is* a collection, the lookup *is* a search.

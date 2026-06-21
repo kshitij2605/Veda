@@ -37,8 +37,9 @@ export function Hero() {
           />
         </h1>
         <p className="mt-7 max-w-xl text-[18px] leading-relaxed text-[var(--color-text-muted)]">
-          Upload a PDF, image, or video and Veda handles the whole pipeline — OCR, chunking,
-          modality-routed embeddings, indexing, and fused search — in a single pure-Rust engine.
+          Drop in any document, image, audio, or video — Veda runs the whole pipeline (OCR,
+          chunking, modality-routed embeddings, indexing, fused search) and makes every modality
+          searchable in one cross-modal space, on a single pure-Rust engine.
         </p>
         <div className="mt-9 flex flex-wrap items-center gap-3">
           <Button

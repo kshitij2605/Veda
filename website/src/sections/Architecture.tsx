@@ -34,7 +34,8 @@ export function Architecture() {
             Three services. That's it.
           </h3>
           <p className="mt-2 text-[14px] leading-relaxed text-[var(--color-text-muted)]">
-            Milvus needs etcd + Kafka/Pulsar + MinIO before it stores a single vector. Veda needs three:
+            No external coordination service, message broker, or metadata store to provision —
+            the whole engine runs on three:
           </p>
           <ul className="mt-5 space-y-3.5">
             {SERVICES.map(([name, desc]) => (

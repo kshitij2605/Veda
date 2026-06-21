@@ -1,6 +1,6 @@
 # Web Connectors & Agentic Web Search
 
-Data-source connectors are one of Elastic's headline integration stories — 30-plus SaaS connectors (SharePoint, Confluence, Salesforce, …) that pull external content into the index. Most of them phone home to a third-party SaaS, and chasing that catalog is an out-of-lane race for a vector database. Veda's in-lane answer is the one source that actually matters for RAG and that nobody self-hosts well: **the open web**.
+The one external source that matters most for RAG — and that nobody self-hosts well — is **the open web**. Rather than a catalog of SaaS connectors that phone home to third-party services, Veda's answer is a web-native RAG stack you run entirely on your own infrastructure.
 
 This is a web-native RAG stack built entirely on **open-source, self-hosted services** — `crawl4ai` for clean page-to-markdown crawling and `searxng` for meta-search — wired into Veda so you can (1) **ingest** live web pages into a collection, (2) let an agent **search → fetch → ground** over the open web, and (3) **manage** web data sources from Niriksha. No external API, no data leaving your trust boundary. Everything reuses an existing primitive (the chunk → embed → insert path, the agent [tool catalog](/docs/agents-mcp#the-tool-catalog), saved-object persistence) and is **opt-in** — both services are off by default (endpoints unset → a clean `503`, no behavior change), and the web agent tools are excluded from the default agent.
 

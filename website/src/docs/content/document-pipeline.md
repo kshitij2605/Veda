@@ -1,6 +1,6 @@
 # Document pipeline
 
-Upload a document and Veda handles the entire pipeline — OCR, chunking, embedding, and insertion into your collection. Document parsing is powered by FlashParse, which converts PDFs, DOCX, PPTX, images, and other formats into structured markdown with extracted images.
+Upload a document and Veda handles the entire pipeline — OCR, chunking, embedding, and insertion into your collection. Document parsing is powered by FlashParse, which converts PDFs, Office documents (DOCX, PPTX, XLSX), images, and scans into structured markdown — running layout analysis to extract tables, figures, and images, not just flat text.
 
 > **Pipeline:** upload → FlashParse OCR → markdown + images → chunk (configurable strategy) → embed (optional) → insert into collection
 
@@ -29,7 +29,7 @@ To use an external VLM instead, point these at any OpenAI-compatible API:
 
 ## Supported formats
 
-PDF, DOCX, PPTX, images (PNG, JPG, TIFF, BMP), and other formats supported by FlashParse.
+PDF, Office documents (DOCX, PPTX, XLSX), images (PNG, JPG, TIFF, BMP), and scans. GLM-OCR plus PP-DocLayoutV3 layout analysis recover tables (as clean markdown tables), figures, and extracted images — so a spreadsheet, a slide deck, or a scanned report all become searchable in one call.
 
 ## Chunking strategies
 
