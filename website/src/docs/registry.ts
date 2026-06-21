@@ -4,6 +4,7 @@ import installation from './content/installation.md?raw'
 import collections from './content/collections.md?raw'
 import indexes from './content/indexes.md?raw'
 import search from './content/search.md?raw'
+import multimodal from './content/multimodal.md?raw'
 import documentPipeline from './content/document-pipeline.md?raw'
 import agentsMcp from './content/agents-mcp.md?raw'
 import webConnectors from './content/web-connectors.md?raw'
@@ -45,6 +46,7 @@ export const DOCS: DocGroup[] = [
       { slug: 'collections', title: 'Collections & fields', md: collections },
       { slug: 'indexes', title: 'Indexes', md: indexes },
       { slug: 'search', title: 'Search & fusion', md: search },
+      { slug: 'multimodal', title: 'Multimodal & cross-modal', md: multimodal },
       { slug: 'document-pipeline', title: 'Document pipeline', md: documentPipeline },
       { slug: 'agents-mcp', title: 'Agents & MCP', md: agentsMcp },
       { slug: 'web-connectors', title: 'Web Connectors', md: webConnectors },

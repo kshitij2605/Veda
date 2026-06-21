@@ -72,18 +72,20 @@ This brings up **`crawl4ai`** (`unclecode/crawl4ai`, page → clean markdown) an
 | Variable | Default | Notes |
 |---|---|---|
 | `VEDA_CRAWL4AI_ENDPOINT` | *(empty)* | crawl4ai base URL; unset → `ingest-url` / `fetch_url` / connector `run` return `503` |
+| `VEDA_CRAWL4AI_TOKEN` | *(empty)* | Bearer for crawl4ai. The container binds loopback-only unless this is set; **you must set it** for Veda to reach crawl4ai |
 | `VEDA_SEARXNG_ENDPOINT` | *(empty)* | searxng base URL; unset → `web_search` is unavailable |
+| `VEDA_WEB_ALLOWLIST` / `VEDA_WEB_BLOCKLIST` | *(empty)* | Host-suffix allow/block lists for the SSRF guard |
+| `VEDA_WEB_ALLOW_PRIVATE` | `0` | Escape hatch to permit private/internal addresses (default denied) |
+| `VEDA_WEB_MAX_PAGES` | `50` | Server cap on deep-crawl `max_pages` |
 
 ## Security & trust boundary
 
-`ingest-url` and the `fetch_url` tool fetch **arbitrary user-provided URLs** — a classic SSRF surface (internal addresses, cloud metadata endpoints). Today that is mitigated by the endpoints being **admin/authenticated and tenant-scoped** within a **self-hosted trust boundary**: the operator controls who can call them. A URL allowlist / private-range denylist is a sensible follow-up before exposing these to lower-trust callers.
+`ingest-url`, the connector `run` path, and the `fetch_url` tool fetch **arbitrary user-provided URLs** — a classic SSRF surface. Veda ships a **default-secure SSRF guard**: every user-provided URL is run through a guard that **resolves the host and checks the resolved IP** (DNS-rebinding-safe), rejecting **loopback, RFC1918 private ranges, link-local (including the `169.254.169.254` cloud-metadata address), and IPv6 ULA** by default. A blocked URL returns **`403 URL_BLOCKED_PRIVATE`** (or a `{blocked: true}` tool result for `fetch_url`) **without crawling**. It is tunable via host-suffix `VEDA_WEB_ALLOWLIST` / `VEDA_WEB_BLOCKLIST` and a `VEDA_WEB_ALLOW_PRIVATE=1` escape hatch, and deep-crawl `max_pages` is clamped to a server cap (`VEDA_WEB_MAX_PAGES`, default 50). The endpoints are also admin/authenticated and tenant-scoped.
 
 **Licensing.** `crawl4ai` is Apache-2.0 (fully compatible). `searxng` is AGPL-3.0, but Veda only **HTTP-clients a separately-run instance** over its JSON API — AGPL's network-copyleft binds modifications to searxng *itself*, not a client that calls its API. Veda ships a client, not a fork, and the service stays opt-in and self-hosted (you run the upstream image unmodified), so there's no contamination of Veda's Apache-2.0 codebase.
 
 ## Current limitations
 
-- **SSRF — allowlist is a follow-up.** Arbitrary-URL fetch is currently gated by the admin/authenticated, tenant-scoped, self-hosted trust boundary; a URL allowlist / private-range denylist is the planned hardening.
 - **Full SaaS connectors are out of scope by design.** This is web-native RAG, not a SharePoint/Confluence/Salesforce connector catalog — depth on the open web over breadth of proprietary SaaS sources.
-- **Deep crawl is bounded by `max_pages`** — it follows in-domain links only, not a full-site spider, to bound cost.
+- **Deep crawl uses per-URL fetch today.** `deep_crawl` / `max_pages` are accepted and `max_pages` is capped; recursive in-domain crawling via crawl4ai's async job endpoint is a documented follow-up.
 - **searxng must be configured for JSON output** (enabled via the mounted `settings.yml` in the compose profile).
-- **Live validation requires `--profile web`** — the mock tests cover the wiring and the ingestion path, but the end-to-end run against the real crawl4ai/searxng images is not run in CI (the crawl4ai image is large).

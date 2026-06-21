@@ -6,7 +6,7 @@
 
 Most vector databases just store vectors: you bring your own embedding services, OCR pipeline, and chunking glue. Veda handles the whole pipeline natively, in a single pure-Rust engine.
 
-- **Multimodal native** — first-class support for text, image, audio, video, and PDF embeddings, with automatic modality-based model routing.
+- **Multimodal native** — first-class support for text, image, audio, video, and PDF embeddings, with automatic modality-based model routing — or a single [unified omni embedder](/docs/multimodal) that puts all modalities in one cross-modal space, so a text query retrieves audio, video, and images directly.
 - **Nine index algorithms** — HNSW, DiskANN (Vamana graph), IVF-PQ, Flat, RaBitQ, Sq4 + Sq8 scalar quantization, a suffix array for exact text patterns, and scalar indexes for metadata filtering.
 - **SIMD-optimized distances** — SimSIMD kernels (AVX-512, ARM NEON, SVE) on by default, with an AVX2/scalar fallback, across 6 metrics (Cosine, Euclidean, DotProduct, Hamming, Manhattan, Jaccard).
 - **Multi-vector fusion** — RRF, WeightedSum, and Intersection strategies for cross-modal retrieval in a single API call.
@@ -24,7 +24,7 @@ Veda also ships a distributed data plane (per-shard append-only logs with quorum
 ## How these docs are organized
 
 - **Getting started** — [Quick start](/docs/quickstart) gets a cluster running and serving queries in minutes; [Installation & config](/docs/installation) covers building from source, cluster modes, and configuration.
-- **Core concepts** — [Collections & fields](/docs/collections), [Indexes](/docs/indexes), [Search & fusion](/docs/search), the [Document pipeline](/docs/document-pipeline), [Agents & MCP](/docs/agents-mcp), and [Web Connectors](/docs/web-connectors).
+- **Core concepts** — [Collections & fields](/docs/collections), [Indexes](/docs/indexes), [Search & fusion](/docs/search), [Multimodal & cross-modal](/docs/multimodal), the [Document pipeline](/docs/document-pipeline), [Agents & MCP](/docs/agents-mcp), and [Web Connectors](/docs/web-connectors).
 - **Reference** — the [REST API](/docs/rest-api), the [Python SDK](/docs/python-sdk), [Observability](/docs/observability), [APM & Performance](/docs/apm-observability), [LLM Observability](/docs/llm-observability), [AIOps](/docs/aiops) (and its deep dives: the [Ops Advisor](/docs/ops-advisor), [Log Insights](/docs/log-insights), [Node Resource Signals](/docs/resource-signals), [Service Reliability](/docs/service-reliability), and [RAG & AIOps Intelligence](/docs/rag-aiops)).
 
 ## License
