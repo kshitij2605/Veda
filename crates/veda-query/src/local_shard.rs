@@ -425,6 +425,7 @@ impl ShardSearcher for LocalShardSearcher {
                     filter_expr: request.filter_expr.clone(),
                     truncate_to: None, // already truncated
                     read_ts: request.read_ts,
+                    ef_search: request.ef_search,
                 };
                 let results = search_sealed_segment_ref(reader, mrl_index.as_ref(), &trunc_req)?;
                 all_results.extend(results);
@@ -928,9 +929,20 @@ fn search_sealed_segment_ref(
         (None, base) => base,
     };
 
+    // Oversample per segment: hand the cross-segment merge up to `fetch_k`
+    // candidates (not just `request.k`). Each segment's ANN search is only
+    // *approximate* (HNSW explores ~ef nodes), so its true top-`k` can omit
+    // global neighbours that rank just outside the local top-`k`. Returning
+    // the wider working set lets the (correct) merge re-rank + truncate to
+    // `request.k` without losing them. Exact indexes (Flat/SQ8) just return
+    // their top-`fetch_k` harmlessly. HNSW's cost is unchanged (ef is fixed);
+    // only the returned count widens.
+    let fetch_k = request
+        .k
+        .max(request.ef_search.unwrap_or(crate::search::DEFAULT_EF_SEARCH));
     let raw_results = match allowed {
-        Some(bm) => index.search_filtered(&request.query_vector, request.k, &bm)?,
-        None => index.search(&request.query_vector, request.k)?,
+        Some(bm) => index.search_filtered(&request.query_vector, fetch_k, &bm)?,
+        None => index.search(&request.query_vector, fetch_k)?,
     };
 
     let results: Vec<ScoredRecord> = raw_results

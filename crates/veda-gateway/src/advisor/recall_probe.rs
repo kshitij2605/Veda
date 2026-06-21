@@ -247,6 +247,7 @@ pub async fn probe_recall(
                 metric,
                 filter: None,
                 filter_expr: None,
+                ef_search: None,
                 truncate_to: None,
                 read_ts: None,
             };

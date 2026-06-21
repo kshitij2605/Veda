@@ -344,6 +344,7 @@ async fn probe_search(state: &AppState, collection: &str) -> Result<(), String> 
         metric,
         filter: None,
         filter_expr: None,
+        ef_search: None,
         truncate_to: None,
         read_ts: None,
     };

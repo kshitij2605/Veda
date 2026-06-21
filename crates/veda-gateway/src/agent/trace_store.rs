@@ -405,6 +405,7 @@ pub async fn search_traces(
         metric: DistanceMetric::Cosine,
         filter: None,
         filter_expr: None,
+        ef_search: None,
         truncate_to: None,
         read_ts: None,
     };
@@ -821,6 +822,7 @@ mod tests {
             metric: DistanceMetric::Cosine,
             filter: None,
             filter_expr: None,
+            ef_search: None,
             truncate_to: None,
             read_ts: None,
         };
@@ -986,6 +988,7 @@ mod tests {
             metric: DistanceMetric::Cosine,
             filter: None,
             filter_expr: None,
+            ef_search: None,
             truncate_to: None,
             read_ts: None,
         };

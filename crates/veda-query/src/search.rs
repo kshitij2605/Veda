@@ -39,7 +39,19 @@ pub struct VectorSearchRequest {
     /// owner predicate (RLS) at the AST level without string round-tripping.
     #[serde(skip)]
     pub filter_expr: Option<FilterExpr>,
+    /// Per-segment candidate budget (HNSW `ef` / IVF `nprobe`-equivalent).
+    /// Each sealed-segment ANN search returns up to `max(k, ef_search)`
+    /// candidates to the cross-segment merge so true global neighbours are
+    /// not dropped by per-segment `k`-truncation before the merge re-ranks.
+    /// `None` falls back to [`DEFAULT_EF_SEARCH`].
+    #[serde(default)]
+    pub ef_search: Option<usize>,
 }
+
+/// Default per-segment candidate budget when a request does not set
+/// `ef_search`. Matches the HNSW index default `ef_search` so per-segment
+/// search returns its full working set rather than a `k`-truncated slice.
+pub const DEFAULT_EF_SEARCH: usize = 200;
 
 /// A search request for a single sparse vector field.
 #[derive(Debug, Clone)]
