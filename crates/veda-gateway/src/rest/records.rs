@@ -1285,7 +1285,7 @@ pub async fn rebuild_executors(
             schema.clone(),
             shard_id,
             &collection_dir,
-            512 * 1024 * 1024,
+            crate::rest::collections::seal_threshold_bytes(),
         )
         .map_err(|e| {
             (

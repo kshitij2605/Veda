@@ -1150,7 +1150,7 @@ impl AppState {
                     schema.clone(),
                     shard_id,
                     &path,
-                    512 * 1024 * 1024,
+                    crate::rest::collections::seal_threshold_bytes(),
                 ) {
                     Ok(s) => s,
                     Err(e) => {
@@ -1171,7 +1171,7 @@ impl AppState {
                     schema.clone(),
                     shard_id,
                     &path,
-                    512 * 1024 * 1024,
+                    crate::rest::collections::seal_threshold_bytes(),
                 ) {
                     Ok(s) => s,
                     Err(e) => {
