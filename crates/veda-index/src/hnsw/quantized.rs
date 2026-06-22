@@ -36,6 +36,7 @@ use crate::hnsw::builder::HnswBuilder;
 use crate::hnsw::distance_provider::{DistanceProvider, QuantizedDistanceProvider};
 use crate::hnsw::graph::HnswGraph;
 use crate::hnsw::searcher::HnswSearcher;
+use crate::hnsw::slab::VectorSlab;
 use crate::quantization::rabitq::RaBitQuantizer;
 use crate::traits::{SearchResult, VectorIndex};
 
@@ -104,7 +105,15 @@ impl VectorIndex for QuantizedHnswIndex {
         // 2. Build the HNSW graph using raw vectors (better edges).
         //    The builder uses RawVectorsProvider internally so this is
         //    just the existing path — we ditch the raw vectors after.
+        //    Pack the raw vectors into a contiguous slab so build-time
+        //    distance probes are cache-friendly too; the slab is dropped
+        //    once the graph + quantizer are built.
         self.graph = HnswGraph::new();
+        let mut slab = VectorSlab::new(owned[0].len());
+        slab.reserve(owned.len());
+        for v in &owned {
+            slab.push(v);
+        }
         let max_level_cap = 16;
         for (id, v) in owned.iter().enumerate() {
             let _ = max_level_cap; // future hyperparameter
@@ -112,7 +121,7 @@ impl VectorIndex for QuantizedHnswIndex {
                 id as u32,
                 v,
                 &mut self.graph,
-                &owned,
+                &slab,
                 self.metric,
                 // `owned` holds raw (un-normalized) vectors here, so the
                 // normalized-cosine fast path must stay off — the builder

@@ -5,6 +5,7 @@ use rand::Rng;
 use crate::hnsw::distance_provider::{DistanceProvider, RawVectorsProvider};
 use crate::hnsw::graph::HnswGraph;
 use crate::hnsw::searcher::HnswSearcher;
+use crate::hnsw::slab::VectorSlab;
 use veda_core::types::DistanceMetric;
 
 /// HNSW index builder — handles insertion of vectors into the graph.
@@ -25,7 +26,7 @@ impl HnswBuilder {
     /// Build the distance provider over the corpus, selecting the
     /// normalized-dot fast path for Cosine indexes (matches the search path).
     fn provider(
-        vectors: &[Vec<f32>],
+        vectors: &VectorSlab,
         metric: DistanceMetric,
         normalized: bool,
     ) -> RawVectorsProvider<'_> {
@@ -38,8 +39,8 @@ impl HnswBuilder {
 
     /// Distance between two stored vectors by id, via the same metric /
     /// normalized fast path the search uses.
-    fn dist_ids(dp: &dyn DistanceProvider, vectors: &[Vec<f32>], a: u32, b: u32) -> f32 {
-        dp.distance(&vectors[a as usize], b)
+    fn dist_ids(dp: &dyn DistanceProvider, vectors: &VectorSlab, a: u32, b: u32) -> f32 {
+        dp.distance(vectors.row(a as usize), b)
     }
 
     /// SELECT-NEIGHBORS-HEURISTIC (Malkov & Yashunin, Algorithm 4).
@@ -56,7 +57,7 @@ impl HnswBuilder {
         candidates: &[(u32, f32)],
         m: usize,
         dp: &dyn DistanceProvider,
-        vectors: &[Vec<f32>],
+        vectors: &VectorSlab,
     ) -> Vec<u32> {
         // Work over candidates sorted nearest-first to the base.
         let mut sorted: Vec<(u32, f32)> = candidates
@@ -115,7 +116,7 @@ impl HnswBuilder {
         id: u32,
         vector: &[f32],
         graph: &mut HnswGraph,
-        vectors: &[Vec<f32>],
+        vectors: &VectorSlab,
         metric: DistanceMetric,
         normalized: bool,
         m: usize,
