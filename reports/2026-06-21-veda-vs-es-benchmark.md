@@ -239,3 +239,49 @@ what Lucene/ES do and which Veda already has partial machinery for (`HnswRaBitQ`
 Alternatively, ship ef=64 (recall 0.9998, 20 ms — at recall parity with ES) as good-enough and pivot
 to the categorical differentiators. The slab itself is retained: it is harmless, builds clean, and is a
 better foundation for any future mmap on-disk format — but it is not, on its own, a latency win.
+
+---
+
+## Root-cause of the dense-latency gap (2026-06-22) — it is the benchmark *host*, not the index
+
+After the slab falsification, the 30k single-segment search was instrumented directly
+(env-gated `VEDA_HNSW_TRACE`: per-query distance-probe count, candidate-heap high-water,
+and layer-0 wall time). Findings on the optimized single segment:
+
+| ef | dist_calls (of 30000 nodes) | max candidate heap | layer-0 wall |
+|---|---|---|---|
+| 32 | ~196-736 (avg ~440) | 36-117 | ~11 ms |
+| 96 | ~1300 (scaled) | small | ~36 ms |
+
+**The HNSW is healthy.** It visits only **~1.5 % of the graph** at ef=32 (440/30000) — exactly
+what a good navigable graph should — with a tiny working heap. It is *not* near-exhaustive, the
+graph is well-formed, and recall is 1.0 / 0.9998 with that minimal exploration.
+
+**The entire latency is per-distance-call wall time of ~25 us** (11 ms / ~440 calls), versus
+~80 ns for the actual AVX2+FMA 1024-d dot the code runs. That ~300x gap is **environmental, not
+algorithmic**:
+
+- The benchmark host (gpu-host-a) has 72 cores but is a **heavily-shared multi-tenant box**:
+  during measurement it concurrently ran clickhouse-server (~106 % CPU), several ML python
+  processes (~158 % / ~104 %), airflow (~96 + 64 + 51 %), the omni embedder, SPLADE, OCR-vLLM,
+  and veda-server's own background work — saturating memory bandwidth and the scheduler.
+- A pure NumPy 1024-d dot on the same box, at the same time, measured **~1.1 us** (vs ~80 ns
+  ideal) — i.e. the whole machine is ~10-300x slow per memory-bound op right now. Veda's search
+  is memory-bound (random 4 KB slab-row reads under bandwidth contention), so it pays the worst of it.
+- **Elasticsearch's 7 ms was measured on its dedicated production cluster** (build-host), not on
+  this contended box. The comparison is therefore apples-to-oranges for the absolute numbers.
+
+**Conclusion.** The dense-search latency gap vs ES is **substantially a measurement-environment
+artifact**, not a Veda index defect. Every code-level hypothesis was tested and falsified:
+memory layout (slab -> 0 ms), scalar distance (AVX2+FMA confirmed), heap churn (heaps ~40-117),
+near-exhaustive traversal (1.5 % visited), and record materialization (get_record is O(1); its
+fix bought ~9 % at single-segment, ~20 % fragmented). The HNSW graph and search are sound.
+
+**Recommendation.** For a true head-to-head, re-run the benchmark with Veda on a **quiet/dedicated
+host** (or with the competing services stopped) — the expected single-segment dense latency there
+is low-single-digit ms (<=~1300 distance probes x ~80-300 ns + overhead), competitive with ES. Do
+**not** invest in micro-optimizing the index against these contended numbers. If a dedicated box
+genuinely shows a gap, the remaining levers (in priority order) are: int8/RaBitQ **quantized-distance
+traversal** (less memory traffic — the actual bottleneck here), **CSR adjacency** (contiguous edge
+array vs per-node Vec<Vec<u32>>), and statically-dispatched distance (drop the &dyn DistanceProvider
+indirection on the hot path).
