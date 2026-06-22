@@ -16,9 +16,14 @@ copyright to your contributions**. (This is a CLA, not a DCO `Signed-off-by`.)
 | Tool | Minimum Version | Purpose |
 |---|---|---|
 | Rust | 1.96.0 (pinned via `rust-toolchain.toml` — `rustup` auto-selects it) | Core engine |
+| Protocol Buffers compiler (`protoc`) | 3.x+ | **Required** — the gRPC data-plane crates (`veda-query`, `veda-log`, `veda-coordinator`) compile `.proto` files at build time. Install via `apt-get install protobuf-compiler` / `dnf install protobuf-compiler` / `brew install protobuf`, or set `PROTOC=/path/to/protoc`. |
 | Node.js | 22+ | Niriksha dashboard |
 | Python | 3.9+ | Python SDK and tests |
 | Docker | 24+ | Container builds and integration tests |
+
+> **Note (proxied networks):** if `http_proxy`/`https_proxy` are set in your environment, also set
+> `no_proxy=localhost,127.0.0.1` — otherwise local calls to the running server (`localhost:6340`)
+> get routed through the proxy and return an empty-body `503`.
 
 ## Building
 
