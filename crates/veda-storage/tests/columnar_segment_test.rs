@@ -89,6 +89,42 @@ fn columnar_segment_round_trips_via_reader() {
 }
 
 #[test]
+fn get_record_id_matches_full_record_id_both_backends() {
+    // The query hot path only needs a candidate's UUID, not its whole
+    // record. `get_record_id` is the cheap accessor (an O(1) mmap slice
+    // on the columnar backend) and MUST return exactly the UUID that the
+    // heavy `get_record(..).id()` would, for every doc, on both storage
+    // backends.
+    for columnar in [true, false] {
+        let dir = TempDir::new().unwrap();
+        let schema = test_schema();
+        let mut w = if columnar {
+            SegmentWriter::create_columnar(dir.path(), &schema).unwrap()
+        } else {
+            SegmentWriter::create(dir.path(), &schema).unwrap()
+        };
+        let recs = [
+            mk_record("alpha", 9.99, 2024),
+            mk_record("ブラボー", 1.50, 2026),
+            mk_record("charlie", 0.0, 1999),
+        ];
+        let ids: Vec<_> = recs.iter().map(|r| r.id()).collect();
+        for r in &recs {
+            w.insert(r).unwrap();
+        }
+        w.seal().unwrap();
+
+        let r = SegmentReader::open(dir.path()).unwrap();
+        for (doc_id, expected) in ids.iter().enumerate() {
+            let cheap = r.get_record_id(doc_id as u32).unwrap();
+            let heavy = r.get_record(doc_id as u32).unwrap().id();
+            assert_eq!(cheap, *expected, "columnar={columnar} doc {doc_id}");
+            assert_eq!(cheap, heavy, "columnar={columnar} doc {doc_id}");
+        }
+    }
+}
+
+#[test]
 fn jsonl_default_still_works_after_columnar_landing() {
     // Sanity: the default `SegmentWriter::create` path is unchanged.
     // A segment built with it loads as Jsonl format and reads back

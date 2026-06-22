@@ -957,6 +957,48 @@ impl SegmentReader {
         self.multivec_readers.get(field).map(|r| r.iter())
     }
 
+    /// Resolve only the record UUID for `doc_id`, without materializing
+    /// the rest of the record.
+    ///
+    /// The query hot path fetches `ef` (≫ k) candidates per segment for
+    /// the cross-segment merge but needs nothing from each candidate
+    /// except its identity. [`Self::get_record`] would deserialize the
+    /// full scalar map and copy every vector field per candidate — tens
+    /// of milliseconds at `ef=96`. This skips all of that: the columnar
+    /// backend reads the UUID from a single O(1) mmap slice; the JSONL
+    /// backend parses only the `__record_id__` out of the line.
+    pub fn get_record_id(&self, doc_id: u32) -> Result<uuid::Uuid> {
+        if doc_id as u64 >= self.metadata.row_count {
+            return Err(VedaError::Storage(format!(
+                "doc_id {doc_id} out of range (row_count={})",
+                self.metadata.row_count
+            )));
+        }
+        match &self.stored_fields {
+            StoredFieldsBackend::Columnar(c) => c.record_id(doc_id).ok_or_else(|| {
+                VedaError::Storage(format!("columnar: doc_id {doc_id} has no __record_id__"))
+            }),
+            StoredFieldsBackend::Jsonl(j) => {
+                // JSONL has no per-field random access, so we still parse
+                // the line's scalar map — but skip the vector-field copies
+                // that dominate `get_record`'s cost. `__record_id__` is
+                // stored as a `FieldValue::String`, matching `get_record`.
+                let line = j.get_line_bytes(doc_id).ok_or_else(|| {
+                    VedaError::Storage(format!("missing JSONL line for doc_id {doc_id}"))
+                })?;
+                let scalar_data: HashMap<String, FieldValue> = serde_json::from_slice(line)?;
+                match scalar_data.get("__record_id__") {
+                    Some(FieldValue::String(s)) => s
+                        .parse()
+                        .map_err(|e| VedaError::Storage(format!("invalid record id: {e}"))),
+                    _ => Err(VedaError::Storage(
+                        "missing __record_id__ in stored data".into(),
+                    )),
+                }
+            }
+        }
+    }
+
     /// Reconstruct a full [`Record`] for the given doc_id from stored JSONL data.
     ///
     /// The record includes scalar fields, blob refs, and vector fields.
