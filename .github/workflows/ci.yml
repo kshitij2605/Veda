@@ -132,3 +132,25 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+
+  # Python SDK install + tests across the declared Python range. There was
+  # no Python job before, so two SDK ship-blockers reached main: an invalid
+  # `hatchling.backends` build-backend, and PEP 604 `X | None` annotations
+  # that raise at runtime on 3.9 (the declared floor AND the RHEL 9 system
+  # Python). 3.9 is the regression guard; 3.12 covers the recent end.
+  python-sdk:
+    name: python sdk (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install SDK + dev extras
+        run: pip install -e "sdk/python[dev]"
+      - name: Run SDK tests
+        run: cd sdk/python && python -m pytest -q
