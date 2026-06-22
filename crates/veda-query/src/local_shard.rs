@@ -487,10 +487,8 @@ impl ShardSearcher for LocalShardSearcher {
                 local.truncate(request.k);
                 for (doc_id, distance) in local {
                     let record_id = reader
-                        .get_record(doc_id)
-                        .ok()
-                        .map(|r| r.id())
-                        .unwrap_or_else(Uuid::new_v4);
+                        .get_record_id(doc_id)
+                        .unwrap_or_else(|_| Uuid::new_v4());
                     all_results.push(ScoredRecord {
                         id: record_id,
                         segment_id,
@@ -793,10 +791,8 @@ impl ShardSearcher for LocalShardSearcher {
             let segment_id = handle.metadata.id;
             for (doc_id, distance) in local {
                 let record_id = reader
-                    .get_record(doc_id)
-                    .ok()
-                    .map(|r| r.id())
-                    .unwrap_or_else(Uuid::new_v4);
+                    .get_record_id(doc_id)
+                    .unwrap_or_else(|_| Uuid::new_v4());
                 all_results.push(ScoredRecord {
                     id: record_id,
                     segment_id,
@@ -958,10 +954,8 @@ fn search_sealed_segment_ref(
         .into_iter()
         .map(|sr| {
             let record_id = reader
-                .get_record(sr.id)
-                .ok()
-                .map(|r| r.id())
-                .unwrap_or_else(Uuid::new_v4);
+                .get_record_id(sr.id)
+                .unwrap_or_else(|_| Uuid::new_v4());
             ScoredRecord {
                 id: record_id,
                 segment_id,
@@ -1082,10 +1076,8 @@ fn search_sealed_brute_truncated(
         .into_iter()
         .map(|(doc_id, distance)| {
             let record_id = reader
-                .get_record(doc_id)
-                .ok()
-                .map(|r| r.id())
-                .unwrap_or_else(Uuid::new_v4);
+                .get_record_id(doc_id)
+                .unwrap_or_else(|_| Uuid::new_v4());
             ScoredRecord {
                 id: record_id,
                 segment_id,
