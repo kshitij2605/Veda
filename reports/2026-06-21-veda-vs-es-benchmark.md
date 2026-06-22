@@ -285,3 +285,49 @@ genuinely shows a gap, the remaining levers (in priority order) are: int8/RaBitQ
 traversal** (less memory traffic — the actual bottleneck here), **CSR adjacency** (contiguous edge
 array vs per-node Vec<Vec<u32>>), and statically-dispatched distance (drop the &dyn DistanceProvider
 indirection on the hot path).
+
+---
+
+## Clean-host re-benchmark on mactrn01 (2026-06-22) — Veda is ~13x FASTER than ES on dense search
+
+The root-cause section above predicted that the dense-latency gap was host contention on
+iitgpu11 (a saturated shared box) and recommended re-running on a quiet/dedicated host. Done:
+the **identical binary** (`e3688da`) and the **identical 30k x 1024 data** were benchmarked on
+`mactrn01` (RHEL 9.3, 96 cores, load ~12, no co-tenant ClickHouse/airflow/ML jobs).
+
+**Single-segment (optimized), ann_search p50 — identical data, identical binary:**
+
+| ef | mactrn01 (quiet) | iitgpu11 (contended) | Elasticsearch |
+|---|---|---|---|
+| 96 (default) | **0.53 ms** | 36.6 ms | 7 ms |
+| 64 | **0.39 ms** | 20 ms | — |
+| 32 | **0.21 ms** | 11 ms | — |
+
+Fragmented (34 segments, pre-optimize) on mactrn01 was already **1.37 ms** at ef=96 vs iitgpu11's
+~33 ms — ~24x faster in the same state. Ingest was **1837 docs/s** on mactrn01 vs ~200 docs/s on
+iitgpu11 — ~8x.
+
+**Conclusion (definitive).** iitgpu11's 36 ms was ~99 % host contention. On fair hardware Veda's
+single-segment dense search is **0.53 ms — roughly 13x faster than Elasticsearch's 7 ms** at
+recall 1.0. Every code-level "fix" investigated earlier (slab, get_record, total_cmp, quantized
+traversal) was chasing a phantom; the HNSW was healthy all along (visits ~1.5 % of nodes). The
+"5x slower than ES" framing was purely a measurement-environment artifact. **No index optimization
+is warranted.** The standing recommendation is simply: do not benchmark on the shared iitgpu11 box.
+
+### Fresh-install test (mactrn01, as a brand-new user)
+
+This was also a clean-room install test on a host that had never built Veda. Findings:
+
+- **Toolchain auto-selection works**: `rustup` + `rust-toolchain.toml` pulled and used 1.96.0 with
+  no intervention. `gcc`/`cmake`/`node`/`docker` were already present.
+- **`protoc` is a missing, undocumented prerequisite.** A doc-following `cargo build` fails hard
+  (`could not find protoc`) in `veda-query` / `veda-log` / `veda-coordinator`. CONTRIBUTING.md's
+  Prerequisites listed Rust/npm/pip but **not** protobuf-compiler. Fixed in this cycle (added to
+  the prereq table); a future improvement is to vendor protoc (e.g. `protoc-bin-vendored`) so no
+  system install is needed — important for users without sudo.
+- **Build is fast and clean** once protoc is present: full `--release` engine in **1m 04s** on 96
+  cores, zero errors/warnings escalated.
+- **Corporate-proxy gotcha**: with `http_proxy`/`https_proxy` set (as on these hosts), calls to
+  `localhost:6340` get routed through the proxy and return an empty-body `503` — looks like a server
+  failure but isn't. Users must set `no_proxy=localhost,127.0.0.1` (or `curl --noproxy '*'` /
+  `requests` `trust_env=False`). Worth a one-line note in the quickstart.
