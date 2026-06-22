@@ -65,3 +65,36 @@ cargo test --release -p veda-index --test scale_benchmark -- --ignored --nocaptu
 - Re-run 100K with tuned HNSW params (`m=32`, `ef_construction=400`,
   `ef_search=128`) before drawing index-quality conclusions.
 - 10M × 768d on a GPU host once `gpu_cuvs` build path lands.
+
+---
+
+## Live REST benchmark vs Elasticsearch + the host-contention lesson (2026-06-22)
+
+The table above is the **in-process** index micro-benchmark (`scale_benchmark.rs`). Separately,
+the end-to-end **REST** path was benchmarked against a production Elasticsearch cluster on a real
+30k × 1024d corpus. The full write-up is in `reports/2026-06-21-veda-vs-es-benchmark.md`; the
+headline and the operational lesson belong here:
+
+**Single-segment dense search, ann_search p50 — identical binary + identical data, two hosts:**
+
+| ef | mactrn01 (quiet, 96-core) | iitgpu11 (shared, contended) | Elasticsearch (dedicated cluster) |
+|---|---|---|---|
+| 96 (default) | **0.53 ms** | 36.6 ms | 7 ms |
+| 64 | 0.39 ms | 20 ms | — |
+| 32 | 0.21 ms | 11 ms | — |
+
+Recall@10 = 1.0 at ef=96 on both hosts (this corpus is weakly clustered, so the navigable graph
+visits only ~1.5 % of nodes — confirmed by instrumentation — yet returns exact top-10).
+
+**Takeaways:**
+- On a fair (quiet/dedicated) host, Veda's single-segment dense search is **0.53 ms — roughly
+  13× faster than Elasticsearch's 7 ms** at recall 1.0, and ~8× faster on ingest (1837 vs ~200 docs/s).
+- iitgpu11's 36 ms was **~99 % host contention**, not a Veda defect: that box is a heavily-shared
+  multi-tenant node (ClickHouse, airflow, ML jobs saturating memory bandwidth). The same binary on
+  mactrn01 was ~70× faster. The HNSW graph and AVX2+FMA distance path were healthy throughout.
+- **Operational rule: never benchmark Veda on the shared `iitgpu11` box.** Use a quiet/dedicated
+  host (e.g. `mactrn01`) for any latency comparison, or the numbers are dominated by co-tenant
+  memory-bandwidth contention.
+- Process of elimination ruled out every code-level "fix" (contiguous slab → 0 ms; AVX2 distance
+  already vectorized; heap churn negligible; record materialization O(1)). No index optimization is
+  warranted for dense latency.
