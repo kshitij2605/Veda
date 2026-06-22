@@ -22,6 +22,7 @@ use veda_core::simd;
 use veda_core::types::DistanceMetric;
 
 use crate::distance::compute_distance;
+use crate::hnsw::slab::VectorSlab;
 use crate::quantization::rabitq::RaBitQuantizer;
 
 /// L2-normalize a vector in place into a fresh `Vec<f32>`.
@@ -64,27 +65,30 @@ pub trait DistanceProvider: Sync {
     fn metric(&self) -> DistanceMetric;
 }
 
-/// Wraps a `&[Vec<f32>]` corpus and the distance metric to use. This
-/// is the historical path; semantically equivalent to the old
-/// `compute_distance(query, vectors[id], metric)` calls.
+/// Wraps a contiguous [`VectorSlab`] corpus and the distance metric to
+/// use. This is the historical raw-f32 path; semantically equivalent to
+/// the old `compute_distance(query, vectors[id], metric)` calls, but the
+/// row is read from a single flat slab (`slab.row(id)`) so each probe
+/// hits a predictable, cache-friendly location instead of chasing a
+/// per-row heap pointer.
 ///
 /// `normalized_cosine` is the Cosine fast path: when set, both the
-/// stored `vectors` and the query handed to [`Self::distance`] are
+/// stored rows and the query handed to [`Self::distance`] are
 /// assumed L2-normalized, so cosine distance reduces to `1 - dot`.
 /// This skips the two norm + one division that `simd::cosine_distance`
 /// recomputes on every call (~3× the FLOPs of a bare dot). The
 /// returned value and ranking are identical to the Cosine path within
 /// fp tolerance because for unit vectors `1 - dot == 1 - cos`.
 pub struct RawVectorsProvider<'a> {
-    pub vectors: &'a [Vec<f32>],
+    pub vectors: &'a VectorSlab,
     pub metric: DistanceMetric,
     pub normalized_cosine: bool,
 }
 
 impl<'a> RawVectorsProvider<'a> {
-    /// Construct a provider over raw vectors with the given metric
+    /// Construct a provider over a raw-f32 slab with the given metric
     /// (no normalization fast path).
-    pub fn new(vectors: &'a [Vec<f32>], metric: DistanceMetric) -> Self {
+    pub fn new(vectors: &'a VectorSlab, metric: DistanceMetric) -> Self {
         Self {
             vectors,
             metric,
@@ -92,10 +96,10 @@ impl<'a> RawVectorsProvider<'a> {
         }
     }
 
-    /// Construct a provider that treats `vectors` (and the query) as
+    /// Construct a provider that treats the slab rows (and the query) as
     /// L2-normalized and computes cosine distance as `1 - dot`. Only
     /// valid for [`DistanceMetric::Cosine`].
-    pub fn new_normalized_cosine(vectors: &'a [Vec<f32>]) -> Self {
+    pub fn new_normalized_cosine(vectors: &'a VectorSlab) -> Self {
         Self {
             vectors,
             metric: DistanceMetric::Cosine,
@@ -106,7 +110,7 @@ impl<'a> RawVectorsProvider<'a> {
 
 impl<'a> DistanceProvider for RawVectorsProvider<'a> {
     fn distance(&self, query: &[f32], doc_id: u32) -> f32 {
-        let doc = &self.vectors[doc_id as usize];
+        let doc = self.vectors.row(doc_id as usize);
         if self.normalized_cosine {
             1.0 - simd::dot_product(query, doc)
         } else {
@@ -148,5 +152,76 @@ impl<'a> DistanceProvider for QuantizedDistanceProvider<'a> {
 
     fn metric(&self) -> DistanceMetric {
         self.quantizer.metric()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vec_of(seed: u32, dim: usize) -> Vec<f32> {
+        let mut s = seed.wrapping_mul(2654435761).wrapping_add(1);
+        (0..dim)
+            .map(|_| {
+                s = s.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                ((s >> 16) as f32 / 32768.0) - 1.0
+            })
+            .collect()
+    }
+
+    /// The contiguous-slab `RawVectorsProvider` must return distances
+    /// identical (within fp tolerance) to the naive per-row
+    /// `compute_distance(query, rows[id], metric)` it replaced. This is
+    /// the equivalence guard for the memory-layout change: same numbers,
+    /// just read from a cache-friendly location.
+    #[test]
+    fn slab_provider_matches_naive_rows_all_metrics() {
+        let dim = 17;
+        let n = 64;
+        let rows: Vec<Vec<f32>> = (0..n).map(|i| vec_of(i as u32, dim)).collect();
+
+        for metric in [
+            DistanceMetric::Cosine,
+            DistanceMetric::Euclidean,
+            DistanceMetric::DotProduct,
+        ] {
+            let mut slab = VectorSlab::new(dim);
+            for r in &rows {
+                slab.push(r);
+            }
+            let provider = RawVectorsProvider::new(&slab, metric);
+
+            for q_seed in [100u32, 200, 300] {
+                let query = vec_of(q_seed, dim);
+                for (id, row) in rows.iter().enumerate() {
+                    let from_slab = provider.distance(&query, id as u32);
+                    let naive = compute_distance(&query, row, metric);
+                    assert!(
+                        (from_slab - naive).abs() <= 1e-5 * (1.0 + naive.abs()),
+                        "metric {metric:?} id {id}: slab {from_slab} vs naive {naive}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// The normalized-cosine fast path over the slab must equal
+    /// `1 - dot` over L2-normalized rows — the same value the index
+    /// stores and searches against.
+    #[test]
+    fn slab_normalized_cosine_matches_one_minus_dot() {
+        let dim = 13;
+        let rows: Vec<Vec<f32>> = (0..32).map(|i| l2_normalize(&vec_of(i, dim))).collect();
+        let mut slab = VectorSlab::new(dim);
+        for r in &rows {
+            slab.push(r);
+        }
+        let provider = RawVectorsProvider::new_normalized_cosine(&slab);
+        let query = l2_normalize(&vec_of(999, dim));
+        for (id, row) in rows.iter().enumerate() {
+            let got = provider.distance(&query, id as u32);
+            let expect = 1.0 - simd::dot_product(&query, row);
+            assert!((got - expect).abs() <= 1e-6, "id {id}: {got} vs {expect}");
+        }
     }
 }

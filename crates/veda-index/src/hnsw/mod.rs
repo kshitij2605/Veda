@@ -3,6 +3,7 @@ pub mod distance_provider;
 pub mod graph;
 pub mod quantized;
 pub mod searcher;
+pub mod slab;
 
 pub use builder::HnswBuilder;
 pub use graph::HnswGraph;
@@ -18,6 +19,7 @@ use veda_core::error::{Result, VedaError};
 use veda_core::types::DistanceMetric;
 
 use crate::hnsw::distance_provider::DistanceProvider;
+use crate::hnsw::slab::VectorSlab;
 use crate::traits::{SearchResult, VectorIndex};
 
 /// HNSW (Hierarchical Navigable Small World) index implementing VectorIndex.
@@ -27,19 +29,22 @@ use crate::traits::{SearchResult, VectorIndex};
 /// parameters).
 pub struct HnswIndex {
     graph: HnswGraph,
-    // TODO(perf): flat contiguous `Vec<f32>` slab + CSR adjacency layout.
-    // The current `Vec<Vec<f32>>` vectors and per-node `Vec<Vec<u32>>`
-    // neighbour lists (graph.rs) scatter every distance probe and edge
-    // walk across the heap, costing a cache miss per access on the search
-    // hot path. A single contiguous vector slab (id*dim slice) + CSR
-    // adjacency would be the biggest remaining structural win, but it is a
-    // rewrite plus an on-disk format change — deferred to a later cycle.
-    /// Internal vector copies. For Cosine metric these are kept
-    /// **L2-normalized** so traversal distance reduces to `1 - dot`
-    /// (see `normalized` and `distance_provider::RawVectorsProvider`).
-    /// This is an index-internal representation only — the record store
-    /// is untouched, so `get_record` still returns original vectors.
-    vectors: Vec<Vec<f32>>,
+    // TODO(perf): CSR adjacency layout. The per-node `Vec<Vec<u32>>`
+    // neighbour lists (graph.rs) still scatter every edge walk across
+    // the heap. Flattening them into CSR (offsets + a single contiguous
+    // edge array) is the next structural win, but it touches the graph
+    // serialization format — deferred to a later cycle. The vector slab
+    // below already removed the per-row distance-probe cache miss.
+    /// Internal vector copies packed into a single contiguous slab so
+    /// each distance probe reads `slab.row(id)` from a predictable
+    /// location instead of chasing a per-row heap pointer. For Cosine
+    /// metric the rows are kept **L2-normalized** so traversal distance
+    /// reduces to `1 - dot` (see `normalized` and
+    /// `distance_provider::RawVectorsProvider`). This is an
+    /// index-internal representation only — the record store is
+    /// untouched, so `get_record` still returns original vectors, and
+    /// the on-disk format stays row-major `Vec<Vec<f32>>`.
+    vectors: VectorSlab,
     metric: DistanceMetric,
     dimension: u32,
     /// True iff `metric == Cosine`: enables the normalized-dot fast path.
@@ -80,7 +85,7 @@ impl HnswIndex {
         let m = 16;
         Self {
             graph: HnswGraph::new(),
-            vectors: Vec::new(),
+            vectors: VectorSlab::new(dimension as usize),
             metric,
             dimension,
             normalized: metric == DistanceMetric::Cosine,
@@ -103,7 +108,7 @@ impl HnswIndex {
     ) -> Self {
         Self {
             graph: HnswGraph::new(),
-            vectors: Vec::new(),
+            vectors: VectorSlab::new(dimension as usize),
             metric,
             dimension,
             normalized: metric == DistanceMetric::Cosine,
@@ -203,6 +208,8 @@ impl VectorIndex for HnswIndex {
         // Validate dimensions and store vectors. For Cosine, store an
         // L2-normalized copy so traversal distance is `1 - dot` (the
         // record store keeps the originals — this copy is index-internal).
+        // Rows are packed into a single contiguous slab.
+        self.vectors.reserve(vectors.len());
         for v in vectors {
             if v.len() as u32 != self.dimension {
                 return Err(VedaError::DimensionMismatch {
@@ -212,17 +219,20 @@ impl VectorIndex for HnswIndex {
             }
             if self.normalized {
                 self.vectors
-                    .push(crate::hnsw::distance_provider::l2_normalize(v));
+                    .push(&crate::hnsw::distance_provider::l2_normalize(v));
             } else {
-                self.vectors.push(v.to_vec());
+                self.vectors.push(v);
             }
         }
 
-        // Insert each vector into the HNSW graph.
+        // Insert each vector into the HNSW graph. `row` borrows the slab
+        // immutably alongside the `&self.vectors` provider argument; the
+        // builder only mutates `self.graph`, a separate field.
         for id in 0..self.vectors.len() {
+            let row = self.vectors.row(id);
             HnswBuilder::insert(
                 id as u32,
-                &self.vectors[id],
+                row,
                 &mut self.graph,
                 &self.vectors,
                 self.metric,
@@ -320,23 +330,20 @@ impl VectorIndex for HnswIndex {
             });
         }
 
-        // Grow the vectors array if needed.
-        if id as usize >= self.vectors.len() {
-            self.vectors
-                .resize(id as usize + 1, vec![0.0; self.dimension as usize]);
-        }
-        // Store the index-internal (normalized for Cosine) copy.
+        // Store the index-internal (normalized for Cosine) copy. The
+        // slab grows + zero-fills intermediate ids as needed, matching
+        // the prior `Vec<Vec<f32>>::resize` insert semantics.
         let stored = if self.normalized {
             crate::hnsw::distance_provider::l2_normalize(vector)
         } else {
             vector.to_vec()
         };
-        self.vectors[id as usize] = stored;
+        self.vectors.set_row(id as usize, &stored);
         self.deleted.remove(&id);
 
         // Insert into the HNSW graph using the stored representation so
         // build-time distances match the normalized search-time path.
-        let inserted = self.vectors[id as usize].clone();
+        let inserted = self.vectors.row(id as usize).to_vec();
         HnswBuilder::insert(
             id,
             &inserted,
@@ -378,7 +385,9 @@ impl VectorIndex for HnswIndex {
 
         let data = HnswIndexData {
             graph: graph_copy,
-            vectors: self.vectors.clone(),
+            // On-disk format stays row-major `Vec<Vec<f32>>` — the slab
+            // is materialized back into rows for serialization.
+            vectors: self.vectors.to_rows(),
             metric: self.metric,
             dimension: self.dimension,
             m: self.m,
@@ -420,14 +429,16 @@ impl VectorIndex for HnswIndex {
         // path is correct even for indexes persisted before normalized
         // storage existed. Normalizing an already-unit vector is a no-op
         // within fp tolerance, so this is safe + idempotent for new files.
-        let vectors = if normalized {
-            data.vectors
-                .iter()
-                .map(|v| crate::hnsw::distance_provider::l2_normalize(v))
-                .collect()
-        } else {
-            data.vectors
-        };
+        // Rows are loaded into a single contiguous slab.
+        let mut vectors = VectorSlab::new(data.dimension as usize);
+        vectors.reserve(data.vectors.len());
+        for v in &data.vectors {
+            if normalized {
+                vectors.push(&crate::hnsw::distance_provider::l2_normalize(v));
+            } else {
+                vectors.push(v);
+            }
+        }
 
         Ok(Self {
             graph: data.graph,
