@@ -200,3 +200,42 @@ test is O(M²) in distance comps per node in the back-link prune, and over `Vec<
 loaded box this confirmation run's rebuild took ~30 min vs the prior cycle's ~10 min. `/optimize` is a
 one-time operator step, not a query path, but this regression is real and is another argument for the
 contiguous-layout rewrite (which would also speed the build).
+
+---
+
+## Contiguous vector-slab re-run (2026-06-22) — the layout hypothesis, falsified
+
+Deferred item #3 above predicted that replacing the cache-hostile `Vec<Vec<f32>>` vector
+storage with a contiguous flat `Vec<f32>` slab (commit `453f2dd`) would close the gap to ES.
+We built it and re-ran the identical 30k×1024 protocol back-to-back against the pre-slab build
+to control for host load. **The prediction was wrong.**
+
+| Build | Config | Recall@10 | server p50 | ann_search p50 |
+|---|---|---|---|---|
+| pre-slab (bench2) | post-optimize, ef=96 | 1.000 | 36.5 ms | 36.7 ms |
+| **slab (bench3)** | post-optimize, ef=96 | 1.000 | 37.0 ms | **36.6 ms** |
+| **slab (bench3)** | post-optimize, ef=64 | 0.9998 | 20.0 ms | 20.5 ms |
+| Elasticsearch | — | 1.000 | 7 ms | — |
+
+**The contiguous slab changed latency by ~0 ms (36.6 vs 36.7 at ef=96).** Memory layout was
+**not** the bottleneck. Two corollaries, both verified in-tree:
+
+1. `ann_search` is 36.6 ms of the 37 ms total → ~99 % of query time is inside HNSW
+   traversal+distance, **not** HTTP/auth/serde per-request overhead. The gap to ES is in the graph walk.
+2. The distance hot path (`veda-core/src/simd.rs`) is **already real AVX2+FMA** (`_mm256_fmadd_ps`,
+   runtime-dispatched, scalar fallback; plus an int8 `_mm256_madd_epi16` path). So scalar-arithmetic
+   is not the lever either.
+
+**Diagnosis.** 36 ms for ef=96 over only 30k vectors is abnormally high (a tight HNSW does this in
+~1 ms; ES in 7 ms). With both layout and arithmetic ruled out, the cost is in **traversal efficiency**:
+node-visit count and per-hop heap/visited bookkeeping — possibly per-query allocation, the `fetch_k`
+oversample widening the walk, or redundant distance recomputation. This is NOT addressed by the
+queued CSR-adjacency + on-disk-slab increment (which targets the same now-falsified layout hypothesis),
+so that increment is **deprioritised**.
+
+**Recommendation.** The highest-value remaining lever is **quantized-distance traversal** — walk the
+graph on int8/SQ8 (or RaBitQ) distances and rerank the final top-k at full precision, which is exactly
+what Lucene/ES do and which Veda already has partial machinery for (`HnswRaBitQ`, SQ8 index types).
+Alternatively, ship ef=64 (recall 0.9998, 20 ms — at recall parity with ES) as good-enough and pivot
+to the categorical differentiators. The slab itself is retained: it is harmless, builds clean, and is a
+better foundation for any future mmap on-disk format — but it is not, on its own, a latency win.
