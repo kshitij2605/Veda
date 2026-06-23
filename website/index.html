@@ -6,10 +6,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#0A0C10" />
+
     <meta
       name="description"
-      content="Veda — a next-generation multimodal vector database for the era of RAG. Native multimodal ingestion, pure-Rust performance, 7 index algorithms."
+      content="Veda is an open-source, Rust-native multimodal vector database and RAG platform: one unified vector space for text, images, audio, video and documents, with hybrid search, reranking, and a built-in MCP server."
     />
+    <!-- Canonical + social. NOTE: veda.example is a placeholder domain — swap for
+         production (see src/lib/site.ts + public/robots.txt + public/sitemap.xml). -->
+    <link rel="canonical" href="https://veda.example/" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Veda" />
+    <meta property="og:title" content="Veda — Multimodal Vector Database & RAG Platform (Rust)" />
+    <meta
+      property="og:description"
+      content="Open-source, Rust-native multimodal vector database and RAG platform: one unified vector space for text, image, audio, video and documents, with hybrid search, reranking, and a built-in MCP server."
+    />
+    <meta property="og:url" content="https://veda.example/" />
+    <meta property="og:image" content="https://veda.example/og-image.png" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Veda — Multimodal Vector Database & RAG Platform (Rust)" />
+    <meta
+      name="twitter:description"
+      content="Open-source, Rust-native multimodal vector database and RAG platform with cross-modal search, hybrid retrieval, reranking, and a built-in MCP server."
+    />
+    <meta name="twitter:image" content="https://veda.example/og-image.png" />
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -18,7 +40,23 @@
       rel="stylesheet"
     />
 
-    <title>Veda — Multimodal Vector Database</title>
+    <title>Veda — Multimodal Vector Database & RAG Platform (Rust)</title>
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Veda",
+        "applicationCategory": "DeveloperApplication",
+        "applicationSubCategory": "Vector Database",
+        "operatingSystem": "Linux, macOS, Windows",
+        "description": "Open-source, Rust-native multimodal vector database and RAG platform: one unified vector space for text, image, audio, video and documents, with hybrid search (dense + sparse + BM25), reranking, 7+ ANN index types, a document pipeline, and a built-in Model Context Protocol (MCP) server.",
+        "url": "https://veda.example/",
+        "programmingLanguage": "Rust",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "keywords": "multimodal vector database, vector search, RAG, retrieval-augmented generation, embeddings, semantic search, hybrid search, reranking, HNSW, MCP, Rust, Elasticsearch alternative"
+      }
+    </script>
 
     <style>
       html { margin: 0; background: #0a0c10 }

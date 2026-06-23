@@ -1,0 +1,41 @@
+# Veda
+
+> Veda is an open-source, Rust-native multimodal vector database and RAG platform.
+> It stores, indexes, and searches embeddings from any modality — text, images,
+> audio, video, and documents — in one unified vector space, so you can index with
+> text and query with any modality (cross-modal retrieval) without re-indexing.
+> It ships hybrid search (dense + sparse/SPLADE + BM25 with RRF/weighted fusion),
+> reranking, ColPali, 7+ ANN index types (HNSW, DiskANN, IVF-PQ, Flat, RaBitQ, SQ8),
+> a document pipeline (OCR → chunk → embed → insert), an agent framework with a
+> built-in Model Context Protocol (MCP) server, and a vector-native observability /
+> AIOps / LLM-observability layer. Includes Niriksha, a visual exploration dashboard.
+
+## Getting started
+- [Introduction](https://veda.example/docs/introduction): what Veda is and who it's for
+- [Quick start](https://veda.example/docs/quickstart): run Veda and do your first search in minutes
+- [Installation & config](https://veda.example/docs/installation): build/run, environment, Docker profiles
+
+## Core concepts
+- [Collections & fields](https://veda.example/docs/collections): schema, vector/scalar/sparse fields
+- [Indexes](https://veda.example/docs/indexes): HNSW, DiskANN, IVF-PQ, Flat, RaBitQ, SQ8 — when to use which
+- [Search & fusion](https://veda.example/docs/search): dense, sparse, BM25, hybrid (RRF/weighted), rerank
+- [Multimodal & cross-modal](https://veda.example/docs/multimodal): one embedding space for text·image·audio·video
+- [Document pipeline](https://veda.example/docs/document-pipeline): OCR → chunk → embed → insert
+- [Agents & MCP](https://veda.example/docs/agents-mcp): agent framework + MCP server tool catalog
+- [Web Connectors](https://veda.example/docs/web-connectors): web ingestion + agentic web search
+
+## Reference
+- [REST API](https://veda.example/docs/rest-api): the HTTP API surface
+- [Python SDK](https://veda.example/docs/python-sdk): the veda-client package
+- [Observability](https://veda.example/docs/observability): metrics, tracing, explain timings
+- [APM & Performance](https://veda.example/docs/apm-observability): distributed tracing, profiling, index advisor
+- [LLM Observability](https://veda.example/docs/llm-observability): semantic cache, guardrails, trace store
+- [AIOps](https://veda.example/docs/aiops): change-point detection, spike attribution, incident drafts
+- [Ops Advisor](https://veda.example/docs/ops-advisor): rule catalog, RCA, recommendations, alerting
+- [Log Insights](https://veda.example/docs/log-insights): semantic log categorization + log-content alerting
+- [Node Resource Signals](https://veda.example/docs/resource-signals): disk/CPU/load/fd/mem monitoring
+- [Service Reliability](https://veda.example/docs/service-reliability): SLOs, error budgets, synthetics, AI triage
+- [RAG & AIOps Intelligence](https://veda.example/docs/rag-aiops): faithfulness, citations, eval, forecasting
+
+## Community
+- [Contributing](https://veda.example/docs/contributing): build, test, and contribution workflow
