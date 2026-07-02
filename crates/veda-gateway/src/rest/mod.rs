@@ -462,6 +462,10 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/eval-sets/{id}/cases/from-conversation",
             post(rag_eval::case_from_conversation),
         )
+        .route(
+            "/v1/collections/{name}/eval-sets/generate",
+            post(rag_eval::generate_eval_set),
+        )
         // Document processing (OCR)
         .route(
             "/v1/collections/{name}/process-document",
