@@ -846,6 +846,186 @@ fn extract_turn(conv: &crate::agent::model::Conversation) -> Option<GraduatedTur
     })
 }
 
+// ── Synthetic generation HTTP endpoint (Task 1.3) ────────────────────────
+
+/// Body for `POST /v1/collections/{name}/eval-sets/generate`.
+#[derive(Deserialize)]
+pub struct GenerateEvalSetRequest {
+    /// How many cases to generate. Default 20 when omitted/absent.
+    #[serde(default = "default_num_cases")]
+    pub num_cases: usize,
+    /// Name for the resulting eval set; default "generated-{collection}".
+    #[serde(default)]
+    pub name: Option<String>,
+}
+fn default_num_cases() -> usize {
+    20
+}
+
+/// Fixed, equal-weighted difficulty mix — DataMorgana-style distribution
+/// control kept intentionally simple for v1 (a configurable mix is a
+/// natural follow-up, not needed for the MVP).
+fn default_difficulty_mix() -> Vec<(String, f64)> {
+    vec![
+        ("simple".to_owned(), 0.4),
+        ("reasoning".to_owned(), 0.4),
+        ("multi_context".to_owned(), 0.2),
+    ]
+}
+
+/// Read a collection's own records as source chunks and generate a labeled
+/// [`EvalSet`] from them via [`generate_cases`], using the gateway's
+/// configured LLM. 503s when no LLM is configured (mirrors `run_eval`).
+pub async fn generate_eval_set(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(collection): Path<String>,
+    Json(req): Json<GenerateEvalSetRequest>,
+) -> Result<Json<EvalSet>, GatewayError> {
+    let llm_config = state.inner.llm_config.read().await.clone();
+    if llm_config.is_none() {
+        return Err(service_unavailable(
+            "VEDA_LLM_ENDPOINT not configured. Set the env var to enable eval-set generation.",
+        ));
+    }
+
+    let scoped = tenant::scope(&tenant, &collection);
+    let chunks = load_source_chunks(&state, &scoped).await?;
+    if chunks.is_empty() {
+        return Err(bad_request(format!(
+            "collection '{collection}' has no records to generate cases from"
+        )));
+    }
+
+    let mix = default_difficulty_mix();
+    let cases = generate_cases(&chunks, &mix, req.num_cases, move |chunk, difficulty| {
+        let llm_config = llm_config.clone();
+        let text = chunk.text.clone();
+        let difficulty = difficulty.to_owned();
+        async move { generate_one_qa(&llm_config, &text, &difficulty).await }
+    })
+    .await;
+
+    let set = EvalSet {
+        id: format!("eval-{}", uuid::Uuid::new_v4()),
+        name: req
+            .name
+            .unwrap_or_else(|| format!("generated-{collection}")),
+        agent_id: None,
+        cases,
+    };
+    save_and_return_set(&state, &tenant, set).await
+}
+
+/// Read up to a bounded number of records' text field(s) as source chunks.
+/// Kept intentionally simple (first text-bearing field per record) — a
+/// smarter multi-field / clustering strategy is a natural follow-up.
+///
+/// Walks both the growing segment and any sealed segments directly (there
+/// is no single "iterate all records" call on `SegmentManager`), mirroring
+/// `records::list_records`'s traversal.
+async fn load_source_chunks(
+    state: &AppState,
+    scoped_collection: &str,
+) -> Result<Vec<SourceChunk>, GatewayError> {
+    const MAX_SOURCE_CHUNKS: usize = 200;
+    let managers = state.inner.segment_managers.read().await;
+    let Some(shards) = managers.get(scoped_collection) else {
+        return Err(not_found(format!(
+            "collection '{scoped_collection}' not found"
+        )));
+    };
+    let mut out = Vec::new();
+    'outer: for sm in shards.values() {
+        let gs = sm.growing_segment();
+        for doc_id in 0..gs.count() {
+            if gs.is_deleted(doc_id) {
+                continue;
+            }
+            if let Some(record) = gs.get_record(doc_id)
+                && let Some(text) = first_text_field(record)
+            {
+                out.push(SourceChunk {
+                    chunk_id: record.id().to_string(),
+                    text,
+                });
+                if out.len() >= MAX_SOURCE_CHUNKS {
+                    break 'outer;
+                }
+            }
+        }
+        for handle in sm.sealed_segments() {
+            for doc_id in 0..handle.metadata.row_count as u32 {
+                if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                    continue;
+                }
+                if let Ok(record) = handle.reader.get_record(doc_id)
+                    && let Some(text) = first_text_field(&record)
+                {
+                    out.push(SourceChunk {
+                        chunk_id: record.id().to_string(),
+                        text,
+                    });
+                    if out.len() >= MAX_SOURCE_CHUNKS {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn first_text_field(record: &veda_core::record::Record) -> Option<String> {
+    record.fields().values().find_map(|v| match v {
+        veda_core::record::FieldValue::String(s) if !s.trim().is_empty() => Some(s.clone()),
+        _ => None,
+    })
+}
+
+/// One real LLM call: ask it to write a grounded question + answer for a
+/// chunk at the given difficulty, and self-report a quality score. Kept
+/// as a thin adapter over `LlmConfig`/the chat-completions client so
+/// `generate_cases` itself never touches the network (that's what makes
+/// it unit-testable per Task 1.2).
+async fn generate_one_qa(
+    llm_config: &Option<veda_core::llm_client::LlmConfig>,
+    chunk_text: &str,
+    difficulty: &str,
+) -> Option<GeneratedQa> {
+    let config = llm_config.as_ref()?;
+    let client = veda_core::llm_client::LlmClient::new(config.clone());
+    let prompt = format!(
+        "Given this text, write one {difficulty} question that is answerable ONLY from \
+         this text, plus a concise answer. Respond as JSON: \
+         {{\"query\": \"...\", \"answer\": \"...\", \"quality_score\": <0.0-1.0, your \
+         confidence the question is answerable, non-trivial, and grounded>}}.\n\nText:\n{chunk_text}"
+    );
+    let messages = vec![veda_core::llm_client::ChatMessage {
+        role: "user".to_owned(),
+        content: Some(prompt),
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+    let opts = veda_core::llm_client::CompletionOptions {
+        json_mode: true,
+        ..Default::default()
+    };
+    let resp = client.complete(&messages, &opts).await.ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&resp.content).ok()?;
+    Some(GeneratedQa {
+        query: parsed.get("query")?.as_str()?.to_owned(),
+        answer: parsed
+            .get("answer")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        quality_score: parsed
+            .get("quality_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+    })
+}
+
 #[cfg(test)]
 mod generation_tests {
     use super::*;
@@ -1206,5 +1386,153 @@ mod tests {
         let json = serde_json::to_value(&case).unwrap();
         let back: EvalCase = serde_json::from_value(json).unwrap();
         assert_eq!(back, case);
+    }
+}
+
+#[cfg(test)]
+mod generate_endpoint_tests {
+    use super::*;
+    use crate::rest::collections::create_collection;
+    use veda_core::llm_client::LlmConfig;
+
+    fn test_state() -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        AppState::new(tmp.path())
+    }
+
+    /// Starts an in-process mock chat-completions server (always returns
+    /// the same JSON-encoded `{query, answer, quality_score}` payload as
+    /// the assistant message content, satisfying `generate_one_qa`'s
+    /// self-parsing) and returns its full URL, suitable to use verbatim as
+    /// `LlmConfig.endpoint` (the real client POSTs directly to `endpoint`
+    /// with no path appended).
+    async fn start_mock_llm() -> String {
+        use axum::Router;
+        use axum::routing::post;
+
+        async fn completions() -> axum::Json<serde_json::Value> {
+            axum::Json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "{\"query\": \"What ANN index does Veda use?\", \"answer\": \"HNSW\", \"quality_score\": 0.9}"
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+        }
+
+        let router = Router::new().route("/v1/chat/completions", post(completions));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}/v1/chat/completions")
+    }
+
+    /// Builds an `AppState` with a fake-but-real LLM configured and
+    /// `collection` seeded (via `create_collection`'s `seed_records`, which
+    /// lands directly in `segment_managers`) with one record per
+    /// `(chunk_id, text)` pair carrying a `text` string field, so
+    /// `load_source_chunks`/`first_text_field` can find it.
+    async fn test_state_with_llm_and_records(
+        collection: &str,
+        records: &[(&str, &str)],
+    ) -> AppState {
+        let state = test_state();
+
+        let llm_url = start_mock_llm().await;
+        *state.inner.llm_config.write().await = Some(LlmConfig {
+            endpoint: llm_url,
+            api_key: None,
+            model: "mock-model".to_owned(),
+            timeout: std::time::Duration::from_secs(5),
+        });
+
+        let seed_records: Vec<serde_json::Value> = records
+            .iter()
+            .map(|(_id, text)| serde_json::json!({ "v": [1.0, 0.0], "text": text }))
+            .collect();
+        let req = serde_json::from_value(serde_json::json!({
+            "name": collection,
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" },
+                { "name": "text", "type": "string" }
+            ],
+            "seed_records": seed_records,
+        }))
+        .expect("fixture create-collection request should deserialize");
+        let resp = create_collection(
+            State(state.clone()),
+            Tenant(TenantId::default_tenant()),
+            Json(req),
+        )
+        .await;
+        use axum::response::IntoResponse;
+        let status = resp.into_response().status();
+        assert!(
+            status.is_success(),
+            "test_state_with_llm_and_records({collection}) seed should succeed, got {status}"
+        );
+
+        state
+    }
+
+    #[tokio::test]
+    async fn generate_eval_set_endpoint_creates_a_persisted_set_from_collection_chunks() {
+        let state = test_state_with_llm_and_records(
+            "mycol",
+            &[
+                (
+                    "chunk-1",
+                    "Veda uses HNSW for approximate nearest neighbor search.",
+                ),
+                (
+                    "chunk-2",
+                    "Chunker strategies include MarkdownRecursive and Semantic.",
+                ),
+            ],
+        )
+        .await;
+        let tenant = TenantId::default_tenant();
+
+        let resp = generate_eval_set(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Path("mycol".to_owned()),
+            Json(GenerateEvalSetRequest {
+                num_cases: 2,
+                name: Some("auto-generated".to_owned()),
+            }),
+        )
+        .await
+        .expect("generation should succeed with a fake LLM configured");
+
+        assert_eq!(resp.cases.len(), 2);
+        assert!(resp.cases.iter().all(|c| c.source.is_some()));
+
+        // Persisted and fetchable.
+        let fetched = get_eval_set(State(state), Tenant(tenant), Path(resp.id.clone()))
+            .await
+            .expect("generated set must be persisted");
+        assert_eq!(fetched.cases.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn generate_eval_set_503_without_llm() {
+        let state = test_state(); // no LLM configured, no records needed for this check
+        let tenant = TenantId::default_tenant();
+        let err = generate_eval_set(
+            State(state),
+            Tenant(tenant),
+            Path("mycol".to_owned()),
+            Json(GenerateEvalSetRequest {
+                num_cases: 5,
+                name: None,
+            }),
+        )
+        .await
+        .expect_err("must 503 without an LLM configured");
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
     }
 }
