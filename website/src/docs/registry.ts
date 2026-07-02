@@ -20,6 +20,8 @@ import resourceSignals from './content/resource-signals.md?raw'
 import serviceReliability from './content/service-reliability.md?raw'
 import ragAiops from './content/rag-aiops.md?raw'
 import contributing from './content/contributing.md?raw'
+import vsElasticsearch from './content/vs-elasticsearch.md?raw'
+import vsPinecone from './content/vs-pinecone.md?raw'
 
 export interface DocPageEntry {
   slug: string
@@ -67,6 +69,13 @@ export const DOCS: DocGroup[] = [
       { slug: 'resource-signals', title: 'Node Resource Signals', md: resourceSignals },
       { slug: 'service-reliability', title: 'Service Reliability', md: serviceReliability },
       { slug: 'rag-aiops', title: 'RAG & AIOps Intelligence', md: ragAiops },
+    ],
+  },
+  {
+    label: 'Compare',
+    items: [
+      { slug: 'vs-elasticsearch', title: 'Veda vs Elasticsearch', md: vsElasticsearch },
+      { slug: 'vs-pinecone', title: 'Veda vs Pinecone', md: vsPinecone },
     ],
   },
   {

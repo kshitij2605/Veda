@@ -37,5 +37,9 @@
 - [Service Reliability](https://veda.example/docs/service-reliability): SLOs, error budgets, synthetics, AI triage
 - [RAG & AIOps Intelligence](https://veda.example/docs/rag-aiops): faithfulness, citations, eval, forecasting
 
+## Compare
+- [Veda vs Elasticsearch](https://veda.example/docs/vs-elasticsearch): benchmarked recall/latency comparison, capability differences
+- [Veda vs Pinecone](https://veda.example/docs/vs-pinecone): open-source self-hosted engine vs a managed proprietary vector store
+
 ## Community
 - [Contributing](https://veda.example/docs/contributing): build, test, and contribution workflow
