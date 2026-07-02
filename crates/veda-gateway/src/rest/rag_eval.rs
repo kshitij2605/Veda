@@ -434,6 +434,83 @@ where
     }
 }
 
+// ── Synthetic generation (Phase 1) ───────────────────────────────────────
+
+/// One chunk of source text to generate a question against.
+#[derive(Clone, Debug)]
+pub struct SourceChunk {
+    pub chunk_id: String,
+    pub text: String,
+}
+
+/// One LLM-generated question/answer/quality triple for a chunk.
+pub struct GeneratedQa {
+    pub query: String,
+    pub answer: Option<String>,
+    /// A quality score in [0, 1]; generations below 0.5 are discarded
+    /// (mirrors DeepEval's numeric quality gate).
+    pub quality_score: f64,
+}
+
+const GENERATION_QUALITY_BAR: f64 = 0.5;
+
+/// Generate up to `target_count` [`EvalCase`]s from `chunks`, cycling
+/// through the difficulty categories in `difficulty_mix` (proportionally —
+/// weight is relative, categories are visited round-robin weighted by
+/// their share) so the output set is diverse rather than one paraphrase
+/// style repeated. `generate` is injected (mirrors `run_eval_set`'s `turn`
+/// closure) so this is unit-testable without a real LLM; the HTTP handler
+/// (Task 1.3) passes a closure over the real LLM client.
+pub async fn generate_cases<F, Fut>(
+    chunks: &[SourceChunk],
+    difficulty_mix: &[(String, f64)],
+    target_count: usize,
+    mut generate: F,
+) -> Vec<EvalCase>
+where
+    F: FnMut(&SourceChunk, &str) -> Fut,
+    Fut: std::future::Future<Output = Option<GeneratedQa>>,
+{
+    let mut cases = Vec::with_capacity(target_count);
+    if chunks.is_empty() || difficulty_mix.is_empty() {
+        return cases;
+    }
+    let mut chunk_idx = 0usize;
+    let mut difficulty_idx = 0usize;
+    // Bound the number of attempts so a chunk set smaller than
+    // target_count (or an all-filtered run) can't loop forever.
+    let max_attempts = target_count.max(chunks.len()) * 3;
+    let mut attempts = 0usize;
+
+    while cases.len() < target_count && attempts < max_attempts {
+        attempts += 1;
+        let chunk = &chunks[chunk_idx % chunks.len()];
+        let difficulty = &difficulty_mix[difficulty_idx % difficulty_mix.len()].0;
+        chunk_idx += 1;
+        difficulty_idx += 1;
+
+        let Some(qa) = generate(chunk, difficulty).await else {
+            continue;
+        };
+        if qa.quality_score < GENERATION_QUALITY_BAR {
+            continue;
+        }
+        cases.push(EvalCase {
+            id: format!("case-{}", uuid::Uuid::new_v4()),
+            query: qa.query,
+            expected_chunk_ids: vec![chunk.chunk_id.clone()],
+            gold_answer: qa.answer,
+            source: Some(CaseSource {
+                generated_by: "synthetic-v1".to_owned(),
+                source_chunk_ids: vec![chunk.chunk_id.clone()],
+                generated_at: now_ms(),
+            }),
+            difficulty: Some(difficulty.clone()),
+        });
+    }
+    cases
+}
+
 // ── CRUD handlers ────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -767,6 +844,84 @@ fn extract_turn(conv: &crate::agent::model::Conversation) -> Option<GraduatedTur
         expected_chunk_ids,
         gold_answer,
     })
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    fn chunk(id: &str, text: &str) -> SourceChunk {
+        SourceChunk {
+            chunk_id: id.to_owned(),
+            text: text.to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_cases_produces_one_case_per_chunk_up_to_target_count() {
+        let chunks = vec![
+            chunk("c1", "Veda uses HNSW for approximate nearest neighbor search."),
+            chunk("c2", "Chunking strategies include MarkdownRecursive and Semantic."),
+        ];
+        let mix = vec![("simple".to_owned(), 1.0)];
+        let cases = generate_cases(&chunks, &mix, 2, |c, _difficulty| {
+            let query = format!("What does chunk {} say?", c.chunk_id);
+            async move {
+                Some(GeneratedQa {
+                    query,
+                    answer: Some("an answer".to_owned()),
+                    quality_score: 0.9,
+                })
+            }
+        })
+        .await;
+
+        assert_eq!(cases.len(), 2);
+        assert_eq!(cases[0].source.as_ref().unwrap().source_chunk_ids, vec!["c1".to_owned()]);
+        assert_eq!(cases[0].difficulty.as_deref(), Some("simple"));
+        assert_eq!(cases[0].expected_chunk_ids, vec!["c1".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn generate_cases_filters_low_quality_generations() {
+        let chunks = vec![chunk("c1", "some text")];
+        let mix = vec![("simple".to_owned(), 1.0)];
+        let cases = generate_cases(&chunks, &mix, 1, |_c, _d| async move {
+            Some(GeneratedQa {
+                query: "bad question".to_owned(),
+                answer: None,
+                quality_score: 0.2, // below the 0.5 gate
+            })
+        })
+        .await;
+        assert!(cases.is_empty(), "a quality_score below 0.5 must be filtered out");
+    }
+
+    #[tokio::test]
+    async fn generate_cases_skips_a_none_generation_without_panicking() {
+        let chunks = vec![chunk("c1", "text")];
+        let mix = vec![("simple".to_owned(), 1.0)];
+        let cases = generate_cases(&chunks, &mix, 1, |_c, _d| async move { None }).await;
+        assert!(cases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn generate_cases_stops_at_target_count_even_with_more_chunks() {
+        let chunks = vec![chunk("c1", "a"), chunk("c2", "b"), chunk("c3", "c")];
+        let mix = vec![("simple".to_owned(), 1.0)];
+        let cases = generate_cases(&chunks, &mix, 2, |c, _d| {
+            let query = format!("q for {}", c.chunk_id);
+            async move {
+                Some(GeneratedQa {
+                    query,
+                    answer: None,
+                    quality_score: 1.0,
+                })
+            }
+        })
+        .await;
+        assert_eq!(cases.len(), 2, "must stop once target_count cases are accepted");
+    }
 }
 
 #[cfg(test)]
