@@ -94,6 +94,7 @@ pub async fn insert(
     }
     use axum::response::IntoResponse;
     let scoped = tenant::scope(&tenant, &name);
+    let scoped = state.inner.aliases.resolve(&scoped).await;
     // Optional transactional enrollment — when X-Veda-Txn-Id is
     // present, every record in this request is staged under that
     // txn instead of going straight into the records map. See
@@ -393,6 +394,7 @@ pub async fn list_records(
 ) -> Result<Json<ListRecordsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let claims = claims.map(|axum::Extension(c)| c);
     let name = tenant::scope(&tenant, &name);
+    let name = state.inner.aliases.resolve(&name).await;
     let rls_field = {
         let schemas = state.inner.schemas.read().await;
         if !schemas.contains_key(&name) {
@@ -515,6 +517,7 @@ pub async fn get_record(
 ) -> Result<Json<GetRecordResponse>, (StatusCode, Json<ErrorResponse>)> {
     let claims = claims.map(|axum::Extension(c)| c);
     let name = tenant::scope(&tenant, &name);
+    let name = state.inner.aliases.resolve(&name).await;
     let record_id: Uuid = id_str.parse().map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -730,6 +733,7 @@ pub async fn delete_records(
     Json(req): Json<DeleteRecordsRequest>,
 ) -> Result<Json<DeleteRecordsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let name = tenant::scope(&tenant, &name);
+    let name = state.inner.aliases.resolve(&name).await;
     {
         let schemas = state.inner.schemas.read().await;
         if !schemas.contains_key(&name) {
@@ -1322,4 +1326,101 @@ pub async fn rebuild_executors(
     executors.insert(collection_name.to_owned(), executor);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rest::collections::create_collection;
+
+    fn test_state() -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        AppState::new(tmp.path())
+    }
+
+    /// Creates a collection with one "v" vector field (dim 2, cosine).
+    /// `seed_records`, when non-empty, is bulk-loaded atomically at create
+    /// time (mirrors `create_collection`'s Phase G behaviour), landing
+    /// directly in `segment_managers` so `get_record` / `list_records` /
+    /// `delete_records` (which read the segment managers, not the query
+    /// executor) see it immediately.
+    async fn seed_test_collection(
+        state: &AppState,
+        name: &str,
+        seed_records: Vec<serde_json::Value>,
+    ) {
+        let req = serde_json::from_value(serde_json::json!({
+            "name": name,
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" }
+            ],
+            "seed_records": seed_records,
+        }))
+        .expect("fixture create-collection request should deserialize");
+        let resp = create_collection(
+            State(state.clone()),
+            crate::tenant::Tenant(crate::tenant::TenantId::default_tenant()),
+            Json(req),
+        )
+        .await;
+        use axum::response::IntoResponse;
+        let status = resp.into_response().status();
+        assert!(
+            status.is_success(),
+            "seed_test_collection({name}) should succeed, got {status}"
+        );
+    }
+
+    /// Inserts one record `{"v": [1.0, 0.0]}` into `name` and returns its
+    /// assigned id (mirrors the seed_records insert-and-seal path but
+    /// through the plain `/insert` handler, returning `InsertResponse.ids`).
+    async fn insert_fixture_record(state: &AppState, name: &str) -> String {
+        let req: InsertRequest = serde_json::from_value(serde_json::json!({
+            "records": [ { "v": [1.0, 0.0] } ]
+        }))
+        .expect("fixture insert request should deserialize");
+        let scoped = crate::tenant::scope(&crate::tenant::TenantId::default_tenant(), name);
+        let (status, body) = insert_impl(state.clone(), scoped, None, req)
+            .await
+            .expect("insert_fixture_record should succeed");
+        assert!(
+            status.is_success(),
+            "insert_fixture_record({name}) failed: {status}"
+        );
+        body.0
+            .ids
+            .first()
+            .cloned()
+            .expect("insert should return an id")
+    }
+
+    #[tokio::test]
+    async fn get_record_follows_an_alias_to_the_swapped_collection() {
+        let state = test_state();
+        let tenant = crate::tenant::TenantId::default_tenant();
+        seed_test_collection(&state, "mycol", vec![]).await;
+        seed_test_collection(&state, "mycol@v2", vec![]).await;
+        let id = insert_fixture_record(&state, "mycol@v2").await;
+
+        state
+            .inner
+            .aliases
+            .set(
+                crate::tenant::scope(&tenant, "mycol"),
+                crate::tenant::scope(&tenant, "mycol@v2"),
+            )
+            .await;
+
+        let rec = get_record(
+            State(state),
+            crate::tenant::Tenant(tenant),
+            Path(("mycol".to_owned(), id)),
+            None,
+            Query(GetRecordQuery::default()),
+        )
+        .await
+        .expect("get_record should follow the alias and find the record");
+        assert!(!rec.id.is_empty());
+    }
 }

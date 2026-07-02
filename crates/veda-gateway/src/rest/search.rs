@@ -294,6 +294,7 @@ pub async fn search(
     Json(mut req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, (StatusCode, Json<ErrorResponse>)> {
     let name = tenant::scope(&tenant, &name);
+    let name = state.inner.aliases.resolve(&name).await;
     // Cross-encoder rerank oversampling: if rerank is configured, fetch
     // `limit * 4` initial candidates so the reranker has enough to choose from.
     let final_limit = req.limit;
@@ -1486,4 +1487,93 @@ fn resolve_metric(
             _ => None,
         })
         .unwrap_or(DistanceMetric::Cosine)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rest::collections::create_collection;
+
+    fn test_state() -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        AppState::new(tmp.path())
+    }
+
+    /// Creates a collection with one "v" vector field (dim 2, cosine).
+    /// `seed_records`, when non-empty, is bulk-loaded atomically at create
+    /// time (mirrors `create_collection`'s Phase G behaviour) and
+    /// synchronously builds the query executor, so `search` can find it
+    /// immediately without racing the background compaction/rebuild task
+    /// that a plain `/insert` spawns.
+    async fn seed_test_collection(
+        state: &AppState,
+        name: &str,
+        seed_records: Vec<serde_json::Value>,
+    ) {
+        let req = serde_json::from_value(serde_json::json!({
+            "name": name,
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" }
+            ],
+            "seed_records": seed_records,
+        }))
+        .expect("fixture create-collection request should deserialize");
+        let resp = create_collection(
+            State(state.clone()),
+            crate::tenant::Tenant(crate::tenant::TenantId::default_tenant()),
+            Json(req),
+        )
+        .await;
+        use axum::response::IntoResponse;
+        let status = resp.into_response().status();
+        assert!(
+            status.is_success(),
+            "seed_test_collection({name}) should succeed, got {status}"
+        );
+    }
+
+    fn fixture_search_request() -> SearchRequest {
+        serde_json::from_value(serde_json::json!({
+            "query": { "vector": { "field": "v", "values": [1.0, 0.0] } },
+            "limit": 10,
+        }))
+        .expect("fixture search request should deserialize")
+    }
+
+    #[tokio::test]
+    async fn search_follows_an_alias_to_the_swapped_collection() {
+        let state = test_state();
+        let tenant = crate::tenant::TenantId::default_tenant();
+        seed_test_collection(&state, "mycol", vec![]).await;
+        seed_test_collection(
+            &state,
+            "mycol@v2",
+            vec![serde_json::json!({ "v": [1.0, 0.0] })],
+        )
+        .await;
+
+        state
+            .inner
+            .aliases
+            .set(
+                crate::tenant::scope(&tenant, "mycol"),
+                crate::tenant::scope(&tenant, "mycol@v2"),
+            )
+            .await;
+
+        let results = search(
+            State(state),
+            crate::tenant::Tenant(tenant),
+            Path("mycol".to_owned()),
+            None,
+            Json(fixture_search_request()),
+        )
+        .await
+        .expect("search should succeed");
+        assert!(
+            !results.results.is_empty(),
+            "search on the aliased name must hit mycol@v2's data, not the empty original"
+        );
+    }
 }
