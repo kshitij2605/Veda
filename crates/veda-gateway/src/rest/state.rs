@@ -241,6 +241,11 @@ pub struct AppStateInner {
     pub prometheus_handle: Option<PrometheusHandle>,
     /// SavedObject store, persisted to `{data_dir}/_saved_objects.json`.
     pub saved_objects: SavedObjectStore,
+    /// Non-Raft alias resolution (see `rest::alias::AliasMap`). In Raft
+    /// mode aliases are ALSO written here so single-node reads/tests and
+    /// Raft-replicated state stay consistent; resolution always checks
+    /// this map first.
+    pub aliases: crate::rest::alias::AliasMap,
     /// Process start time — used by `/v1/admin/nodes` to report uptime.
     pub started_at: Instant,
     /// When `VEDA_COORDINATOR=raft` is set, this holds a running
@@ -394,6 +399,7 @@ impl AppState {
                 )),
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
+                aliases: crate::rest::alias::AliasMap::new(data_dir),
                 started_at: Instant::now(),
                 raft: RwLock::new(None),
                 raft_materialized_records: RwLock::new(HashMap::new()),
@@ -466,6 +472,7 @@ impl AppState {
                 )),
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
+                aliases: crate::rest::alias::AliasMap::new(data_dir),
                 started_at: Instant::now(),
                 raft: RwLock::new(None),
                 raft_materialized_records: RwLock::new(HashMap::new()),
@@ -519,6 +526,7 @@ impl AppState {
                 )),
                 prometheus_handle: None,
                 saved_objects: SavedObjectStore::new(data_dir),
+                aliases: crate::rest::alias::AliasMap::new(data_dir),
                 started_at: Instant::now(),
                 raft: RwLock::new(None),
                 raft_materialized_records: RwLock::new(HashMap::new()),

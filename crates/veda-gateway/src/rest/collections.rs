@@ -730,9 +730,8 @@ pub async fn get_alias(
     Path(name): Path<String>,
 ) -> Result<Json<AliasResponse>, (StatusCode, Json<ErrorResponse>)> {
     let scoped = tenant::scope(&tenant, &name);
-    // No Raft → just resolve against the in-memory schemas
-    // (the alias map round-trips through state-machine snapshot,
-    // but in non-Raft mode there's no SM to consult). Surface
+    // No Raft → resolve against the local AliasMap (Phase 0 fix).
+    // In Raft mode, also check the replicated SM snapshot. Surface
     // alias = target when no alias is set.
     let raft_guard = state.inner.raft.read().await;
     let target = if let Some(coord) = raft_guard.as_ref() {
@@ -746,7 +745,7 @@ pub async fn get_alias(
         })?;
         snap.aliases.get(&scoped).cloned().unwrap_or(scoped.clone())
     } else {
-        scoped.clone()
+        state.inner.aliases.resolve(&scoped).await
     };
     let target_user = tenant::strip_prefix(&tenant, &target)
         .unwrap_or(&target)
@@ -787,10 +786,16 @@ pub async fn set_alias(
                 ));
             }
         }
-        // Non-Raft mode: there's no SM to write to. The handler
-        // is a no-op that surfaces the requested target as if
-        // the swap happened — alias resolution in non-Raft mode
-        // is a follow-up.
+        // Non-Raft mode: no Raft SM to write through, but we still
+        // persist the alias locally so resolution genuinely works
+        // without a coordinator (see Phase 0 of the auto-tuning plan).
+        if raft_guard.as_ref().is_none() {
+            state
+                .inner
+                .aliases
+                .set(scoped_alias.clone(), scoped_target.clone())
+                .await;
+        }
     }
     Ok(Json(AliasResponse {
         alias: name,
@@ -1141,9 +1146,9 @@ pub async fn reindex_collection(
         copy_source_records_to_sibling(&state, &scoped, &scoped_new).await?
     };
 
-    // 6. Atomic alias swap. Raft mode only — non-Raft mode
-    //    falls through with "no_raft" as before, but at least
-    //    the sibling now has every source record.
+    // 6. Alias swap: Raft mode uses the replicated command; non-Raft mode
+    //    writes directly to the local AliasMap (Phase 0 fix) so the swap
+    //    genuinely redirects traffic in single-node deployments too.
     {
         let raft_guard = state.inner.raft.read().await;
         if let Some(coord) = raft_guard.as_ref() {
@@ -1165,9 +1170,14 @@ pub async fn reindex_collection(
             }));
         }
     }
+    state
+        .inner
+        .aliases
+        .set(scoped.clone(), scoped_new.clone())
+        .await;
     Ok(Json(ReindexResponse {
         target: new_user_name,
-        status: format!("no_raft (copied {copied} records)"),
+        status: format!("alias_swapped (copied {copied} records)"),
     }))
 }
 
@@ -1825,6 +1835,86 @@ mod tests {
         assert_eq!(
             parse_seal_threshold(Some("0".to_owned())),
             DEFAULT_SEAL_THRESHOLD_BYTES
+        );
+    }
+
+    fn test_state() -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        AppState::new(tmp.path())
+    }
+
+    #[tokio::test]
+    async fn set_alias_then_get_alias_resolves_in_non_raft_mode() {
+        let state = test_state();
+        let tenant = crate::tenant::TenantId::default_tenant();
+
+        // No Raft configured on `state` -> this exercises the non-Raft path.
+        let resp = set_alias(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Path("mycol".to_owned()),
+            Json(SetAliasRequest {
+                target: "mycol@v2".to_owned(),
+            }),
+        )
+        .await
+        .expect("set_alias should succeed without Raft");
+        assert_eq!(resp.target, "mycol@v2");
+
+        let got = get_alias(
+            State(state.clone()),
+            Tenant(tenant),
+            Path("mycol".to_owned()),
+        )
+        .await
+        .expect("get_alias should succeed");
+        assert_eq!(
+            got.target, "mycol@v2",
+            "non-Raft get_alias must now reflect the swap, not just echo back a no-op"
+        );
+    }
+
+    async fn seed_test_collection(state: &AppState, name: &str) {
+        let scoped = crate::tenant::scope(&crate::tenant::TenantId::default_tenant(), name);
+        let schema = CollectionSchema::builder(scoped.clone())
+            .add_field(FieldDefinition::new("id", FieldType::String))
+            .shard_count(1)
+            .replication_factor(1)
+            .build()
+            .expect("test schema should build");
+        {
+            let mut schemas = state.inner.schemas.write().await;
+            schemas.insert(scoped.clone(), schema);
+        }
+    }
+
+    #[tokio::test]
+    async fn reindex_then_get_alias_shows_the_swap_without_raft() {
+        let state = test_state();
+        let tenant = crate::tenant::TenantId::default_tenant();
+        // Seed a minimal collection so reindex_collection has a schema to copy.
+        seed_test_collection(&state, "mycol").await;
+
+        let resp = reindex_collection(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Path("mycol".to_owned()),
+            None,
+        )
+        .await
+        .expect("reindex should succeed");
+        assert!(resp.status.starts_with("alias_swapped"));
+
+        let alias = get_alias(
+            State(state.clone()),
+            Tenant(tenant),
+            Path("mycol".to_owned()),
+        )
+        .await
+        .expect("get_alias should succeed");
+        assert_eq!(
+            alias.target, resp.target,
+            "alias must now point at the new sibling"
         );
     }
 }
