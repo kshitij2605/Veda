@@ -12,6 +12,7 @@ pub mod a2a;
 pub mod admin;
 pub mod agents;
 pub mod aggregate;
+pub mod alias;
 pub mod changepoint;
 pub mod chunk_preview;
 pub mod collections;
