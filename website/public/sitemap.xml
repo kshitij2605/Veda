@@ -24,4 +24,6 @@
   <url><loc>https://veda.example/docs/service-reliability</loc><lastmod>2026-06-23</lastmod><priority>0.6</priority></url>
   <url><loc>https://veda.example/docs/rag-aiops</loc><lastmod>2026-06-23</lastmod><priority>0.6</priority></url>
   <url><loc>https://veda.example/docs/contributing</loc><lastmod>2026-06-23</lastmod><priority>0.6</priority></url>
+  <url><loc>https://veda.example/docs/vs-elasticsearch</loc><lastmod>2026-06-23</lastmod><priority>0.85</priority></url>
+  <url><loc>https://veda.example/docs/vs-pinecone</loc><lastmod>2026-06-23</lastmod><priority>0.85</priority></url>
 </urlset>

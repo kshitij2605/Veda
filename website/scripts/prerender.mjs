@@ -36,6 +36,21 @@ const docs = [
   ['contributing', 'Contributing'],
 ]
 
+// Comparison pages get their own title/description (marketing intent, not the
+// generic "<title> — Veda Docs" doc template) so search snippets read well.
+const comparisons = [
+  {
+    slug: 'vs-elasticsearch',
+    title: 'Veda vs Elasticsearch — Multimodal Vector Search Compared',
+    desc: 'A benchmarked, honest comparison of Veda and Elasticsearch for vector and multimodal search: recall, latency, document ingestion, and RAG quality.',
+  },
+  {
+    slug: 'vs-pinecone',
+    title: 'Veda vs Pinecone — Open-Source Alternative to a Managed Vector DB',
+    desc: 'How Veda, an open-source self-hostable multimodal vector database, compares to Pinecone, a managed proprietary vector store.',
+  },
+]
+
 const routes = [
   {
     path: '/',
@@ -47,6 +62,7 @@ const routes = [
     title: `${title} — Veda Docs`,
     desc: `${title} — documentation for Veda, the open-source multimodal vector database and RAG platform.`,
   })),
+  ...comparisons.map((c) => ({ path: `/docs/${c.slug}`, title: c.title, desc: c.desc })),
 ]
 
 const esc = (s) =>
