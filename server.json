@@ -1,0 +1,25 @@
+{
+  "$comment": "Model Context Protocol server manifest for Veda — see https://github.com/modelcontextprotocol/registry for the registry format and the mcp-publisher CLI used to submit this file. Fields reflect Veda's actual MCP surface as of the veda-mcp crate + crates/veda-gateway/src/rest/mcp.rs; keep in sync when either changes.",
+  "name": "io.github.kshitij2605/veda",
+  "description": "Open-source, Rust-native multimodal vector database and RAG platform. Exposes a 15-tool MCP catalog — cross-modal search (text/image/audio/video), collection management, upserts, structured aggregation, and adaptive query routing — over Streamable HTTP, with JWT + tenant + row-level security enforced at the MCP layer.",
+  "repository": {
+    "url": "https://github.com/kshitij2605/Veda",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "http://localhost:6340/v1/mcp",
+      "description": "Stateless Streamable HTTP transport, JSON-RPC 2.0. Protocol version 2025-06-18 (2025-03-26 also accepted). Auth via an optional `Authorization: Bearer <jwt>` header — point `url` at your own running Veda instance."
+    }
+  ],
+  "packages": [
+    {
+      "identifier": "veda-mcp",
+      "registry_type": "source",
+      "transport": { "type": "stdio" },
+      "description": "A stdio↔HTTP bridge (crates/veda-mcp) for desktop MCP clients (Claude Desktop, Cursor, VS Code) that only speak stdio. Build with `cargo build --release -p veda-mcp`; run as `veda-mcp --url <veda-url>` with `VEDA_MCP_TOKEN` for bearer auth. Not yet published to crates.io — build from the repository source."
+    }
+  ]
+}
