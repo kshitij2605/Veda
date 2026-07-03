@@ -99,13 +99,23 @@ impl MultiObjectiveSearch for Nsga2Search {
                 .collect();
         }
 
+        // Refresh rank/crowding-distance before breeding: solutions added
+        // via record() since the last cull still carry
+        // MultiObjectiveSolution::new()'s defaults (rank 0, crowding_distance
+        // 0.0), which TournamentSelection reads directly to decide winners —
+        // recompute so tournament selection sees real fitness, not stale or
+        // default values.
+        let fronts = self.population.non_dominated_sort();
+        for front in &fronts {
+            self.population.calculate_crowding_distances(front);
+        }
+
         let parents = self.population.solutions().to_vec();
         let mut offspring = Vec::with_capacity(n);
         while offspring.len() < n && !parents.is_empty() {
+            // TournamentSelection::select always returns exactly `n_select`
+            // items when `parents` is non-empty (verified against source).
             let selected = self.selection.select(&parents, 2);
-            if selected.len() < 2 {
-                break;
-            }
             let p1 = selected[0].variables.as_slice().expect("contiguous");
             let p2 = selected[1].variables.as_slice().expect("contiguous");
             let (mut c1, mut c2) = self.crossover.crossover(p1, p2);
@@ -120,9 +130,15 @@ impl MultiObjectiveSearch for Nsga2Search {
     }
 
     fn record(&mut self, params: Vec<f64>, objectives: Vec<f64>) {
+        // MultiObjectiveSolution::dominates() implements MINIMIZATION
+        // (verified against scirs2-optimize-0.6.0 source: `if obj1 > obj2 {
+        // return false; }` — lower is better). This trait's contract is
+        // MAXIMIZATION (see MultiObjectiveSearch's doc comment), so negate
+        // on the way in; pareto_front() negates back on the way out.
+        let minimized: Vec<f64> = objectives.iter().map(|o| -o).collect();
         self.population.add(MultiObjectiveSolution::new(
             Array1::from_vec(params),
-            Array1::from_vec(objectives),
+            Array1::from_vec(minimized),
         ));
         // Standard NSGA-II generational step: once parents + offspring have
         // both been recorded (population has grown past target size), cull
@@ -138,7 +154,12 @@ impl MultiObjectiveSearch for Nsga2Search {
         self.population
             .extract_pareto_front()
             .into_iter()
-            .map(|s| (s.variables.to_vec(), s.objectives.to_vec()))
+            .map(|s| {
+                (
+                    s.variables.to_vec(),
+                    s.objectives.iter().map(|o| -o).collect(),
+                )
+            })
             .collect()
     }
 }
@@ -196,6 +217,45 @@ mod spike {
         assert!(
             spread > 0.3,
             "front should span x values, not collapse (spread={spread})"
+        );
+    }
+
+    /// Directly exercises `record()` + `pareto_front()`'s domination
+    /// direction with a manually-constructed, non-degenerate pair — one
+    /// solution strictly better than the other on every objective — rather
+    /// than relying on the evolutionary loop's convergence (NSGA-II's
+    /// crowding-distance diversity preservation means an independent
+    /// two-decision-variable "single joint optimum" problem is not
+    /// guaranteed to fully converge in a handful of generations, which is
+    /// expected GA behavior, not a domination-direction bug). If
+    /// `Nsga2Search` minimized instead of maximized (the underlying crate's
+    /// raw `dominates()` direction, confirmed in Task 3.1 review), the
+    /// "loser" here would incorrectly survive to the front instead of the
+    /// "winner".
+    #[test]
+    fn nsga2_search_pareto_front_keeps_the_maximizing_winner_not_the_loser() {
+        let mut search = super::Nsga2Search::new(
+            /* num_objectives */ 2,
+            /* param_bounds */ vec![(0.0, 10.0), (0.0, 10.0)],
+            /* population_size */ 20,
+        );
+
+        search.record(vec![10.0, 10.0], vec![10.0, 10.0]);
+        search.record(vec![1.0, 1.0], vec![1.0, 1.0]);
+
+        let front = search.pareto_front();
+        let objectives: Vec<&Vec<f64>> = front.iter().map(|(_, o)| o).collect();
+        assert!(
+            objectives
+                .iter()
+                .any(|o| (o[0] - 10.0).abs() < 1e-9 && (o[1] - 10.0).abs() < 1e-9),
+            "the maximizing winner (10, 10) must survive to the front, got {objectives:?}"
+        );
+        assert!(
+            !objectives
+                .iter()
+                .any(|o| (o[0] - 1.0).abs() < 1e-9 && (o[1] - 1.0).abs() < 1e-9),
+            "the dominated loser (1, 1) must NOT survive to the front, got {objectives:?}"
         );
     }
 }
