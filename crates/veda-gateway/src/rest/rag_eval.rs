@@ -369,6 +369,52 @@ fn noise_sensitivity(retrieved: &[String], expected: &[String]) -> Option<f64> {
     Some(miss as f64 / retrieved.len() as f64)
 }
 
+/// LLM-judge verdict for the 4 metrics that need semantic (not set-overlap)
+/// comparison — mirrors RAGChecker's claim-level diagnostics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JudgeVerdict {
+    pub claim_recall: Option<f64>,
+    pub context_utilization: Option<f64>,
+    pub hallucination: Option<f64>,
+    pub self_knowledge: Option<f64>,
+}
+
+/// Judge one case's answer against its retrieved context (+ gold answer,
+/// when available). `judge` is injected (the real caller sends a prompt
+/// to the configured LLM and parses its JSON reply; tests inject a fixed
+/// verdict) so this never touches the network directly. Returns `None`
+/// when there is no retrieved context to judge against — an answer with
+/// zero retrieved chunks has nothing for claim_recall/context_utilization/
+/// hallucination to be computed relative to.
+pub async fn judge_case<F, Fut>(
+    response: &str,
+    retrieved_chunks: &[String],
+    gold_answer: Option<&str>,
+    judge: F,
+) -> Option<JudgeVerdict>
+where
+    F: FnOnce(&str) -> Fut,
+    Fut: std::future::Future<Output = Option<JudgeVerdict>>,
+{
+    if retrieved_chunks.is_empty() {
+        return None;
+    }
+    let context = retrieved_chunks.join("\n---\n");
+    let gold_line = gold_answer
+        .map(|g| format!("\nReference answer: {g}"))
+        .unwrap_or_default();
+    let prompt = format!(
+        "Answer: {response}\n\nRetrieved context:\n{context}{gold_line}\n\nJudge this answer on 4 axes, \
+         each a score in [0,1], as JSON {{\"claim_recall\":.., \"context_utilization\":.., \
+         \"hallucination\":.., \"self_knowledge\":..}}. claim_recall = fraction of the answer's \
+         claims that are supported by the context. context_utilization = fraction of the retrieved \
+         context that the answer actually used. hallucination = fraction of the answer's claims NOT \
+         supported by the context or the reference answer. self_knowledge = whether the answer relied \
+         on the model's own knowledge rather than the retrieved context (1.0 = entirely self-knowledge)."
+    );
+    judge(&prompt).await
+}
+
 /// Assemble a [`CaseResult`] from one case + the run outputs. `gold_cosine`
 /// is a precomputed cosine(answer, gold_answer) when available (best-effort,
 /// done by the caller off the embedder); it takes precedence over the
@@ -413,6 +459,39 @@ fn score_case(
     }
 }
 
+/// `score_case`, extended to accept a precomputed [`JudgeVerdict`] (Task
+/// 2.2) alongside the existing signals. `score_case` (Task 2.1's caller
+/// contract) now delegates here with `judge_verdict: None`, so existing
+/// callers/tests that never judge are unaffected.
+#[allow(clippy::too_many_arguments)]
+fn score_case_with_judge(
+    case: &EvalCase,
+    response: &str,
+    citations: &[Citation],
+    grounding: Option<&Grounding>,
+    gold_cosine: Option<f64>,
+    recall_bar: f64,
+    faithfulness_bar: f64,
+    judge_verdict: Option<JudgeVerdict>,
+) -> CaseResult {
+    let mut result = score_case(
+        case,
+        response,
+        citations,
+        grounding,
+        gold_cosine,
+        recall_bar,
+        faithfulness_bar,
+    );
+    if let Some(v) = judge_verdict {
+        result.claim_recall = v.claim_recall;
+        result.context_utilization = v.context_utilization;
+        result.hallucination = v.hallucination;
+        result.self_knowledge = v.self_knowledge;
+    }
+    result
+}
+
 /// Mean of the `Some` values in `xs`, or `None` when all are `None`.
 fn mean_some<I: IntoIterator<Item = Option<f64>>>(xs: I) -> Option<f64> {
     let vals: Vec<f64> = xs.into_iter().flatten().collect();
@@ -450,6 +529,8 @@ pub struct TurnOutcome {
     pub grounding: Option<Grounding>,
     /// Precomputed cosine(answer, gold_answer), when scored.
     pub gold_cosine: Option<f64>,
+    /// Precomputed LLM-judge verdict (Task 2.2), when scored.
+    pub judge_verdict: Option<JudgeVerdict>,
 }
 
 /// Core harness: run `turn` over every case in `set` and assemble the
@@ -472,7 +553,7 @@ where
     let mut cases = Vec::with_capacity(set.cases.len());
     for case in &set.cases {
         let outcome = turn(case.clone()).await;
-        cases.push(score_case(
+        cases.push(score_case_with_judge(
             case,
             &outcome.response,
             &outcome.citations,
@@ -480,6 +561,7 @@ where
             outcome.gold_cosine,
             recall_bar,
             faithfulness_bar,
+            outcome.judge_verdict,
         ));
     }
     let aggregate = aggregate(&cases);
@@ -747,11 +829,24 @@ pub async fn run_eval(
                 {
                     Ok((_agent, result, citations, grounding, _cache_hit, _guardrails)) => {
                         let gc = gold_cosine(embedder, &result.response, gold.as_deref()).await;
+                        let retrieved_chunks: Vec<String> =
+                            citations.iter().filter_map(|c| c.snippet.clone()).collect();
+                        let jv = judge_case(
+                            &result.response,
+                            &retrieved_chunks,
+                            gold.as_deref(),
+                            |prompt| {
+                                let prompt = prompt.to_owned();
+                                async move { judge_via_llm(state, &prompt).await }
+                            },
+                        )
+                        .await;
                         TurnOutcome {
                             response: result.response,
                             citations,
                             grounding,
                             gold_cosine: gc,
+                            judge_verdict: jv,
                         }
                     }
                     Err(AgentTurnError::NoLlm) => {
@@ -761,6 +856,7 @@ pub async fn run_eval(
                             citations: Vec::new(),
                             grounding: None,
                             gold_cosine: None,
+                            judge_verdict: None,
                         }
                     }
                     Err(AgentTurnError::NotFound(_)) => TurnOutcome {
@@ -768,6 +864,7 @@ pub async fn run_eval(
                         citations: Vec::new(),
                         grounding: None,
                         gold_cosine: None,
+                        judge_verdict: None,
                     },
                 }
             }
@@ -1087,6 +1184,33 @@ async fn generate_one_qa(
     })
 }
 
+/// Send one judge `prompt` to the gateway's configured LLM and parse its
+/// JSON reply into a [`JudgeVerdict`]. Mirrors `generate_one_qa`'s
+/// call-and-parse shape. `None` when no LLM is configured or the call/parse
+/// fails (best-effort — a failed judge call must not fail the eval run).
+async fn judge_via_llm(state: &AppState, prompt: &str) -> Option<JudgeVerdict> {
+    let config = state.inner.llm_config.read().await.clone()?;
+    let client = veda_core::llm_client::LlmClient::new(config);
+    let messages = vec![veda_core::llm_client::ChatMessage {
+        role: "user".to_owned(),
+        content: Some(prompt.to_owned()),
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+    let opts = veda_core::llm_client::CompletionOptions {
+        json_mode: true,
+        ..Default::default()
+    };
+    let resp = client.complete(&messages, &opts).await.ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&resp.content).ok()?;
+    Some(JudgeVerdict {
+        claim_recall: parsed.get("claim_recall").and_then(|v| v.as_f64()),
+        context_utilization: parsed.get("context_utilization").and_then(|v| v.as_f64()),
+        hallucination: parsed.get("hallucination").and_then(|v| v.as_f64()),
+        self_knowledge: parsed.get("self_knowledge").and_then(|v| v.as_f64()),
+    })
+}
+
 #[cfg(test)]
 mod generation_tests {
     use super::*;
@@ -1343,6 +1467,7 @@ mod tests {
                     citations: vec![cite("id-1")],
                     grounding: Some(grounding(0.95, 0.9)),
                     gold_cosine: None,
+                    judge_verdict: None,
                 }
             } else {
                 TurnOutcome {
@@ -1350,6 +1475,7 @@ mod tests {
                     citations: vec![cite("id-x")],
                     grounding: Some(grounding(0.2, 0.1)),
                     gold_cosine: None,
+                    judge_verdict: None,
                 }
             }
         })
@@ -1499,6 +1625,76 @@ mod tests {
         let json = serde_json::to_value(&case).unwrap();
         let back: EvalCase = serde_json::from_value(json).unwrap();
         assert_eq!(back, case);
+    }
+}
+
+#[cfg(test)]
+mod judge_tests {
+    use super::*;
+
+    fn cite(id: &str) -> Citation {
+        Citation {
+            chunk_id: id.to_owned(),
+            collection: Some("docs".to_owned()),
+            snippet: Some("snip".to_owned()),
+            score: Some(0.1),
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_case_returns_the_injected_verdict() {
+        let verdict = judge_case(
+            "the answer",
+            &["chunk text".to_owned()],
+            Some("gold"),
+            |_prompt| async move {
+                Some(JudgeVerdict {
+                    claim_recall: Some(0.8),
+                    context_utilization: Some(0.6),
+                    hallucination: Some(0.1),
+                    self_knowledge: Some(0.0),
+                })
+            },
+        )
+        .await;
+        let v = verdict.expect("judge returned Some");
+        assert_eq!(v.claim_recall, Some(0.8));
+        assert_eq!(v.hallucination, Some(0.1));
+    }
+
+    #[tokio::test]
+    async fn judge_case_none_when_no_context_retrieved() {
+        // Nothing retrieved -> nothing to judge context_utilization/
+        // hallucination against; the judge closure is never even called.
+        let verdict = judge_case("answer", &[], None, |_p| async move {
+            unreachable!("judge must not be called with empty retrieved context")
+        })
+        .await;
+        assert!(verdict.is_none());
+    }
+
+    #[tokio::test]
+    async fn score_case_wires_judge_verdict_into_case_result_when_provided() {
+        let case = EvalCase {
+            id: "c1".to_owned(),
+            query: "q".to_owned(),
+            expected_chunk_ids: vec!["a".to_owned()],
+            gold_answer: None,
+            source: None,
+            difficulty: None,
+        };
+        let cites = vec![cite("a")];
+        let verdict = JudgeVerdict {
+            claim_recall: Some(0.75),
+            context_utilization: Some(0.5),
+            hallucination: Some(0.05),
+            self_knowledge: Some(0.1),
+        };
+        let r = score_case_with_judge(&case, "ans", &cites, None, None, 0.8, 0.8, Some(verdict));
+        assert_eq!(r.claim_recall, Some(0.75));
+        assert_eq!(r.context_utilization, Some(0.5));
+        assert_eq!(r.hallucination, Some(0.05));
+        assert_eq!(r.self_knowledge, Some(0.1));
     }
 }
 
