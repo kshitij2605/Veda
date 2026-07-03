@@ -11,3 +11,4 @@ pub mod scheduler;
 pub mod server;
 pub mod streaming;
 pub mod tenant;
+pub mod tuning;
