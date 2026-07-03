@@ -154,6 +154,30 @@ pub struct CaseResult {
     /// embedder are available, else the run's grounding answer_relevancy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer_relevancy: Option<f64>,
+    /// Fraction of retrieved chunks that are in `expected_chunk_ids`
+    /// (precision, not recall). `None` when nothing was retrieved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_precision: Option<f64>,
+    /// Fraction of retrieved chunks that are NOT in `expected_chunk_ids`
+    /// — how much irrelevant context the answer had to filter through.
+    /// `None` when nothing was retrieved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise_sensitivity: Option<f64>,
+    /// Reserved for a future LLM-judge pass (claim-level recall against
+    /// the gold answer's atomic claims); `None` until that judge exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_recall: Option<f64>,
+    /// Reserved: how much of the retrieved context the answer actually
+    /// used (vs. ignored). `None` until an LLM-judge pass computes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_utilization: Option<f64>,
+    /// Reserved: LLM-judge-scored hallucination rate. `None` until wired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hallucination: Option<f64>,
+    /// Reserved: whether the answer relied on the model's own knowledge
+    /// rather than retrieved context. `None` until wired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_knowledge: Option<f64>,
     /// Whether this case met the pass bars (recall + faithfulness, where
     /// each is ignored when unscored).
     pub passed: bool,
@@ -316,6 +340,35 @@ fn recall_at_k(retrieved: &[String], expected: &[String]) -> Option<f64> {
     Some(hit as f64 / expected.len() as f64)
 }
 
+/// Fraction of `retrieved` present in `expected` — precision, the
+/// complement of `recall_at_k`. `None` when nothing was retrieved (there
+/// is nothing to score precision over).
+fn context_precision(retrieved: &[String], expected: &[String]) -> Option<f64> {
+    if retrieved.is_empty() {
+        return None;
+    }
+    let want: std::collections::HashSet<&str> = expected.iter().map(String::as_str).collect();
+    let hit = retrieved
+        .iter()
+        .filter(|r| want.contains(r.as_str()))
+        .count();
+    Some(hit as f64 / retrieved.len() as f64)
+}
+
+/// Fraction of `retrieved` NOT present in `expected` — the complement of
+/// `context_precision`. `None` when nothing was retrieved.
+fn noise_sensitivity(retrieved: &[String], expected: &[String]) -> Option<f64> {
+    if retrieved.is_empty() {
+        return None;
+    }
+    let want: std::collections::HashSet<&str> = expected.iter().map(String::as_str).collect();
+    let miss = retrieved
+        .iter()
+        .filter(|r| !want.contains(r.as_str()))
+        .count();
+    Some(miss as f64 / retrieved.len() as f64)
+}
+
 /// Assemble a [`CaseResult`] from one case + the run outputs. `gold_cosine`
 /// is a precomputed cosine(answer, gold_answer) when available (best-effort,
 /// done by the caller off the embedder); it takes precedence over the
@@ -333,6 +386,8 @@ fn score_case(
     let recall = recall_at_k(&retrieved_chunk_ids, &case.expected_chunk_ids);
     let faithfulness = grounding.and_then(|g| g.faithfulness);
     let answer_relevancy = gold_cosine.or_else(|| grounding.and_then(|g| g.answer_relevancy));
+    let precision = context_precision(&retrieved_chunk_ids, &case.expected_chunk_ids);
+    let noise = noise_sensitivity(&retrieved_chunk_ids, &case.expected_chunk_ids);
 
     // A case passes when each *scored* bar is met. An unscored signal is
     // not held against the case (it can't fail on a metric it lacks).
@@ -348,6 +403,12 @@ fn score_case(
         recall_at_k: recall,
         faithfulness,
         answer_relevancy,
+        context_precision: precision,
+        noise_sensitivity: noise,
+        claim_recall: None,
+        context_utilization: None,
+        hallucination: None,
+        self_knowledge: None,
         passed,
     }
 }
@@ -1211,6 +1272,12 @@ mod tests {
                 recall_at_k: Some(1.0),
                 faithfulness: Some(0.9),
                 answer_relevancy: Some(0.8),
+                context_precision: None,
+                noise_sensitivity: None,
+                claim_recall: None,
+                context_utilization: None,
+                hallucination: None,
+                self_knowledge: None,
                 passed: true,
             },
             CaseResult {
@@ -1221,6 +1288,12 @@ mod tests {
                 recall_at_k: None, // skipped in the mean
                 faithfulness: Some(0.5),
                 answer_relevancy: None,
+                context_precision: None,
+                noise_sensitivity: None,
+                claim_recall: None,
+                context_utilization: None,
+                hallucination: None,
+                self_knowledge: None,
                 passed: false,
             },
         ];
@@ -1350,6 +1423,46 @@ mod tests {
             feedback: Vec::new(),
         };
         assert!(extract_turn(&conv).is_none());
+    }
+
+    // ── diagnostic fields (Task 2.1) ─────────────────────────────────────────
+
+    #[test]
+    fn case_result_new_diagnostic_fields_default_to_none() {
+        let case = EvalCase {
+            id: "c1".to_owned(),
+            query: "q".to_owned(),
+            expected_chunk_ids: vec![],
+            gold_answer: None,
+            source: None,
+            difficulty: None,
+        };
+        let r = score_case(&case, "ans", &[], None, None, 0.8, 0.8);
+        assert_eq!(r.claim_recall, None);
+        assert_eq!(r.context_precision, None);
+        assert_eq!(r.context_utilization, None);
+        assert_eq!(r.noise_sensitivity, None);
+        assert_eq!(r.hallucination, None);
+        assert_eq!(r.self_knowledge, None);
+    }
+
+    #[test]
+    fn compute_context_precision_is_fraction_of_retrieved_that_are_relevant() {
+        // 3 retrieved, 2 of them in expected -> precision 2/3.
+        let expected = vec!["a".to_owned(), "b".to_owned()];
+        let retrieved = vec!["a".to_owned(), "b".to_owned(), "z".to_owned()];
+        assert_eq!(context_precision(&retrieved, &expected), Some(2.0 / 3.0));
+        // No retrieval at all -> None (nothing to score).
+        assert_eq!(context_precision(&[], &expected), None);
+    }
+
+    #[test]
+    fn compute_noise_sensitivity_is_fraction_of_retrieved_that_are_irrelevant() {
+        let expected = vec!["a".to_owned()];
+        let retrieved = vec!["a".to_owned(), "z".to_owned(), "y".to_owned()];
+        // 2 of 3 retrieved are NOT in expected -> noise 2/3.
+        assert_eq!(noise_sensitivity(&retrieved, &expected), Some(2.0 / 3.0));
+        assert_eq!(noise_sensitivity(&[], &expected), None);
     }
 
     // ── backward compat + new fields ────────────────────────────────────────
