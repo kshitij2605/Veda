@@ -234,6 +234,11 @@ pub struct FieldInfo {
     pub metric: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The field's ANN index type ("Hnsw", "DiskAnn", "Flat", ...) — only
+    /// present for vector/sparse_vector/multi_vector fields. Lets a caller
+    /// confirm a `/reindex` request's `index_type` genuinely took effect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -714,6 +719,19 @@ pub struct ReindexRequest {
     /// the schema's first vector field.
     #[serde(default)]
     pub embedding_field: Option<String>,
+    /// New vector index type to apply to every vector field on the
+    /// sibling (same accepted values as collection-create's `FieldDef.index`
+    /// — "hnsw", "diskann", "ivfpq", "flat", "rabitq", "rabitq_rerank",
+    /// "hnsw_rabitq", "cagra", "rabitq_ext_rerank", "sq4", "sq8"). `None` =
+    /// keep the source's index type unchanged (the pre-existing behaviour).
+    /// NOTE: HNSW build parameters (`ef_construction`/`m`) are NOT
+    /// schema-configurable anywhere in Veda today — they're hardcoded in
+    /// `veda-index`'s HNSW builder (`crates/veda-index/src/hnsw/mod.rs`).
+    /// This field only changes WHICH index algorithm the sibling uses, not
+    /// that algorithm's internal build tuning; that is a separate,
+    /// pre-existing platform limitation out of this field's scope.
+    #[serde(default)]
+    pub index_type: Option<String>,
     /// Internal-only override for the sibling's name suffix (e.g.
     /// `@tuning-base1-<uuid>`), bypassing the default `@vN` bump.
     /// `skip_deserializing` — never settable from the public `/reindex`
@@ -1096,6 +1114,28 @@ pub async fn reindex_collection_internal(
         )
     })?;
     rewritten["name"] = serde_json::Value::String(scoped_new.clone());
+    if let Some(idx_str) = &req.index_type {
+        let idx_type = parse_index_type(idx_str).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("reindex index_type: {e}"),
+                }),
+            )
+        })?;
+        let idx_value = serde_json::to_value(idx_type).unwrap_or(serde_json::Value::Null);
+        if let Some(fields) = rewritten["fields"].as_array_mut() {
+            for field in fields.iter_mut() {
+                let is_vector = field
+                    .get("field_type")
+                    .and_then(|ft| ft.get("Vector"))
+                    .is_some();
+                if is_vector {
+                    field["index_type"] = idx_value.clone();
+                }
+            }
+        }
+    }
     let new_schema_json = serde_json::to_string(&rewritten).unwrap_or(schema_json);
     let new_schema: CollectionSchema = serde_json::from_str(&new_schema_json).map_err(|e| {
         (
@@ -1675,6 +1715,43 @@ async fn drop_collection_impl(
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+/// Parse a vector index-type string (accepted at collection-create time via
+/// `FieldDef.index`, and on `/reindex` via `ReindexRequest.index_type`) into
+/// the real `veda_core::types::IndexType`. Factored out of `parse_field_def`
+/// so both call sites share one alias list and one CAGRA GPU-availability
+/// check rather than risking two copies drifting apart.
+fn parse_index_type(idx: &str) -> Result<veda_core::types::IndexType, String> {
+    Ok(match idx.to_lowercase().as_str() {
+        "hnsw" => veda_core::types::IndexType::Hnsw,
+        "diskann" => veda_core::types::IndexType::DiskAnn,
+        "ivfpq" | "ivf_pq" => veda_core::types::IndexType::IvfPq,
+        "flat" => veda_core::types::IndexType::Flat,
+        "rabitq" | "rabit_q" => veda_core::types::IndexType::RaBitQ,
+        "rabitq_rerank" | "rabit_q_rerank" => veda_core::types::IndexType::RaBitQRerank,
+        "hnsw_rabitq" | "hnsw_rabit_q" | "quantized_hnsw" => {
+            veda_core::types::IndexType::HnswRaBitQ
+        }
+        "cagra" | "gpu_cagra" | "gpu" => {
+            // CAGRA needs the GPU cuVS backend. Without the `gpu_cuvs`
+            // feature the index build fails after insert, leaving an
+            // unsearchable collection. Reject up-front with a clear error.
+            if !veda_index::gpu_cuvs::gpu_cuvs_available() {
+                return Err(
+                    "index type 'cagra' requires a GPU build (compile with --features veda-index/gpu_cuvs); this binary has no cuVS backend"
+                        .to_owned(),
+                );
+            }
+            veda_core::types::IndexType::Cagra
+        }
+        "rabitq_ext_rerank" | "ext_rabitq_rerank" | "rabitq4_rerank" => {
+            veda_core::types::IndexType::RaBitQExtRerank
+        }
+        "sq4" => veda_core::types::IndexType::Sq4,
+        "sq8" => veda_core::types::IndexType::Sq8,
+        other => return Err(format!("unknown vector index type '{other}'")),
+    })
+}
+
 fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
     match f.field_type.as_str() {
         "vector" => {
@@ -1701,41 +1778,8 @@ fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
                 fd = fd.with_auto_embed(cfg.clone());
             }
             if let Some(idx) = f.index.as_deref() {
-                let idx_type = match idx.to_lowercase().as_str() {
-                    "hnsw" => veda_core::types::IndexType::Hnsw,
-                    "diskann" => veda_core::types::IndexType::DiskAnn,
-                    "ivfpq" | "ivf_pq" => veda_core::types::IndexType::IvfPq,
-                    "flat" => veda_core::types::IndexType::Flat,
-                    "rabitq" | "rabit_q" => veda_core::types::IndexType::RaBitQ,
-                    "rabitq_rerank" | "rabit_q_rerank" => veda_core::types::IndexType::RaBitQRerank,
-                    "hnsw_rabitq" | "hnsw_rabit_q" | "quantized_hnsw" => {
-                        veda_core::types::IndexType::HnswRaBitQ
-                    }
-                    "cagra" | "gpu_cagra" | "gpu" => {
-                        // CAGRA needs the GPU cuVS backend. Without the
-                        // `gpu_cuvs` feature the index build fails after
-                        // insert, leaving an unsearchable collection.
-                        // Reject up-front with a clear error instead.
-                        if !veda_index::gpu_cuvs::gpu_cuvs_available() {
-                            return Err(format!(
-                                "field '{}': index type 'cagra' requires a GPU build (compile with --features veda-index/gpu_cuvs); this binary has no cuVS backend",
-                                f.name
-                            ));
-                        }
-                        veda_core::types::IndexType::Cagra
-                    }
-                    "rabitq_ext_rerank" | "ext_rabitq_rerank" | "rabitq4_rerank" => {
-                        veda_core::types::IndexType::RaBitQExtRerank
-                    }
-                    "sq4" => veda_core::types::IndexType::Sq4,
-                    "sq8" => veda_core::types::IndexType::Sq8,
-                    other => {
-                        return Err(format!(
-                            "field '{}': unknown vector index type '{other}'",
-                            f.name
-                        ));
-                    }
-                };
+                let idx_type =
+                    parse_index_type(idx).map_err(|e| format!("field '{}': {e}", f.name))?;
                 fd = fd.with_index_type(idx_type);
             }
             Ok(fd.with_filterable(f.filterable))
@@ -1884,6 +1928,9 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
         FieldType::Array(_) => ("array", None, None, None),
     };
 
+    let index_type = matches!(type_str, "vector" | "sparse_vector" | "multi_vector")
+        .then(|| format!("{:?}", f.index_type()));
+
     FieldInfo {
         name: f.name().to_owned(),
         field_type: type_str.to_owned(),
@@ -1891,6 +1938,7 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
         dimension,
         metric,
         model,
+        index_type,
     }
 }
 

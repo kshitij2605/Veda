@@ -337,3 +337,96 @@ async fn reindex_re_embed_without_embedding_endpoint_returns_424() {
     let body: Value = resp.json().await.unwrap();
     assert!(body["error"].as_str().unwrap().contains("embedding"));
 }
+
+#[tokio::test]
+async fn reindex_with_index_type_changes_the_siblings_vector_index() {
+    let (base, _tmp) = start_server().await;
+    let c = Client::new();
+
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "vecs",
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "create: {}", resp.text().await.unwrap());
+
+    // Default index type is Hnsw (FieldDefinition::vector's default).
+    let resp = c
+        .get(format!("{base}/v1/collections/vecs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["fields"][0]["index_type"], json!("Hnsw"));
+
+    let resp = c
+        .post(format!("{base}/v1/collections/vecs/reindex"))
+        .json(&json!({ "index_type": "diskann" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "reindex: {}",
+        resp.text().await.unwrap()
+    );
+    let body: Value = resp.json().await.unwrap();
+    let target = body["target"].as_str().unwrap().to_owned();
+    assert_eq!(target, "vecs@v2");
+
+    // The sibling's vector field must now report DiskAnn, not Hnsw.
+    let resp = c
+        .get(format!("{base}/v1/collections/{target}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "describe sibling: {}",
+        resp.text().await.unwrap()
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["fields"][0]["index_type"],
+        json!("DiskAnn"),
+        "reindex's index_type must actually change the sibling's index, not just rename it"
+    );
+}
+
+#[tokio::test]
+async fn reindex_with_unknown_index_type_returns_400() {
+    let (base, _tmp) = start_server().await;
+    let c = Client::new();
+
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "vecs2",
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let resp = c
+        .post(format!("{base}/v1/collections/vecs2/reindex"))
+        .json(&json!({ "index_type": "not_a_real_index_type" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "expected 400, got {}", resp.status());
+}
