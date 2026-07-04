@@ -720,7 +720,9 @@ pub struct ReindexRequest {
 pub struct ReindexResponse {
     /// New collection that was created with the same schema.
     pub target: String,
-    /// Status — "alias_swapped" or "no_raft" depending on mode.
+    /// Status — always "alias_swapped (copied N records)" in both Raft
+    /// and non-Raft mode (the local AliasMap makes the non-Raft swap
+    /// genuinely work too, see Task 0.2's "Phase 0 fix").
     pub status: String,
 }
 
@@ -1002,19 +1004,22 @@ pub async fn optimize_collection(
 /// Does NOT copy records or re-chunk — that's the full
 /// reindex pipeline (separate follow-up). Today this proves the
 /// atomic-swap primitive end-to-end via REST.
-pub async fn reindex_collection(
-    State(state): State<AppState>,
-    Tenant(tenant): Tenant,
-    Path(name): Path<String>,
-    body: Option<Json<ReindexRequest>>,
-) -> Result<Json<ReindexResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let scoped = tenant::scope(&tenant, &name);
-    let req = body.map(|Json(r)| r).unwrap_or_default();
-
+/// `reindex_collection`'s full existing body (unchanged from Phase 0 —
+/// schema lookup, sibling creation, copy/rechunk, alias-swap), just with
+/// the axum extractors replaced by plain arguments so non-HTTP callers
+/// (the campaign engine, Task 5.1's apply) can call it directly.
+/// `scoped_name` is already tenant-scoped; `ReindexResponse.target` is
+/// still the UNSCOPED display name (via `tenant::display_name`) to match
+/// this function's existing HTTP-facing contract/tests.
+pub async fn reindex_collection_internal(
+    state: &AppState,
+    scoped_name: &str,
+    req: ReindexRequest,
+) -> Result<ReindexResponse, (StatusCode, Json<ErrorResponse>)> {
     // 1. Look up the current schema.
     let schema_json = {
         let schemas = state.inner.schemas.read().await;
-        match schemas.get(&scoped) {
+        match schemas.get(scoped_name) {
             Some(s) => serde_json::to_string(s).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1027,7 +1032,10 @@ pub async fn reindex_collection(
                 return Err((
                     StatusCode::NOT_FOUND,
                     Json(ErrorResponse {
-                        error: format!("collection '{name}' not found"),
+                        error: format!(
+                            "collection '{}' not found",
+                            tenant::display_name(scoped_name)
+                        ),
                     }),
                 ));
             }
@@ -1035,17 +1043,20 @@ pub async fn reindex_collection(
     };
 
     // 2. Pick the next sibling version. Today we just append
-    //    `@v2`; a v2 of v2 would be `@v3`. Keep it simple.
-    let new_user_name = if let Some(prefix) = name.strip_suffix("@v2") {
+    //    `@v2`; a v2 of v2 would be `@v3`. Keep it simple. This operates
+    //    directly on `scoped_name` (already tenant-prefixed) — tenant ids
+    //    can't contain '@' (see `TenantId::parse`), so bumping the whole
+    //    scoped string is equivalent to bumping the unscoped display name
+    //    and re-adding the prefix.
+    let scoped_new = if let Some(prefix) = scoped_name.strip_suffix("@v2") {
         format!("{prefix}@v3")
-    } else if name.contains("@v") {
+    } else if scoped_name.contains("@v") {
         // generic vN bump
 
-        bump_version_suffix(&name).unwrap_or_else(|| format!("{name}@v2"))
+        bump_version_suffix(scoped_name).unwrap_or_else(|| format!("{scoped_name}@v2"))
     } else {
-        format!("{name}@v2")
+        format!("{scoped_name}@v2")
     };
-    let scoped_new = tenant::scope(&tenant, &new_user_name);
 
     // 3. Materialize the sibling locally with the rewritten
     //    schema. In Raft mode we ALSO submit a CreateCollection
@@ -1098,8 +1109,7 @@ pub async fn reindex_collection(
             }),
         )
     })?;
-    if let Err((status, e)) =
-        materialize_collection_locally(&state, &new_schema, &sibling_dir).await
+    if let Err((status, e)) = materialize_collection_locally(state, &new_schema, &sibling_dir).await
     {
         return Err((status, e));
     }
@@ -1141,19 +1151,43 @@ pub async fn reindex_collection(
     //    - Chunker config + re_embed → as above, plus embed
     //      each new chunk via the gateway's embedding client.
     let copied = if req.chunker.is_some() {
-        rechunk_source_into_sibling(&state, &scoped, &scoped_new, &req).await?
+        rechunk_source_into_sibling(state, scoped_name, &scoped_new, &req).await?
     } else {
-        copy_source_records_to_sibling(&state, &scoped, &scoped_new).await?
+        copy_source_records_to_sibling(state, scoped_name, &scoped_new).await?
     };
+
+    // Seal the sibling's growing segments so the copied/rechunked data is
+    // actually on disk before the alias swap below. Without this, a crash
+    // right after a "successful" reindex (this function already returned
+    // `Ok`, alias already swapped) loses everything: `recover_collections_
+    // from_disk` only ever reconstructs SEALED segments, never a growing
+    // one (mirrors `records::insert_impl`'s existing "seal growing
+    // segments so data is on disk" step after an insert batch).
+    {
+        let mut managers = state.inner.segment_managers.write().await;
+        if let Some(shard_map) = managers.get_mut(&scoped_new) {
+            for sm in shard_map.values_mut() {
+                sm.seal_growing().map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("failed to seal sibling segment: {e}"),
+                        }),
+                    )
+                })?;
+            }
+        }
+    }
 
     // 6. Alias swap: Raft mode uses the replicated command; non-Raft mode
     //    writes directly to the local AliasMap (Phase 0 fix) so the swap
     //    genuinely redirects traffic in single-node deployments too.
+    let target = tenant::display_name(&scoped_new).to_owned();
     {
         let raft_guard = state.inner.raft.read().await;
         if let Some(coord) = raft_guard.as_ref() {
             let swap = veda_coordinator::raft_types::ClusterCommand::SetCollectionAlias {
-                alias: scoped.clone(),
+                alias: scoped_name.to_owned(),
                 target: scoped_new.clone(),
             };
             if let Err(e) = coord.execute(swap).await {
@@ -1164,21 +1198,35 @@ pub async fn reindex_collection(
                     }),
                 ));
             }
-            return Ok(Json(ReindexResponse {
-                target: new_user_name,
+            return Ok(ReindexResponse {
+                target,
                 status: format!("alias_swapped (copied {copied} records)"),
-            }));
+            });
         }
     }
     state
         .inner
         .aliases
-        .set(scoped.clone(), scoped_new.clone())
+        .set(scoped_name.to_owned(), scoped_new.clone())
         .await;
-    Ok(Json(ReindexResponse {
-        target: new_user_name,
+    Ok(ReindexResponse {
+        target,
         status: format!("alias_swapped (copied {copied} records)"),
-    }))
+    })
+}
+
+/// Thin HTTP wrapper: extract, scope the tenant name, delegate.
+pub async fn reindex_collection(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(name): Path<String>,
+    body: Option<Json<ReindexRequest>>,
+) -> Result<Json<ReindexResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let scoped = tenant::scope(&tenant, &name);
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    reindex_collection_internal(&state, &scoped, req)
+        .await
+        .map(Json)
 }
 
 /// Phase G reindex pipeline helper. Iterates the source

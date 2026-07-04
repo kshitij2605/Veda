@@ -447,7 +447,7 @@ fn error_kind_for_status(status: StatusCode) -> &'static str {
 /// `?` early-returns funnel here so the caller can log exactly one
 /// query-log entry. `req` is already RLS-resolved by the caller.
 #[allow(clippy::too_many_arguments)]
-async fn run_search(
+pub(crate) async fn run_search(
     state: &AppState,
     name: &str,
     schema: &veda_core::schema::CollectionSchema,

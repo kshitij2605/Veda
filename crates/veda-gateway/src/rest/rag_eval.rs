@@ -276,6 +276,26 @@ async fn list_sets(store: &SavedObjectStore) -> Vec<EvalSet> {
         .collect()
 }
 
+/// `pub(crate)` pass-through over `list_sets` for callers outside this
+/// module (the scheduler's `Evaluate` job dispatch).
+pub(crate) async fn list_sets_pub(store: &SavedObjectStore) -> Vec<EvalSet> {
+    list_sets(store).await
+}
+
+/// `pub(crate)` pass-through over `save_set` for callers outside this
+/// module (Task 4.3's scheduler-dispatch test fixture) -- test-only, so
+/// cfg-gated to avoid a dead-code warning in non-test builds.
+#[cfg(test)]
+pub(crate) async fn save_set_pub(store: &SavedObjectStore, set: &EvalSet) {
+    save_set(store, set).await;
+}
+
+/// `pub(crate)` pass-through over `get_set` for callers outside this
+/// module (the tuning campaign engine's trial evaluator).
+pub(crate) async fn get_set_pub(store: &SavedObjectStore, id: &str) -> Option<EvalSet> {
+    get_set(store, id).await
+}
+
 async fn save_run(store: &SavedObjectStore, run: &EvalRun) {
     let obj = SavedObject {
         id: run.id.clone(),
@@ -327,6 +347,12 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (na.sqrt() * nb.sqrt())
+}
+
+/// `pub(crate)` pass-through over `cosine` for callers outside this
+/// module (the tuning campaign engine's faithfulness-proxy scoring).
+pub(crate) fn cosine_pub(a: &[f32], b: &[f32]) -> f32 {
+    cosine(a, b)
 }
 
 /// recall@k for one case: |retrieved ∩ expected| / |expected|. `None`
@@ -756,6 +782,14 @@ async fn text_embedder(state: &AppState) -> Option<veda_core::embedding_client::
         .map(|c| veda_core::embedding_client::EmbeddingClient::new((*c).clone()))
 }
 
+/// `pub(crate)` pass-through over `text_embedder` for callers outside
+/// this module (the tuning campaign engine's trial evaluator).
+pub(crate) async fn text_embedder_pub(
+    state: &AppState,
+) -> Option<veda_core::embedding_client::EmbeddingClient> {
+    text_embedder(state).await
+}
+
 /// Best-effort cosine(answer, gold). `None` when no gold answer / embedder
 /// or any embed call fails — never an error.
 async fn gold_cosine(
@@ -767,6 +801,75 @@ async fn gold_cosine(
     let av = embedder.embed_text(answer).await.ok()?;
     let gv = embedder.embed_text(gold).await.ok()?;
     Some((cosine(&av, &gv) as f64).clamp(0.0, 1.0))
+}
+
+/// Run one eval set's cases through the harness using the collection's
+/// live (default) agent/config and persist the resulting `EvalRun` — the
+/// real body the `Evaluate` job dispatch was a stub for. Reuses
+/// `run_eval_set`'s injected-turn-closure machinery directly rather than
+/// duplicating it; the only difference from the HTTP `run_eval` handler
+/// is that this is called with a `&EvalSet` already in hand (no id
+/// lookup) and never needs axum's `State`/`Path`/`Json` extractors.
+///
+/// Captures the embedder as `Option<&EmbeddingClient>` (mirroring
+/// `run_eval`'s own closure below) rather than cloning it per case:
+/// `EmbeddingClient` has no `Clone` impl.
+pub(crate) async fn run_eval_set_for_job(state: &AppState, set: &EvalSet) -> EvalRun {
+    let agent_id = set
+        .agent_id
+        .clone()
+        .unwrap_or_else(|| "veda-agent".to_owned());
+    let embedder = text_embedder(state).await;
+    let embedder_ref = embedder.as_ref();
+    // A separate clone for the closure to `move`-capture: the closure
+    // literal is itself one of `run_eval_set`'s arguments, evaluated
+    // alongside the `&agent_id` argument in the same call, so moving
+    // `agent_id` itself into the closure would conflict with that borrow.
+    let closure_agent_id = agent_id.clone();
+    let run = run_eval_set(
+        set,
+        &agent_id,
+        DEFAULT_RECALL_BAR,
+        DEFAULT_FAITHFULNESS_BAR,
+        move |case| {
+            let turn_agent_id = closure_agent_id.clone();
+            async move {
+                match agents::run_agent_turn(
+                    state,
+                    &TenantId::default_tenant(),
+                    None,
+                    &turn_agent_id,
+                    &[],
+                    &case.query,
+                    None,
+                )
+                .await
+                {
+                    Ok((_agent, result, citations, grounding, _cache_hit, _guardrails)) => {
+                        let gold = case.gold_answer.clone();
+                        let gc = gold_cosine(embedder_ref, &result.response, gold.as_deref()).await;
+                        TurnOutcome {
+                            response: result.response,
+                            citations,
+                            grounding,
+                            gold_cosine: gc,
+                            judge_verdict: None,
+                        }
+                    }
+                    Err(_) => TurnOutcome {
+                        response: String::new(),
+                        citations: Vec::new(),
+                        grounding: None,
+                        gold_cosine: None,
+                        judge_verdict: None,
+                    },
+                }
+            }
+        },
+    )
+    .await;
+    save_run(&state.inner.saved_objects, &run).await;
+    run
 }
 
 pub async fn run_eval(

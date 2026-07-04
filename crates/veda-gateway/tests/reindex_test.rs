@@ -26,7 +26,7 @@ async fn start_server() -> (String, tempfile::TempDir) {
 }
 
 #[tokio::test]
-async fn reindex_in_non_raft_mode_returns_target_status_no_raft() {
+async fn reindex_in_non_raft_mode_returns_target_status_alias_swapped() {
     let (base, _tmp) = start_server().await;
     let c = Client::new();
 
@@ -57,12 +57,14 @@ async fn reindex_in_non_raft_mode_returns_target_status_no_raft() {
     );
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["target"], json!("docs@v2"));
-    // Non-Raft mode: status reflects the no-SM path.
-    // Status string now reports copy count too: "no_raft (copied N records)".
+    // Non-Raft mode: the local AliasMap (Task 0.2's "Phase 0 fix") makes
+    // the swap genuinely work without a Raft coordinator too, so both
+    // modes report the same "alias_swapped" status.
+    // Status string reports copy count too: "alias_swapped (copied N records)".
     let status = body["status"].as_str().unwrap();
     assert!(
-        status.starts_with("no_raft"),
-        "status must start with 'no_raft', got {status}"
+        status.starts_with("alias_swapped"),
+        "status must start with 'alias_swapped', got {status}"
     );
 }
 
