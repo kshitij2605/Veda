@@ -188,32 +188,62 @@ fn sample_outer_bases(num_bases: usize) -> Vec<PipelineConfig> {
 
 /// Build the `/reindex` request for a non-base-0 base. When only tier2
 /// differs from the default (chunker unchanged), this is a cheap
-/// straight-copy (`chunker: None`) — the sibling gets tier2's index type
-/// via its schema, no re-chunk/re-embed. When tier3 differs, a real
-/// chunker transform + re-embed is required. `..Default::default()`
-/// fills `ReindexRequest`'s other fields (`parent_id_field` etc.) with
-/// their defaults — this campaign engine only ever needs to set
-/// `chunker`/`re_embed`/`text_field`.
+/// straight-copy that still carries the new `index_type` — the sibling
+/// genuinely gets tier2's index type via `ReindexRequest.index_type`, no
+/// re-chunk/re-embed needed. When tier3 differs, a real chunker transform +
+/// re-embed is required (tier2's index_type, if it also differs, rides
+/// along on the same request). `..Default::default()` fills
+/// `ReindexRequest`'s other fields (`parent_id_field` etc.) with their
+/// defaults — this campaign engine only ever needs to set
+/// `chunker`/`re_embed`/`text_field`/`index_type`.
+///
+/// NOTE: `Tier2Config.ef_construction`/`.m` are NOT wired here — those HNSW
+/// build parameters aren't schema-configurable anywhere in Veda today (see
+/// `ReindexRequest.index_type`'s doc comment in `collections.rs`), a
+/// separate, pre-existing platform gap. `sample_outer_bases` only ever
+/// varies `index_type` within tier2, never `ef_construction`/`m`, so this
+/// omission doesn't silently drop a real search-space dimension the
+/// sampler actually explores.
 fn config_to_reindex_request(base: &PipelineConfig) -> crate::rest::collections::ReindexRequest {
-    let default_tier3 = crate::tuning::config::PipelineConfig::default().tier3;
-    if base.tier3 == default_tier3 {
-        crate::rest::collections::ReindexRequest {
-            chunker: None,
-            re_embed: false,
-            text_field: None,
-            ..Default::default()
-        }
-    } else {
-        crate::rest::collections::ReindexRequest {
-            chunker: Some(chunker_strategy_to_veda_core(
+    let default_cfg = crate::tuning::config::PipelineConfig::default();
+    let chunker_differs = base.tier3 != default_cfg.tier3;
+    let index_differs = base.tier2.index_type != default_cfg.tier2.index_type;
+
+    crate::rest::collections::ReindexRequest {
+        chunker: if chunker_differs {
+            Some(chunker_strategy_to_veda_core(
                 base.tier3.chunker_strategy,
                 base.tier3.chunk_size,
                 base.tier3.overlap,
-            )),
-            re_embed: true,
-            text_field: None,
-            ..Default::default()
-        }
+            ))
+        } else {
+            None
+        },
+        re_embed: chunker_differs,
+        text_field: None,
+        index_type: if index_differs {
+            Some(index_type_choice_to_reindex_str(base.tier2.index_type).to_owned())
+        } else {
+            None
+        },
+        ..Default::default()
+    }
+}
+
+/// Map the campaign's `IndexTypeChoice` (Task 3.2's tuner option list) onto
+/// the string values `parse_index_type` (in `collections.rs`, shared with
+/// collection-create's `FieldDef.index`) accepts.
+fn index_type_choice_to_reindex_str(
+    choice: crate::tuning::config::IndexTypeChoice,
+) -> &'static str {
+    use crate::tuning::config::IndexTypeChoice as C;
+    match choice {
+        C::Hnsw => "hnsw",
+        C::DiskAnn => "diskann",
+        C::IvfPq => "ivfpq",
+        C::Flat => "flat",
+        C::RaBitQ => "rabitq",
+        C::Sq8 => "sq8",
     }
 }
 
@@ -744,5 +774,23 @@ mod tests {
         // test's `apply_trial` call, so the previous target is genuinely
         // `None` here.
         assert_eq!(resp.previous_alias_target, None);
+    }
+
+    #[test]
+    fn config_to_reindex_request_carries_tier2_index_type_when_it_differs() {
+        let mut cfg = PipelineConfig::default();
+        cfg.tier2.index_type = crate::tuning::config::IndexTypeChoice::DiskAnn;
+        let req = config_to_reindex_request(&cfg);
+        assert_eq!(req.index_type.as_deref(), Some("diskann"));
+        // A tier2-only diff must not trigger a needless re-chunk/re-embed.
+        assert!(req.chunker.is_none());
+        assert!(!req.re_embed);
+    }
+
+    #[test]
+    fn config_to_reindex_request_omits_index_type_when_tier2_is_default() {
+        let cfg = PipelineConfig::default();
+        let req = config_to_reindex_request(&cfg);
+        assert_eq!(req.index_type, None);
     }
 }
