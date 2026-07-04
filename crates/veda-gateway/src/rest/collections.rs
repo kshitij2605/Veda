@@ -714,6 +714,28 @@ pub struct ReindexRequest {
     /// the schema's first vector field.
     #[serde(default)]
     pub embedding_field: Option<String>,
+    /// Internal-only override for the sibling's name suffix (e.g.
+    /// `@tuning-base1-<uuid>`), bypassing the default `@vN` bump.
+    /// `skip_deserializing` — never settable from the public `/reindex`
+    /// HTTP body. Used by the tuning campaign's `materialize_bases` to
+    /// guarantee each base lands on its own distinct sibling: the default
+    /// bump derives purely from the SOURCE name, so calling
+    /// `reindex_collection_internal` more than once against the same live
+    /// collection (one call per base) would otherwise always compute the
+    /// same `@v2` target, silently merging different bases' data into one
+    /// sibling.
+    #[serde(default, skip_deserializing)]
+    pub sibling_suffix: Option<String>,
+    /// Internal-only: skip the alias swap in step 6, leaving the live
+    /// collection's alias untouched. `skip_deserializing` — never
+    /// settable from the public `/reindex` HTTP body (real `/reindex`
+    /// calls and `apply_trial`'s genuine applies always want the swap).
+    /// Used by `materialize_bases`, which only needs a sibling collection
+    /// to search against for trial scoring — it must NOT redirect the
+    /// live collection's public alias just because a campaign is
+    /// evaluating candidate configs.
+    #[serde(default, skip_deserializing)]
+    pub skip_alias_swap: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1048,7 +1070,9 @@ pub async fn reindex_collection_internal(
     //    can't contain '@' (see `TenantId::parse`), so bumping the whole
     //    scoped string is equivalent to bumping the unscoped display name
     //    and re-adding the prefix.
-    let scoped_new = if let Some(prefix) = scoped_name.strip_suffix("@v2") {
+    let scoped_new = if let Some(suffix) = req.sibling_suffix.as_deref() {
+        format!("{scoped_name}{suffix}")
+    } else if let Some(prefix) = scoped_name.strip_suffix("@v2") {
         format!("{prefix}@v3")
     } else if scoped_name.contains("@v") {
         // generic vN bump
@@ -1182,7 +1206,21 @@ pub async fn reindex_collection_internal(
     // 6. Alias swap: Raft mode uses the replicated command; non-Raft mode
     //    writes directly to the local AliasMap (Phase 0 fix) so the swap
     //    genuinely redirects traffic in single-node deployments too.
+    //    Skipped when `req.skip_alias_swap` — a tuning campaign's
+    //    `materialize_bases` only needs the sibling to exist and be
+    //    populated for internal trial scoring; it must never redirect the
+    //    live collection's public alias as a side effect of merely
+    //    evaluating candidate configs (only a genuine `apply_trial` or a
+    //    real `/reindex` call should ever do that).
     let target = tenant::display_name(&scoped_new).to_owned();
+    if req.skip_alias_swap {
+        return Ok(ReindexResponse {
+            target,
+            status: format!(
+                "materialized (copied {copied} records), alias not swapped (internal use only)"
+            ),
+        });
+    }
     {
         let raft_guard = state.inner.raft.read().await;
         if let Some(coord) = raft_guard.as_ref() {
