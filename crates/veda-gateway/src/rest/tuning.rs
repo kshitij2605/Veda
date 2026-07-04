@@ -300,7 +300,18 @@ async fn materialize_bases(
 
     let mut out = std::collections::HashMap::new();
     for (i, base) in bases.iter().enumerate().skip(1) {
-        let req = config_to_reindex_request(base);
+        let mut req = config_to_reindex_request(base);
+        // Each base must land on its own distinct sibling, and this call
+        // must NEVER touch the live collection's public alias — this is
+        // materializing a candidate config for internal trial scoring,
+        // not applying anything. The default `/reindex` `@vN` bump
+        // derives purely from the SOURCE name, so calling
+        // `reindex_collection_internal` once per base against the same
+        // live collection would otherwise always compute the identical
+        // `@v2` target, silently merging different bases' data into one
+        // sibling.
+        req.sibling_suffix = Some(format!("@tuning-base{i}-{}", uuid::Uuid::new_v4()));
+        req.skip_alias_swap = true;
         let resp =
             crate::rest::collections::reindex_collection_internal(state, scoped_collection, req)
                 .await
