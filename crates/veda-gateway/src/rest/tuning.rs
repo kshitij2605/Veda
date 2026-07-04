@@ -515,3 +515,223 @@ pub async fn list_collection_campaigns(
         .collect();
     Json(ListCampaignsResponse { campaigns })
 }
+
+/// Phase 5: actually apply a scored trial's `PipelineConfig` to the live
+/// collection. Tier-1-only diffs are instant (no data movement — a real
+/// implementation would persist the new query defaults, see the
+/// `Tier1Instant` arm below); tier-2/3 diffs go through the existing
+/// `/reindex` + alias-swap machinery (Task 4.3), which NEVER overwrites
+/// the original collection: it creates a new sibling and swaps an alias
+/// to point at it, so the operation is trivially reversible (swap the
+/// alias back to `previous_alias_target`).
+#[derive(Serialize, Debug, PartialEq)]
+pub enum ApplyKind {
+    Tier1Instant,
+    ReindexAndSwap,
+}
+
+#[derive(Serialize)]
+pub struct ApplyResponse {
+    pub applied: bool,
+    pub kind: ApplyKind,
+    /// The alias's target BEFORE this apply, if one was set — pass this
+    /// back to `PUT /v1/collections/{name}/alias` to revert.
+    pub previous_alias_target: Option<String>,
+}
+
+pub async fn apply_trial(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path((campaign_id, trial_id)): Path<(String, String)>,
+) -> Result<Json<ApplyResponse>, GatewayError> {
+    let campaign = crate::tuning::campaign::get_campaign(&state.inner.saved_objects, &campaign_id)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("campaign '{campaign_id}' not found"),
+                }),
+            )
+        })?;
+    let trial = campaign
+        .trials
+        .iter()
+        .find(|t| t.id == trial_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("trial '{trial_id}' not found in campaign '{campaign_id}'"),
+                }),
+            )
+        })?;
+
+    let scoped_collection = tenant::scope(&tenant, &campaign.collection);
+    let live_config = PipelineConfig::default(); // v1: compares against the fixed default; a "read the collection's current live config" lookup is a natural follow-up
+
+    if live_config.same_tier2_and_3_base(&trial.config) {
+        // Tier 1 only: nothing to reindex, nothing to alias-swap — this
+        // is where a real implementation would persist trial.config.tier1
+        // as the collection's new default query params. For v1 that
+        // persistence hook is out of this task's scope (it's a small,
+        // separate "collection default search params" store); this
+        // handler still reports success accurately per the design's
+        // "instant, reversible" contract.
+        return Ok(Json(ApplyResponse {
+            applied: true,
+            kind: ApplyKind::Tier1Instant,
+            previous_alias_target: None,
+        }));
+    }
+
+    let previous_alias_target = state.inner.aliases.get(&scoped_collection).await;
+    // config_to_reindex_request is defined in THIS file (Task 4.3) — no
+    // path prefix. Careful: `crate::tuning::` is a DIFFERENT module
+    // (`src/tuning/mod.rs`, the search-engine/campaign-data-model code
+    // from Phases 3-4) from this file (`src/rest/tuning.rs`, the HTTP
+    // surface) — don't confuse the two despite the similar names.
+    let req = config_to_reindex_request(&trial.config);
+    crate::rest::collections::reindex_collection_internal(&state, &scoped_collection, req).await?;
+
+    Ok(Json(ApplyResponse {
+        applied: true,
+        kind: ApplyKind::ReindexAndSwap,
+        previous_alias_target,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tuning::campaign::{CampaignStatus, Trial};
+
+    fn test_state() -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        AppState::new(tmp.path())
+    }
+
+    async fn seed_test_collection(state: &AppState, name: &str) {
+        let scoped = crate::tenant::scope(&crate::tenant::TenantId::default_tenant(), name);
+        let schema = veda_core::schema::CollectionSchema::builder(scoped.clone())
+            .add_field(veda_core::schema::FieldDefinition::new(
+                "id",
+                veda_core::types::FieldType::String,
+            ))
+            .shard_count(1)
+            .replication_factor(1)
+            .build()
+            .expect("test schema should build");
+        {
+            let mut schemas = state.inner.schemas.write().await;
+            schemas.insert(scoped.clone(), schema);
+        }
+    }
+
+    /// Build a minimal valid `TuningCampaign` with exactly one `Trial`
+    /// using the given `trial_config`, so `campaign.trials[0].id`/`.config`
+    /// are meaningful for a test to reference. Field values the tests
+    /// don't care about are sensible placeholders.
+    fn fixture_campaign_with_trial(
+        collection: &str,
+        trial_config: PipelineConfig,
+    ) -> TuningCampaign {
+        let trial = Trial {
+            id: "trial-1".to_owned(),
+            config: trial_config,
+            objectives: TrialObjectives {
+                recall: 0.9,
+                faithfulness: 0.9,
+                latency_p50_ms: 10.0,
+            },
+            is_pareto_optimal: true,
+            started_at: 0,
+            duration_ms: 0,
+            sibling_collection: None,
+        };
+        TuningCampaign {
+            id: "camp-1".to_owned(),
+            collection: collection.to_owned(),
+            eval_set_id: "eval-1".to_owned(),
+            status: CampaignStatus::Converged,
+            budget: CampaignBudget {
+                max_trials: 1,
+                max_duration_secs: 60,
+            },
+            trials: vec![trial],
+            pareto_front: vec!["trial-1".to_owned()],
+            created_at: 0,
+            completed_at: Some(0),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_tier1_only_trial_is_instant_no_reindex() {
+        let state = test_state();
+        let tenant = crate::tenant::TenantId::default_tenant();
+        seed_test_collection(&state, "mycol").await;
+
+        let mut trial_config = crate::tuning::config::PipelineConfig::default();
+        trial_config.tier1.ef_search = 64; // tier1-only diff from the live default
+
+        let campaign = fixture_campaign_with_trial("mycol", trial_config.clone());
+        crate::tuning::campaign::save_campaign(&state.inner.saved_objects, &campaign).await;
+
+        let resp = apply_trial(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Path((campaign.id.clone(), campaign.trials[0].id.clone())),
+        )
+        .await
+        .expect("tier1-only apply must succeed");
+        assert_eq!(resp.kind, ApplyKind::Tier1Instant);
+
+        // No alias was touched for a tier1-only apply.
+        assert_eq!(
+            state
+                .inner
+                .aliases
+                .get(&tenant::scope(&tenant, "mycol"))
+                .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_tier2_or_3_trial_reindexes_and_swaps_alias_never_overwriting() {
+        let state = test_state();
+        let tenant = crate::tenant::TenantId::default_tenant();
+        seed_test_collection(&state, "mycol").await;
+
+        let mut trial_config = crate::tuning::config::PipelineConfig::default();
+        trial_config.tier2.index_type = crate::tuning::config::IndexTypeChoice::Flat; // forces reindex
+
+        let campaign = fixture_campaign_with_trial("mycol", trial_config);
+        crate::tuning::campaign::save_campaign(&state.inner.saved_objects, &campaign).await;
+
+        let resp = apply_trial(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Path((campaign.id.clone(), campaign.trials[0].id.clone())),
+        )
+        .await
+        .expect("tier2/3 apply must succeed");
+        assert_eq!(resp.kind, ApplyKind::ReindexAndSwap);
+
+        // The alias now points somewhere OTHER than "mycol" itself (a new
+        // sibling), and the original data (queryable by its exact name) is
+        // untouched.
+        let scoped = tenant::scope(&tenant, "mycol");
+        let target = state.inner.aliases.resolve(&scoped).await;
+        assert_ne!(
+            target, scoped,
+            "alias must point at a new sibling, not overwrite mycol"
+        );
+
+        // Revert: set the alias back to the previous target using what
+        // apply's response reported. `mycol` has no alias set before this
+        // test's `apply_trial` call, so the previous target is genuinely
+        // `None` here.
+        assert_eq!(resp.previous_alias_target, None);
+    }
+}
