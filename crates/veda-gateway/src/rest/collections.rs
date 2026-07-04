@@ -237,6 +237,12 @@ pub struct FieldInfo {
     /// The field's ANN index type ("Hnsw", "DiskAnn", "Flat", ...) — only
     /// present for vector/sparse_vector/multi_vector fields. Lets a caller
     /// confirm a `/reindex` request's `index_type` genuinely took effect.
+    /// NOTE: this is `{:?}` (Debug) formatted, NOT the same string
+    /// `ReindexRequest.index_type`/`FieldDef.index` accept as input — for
+    /// compound variants (e.g. `RaBitQRerank` Debug-formats to
+    /// "RaBitQRerank", but `parse_index_type` only accepts the underscored
+    /// alias "rabitq_rerank") the two do NOT round-trip. This field is
+    /// read-only observability; never feed it back into `parse_index_type`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index_type: Option<String>,
 }
