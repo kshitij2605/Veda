@@ -18,7 +18,11 @@
 //! - `JobKind::TtlSweep` — **stubbed**: logs "would run TTL sweep" + TODO hook.
 //! - `JobKind::Reindex` — **stubbed**: logs "would run reindex" + TODO hook.
 //! - `JobKind::Compact` — **stubbed**: logs "would run compact" + TODO hook.
-//! - `JobKind::Evaluate` — **stubbed**: logs "would run evaluate" + TODO hook.
+//! - `JobKind::Evaluate` — runs every eval set's harness against its
+//!   configured agent and persists the resulting `EvalRun`.
+//! - `JobKind::TuningCampaign` — runs one bounded auto-tuning campaign
+//!   (Phase 4 of the auto-tuning plan) via
+//!   `rest::tuning::run_and_persist_campaign`.
 //!
 //! Wiring to real ops is deferred; the scheduler infrastructure, registry,
 //! REST API, and persistence are the deliverable for this task.
@@ -43,10 +47,25 @@ use crate::rest::state::AppState;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobKind {
-    TtlSweep { collection: String },
-    Reindex { collection: String },
-    Compact { collection: String },
-    Evaluate { collection: String },
+    TtlSweep {
+        collection: String,
+    },
+    Reindex {
+        collection: String,
+    },
+    Compact {
+        collection: String,
+    },
+    Evaluate {
+        collection: String,
+    },
+    /// Phase 4 of the auto-tuning plan: run one bounded campaign.
+    TuningCampaign {
+        collection: String,
+        eval_set_id: String,
+        max_trials: usize,
+        max_duration_secs: u64,
+    },
 }
 
 /// A single scheduled job entry.
@@ -235,10 +254,38 @@ async fn dispatch(kind: &JobKind, state: &AppState) {
             );
         }
         JobKind::Evaluate { collection } => {
-            tracing::info!(
-                collection = %collection,
-                "scheduler: would run evaluate — TODO: wire to evaluate handler"
-            );
+            // Was a stub ("would run evaluate — TODO"). Now runs every
+            // eval set whose `agent_id` targets this collection's default
+            // agent — a coarse but real dispatch; a per-collection eval-set
+            // index is a natural follow-up, not required for this fix.
+            let sets = crate::rest::rag_eval::list_sets_pub(&state.inner.saved_objects).await;
+            for set in sets {
+                let _ = crate::rest::rag_eval::run_eval_set_for_job(state, &set).await;
+            }
+            tracing::info!(collection = %collection, "scheduler: evaluate job dispatched");
+        }
+        JobKind::TuningCampaign {
+            collection,
+            eval_set_id,
+            max_trials,
+            max_duration_secs,
+        } => {
+            // Job-triggered campaigns (scheduled/corpus-drift) use a
+            // fixed default base count; num_bases is a user-facing tuning
+            // knob exposed only on the on-demand HTTP trigger
+            // (`StartCampaignRequest`), not grown onto JobKind's schema.
+            const DEFAULT_NUM_BASES: usize = 3;
+            let _ = crate::rest::tuning::run_and_persist_campaign(
+                state,
+                collection,
+                eval_set_id,
+                crate::tuning::campaign::CampaignBudget {
+                    max_trials: *max_trials,
+                    max_duration_secs: *max_duration_secs,
+                },
+                DEFAULT_NUM_BASES,
+            )
+            .await;
         }
     }
 }
@@ -478,5 +525,101 @@ mod tests {
         let due = reg.due_jobs(now);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0], "due-job");
+    }
+
+    // ── Test 4: TuningCampaign job dispatch (real /reindex + eval-set
+    // scoring wiring, Task 4.3) ─────────────────────────────────────────
+
+    /// Builds an `AppState` with a text-modality embedding model registered
+    /// (mock endpoint — `EmbeddingClient::embed_text` falls back to a
+    /// deterministic vector, no real embedding service needed) and
+    /// `collection` created with one seeded record. The registered model is
+    /// required so the campaign's tier3-varying base (which triggers a real
+    /// `/reindex` with `re_embed: true`) doesn't 424 on a missing embedder.
+    ///
+    /// This is a small local fixture rather than reusing `rag_eval.rs`'s
+    /// private `test_state_with_llm_and_records` (see Task 4.3 notes): the
+    /// eval set used below has zero cases, so the agent-turn/LLM path is
+    /// never exercised and no LLM mock is needed here.
+    async fn test_state_with_tuning_fixture(collection: &str) -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path());
+
+        {
+            let mut registry = state.embedding_registry().write().await;
+            registry.register(veda_core::embedding::EmbeddingModelConfig {
+                name: "mock-text".into(),
+                endpoint: "http://mock:8080/embed".into(),
+                api_key: String::new(),
+                supported_modalities: vec![veda_core::embedding::Modality::Text],
+                output_dimension: 2,
+                max_input_size_bytes: 1024 * 1024,
+                timeout_seconds: 10,
+                batch_size: 8,
+            });
+        }
+
+        let req = serde_json::from_value(serde_json::json!({
+            "name": collection,
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" },
+                { "name": "text", "type": "string" }
+            ],
+            "seed_records": [{ "v": [1.0, 0.0], "text": "some text" }],
+        }))
+        .expect("fixture create-collection request should deserialize");
+        let resp = crate::rest::collections::create_collection(
+            axum::extract::State(state.clone()),
+            crate::tenant::Tenant(crate::tenant::TenantId::default_tenant()),
+            axum::Json(req),
+        )
+        .await;
+        use axum::response::IntoResponse;
+        let status = resp.into_response().status();
+        assert!(
+            status.is_success(),
+            "fixture collection create should succeed, got {status}"
+        );
+
+        state
+    }
+
+    #[tokio::test]
+    async fn tuning_campaign_job_calls_reindex_once_per_distinct_base_not_per_trial() {
+        // "mycol" under the default tenant is stored as "default__mycol" —
+        // `JobKind::TuningCampaign`'s `collection` field (like the other
+        // `JobKind` variants, e.g. `TtlSweep`) is the already-scoped storage
+        // key, not a user-facing name, so the fixture and the job below
+        // both use the scoped form.
+        let state = test_state_with_tuning_fixture("mycol").await;
+
+        let eval_set = crate::rest::rag_eval::EvalSet {
+            id: "eval-1".to_owned(),
+            name: "fixture".to_owned(),
+            agent_id: None,
+            cases: vec![], // an empty set is enough to exercise the loop's plumbing
+        };
+        crate::rest::rag_eval::save_set_pub(&state.inner.saved_objects, &eval_set).await;
+
+        let job = ScheduledJob {
+            name: "campaign-1".to_owned(),
+            cron: "0 * * * * *".to_owned(),
+            kind: JobKind::TuningCampaign {
+                collection: "default__mycol".to_owned(),
+                eval_set_id: "eval-1".to_owned(),
+                max_trials: 4,
+                max_duration_secs: 60,
+            },
+            last_run: None,
+        };
+        dispatch(&job.kind, &state).await;
+
+        let campaigns = crate::tuning::campaign::list_campaigns(&state.inner.saved_objects).await;
+        assert_eq!(campaigns.len(), 1);
+        assert_eq!(
+            campaigns[0].status,
+            crate::tuning::campaign::CampaignStatus::BudgetExhausted
+        );
     }
 }

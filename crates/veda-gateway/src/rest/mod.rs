@@ -54,6 +54,7 @@ pub mod slos;
 pub mod state;
 pub mod synthetics;
 pub mod time_parse;
+pub mod tuning;
 pub mod txn;
 pub mod url_guard;
 
@@ -314,6 +315,13 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/collections/{name}/reindex",
             post(collections::reindex_collection),
+        )
+        // Phase 4 (auto-tuning): trigger / list bounded search-space
+        // campaigns for a collection (recommend-only; actually applying a
+        // result still goes through /reindex, see Phase 5).
+        .route(
+            "/v1/collections/{name}/tuning-campaigns",
+            get(tuning::list_collection_campaigns).post(tuning::start_campaign),
         )
         // Force-seal the growing segment(s) so the configured vector index
         // type builds (small datasets otherwise never reach the seal
