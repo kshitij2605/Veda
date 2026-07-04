@@ -39,6 +39,7 @@ import type {
 } from './types'
 import { CompareRuns } from './CompareRuns'
 import { RouterExplorer } from './RouterExplorer'
+import { Campaigns } from './Campaigns'
 
 interface QualityLabUrlState {
   setId?: string
@@ -46,6 +47,8 @@ interface QualityLabUrlState {
   compareId?: string
   /** When true, the active set is shown in the Router-decision view. */
   router?: boolean
+  /** When true, the active set is shown in the Campaigns view. */
+  campaigns?: boolean
 }
 
 export function QualityLab() {
@@ -102,6 +105,30 @@ export function QualityLab() {
     )
   }
 
+  if (state.campaigns && activeSet) {
+    return (
+      <div className="flex h-full min-h-0 flex-col overflow-hidden">
+        <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-4 py-2">
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={() => setState({ ...state, campaigns: undefined })}
+          >
+            ← Back
+          </Button>
+        </div>
+        <div className="flex-1 min-h-0">
+          <Campaigns
+            collection={activeSet.body.collection}
+            evalSetIds={sets
+              .filter((s) => s.body.collection === activeSet.body.collection)
+              .map((s) => s.id)}
+          />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-full min-h-0 bg-[var(--color-bg)] overflow-hidden">
       <SetsRail
@@ -128,6 +155,7 @@ export function QualityLab() {
               })
             }
             onRouter={() => setState({ ...state, router: true })}
+            onCampaigns={() => setState({ ...state, campaigns: true })}
           />
         ) : (
           <EmptyMain onCreate={() => setShowCreate(true)} hasSets={sets.length > 0} />
@@ -229,6 +257,7 @@ function SetPanel({
   onRunSelect,
   onCompare,
   onRouter,
+  onCampaigns,
 }: {
   set: SavedObject<EvalSetBody>
   runs: SavedObject<EvalRunBody>[]
@@ -236,6 +265,7 @@ function SetPanel({
   onRunSelect: (id: string) => void
   onCompare: (id: string) => void
   onRouter: () => void
+  onCampaigns: () => void
 }) {
   const { upsert, remove, touch } = useSavedObjects.getState()
   const [schema, setSchema] = useState<FieldSchema[] | undefined>()
@@ -369,6 +399,14 @@ function SetPanel({
           className="ml-auto"
         >
           Router decisions
+        </Button>
+        <Button
+          size="xs"
+          variant="ghost"
+          leading={<Sparkles size={11} strokeWidth={2.25} />}
+          onClick={onCampaigns}
+        >
+          Campaigns
         </Button>
         <Button
           size="xs"
