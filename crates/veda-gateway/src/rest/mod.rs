@@ -323,6 +323,13 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/collections/{name}/tuning-campaigns",
             get(tuning::list_collection_campaigns).post(tuning::start_campaign),
         )
+        // Phase 5: safe-apply a scored trial — tier1-only diffs are
+        // instant, tier2/3 diffs go through /reindex + alias-swap (never
+        // overwrites the original collection).
+        .route(
+            "/v1/tuning-campaigns/{campaign_id}/trials/{trial_id}/apply",
+            post(tuning::apply_trial),
+        )
         // Force-seal the growing segment(s) so the configured vector index
         // type builds (small datasets otherwise never reach the seal
         // threshold and always brute-force with Flat).
