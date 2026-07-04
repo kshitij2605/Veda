@@ -76,6 +76,12 @@ pub async fn ingest_markdown(
     let has_source_url_field = schema.get_field("source_url").is_some();
     let has_title_field = schema.get_field("title").is_some();
     let has_chunk_index_field = schema.get_field("chunk_index").is_some();
+    // Needed for `/reindex`'s rechunk-by-parent grouping (default field
+    // name "parent_doc_id", see `ReindexRequest.parent_id_field`) — without
+    // this, every chunk from every document is an "orphan" to the reindex
+    // path and gets copied as-is, silently making chunker-strategy changes
+    // a no-op for any real ingested document (found via live E2E testing).
+    let has_parent_doc_id_field = schema.get_field("parent_doc_id").is_some();
 
     // Discover text vector fields and SPLADE sparse-text targets, mirroring
     // the document path. Image fields are not handled here — the OCR caller
@@ -160,6 +166,14 @@ pub async fn ingest_markdown(
             }
             if has_title_field && let Some(t) = &source_meta.title {
                 record.set("title", FieldValue::String(t.clone()));
+            }
+            if has_parent_doc_id_field
+                && let Some(pid) = source_meta
+                    .source_file
+                    .as_ref()
+                    .or(source_meta.source_url.as_ref())
+            {
+                record.set("parent_doc_id", FieldValue::String(pid.clone()));
             }
             if has_chunk_index_field {
                 record.set("chunk_index", FieldValue::Int32(chunk.index as i32));

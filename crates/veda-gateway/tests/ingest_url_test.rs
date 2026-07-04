@@ -247,6 +247,98 @@ async fn test_ingest_url_chunks_embeds_and_inserts_with_source_url() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn test_ingest_url_stamps_parent_doc_id_from_source_url() {
+    // Regression test: found via live E2E testing on real ingested
+    // documents that `ingest_markdown` never wrote a `parent_doc_id`,
+    // silently making `/reindex`'s rechunk-by-parent grouping a no-op
+    // (every chunk treated as an orphan and copied as-is) for ANY
+    // document ever ingested through Veda's own pipelines.
+    let (crawl_url, _spy, _crawl_handle) = start_mock_crawl4ai().await;
+    let (base, _tmp) = start_gateway().await;
+
+    let resp = client()
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "web_col_parent",
+            "fields": [
+                { "name": "content", "type": "string", "filterable": true },
+                { "name": "source_url", "type": "string", "filterable": true },
+                { "name": "parent_doc_id", "type": "string", "filterable": true },
+                { "name": "title", "type": "string" },
+                { "name": "embedding", "type": "vector", "dimension": 4, "metric": "cosine" }
+            ],
+            "shard_count": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        201,
+        "create collection failed: {:?}",
+        resp.text().await
+    );
+
+    let _guard = CRAWL_ENV_LOCK.lock().unwrap();
+    // SAFETY: serialized on CRAWL_ENV_LOCK; no concurrent crawl-env access.
+    unsafe {
+        std::env::set_var("VEDA_CRAWL4AI_ENDPOINT", &crawl_url);
+        std::env::set_var("VEDA_CRAWL4AI_TOKEN", "test-token");
+    }
+
+    let resp = client()
+        .post(format!("{base}/v1/collections/web_col_parent/ingest-url"))
+        .json(&json!({
+            "url": "https://example.com/doc",
+            "chunker": "fixed_size",
+            "chunk_size": 80,
+            "chunk_overlap": 0
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+
+    unsafe {
+        std::env::remove_var("VEDA_CRAWL4AI_ENDPOINT");
+        std::env::remove_var("VEDA_CRAWL4AI_TOKEN");
+    }
+    drop(_guard);
+
+    assert_eq!(status, 201, "ingest-url failed: {body}");
+    let inserted = body["chunks_inserted"].as_u64().unwrap();
+    assert!(
+        inserted >= 1,
+        "expected at least one chunk inserted: {body}"
+    );
+
+    let list = client()
+        .get(format!(
+            "{base}/v1/collections/web_col_parent/records?limit=100"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.status(), 200);
+    let list_body: Value = list.json().await.unwrap();
+    let records = list_body["records"].as_array().unwrap();
+    assert_eq!(
+        records.len() as u64,
+        inserted,
+        "record count mismatch: {list_body}"
+    );
+    for rec in records {
+        assert_eq!(
+            rec["fields"]["parent_doc_id"], "https://example.com/doc",
+            "chunk missing parent_doc_id (needed for /reindex's rechunk-by-parent grouping): {rec}"
+        );
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_ingest_url_not_configured_returns_503() {
     let (base, _tmp) = start_gateway().await;
     create_web_collection(&base, "web_col_unset").await;
