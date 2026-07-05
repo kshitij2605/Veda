@@ -1094,7 +1094,7 @@ pub async fn reindex_collection_internal(
     //    can't contain '@' (see `TenantId::parse`), so bumping the whole
     //    scoped string is equivalent to bumping the unscoped display name
     //    and re-adding the prefix.
-    let scoped_new = if let Some(suffix) = req.sibling_suffix.as_deref() {
+    let mut scoped_new = if let Some(suffix) = req.sibling_suffix.as_deref() {
         format!("{scoped_name}{suffix}")
     } else if let Some(prefix) = scoped_name.strip_suffix("@v2") {
         format!("{prefix}@v3")
@@ -1105,6 +1105,25 @@ pub async fn reindex_collection_internal(
     } else {
         format!("{scoped_name}@v2")
     };
+    // Guard against colliding with an already-materialized sibling from a
+    // PRIOR /reindex call on this same base — the computation above only
+    // looks at `scoped_name`'s OWN suffix, not at what siblings already
+    // exist, so reindexing "rag_test" (no `@v` suffix) twice always
+    // computes "rag_test@v2" both times. On collision,
+    // `materialize_collection_locally` silently no-ops (it only checks
+    // whether the name is already in `state.inner.schemas`), so the
+    // schema rewrite (e.g. a new index_type) never applies, and the
+    // record-copy step re-inserts every source record into the STALE
+    // sibling, duplicating them. Found via a live end-to-end trial-apply
+    // on real data: a second reindex onto an existing "@v2" silently kept
+    // reporting the old index type and doubled the sibling's record count.
+    {
+        let schemas = state.inner.schemas.read().await;
+        while schemas.contains_key(&scoped_new) {
+            scoped_new =
+                bump_version_suffix(&scoped_new).unwrap_or_else(|| format!("{scoped_new}@v2"));
+        }
+    }
 
     // 3. Materialize the sibling locally with the rewritten
     //    schema. In Raft mode we ALSO submit a CreateCollection
