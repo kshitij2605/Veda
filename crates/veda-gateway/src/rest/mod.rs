@@ -481,6 +481,10 @@ pub fn build_router(app_state: state::AppState) -> Router {
             "/v1/collections/{name}/eval-sets/generate",
             post(rag_eval::generate_eval_set),
         )
+        .route(
+            "/v1/collections/{name}/eval-set-size-recommendation",
+            get(rag_eval::eval_set_size_recommendation),
+        )
         // Document processing (OCR)
         .route(
             "/v1/collections/{name}/process-document",
