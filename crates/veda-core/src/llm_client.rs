@@ -64,6 +64,35 @@ impl LlmConfig {
             timeout,
         })
     }
+
+    /// Read a DEDICATED answer-generation LLM config from `ANSWER_GEN_*`
+    /// env vars — intentionally separate from `VEDA_LLM_*` (used by
+    /// agents/triage/faithfulness-judging elsewhere), since eval-set
+    /// generation may run against different, production-shared infra
+    /// with its own concurrency budget (see `AppStateInner.answer_gen_semaphore`).
+    /// Returns `None` if `ANSWER_GEN_BASE_URL` is unset — eval-set
+    /// generation and the auto-optimization trigger both no-op cleanly.
+    pub fn from_env_answer_gen() -> Option<Self> {
+        let endpoint = std::env::var("ANSWER_GEN_BASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|e| normalize_endpoint(&e))?;
+        let model = std::env::var("ANSWER_GEN_MODEL").unwrap_or_else(|_| "default".to_owned());
+        let api_key = std::env::var("ANSWER_GEN_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let timeout = std::env::var("ANSWER_GEN_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(30));
+        Some(Self {
+            endpoint,
+            api_key,
+            model,
+            timeout,
+        })
+    }
 }
 
 /// Normalize an OpenAI-compatible chat endpoint so it always points at the
@@ -900,5 +929,34 @@ data: [DONE]\n\
         assert_eq!(completion.content.as_deref(), Some("hello there"));
         assert!(completion.tool_calls.is_empty());
         assert_eq!(completion.finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn from_env_answer_gen_reads_dedicated_prefix() {
+        // SAFETY: tests run single-threaded within this module via serial env var mutation;
+        // mirrors the existing `from_env_reads_...`-style tests in this same block.
+        unsafe {
+            std::env::remove_var("VEDA_LLM_ENDPOINT");
+            std::env::set_var("ANSWER_GEN_BASE_URL", "http://llm-host.internal.example:9000/v1");
+            std::env::set_var("ANSWER_GEN_API_KEY", "tensorflow");
+            std::env::set_var("ANSWER_GEN_MODEL", "Qwen/Qwen3.5-122B-A10B");
+        }
+        let cfg = LlmConfig::from_env_answer_gen().expect("answer-gen config should be present");
+        assert_eq!(cfg.endpoint, "http://llm-host.internal.example:9000/v1/chat/completions");
+        assert_eq!(cfg.model, "Qwen/Qwen3.5-122B-A10B");
+        assert_eq!(cfg.api_key.as_deref(), Some("tensorflow"));
+        unsafe {
+            std::env::remove_var("ANSWER_GEN_BASE_URL");
+            std::env::remove_var("ANSWER_GEN_API_KEY");
+            std::env::remove_var("ANSWER_GEN_MODEL");
+        }
+    }
+
+    #[test]
+    fn from_env_answer_gen_none_when_unset() {
+        unsafe {
+            std::env::remove_var("ANSWER_GEN_BASE_URL");
+        }
+        assert!(LlmConfig::from_env_answer_gen().is_none());
     }
 }

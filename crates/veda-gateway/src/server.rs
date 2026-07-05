@@ -37,6 +37,7 @@ pub async fn start_server(config: ServerConfig) -> std::io::Result<()> {
     app_state.load_embedding_from_env().await;
     app_state.load_splade_from_env().await;
     app_state.load_llm_from_env().await;
+    app_state.load_answer_gen_from_env().await;
     app_state.load_auth_from_env().await;
     app_state.load_raft_from_env().await;
     app_state.load_meta_leased_tso().await;
