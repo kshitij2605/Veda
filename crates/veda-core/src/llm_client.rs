@@ -937,12 +937,18 @@ data: [DONE]\n\
         // mirrors the existing `from_env_reads_...`-style tests in this same block.
         unsafe {
             std::env::remove_var("VEDA_LLM_ENDPOINT");
-            std::env::set_var("ANSWER_GEN_BASE_URL", "http://llm-host.internal.example:9000/v1");
+            std::env::set_var(
+                "ANSWER_GEN_BASE_URL",
+                "http://llm-host.internal.example:9000/v1",
+            );
             std::env::set_var("ANSWER_GEN_API_KEY", "tensorflow");
             std::env::set_var("ANSWER_GEN_MODEL", "Qwen/Qwen3.5-122B-A10B");
         }
         let cfg = LlmConfig::from_env_answer_gen().expect("answer-gen config should be present");
-        assert_eq!(cfg.endpoint, "http://llm-host.internal.example:9000/v1/chat/completions");
+        assert_eq!(
+            cfg.endpoint,
+            "http://llm-host.internal.example:9000/v1/chat/completions"
+        );
         assert_eq!(cfg.model, "Qwen/Qwen3.5-122B-A10B");
         assert_eq!(cfg.api_key.as_deref(), Some("tensorflow"));
         unsafe {
