@@ -1368,6 +1368,43 @@ pub async fn generate_eval_set(
     save_and_return_set(&state, &tenant, set).await
 }
 
+#[derive(Serialize)]
+pub struct EvalSetSizeRecommendation {
+    pub recommended: usize,
+    pub max: usize,
+    pub chunk_count: usize,
+    pub document_count: usize,
+}
+
+/// Recommend a testset size for `collection`: roughly 2 questions per
+/// document (the product's stated "10 docs -> 20 questions" default),
+/// but length-adjusted the same way `sample_diverse_chunks` weights its
+/// allocation, so a corpus of mostly-short documents doesn't recommend
+/// an unreasonably large set. `max` is always the collection's own
+/// chunk count — Niriksha enforces this as a hard ceiling on the
+/// user-editable size input.
+pub async fn eval_set_size_recommendation(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(collection): Path<String>,
+) -> Result<Json<EvalSetSizeRecommendation>, GatewayError> {
+    let scoped = tenant::scope(&tenant, &collection);
+    let chunks = load_source_chunks(&state, &scoped).await?;
+    let groups = document_groups(&chunks);
+    let document_count = groups.len();
+    let chunk_count = chunks.len();
+    // Base recommendation: 2 questions/document, floor 4 (a corpus of 1-2
+    // tiny docs should still get a usable eval set), ceiling at chunk_count.
+    let base = (document_count * 2).max(4);
+    let recommended = base.min(chunk_count);
+    Ok(Json(EvalSetSizeRecommendation {
+        recommended,
+        max: chunk_count,
+        chunk_count,
+        document_count,
+    }))
+}
+
 /// Read up to a bounded number of records' text field(s) as source chunks.
 /// Kept intentionally simple (first text-bearing field per record) — a
 /// smarter multi-field / clustering strategy is a natural follow-up.

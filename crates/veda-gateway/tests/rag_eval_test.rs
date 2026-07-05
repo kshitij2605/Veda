@@ -325,3 +325,56 @@ async fn test_flywheel_requires_query_or_conversation() {
         .unwrap();
     assert_eq!(resp.status(), 400);
 }
+
+#[tokio::test]
+async fn eval_set_size_recommendation_reflects_real_corpus_shape() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "reco_test",
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" },
+                { "name": "content", "type": "string" },
+                { "name": "parent_doc_id", "type": "string", "filterable": true }
+            ],
+            "seed_records": [
+                { "v": [1.0, 0.0], "content": "short doc one chunk", "parent_doc_id": "docA" },
+                { "v": [0.0, 1.0], "content": "a considerably longer chunk of text for document two", "parent_doc_id": "docB" },
+                { "v": [1.0, 1.0], "content": "another long chunk continuing document two's content here", "parent_doc_id": "docB" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "create: {}", resp.text().await.unwrap());
+
+    let resp = c
+        .get(format!(
+            "{base}/v1/collections/reco_test/eval-set-size-recommendation"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "recommendation: {}",
+        resp.text().await.unwrap()
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["chunk_count"], json!(3));
+    assert_eq!(body["document_count"], json!(2));
+    assert_eq!(
+        body["max"],
+        json!(3),
+        "max must never exceed the collection's chunk count"
+    );
+    assert!(
+        body["recommended"].as_u64().unwrap() <= 3,
+        "recommended must not exceed the chunk count either; got {body}"
+    );
+}
