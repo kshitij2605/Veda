@@ -40,6 +40,7 @@ import type {
 import { CompareRuns } from './CompareRuns'
 import { RouterExplorer } from './RouterExplorer'
 import { Campaigns } from './Campaigns'
+import { listEvalSets } from '../../api/ragEval'
 
 interface QualityLabUrlState {
   setId?: string
@@ -47,8 +48,16 @@ interface QualityLabUrlState {
   compareId?: string
   /** When true, the active set is shown in the Router-decision view. */
   router?: boolean
-  /** When true, the active set is shown in the Campaigns view. */
+  /** When true, the Campaigns view is shown for `campaignCollection`. */
   campaigns?: boolean
+  /**
+   * Which collection to run/view tuning campaigns for. Campaigns are
+   * server-side (`/v1/collections/{name}/tuning-campaigns`) and eval-set-
+   * agnostic in shape, unlike this page's own local, saved-search-backed
+   * `EvalSetBody` (which carries a `collection` field) — so campaigns
+   * need their own collection selection, not `activeSet.body.collection`.
+   */
+  campaignCollection?: string
 }
 
 export function QualityLab() {
@@ -74,6 +83,24 @@ export function QualityLab() {
   )
 
   const [showCreate, setShowCreate] = useState(false)
+
+  // Real, server-side eval sets (`/v1/eval-sets` — used by the RAG-eval
+  // harness and the tuning-campaign engine), distinct from this page's own
+  // local, saved-search-backed eval sets above. Campaigns can only ever be
+  // started against these, so they're fetched independently rather than
+  // reused from the (incompatible) local `sets`.
+  const [realEvalSetIds, setRealEvalSetIds] = useState<string[]>([])
+  useEffect(() => {
+    listEvalSets()
+      .then((res) => setRealEvalSetIds(res.data.eval_sets.map((s) => s.id)))
+      .catch(() => setRealEvalSetIds([]))
+  }, [])
+
+  const collections = useCollectionStore((s) => s.collections)
+  const fetchCollections = useCollectionStore((s) => s.fetchCollections)
+  useEffect(() => {
+    if (collections.length === 0) fetchCollections()
+  }, [collections.length, fetchCollections])
 
   const activeSet = state.setId
     ? getSaved<EvalSetBody>(state.setId)
@@ -105,24 +132,28 @@ export function QualityLab() {
     )
   }
 
-  if (state.campaigns && activeSet) {
+  const campaignCollection = state.campaignCollection ?? activeSet?.body.collection
+  if (state.campaigns && campaignCollection) {
     return (
       <div className="flex h-full min-h-0 flex-col overflow-hidden">
         <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-4 py-2">
           <Button
             size="xs"
             variant="ghost"
-            onClick={() => setState({ ...state, campaigns: undefined })}
+            onClick={() =>
+              setState({ ...state, campaigns: undefined, campaignCollection: undefined })
+            }
           >
             ← Back
           </Button>
+          <span className="text-xs text-[var(--color-text-muted)]">
+            Campaigns for <span className="font-mono">{campaignCollection}</span>
+          </span>
         </div>
         <div className="flex-1 min-h-0">
           <Campaigns
-            collection={activeSet.body.collection}
-            evalSetIds={sets
-              .filter((s) => s.body.collection === activeSet.body.collection)
-              .map((s) => s.id)}
+            collection={campaignCollection}
+            evalSetIds={realEvalSetIds}
           />
         </div>
       </div>
@@ -138,6 +169,13 @@ export function QualityLab() {
           setState({ ...state, setId: id, runId: undefined, compareId: undefined })
         }
         onCreate={() => setShowCreate(true)}
+        onCampaigns={() => {
+          const name = window.prompt(
+            'Which collection do you want to view/run tuning campaigns for?',
+            collections[0]?.name ?? '',
+          )
+          if (name) setState({ ...state, campaigns: true, campaignCollection: name })
+        }}
       />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {activeSet ? (
@@ -183,11 +221,13 @@ function SetsRail({
   activeId,
   onSelect,
   onCreate,
+  onCampaigns,
 }: {
   sets: SavedObject<EvalSetBody>[]
   activeId?: string
   onSelect: (id: string) => void
   onCreate: () => void
+  onCampaigns: () => void
 }) {
   return (
     <aside className="w-[260px] flex-none border-r border-[var(--color-border)] bg-[var(--color-bg)] flex flex-col min-h-0">
@@ -200,6 +240,9 @@ function SetsRail({
         <h1 className="text-[13px] font-medium text-[var(--color-text)] flex-1">
           Quality Lab
         </h1>
+        <Button size="xs" variant="ghost" onClick={onCampaigns}>
+          Campaigns
+        </Button>
         <Button
           size="xs"
           variant="primary"
