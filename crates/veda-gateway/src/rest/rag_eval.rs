@@ -1328,8 +1328,14 @@ mod generation_tests {
     #[tokio::test]
     async fn generate_cases_produces_one_case_per_chunk_up_to_target_count() {
         let chunks = vec![
-            chunk("c1", "Veda uses HNSW for approximate nearest neighbor search."),
-            chunk("c2", "Chunking strategies include MarkdownRecursive and Semantic."),
+            chunk(
+                "c1",
+                "Veda uses HNSW for approximate nearest neighbor search.",
+            ),
+            chunk(
+                "c2",
+                "Chunking strategies include MarkdownRecursive and Semantic.",
+            ),
         ];
         let mix = vec![("simple".to_owned(), 1.0)];
         let cases = generate_cases(&chunks, &mix, 2, |c, _difficulty| {
@@ -1345,7 +1351,10 @@ mod generation_tests {
         .await;
 
         assert_eq!(cases.len(), 2);
-        assert_eq!(cases[0].source.as_ref().unwrap().source_chunk_ids, vec!["c1".to_owned()]);
+        assert_eq!(
+            cases[0].source.as_ref().unwrap().source_chunk_ids,
+            vec!["c1".to_owned()]
+        );
         assert_eq!(cases[0].difficulty.as_deref(), Some("simple"));
         assert_eq!(cases[0].expected_chunk_ids, vec!["c1".to_owned()]);
     }
@@ -1362,7 +1371,10 @@ mod generation_tests {
             })
         })
         .await;
-        assert!(cases.is_empty(), "a quality_score below 0.5 must be filtered out");
+        assert!(
+            cases.is_empty(),
+            "a quality_score below 0.5 must be filtered out"
+        );
     }
 
     #[tokio::test]
@@ -1388,7 +1400,11 @@ mod generation_tests {
             }
         })
         .await;
-        assert_eq!(cases.len(), 2, "must stop once target_count cases are accepted");
+        assert_eq!(
+            cases.len(),
+            2,
+            "must stop once target_count cases are accepted"
+        );
     }
 }
 
