@@ -48,6 +48,16 @@ pub async fn start_campaign(
     Json(req): Json<StartCampaignRequest>,
 ) -> Result<Json<TuningCampaign>, GatewayError> {
     let scoped_collection = tenant::scope(&tenant, &collection);
+    // Eval sets are always stored under a tenant-scoped key (every real
+    // creation path — `create_eval_set`/`generate_eval_set` — scopes via
+    // `save_and_return_set`, mirroring `collection` just above). Without
+    // this, `evaluate_one_trial`'s `get_set_pub` lookup (which uses this
+    // id verbatim, unscoped) silently misses the real object and every
+    // trial falls back to a hardcoded 0.0/0.0/10_000.0 "not found"
+    // placeholder — found via a live end-to-end run on real data, where
+    // every trial in a real campaign scored zero recall with no error
+    // logged anywhere.
+    let scoped_eval_set_id = tenant::scope(&tenant, &req.eval_set_id);
     let budget = CampaignBudget {
         max_trials: req.max_trials,
         max_duration_secs: req.max_duration_secs,
@@ -55,7 +65,7 @@ pub async fn start_campaign(
     let campaign = run_and_persist_campaign(
         &state,
         &scoped_collection,
-        &req.eval_set_id,
+        &scoped_eval_set_id,
         budget,
         req.num_bases,
     )
@@ -458,6 +468,12 @@ async fn evaluate_one_trial(
     let Some(set) =
         crate::rest::rag_eval::get_set_pub(&state.inner.saved_objects, eval_set_id).await
     else {
+        tracing::warn!(
+            eval_set_id = %eval_set_id,
+            "tuning campaign trial: eval set not found — scoring this trial (and every other \
+             trial in this campaign) as the 0.0/0.0/10_000.0 fallback; check that eval_set_id \
+             is the tenant-scoped storage key, not the unscoped display id"
+        );
         return TrialObjectives {
             recall: 0.0,
             faithfulness: 0.0,
@@ -792,5 +808,137 @@ mod tests {
         let cfg = PipelineConfig::default();
         let req = config_to_reindex_request(&cfg);
         assert_eq!(req.index_type, None);
+    }
+
+    /// A mock OpenAI-compatible embedding server: `POST /v1/embeddings` ->
+    /// `{"data": [{"embedding": [1.0, 0.0]}]}` (matching
+    /// `embedding_client.rs`'s real response parsing). Fixed output lets
+    /// `evaluate_one_trial`'s query-embedding step succeed deterministically.
+    async fn start_mock_embedder() -> String {
+        use axum::Router;
+        use axum::routing::post;
+
+        async fn embeddings() -> axum::Json<serde_json::Value> {
+            axum::Json(serde_json::json!({
+                "data": [{ "embedding": [1.0, 0.0] }]
+            }))
+        }
+
+        let router = Router::new().route("/v1/embeddings", post(embeddings));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// Regression test for a bug found via a live end-to-end run on real
+    /// data: `start_campaign` passed `req.eval_set_id` straight through
+    /// unscoped, but every real eval-set creation path
+    /// (`create_eval_set`/`generate_eval_set`, via `save_and_return_set`)
+    /// stores the set under a TENANT-SCOPED key. `evaluate_one_trial`'s
+    /// lookup (`get_set_pub`, unscoped) therefore always missed a
+    /// genuinely-existing eval set, silently scoring every trial with the
+    /// hardcoded "not found" fallback (recall 0.0, faithfulness 0.0,
+    /// latency_p50_ms exactly 10_000.0) — with no error logged anywhere.
+    /// A real campaign against real data showed 10/10 trials with that
+    /// exact fallback triple. This test drives the REAL HTTP handlers
+    /// (`create_eval_set`, `start_campaign`), not a hand-scoped fixture, so
+    /// it actually exercises the scoping mismatch that caused the bug.
+    #[tokio::test]
+    async fn start_campaign_finds_a_real_eval_set_created_through_the_public_api() {
+        let state = test_state();
+        let tenant = crate::tenant::TenantId::default_tenant();
+
+        let mock_embed_url = start_mock_embedder().await;
+        {
+            let mut registry = state.inner.embedding_registry.write().await;
+            registry.register(veda_core::embedding::EmbeddingModelConfig {
+                name: "mock-text".to_owned(),
+                endpoint: mock_embed_url,
+                api_key: String::new(),
+                supported_modalities: vec![veda_core::embedding::Modality::Text],
+                output_dimension: 2,
+                max_input_size_bytes: 1024 * 1024,
+                timeout_seconds: 10,
+                batch_size: 32,
+            });
+        }
+
+        // A real collection with one seeded record (explicit vector, no
+        // embedder needed for the document side).
+        let create_req: crate::rest::collections::CreateCollectionRequest =
+            serde_json::from_value(serde_json::json!({
+                "name": "mycol",
+                "shard_count": 1,
+                "fields": [
+                    { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" },
+                    { "name": "text", "type": "string" }
+                ],
+                "seed_records": [{ "v": [1.0, 0.0], "text": "hello world" }]
+            }))
+            .expect("fixture create-collection request should deserialize");
+        let create_resp = crate::rest::collections::create_collection(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Json(create_req),
+        )
+        .await;
+        use axum::response::IntoResponse;
+        assert!(
+            create_resp.into_response().status().is_success(),
+            "fixture collection create should succeed"
+        );
+
+        // Create the eval set through the REAL public endpoint — this is
+        // what tenant-scopes the storage key.
+        let eval_set = crate::rest::rag_eval::EvalSet {
+            id: String::new(),
+            name: "e2e-fixture".to_owned(),
+            agent_id: None,
+            cases: vec![crate::rest::rag_eval::EvalCase {
+                id: String::new(),
+                query: "hello".to_owned(),
+                expected_chunk_ids: vec![],
+                gold_answer: None,
+                source: None,
+                difficulty: None,
+            }],
+        };
+        let created = crate::rest::rag_eval::create_eval_set(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Json(eval_set),
+        )
+        .await
+        .expect("create_eval_set should succeed")
+        .0;
+
+        let req = StartCampaignRequest {
+            eval_set_id: created.id.clone(),
+            max_trials: 2,
+            max_duration_secs: 60,
+            num_bases: 1,
+        };
+        let campaign = start_campaign(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Path("mycol".to_owned()),
+            Json(req),
+        )
+        .await
+        .expect("start_campaign should succeed")
+        .0;
+
+        assert!(
+            !campaign.trials.is_empty(),
+            "campaign should have run trials"
+        );
+        for trial in &campaign.trials {
+            assert_ne!(
+                trial.objectives.latency_p50_ms, 10_000.0,
+                "trial hit the eval-set-not-found fallback ({:?}) — eval_set_id scoping regressed",
+                trial.objectives
+            );
+        }
     }
 }
