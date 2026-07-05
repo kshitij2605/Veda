@@ -635,7 +635,10 @@ pub fn document_groups(chunks: &[SourceChunk]) -> Vec<DocumentGroup> {
     use std::collections::HashMap;
     let mut groups: HashMap<String, DocumentGroup> = HashMap::new();
     for c in chunks {
-        let key = c.parent_doc_id.clone().unwrap_or_else(|| c.chunk_id.clone());
+        let key = c
+            .parent_doc_id
+            .clone()
+            .unwrap_or_else(|| c.chunk_id.clone());
         let entry = groups.entry(key.clone()).or_insert_with(|| DocumentGroup {
             key,
             chunk_ids: Vec::new(),
@@ -652,7 +655,7 @@ pub fn document_groups(chunks: &[SourceChunk]) -> Vec<DocumentGroup> {
 /// Cheap heuristic element-type tag for a chunk, used only to spread
 /// generated questions across content types rather than only ever
 /// drawing from the majority type (usually prose).
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 enum ElementType {
     Table,
     Image,
@@ -663,10 +666,7 @@ fn classify_element(text: &str) -> ElementType {
     if text.contains("![") && text.contains("](") {
         return ElementType::Image;
     }
-    let pipe_lines = text
-        .lines()
-        .filter(|l| l.matches('|').count() >= 2)
-        .count();
+    let pipe_lines = text.lines().filter(|l| l.matches('|').count() >= 2).count();
     if pipe_lines >= 2 {
         return ElementType::Table;
     }
@@ -700,6 +700,30 @@ fn apportion(weights: &[usize], target_count: usize) -> Vec<usize> {
         counts[i] += 1;
         remaining -= 1;
     }
+
+    // Pure largest-remainder can starve a low-weight group to a zero
+    // allocation even when there's clearly enough budget for every
+    // group to get at least one (e.g. 2 groups, target_count 8, one
+    // group's weight is ~0.3% of the total) — found via a live test
+    // failure ("docA must be represented at least once"). When there's
+    // room for every non-empty group to get >= 1 (target_count is at
+    // least the number of groups), bump any zero-allocation group up to
+    // 1 by taking from whichever group currently holds the most —
+    // preserves the total sum while guaranteeing the diversity
+    // requirement this function exists for.
+    if target_count >= weights.len() {
+        for i in 0..counts.len() {
+            if counts[i] == 0
+                && weights[i] > 0
+                && let Some(donor) = (0..counts.len())
+                    .filter(|&j| j != i && counts[j] > 1)
+                    .max_by_key(|&j| counts[j])
+            {
+                counts[donor] -= 1;
+                counts[i] = 1;
+            }
+        }
+    }
     counts
 }
 
@@ -714,8 +738,10 @@ pub fn sample_diverse_chunks(chunks: Vec<SourceChunk>, target_count: usize) -> V
     if chunks.is_empty() || target_count == 0 {
         return Vec::new();
     }
-    let by_id: std::collections::HashMap<String, SourceChunk> =
-        chunks.into_iter().map(|c| (c.chunk_id.clone(), c)).collect();
+    let by_id: std::collections::HashMap<String, SourceChunk> = chunks
+        .into_iter()
+        .map(|c| (c.chunk_id.clone(), c))
+        .collect();
     let groups = {
         let all: Vec<SourceChunk> = by_id.values().cloned().collect();
         document_groups(&all)
@@ -738,7 +764,10 @@ pub fn sample_diverse_chunks(chunks: Vec<SourceChunk>, target_count: usize) -> V
         let mut by_type: std::collections::HashMap<ElementType, Vec<&SourceChunk>> =
             std::collections::HashMap::new();
         for c in &group_chunks {
-            by_type.entry(classify_element(&c.text)).or_default().push(c);
+            by_type
+                .entry(classify_element(&c.text))
+                .or_default()
+                .push(c);
         }
         let mut type_order: Vec<ElementType> = by_type.keys().copied().collect();
         type_order.sort_by_key(|t| format!("{t:?}"));
@@ -1370,12 +1399,10 @@ async fn load_source_chunks(
                 out.push(SourceChunk {
                     chunk_id: record.id().to_string(),
                     text,
-                    parent_doc_id: record
-                        .get("parent_doc_id")
-                        .and_then(|v| match v {
-                            veda_core::record::FieldValue::String(s) => Some(s.clone()),
-                            _ => None,
-                        }),
+                    parent_doc_id: record.get("parent_doc_id").and_then(|v| match v {
+                        veda_core::record::FieldValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    }),
                 });
                 if out.len() >= MAX_SOURCE_CHUNKS {
                     break 'outer;
@@ -1393,12 +1420,10 @@ async fn load_source_chunks(
                     out.push(SourceChunk {
                         chunk_id: record.id().to_string(),
                         text,
-                        parent_doc_id: record
-                            .get("parent_doc_id")
-                            .and_then(|v| match v {
-                                veda_core::record::FieldValue::String(s) => Some(s.clone()),
-                                _ => None,
-                            }),
+                        parent_doc_id: record.get("parent_doc_id").and_then(|v| match v {
+                            veda_core::record::FieldValue::String(s) => Some(s.clone()),
+                            _ => None,
+                        }),
                     });
                     if out.len() >= MAX_SOURCE_CHUNKS {
                         break 'outer;
@@ -1516,7 +1541,11 @@ mod generation_tests {
     fn document_groups_weighs_by_total_text_length() {
         let chunks = vec![
             chunk_with_doc("c1", "short", "docA"),
-            chunk_with_doc("c2", "a much longer piece of text than the others here", "docB"),
+            chunk_with_doc(
+                "c2",
+                "a much longer piece of text than the others here",
+                "docB",
+            ),
             chunk_with_doc("c3", "also short", "docA"),
         ];
         let groups = document_groups(&chunks);
@@ -1538,7 +1567,10 @@ mod generation_tests {
         }];
         let groups = document_groups(&chunks);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].key, "orphan1", "orphan chunks key their own singleton group by chunk id");
+        assert_eq!(
+            groups[0].key, "orphan1",
+            "orphan chunks key their own singleton group by chunk id"
+        );
     }
 
     #[test]
@@ -1556,8 +1588,14 @@ mod generation_tests {
         // Only 4 distinct chunks exist; sampling target 8 should return all 4
         // (can't exceed available source chunks), but at least confirm both
         // documents are represented (diversity requirement).
-        let doc_a_count = sampled.iter().filter(|c| c.parent_doc_id.as_deref() == Some("docA")).count();
-        let doc_b_count = sampled.iter().filter(|c| c.parent_doc_id.as_deref() == Some("docB")).count();
+        let doc_a_count = sampled
+            .iter()
+            .filter(|c| c.parent_doc_id.as_deref() == Some("docA"))
+            .count();
+        let doc_b_count = sampled
+            .iter()
+            .filter(|c| c.parent_doc_id.as_deref() == Some("docB"))
+            .count();
         assert!(doc_a_count >= 1, "docA must be represented at least once");
         assert!(doc_b_count >= 1, "docB must be represented at least once");
     }
@@ -1570,10 +1608,20 @@ mod generation_tests {
             chunk_with_doc("t3", "see figure: ![caption](images/1.jpg)", "doc1"),
         ];
         let sampled = sample_diverse_chunks(chunks, 3);
-        assert_eq!(sampled.len(), 3, "all 3 available chunks should be returned when target == available count");
+        assert_eq!(
+            sampled.len(),
+            3,
+            "all 3 available chunks should be returned when target == available count"
+        );
         let ids: Vec<&str> = sampled.iter().map(|c| c.chunk_id.as_str()).collect();
-        assert!(ids.contains(&"t2"), "the table chunk must not be silently dropped");
-        assert!(ids.contains(&"t3"), "the image chunk must not be silently dropped");
+        assert!(
+            ids.contains(&"t2"),
+            "the table chunk must not be silently dropped"
+        );
+        assert!(
+            ids.contains(&"t3"),
+            "the image chunk must not be silently dropped"
+        );
     }
 
     #[tokio::test]
