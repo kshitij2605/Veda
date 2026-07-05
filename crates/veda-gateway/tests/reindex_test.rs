@@ -358,7 +358,11 @@ async fn reindex_with_index_type_changes_the_siblings_vector_index() {
     assert_eq!(resp.status(), 201, "create: {}", resp.text().await.unwrap());
 
     // Default index type is Hnsw (FieldDefinition::vector's default).
-    let resp = c.get(format!("{base}/v1/collections/vecs")).send().await.unwrap();
+    let resp = c
+        .get(format!("{base}/v1/collections/vecs"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["fields"][0]["index_type"], json!("Hnsw"));
@@ -385,7 +389,12 @@ async fn reindex_with_index_type_changes_the_siblings_vector_index() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "describe sibling: {}", resp.text().await.unwrap());
+    assert_eq!(
+        resp.status(),
+        200,
+        "describe sibling: {}",
+        resp.text().await.unwrap()
+    );
     let body: Value = resp.json().await.unwrap();
     assert_eq!(
         body["fields"][0]["index_type"],
