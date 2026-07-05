@@ -500,3 +500,101 @@ async fn reindex_sibling_is_actually_searchable() {
         "reindexed sibling must be searchable, not just listable via /records; got {body}"
     );
 }
+
+/// Regression test: found via a live end-to-end trial-apply on real data.
+/// Reindexing the SAME base collection twice (without ever renaming it)
+/// always computed "name@v2" both times, since the sibling-name logic only
+/// looks at the SOURCE name's own suffix, not at what siblings already
+/// exist. The second reindex silently collided with the first "@v2":
+/// `materialize_collection_locally` no-ops when the target name is already
+/// materialized, so the second reindex's schema change (new index_type)
+/// was silently dropped, AND the record-copy step re-inserted every source
+/// record into the stale sibling, doubling its record count. This test
+/// reindexes twice with different index types and asserts the second
+/// reindex lands on a genuinely fresh sibling with the correct index type
+/// and un-duplicated record count.
+#[tokio::test]
+async fn reindex_twice_on_the_same_base_does_not_collide_or_duplicate_records() {
+    let (base, _tmp) = start_server().await;
+    let c = Client::new();
+
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "reindex_twice",
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" }
+            ],
+            "seed_records": [
+                { "v": [1.0, 0.0] },
+                { "v": [0.0, 1.0] },
+                { "v": [1.0, 1.0] }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "create: {}", resp.text().await.unwrap());
+
+    // First reindex: no index_type override -> "reindex_twice@v2" (Hnsw).
+    let resp = c
+        .post(format!("{base}/v1/collections/reindex_twice/reindex"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "first reindex: {}",
+        resp.text().await.unwrap()
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["target"], json!("reindex_twice@v2"));
+
+    // Second reindex against the SAME base, with a DIFFERENT index_type —
+    // must NOT collide with "reindex_twice@v2" from the first call.
+    let resp = c
+        .post(format!("{base}/v1/collections/reindex_twice/reindex"))
+        .json(&json!({ "index_type": "flat" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "second reindex: {}",
+        resp.text().await.unwrap()
+    );
+    let body: Value = resp.json().await.unwrap();
+    let target = body["target"].as_str().unwrap().to_owned();
+    assert_ne!(
+        target, "reindex_twice@v2",
+        "second reindex must not collide with the first sibling"
+    );
+
+    // The second sibling must genuinely report Flat, not silently keep
+    // whatever the (nonexistent-collision) first sibling had.
+    let resp = c
+        .get(format!("{base}/v1/collections/{target}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["fields"][0]["index_type"], json!("Flat"));
+
+    // And it must hold exactly the 3 source records, not a duplicated 6.
+    let resp = c
+        .get(format!("{base}/v1/collections/{target}/records?limit=100"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["total"],
+        json!(3),
+        "second sibling must hold exactly the 3 source records, not duplicates; got {body}"
+    );
+}
