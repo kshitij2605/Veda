@@ -358,11 +358,7 @@ async fn reindex_with_index_type_changes_the_siblings_vector_index() {
     assert_eq!(resp.status(), 201, "create: {}", resp.text().await.unwrap());
 
     // Default index type is Hnsw (FieldDefinition::vector's default).
-    let resp = c
-        .get(format!("{base}/v1/collections/vecs"))
-        .send()
-        .await
-        .unwrap();
+    let resp = c.get(format!("{base}/v1/collections/vecs")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["fields"][0]["index_type"], json!("Hnsw"));
@@ -389,12 +385,7 @@ async fn reindex_with_index_type_changes_the_siblings_vector_index() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        200,
-        "describe sibling: {}",
-        resp.text().await.unwrap()
-    );
+    assert_eq!(resp.status(), 200, "describe sibling: {}", resp.text().await.unwrap());
     let body: Value = resp.json().await.unwrap();
     assert_eq!(
         body["fields"][0]["index_type"],
@@ -429,4 +420,74 @@ async fn reindex_with_unknown_index_type_returns_400() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400, "expected 400, got {}", resp.status());
+}
+
+/// Regression test: found via live E2E testing on a real collection —
+/// `/reindex`'s sibling correctly reported the right record count via
+/// `/records` (an existing test only checks that) but every SEARCH against
+/// it returned zero results, because `reindex_collection_internal` sealed
+/// the copied records but never rebuilt the sibling's query executor
+/// (`materialize_collection_locally` had registered one from a separate,
+/// empty `SegmentManager` instance at sibling-creation time). This
+/// reproduced for every index type tried, including a plain same-type
+/// reindex with no `index_type` override at all — a general reindex/copy-path
+/// bug, not anything DiskAnn- or index-type-change-specific.
+#[tokio::test]
+async fn reindex_sibling_is_actually_searchable() {
+    let (base, _tmp) = start_server().await;
+    let c = Client::new();
+
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "reindex_search",
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" }
+            ],
+            "seed_records": [
+                { "v": [1.0, 0.0] },
+                { "v": [0.0, 1.0] },
+                { "v": [1.0, 1.0] }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "create: {}", resp.text().await.unwrap());
+
+    // A plain reindex with no index_type override — a pure copy-as-is
+    // reindex keeping the same (Hnsw) index type, which is the code path
+    // every base-0/no-tier2-change tuning trial exercises.
+    let resp = c
+        .post(format!("{base}/v1/collections/reindex_search/reindex"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "reindex: {}",
+        resp.text().await.unwrap()
+    );
+    let body: Value = resp.json().await.unwrap();
+    let target = body["target"].as_str().unwrap().to_owned();
+    assert_eq!(target, "reindex_search@v2");
+
+    let resp = c
+        .post(format!("{base}/v1/collections/{target}/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "v", "values": [1.0, 0.0] } },
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "search: {}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["count"],
+        json!(3),
+        "reindexed sibling must be searchable, not just listable via /records; got {body}"
+    );
 }

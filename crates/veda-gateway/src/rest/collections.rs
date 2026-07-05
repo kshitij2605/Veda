@@ -1249,6 +1249,17 @@ pub async fn reindex_collection_internal(
         }
     }
 
+    // `materialize_collection_locally` registered the sibling's query
+    // executor from a freshly constructed, empty `SegmentManager` — a
+    // distinct in-memory instance from the one just populated above, so it
+    // never observed the copied/rechunked records. Without this rebuild,
+    // every search against the sibling (directly, or via the alias swap
+    // below) returns zero results regardless of index type — found via
+    // live E2E testing, where a DiskAnn- AND a Flat-reindexed sibling of a
+    // real collection both returned empty results despite holding the
+    // correct record count.
+    crate::rest::records::rebuild_executors(state, &scoped_new).await?;
+
     // 6. Alias swap: Raft mode uses the replicated command; non-Raft mode
     //    writes directly to the local AliasMap (Phase 0 fix) so the swap
     //    genuinely redirects traffic in single-node deployments too.
