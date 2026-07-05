@@ -598,7 +598,7 @@ pub struct ApplyResponse {
 
 pub async fn apply_trial(
     State(state): State<AppState>,
-    Tenant(tenant): Tenant,
+    Tenant(_tenant): Tenant,
     Path((campaign_id, trial_id)): Path<(String, String)>,
 ) -> Result<Json<ApplyResponse>, GatewayError> {
     let campaign = crate::tuning::campaign::get_campaign(&state.inner.saved_objects, &campaign_id)
@@ -624,7 +624,17 @@ pub async fn apply_trial(
             )
         })?;
 
-    let scoped_collection = tenant::scope(&tenant, &campaign.collection);
+    // `campaign.collection` is already the tenant-scoped internal key —
+    // both `start_campaign` (the HTTP trigger) and the scheduler's
+    // `JobKind::TuningCampaign` dispatch pass an already-scoped name into
+    // `run_and_persist_campaign`'s `scoped_collection` parameter, which is
+    // what gets persisted onto `TuningCampaign.collection` verbatim.
+    // Re-scoping it here double-prefixes it (e.g. "default__default__
+    // rag_test"), which never resolves to a real collection — found via a
+    // live end-to-end apply on a real campaign, which 404'd with
+    // "collection 'default__rag_test' not found" (the outer "default__"
+    // stripped by `display_name`, leaving the inner one visible).
+    let scoped_collection = campaign.collection.clone();
     let live_config = PipelineConfig::default(); // v1: compares against the fixed default; a "read the collection's current live config" lookup is a natural follow-up
 
     if live_config.same_tier2_and_3_base(&trial.config) {
@@ -731,7 +741,12 @@ mod tests {
         let mut trial_config = crate::tuning::config::PipelineConfig::default();
         trial_config.tier1.ef_search = 64; // tier1-only diff from the live default
 
-        let campaign = fixture_campaign_with_trial("mycol", trial_config.clone());
+        // `campaign.collection` mirrors what the real `start_campaign`
+        // handler persists: already tenant-scoped (see the doc comment on
+        // `apply_trial` — passing the unscoped name here would silently
+        // hide the double-scoping bug it once had).
+        let campaign =
+            fixture_campaign_with_trial(&tenant::scope(&tenant, "mycol"), trial_config.clone());
         crate::tuning::campaign::save_campaign(&state.inner.saved_objects, &campaign).await;
 
         let resp = apply_trial(
@@ -763,7 +778,11 @@ mod tests {
         let mut trial_config = crate::tuning::config::PipelineConfig::default();
         trial_config.tier2.index_type = crate::tuning::config::IndexTypeChoice::Flat; // forces reindex
 
-        let campaign = fixture_campaign_with_trial("mycol", trial_config);
+        // `campaign.collection` mirrors what the real `start_campaign`
+        // handler persists: already tenant-scoped (see the doc comment on
+        // `apply_trial` — passing the unscoped name here would silently
+        // hide the double-scoping bug it once had).
+        let campaign = fixture_campaign_with_trial(&tenant::scope(&tenant, "mycol"), trial_config);
         crate::tuning::campaign::save_campaign(&state.inner.saved_objects, &campaign).await;
 
         let resp = apply_trial(
@@ -940,5 +959,122 @@ mod tests {
                 trial.objectives
             );
         }
+    }
+
+    /// Regression test for a bug found via a live end-to-end apply on a
+    /// real campaign: `apply_trial` re-scoped `campaign.collection` with
+    /// `tenant::scope(&tenant, &campaign.collection)`, but every real
+    /// campaign-creation path (`start_campaign`, and the scheduler's
+    /// `JobKind::TuningCampaign` dispatch) already passes a tenant-scoped
+    /// name into `run_and_persist_campaign`, which persists it onto
+    /// `TuningCampaign.collection` verbatim. Re-scoping an already-scoped
+    /// name double-prefixes it (e.g. "default__default__rag_test"), which
+    /// never resolves — a real apply against a real campaign 404'd with
+    /// "collection 'default__rag_test' not found". This test drives the
+    /// REAL `start_campaign` handler (not a hand-scoped fixture, which is
+    /// exactly the pattern that hid this bug the first time) so
+    /// `campaign.collection` is genuinely tenant-scoped, then applies a
+    /// tier2-differing trial through the real `apply_trial` handler.
+    #[tokio::test]
+    async fn apply_trial_finds_a_real_campaign_created_through_the_public_api() {
+        let state = test_state();
+        let tenant = crate::tenant::TenantId::default_tenant();
+
+        let mock_embed_url = start_mock_embedder().await;
+        {
+            let mut registry = state.inner.embedding_registry.write().await;
+            registry.register(veda_core::embedding::EmbeddingModelConfig {
+                name: "mock-text".to_owned(),
+                endpoint: mock_embed_url,
+                api_key: String::new(),
+                supported_modalities: vec![veda_core::embedding::Modality::Text],
+                output_dimension: 2,
+                max_input_size_bytes: 1024 * 1024,
+                timeout_seconds: 10,
+                batch_size: 32,
+            });
+        }
+
+        let create_req: crate::rest::collections::CreateCollectionRequest =
+            serde_json::from_value(serde_json::json!({
+                "name": "mycol2",
+                "shard_count": 1,
+                "fields": [
+                    { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" },
+                    { "name": "text", "type": "string" }
+                ],
+                "seed_records": [{ "v": [1.0, 0.0], "text": "hello world" }]
+            }))
+            .expect("fixture create-collection request should deserialize");
+        let create_resp = crate::rest::collections::create_collection(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Json(create_req),
+        )
+        .await;
+        use axum::response::IntoResponse;
+        assert!(
+            create_resp.into_response().status().is_success(),
+            "fixture collection create should succeed"
+        );
+
+        let eval_set = crate::rest::rag_eval::EvalSet {
+            id: String::new(),
+            name: "e2e-fixture-2".to_owned(),
+            agent_id: None,
+            cases: vec![crate::rest::rag_eval::EvalCase {
+                id: String::new(),
+                query: "hello".to_owned(),
+                expected_chunk_ids: vec![],
+                gold_answer: None,
+                source: None,
+                difficulty: None,
+            }],
+        };
+        let created = crate::rest::rag_eval::create_eval_set(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Json(eval_set),
+        )
+        .await
+        .expect("create_eval_set should succeed")
+        .0;
+
+        // num_bases > 1 so the stratified sampler produces at least one
+        // tier2-differing base (needed to exercise the ReindexAndSwap arm).
+        let req = StartCampaignRequest {
+            eval_set_id: created.id.clone(),
+            max_trials: 20,
+            max_duration_secs: 60,
+            num_bases: 5,
+        };
+        let campaign = start_campaign(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Path("mycol2".to_owned()),
+            Json(req),
+        )
+        .await
+        .expect("start_campaign should succeed")
+        .0;
+
+        let tier2_trial = campaign
+            .trials
+            .iter()
+            .find(|t| {
+                !PipelineConfig::default().same_tier2_and_3_base(&t.config)
+            })
+            .expect("stratified sampling with num_bases=5 should produce at least one tier2/3-differing trial");
+
+        let resp = apply_trial(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Path((campaign.id.clone(), tier2_trial.id.clone())),
+        )
+        .await
+        .expect(
+            "apply_trial on a real campaign's tier2 trial must not 404 on a double-scoped name",
+        );
+        assert_eq!(resp.kind, ApplyKind::ReindexAndSwap);
     }
 }
