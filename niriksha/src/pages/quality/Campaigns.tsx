@@ -93,6 +93,7 @@ function StartCampaignForm({
   onCancel: () => void
 }) {
   const [evalSetId, setEvalSetId] = useState(evalSetIds[0] ?? '')
+  const [mode, setMode] = useState<'Quality' | 'Performance'>('Quality')
   const [maxTrials, setMaxTrials] = useState(40)
   return (
     <div className="mb-4 rounded border border-[var(--color-border)] p-4">
@@ -108,6 +109,15 @@ function StartCampaignForm({
           </option>
         ))}
       </select>
+      <label className="mb-2 block text-xs font-medium">Optimization mode</label>
+      <select
+        className="mb-3 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm"
+        value={mode}
+        onChange={(e) => setMode(e.target.value as 'Quality' | 'Performance')}
+      >
+        <option value="Quality">Quality (recall + faithfulness + latency, full Pareto front)</option>
+        <option value="Performance">Performance (fastest, without dropping below today's recall)</option>
+      </select>
       <label className="mb-2 block text-xs font-medium">Max trials</label>
       <input
         type="number"
@@ -119,7 +129,7 @@ function StartCampaignForm({
         <button
           type="button"
           className="rounded bg-[var(--color-accent)] px-3 py-1.5 text-sm text-white"
-          onClick={() => onSubmit({ eval_set_id: evalSetId, max_trials: maxTrials })}
+          onClick={() => onSubmit({ eval_set_id: evalSetId, max_trials: maxTrials, mode })}
         >
           Start
         </button>
