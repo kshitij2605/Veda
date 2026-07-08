@@ -22,7 +22,7 @@
 //!   configured agent and persists the resulting `EvalRun`.
 //! - `JobKind::TuningCampaign` — runs one bounded auto-tuning campaign
 //!   (Phase 4 of the auto-tuning plan) via
-//!   `rest::tuning::run_and_persist_campaign`.
+//!   `rest::tuning::run_and_persist_campaign_with_mode`.
 //!
 //! Wiring to real ops is deferred; the scheduler infrastructure, registry,
 //! REST API, and persistence are the deliverable for this task.
@@ -275,7 +275,7 @@ async fn dispatch(kind: &JobKind, state: &AppState) {
             // knob exposed only on the on-demand HTTP trigger
             // (`StartCampaignRequest`), not grown onto JobKind's schema.
             const DEFAULT_NUM_BASES: usize = 3;
-            let _ = crate::rest::tuning::run_and_persist_campaign(
+            let _ = crate::rest::tuning::run_and_persist_campaign_with_mode(
                 state,
                 collection,
                 eval_set_id,
@@ -284,6 +284,7 @@ async fn dispatch(kind: &JobKind, state: &AppState) {
                     max_duration_secs: *max_duration_secs,
                 },
                 DEFAULT_NUM_BASES,
+                crate::rest::auto_optimization::TuningMode::Quality,
             )
             .await;
         }

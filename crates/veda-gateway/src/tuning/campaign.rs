@@ -246,6 +246,78 @@ mod campaign_loop_tests {
         .await;
         assert!(campaign.trials.len() <= 3);
     }
+
+    #[tokio::test]
+    async fn performance_mode_selects_single_fastest_trial_above_recall_floor() {
+        // Three fixed "trials": one slow baseline (the DEFAULT config —
+        // this is what sets the recall floor, evaluated exactly once via
+        // the explicit baseline probe, regardless of what the search
+        // proposes), one fast-but-below-floor (must be excluded), one
+        // fast-and-AT-the-floor (the expected winner — same recall as the
+        // baseline, much lower latency).
+        let evaluate_trial = move |config: PipelineConfig| {
+            let is_default = config == PipelineConfig::default();
+            async move {
+                if is_default {
+                    TrialObjectives {
+                        recall: 0.95,
+                        faithfulness: 0.9,
+                        latency_p50_ms: 20.0,
+                    }
+                } else if config.tier1.ef_search == 32 {
+                    TrialObjectives {
+                        recall: 0.4,
+                        faithfulness: 0.4,
+                        latency_p50_ms: 1.0,
+                    }
+                } else {
+                    TrialObjectives {
+                        recall: 0.95,
+                        faithfulness: 0.8,
+                        latency_p50_ms: 5.0,
+                    }
+                }
+            }
+        };
+        let mut fast_bad = PipelineConfig::default();
+        fast_bad.tier1.ef_search = 32;
+        let mut fast_good = PipelineConfig::default();
+        fast_good.tier1.ef_search = 64;
+        let outer_bases = vec![PipelineConfig::default(), fast_bad, fast_good];
+
+        let campaign = run_campaign_with_mode(
+            "mycol",
+            "eval-1",
+            CampaignBudget {
+                max_trials: 20,
+                max_duration_secs: 60,
+            },
+            outer_bases,
+            crate::rest::auto_optimization::TuningMode::Performance,
+            evaluate_trial,
+        )
+        .await;
+
+        assert_eq!(
+            campaign.pareto_front.len(),
+            1,
+            "performance mode reports exactly one winner, not a multi-trial front"
+        );
+        let winner = campaign
+            .trials
+            .iter()
+            .find(|t| t.id == campaign.pareto_front[0])
+            .unwrap();
+        assert!(
+            winner.objectives.recall >= 0.95,
+            "the winner must clear the recall floor (the default config's own 0.95 recall); got {:?}",
+            winner.objectives
+        );
+        assert_eq!(
+            winner.objectives.latency_p50_ms, 5.0,
+            "among floor-passing trials the winner must be the fastest"
+        );
+    }
 }
 
 use crate::tuning::search::{MultiObjectiveSearch, Nsga2Search};
@@ -270,6 +342,29 @@ pub async fn run_campaign<F, Fut>(
     eval_set_id: &str,
     budget: CampaignBudget,
     outer_bases: Vec<PipelineConfig>,
+    evaluate_trial: F,
+) -> TuningCampaign
+where
+    F: FnMut(PipelineConfig) -> Fut,
+    Fut: std::future::Future<Output = TrialObjectives>,
+{
+    run_campaign_with_mode(
+        collection,
+        eval_set_id,
+        budget,
+        outer_bases,
+        crate::rest::auto_optimization::TuningMode::Quality,
+        evaluate_trial,
+    )
+    .await
+}
+
+pub async fn run_campaign_with_mode<F, Fut>(
+    collection: &str,
+    eval_set_id: &str,
+    budget: CampaignBudget,
+    outer_bases: Vec<PipelineConfig>,
+    mode: crate::rest::auto_optimization::TuningMode,
     mut evaluate_trial: F,
 ) -> TuningCampaign
 where
@@ -342,7 +437,38 @@ where
         }
     }
 
-    let pareto_ids = mark_and_collect_global_pareto_front(&mut trials);
+    let selected_ids = match mode {
+        crate::rest::auto_optimization::TuningMode::Quality => {
+            mark_and_collect_global_pareto_front(&mut trials)
+        }
+        crate::rest::auto_optimization::TuningMode::Performance => {
+            // The recall floor must come from an EXPLICIT, guaranteed
+            // evaluation of the default config — the search loop above
+            // perturbs tier1 on every trial via `apply_tier1_params`
+            // (including trials from the base-0/default outer base), so
+            // no trial is ever guaranteed to organically reproduce
+            // `PipelineConfig::default()` exactly. Found via a flaky test
+            // failure that (correctly) surfaced this: without this
+            // explicit baseline, the floor silently fell back to 0.0
+            // whenever the search didn't happen to propose the exact
+            // default tier1 values (the common case) — defeating the
+            // entire point of a quality guard in performance mode.
+            let baseline_start = now_ms();
+            let baseline_objectives = evaluate_trial(PipelineConfig::default()).await;
+            let baseline_duration_ms = (now_ms() - baseline_start).max(0) as u64;
+            let recall_floor = baseline_objectives.recall;
+            trials.push(Trial {
+                id: format!("trial-{}", uuid::Uuid::new_v4()),
+                config: PipelineConfig::default(),
+                objectives: baseline_objectives,
+                is_pareto_optimal: false,
+                started_at: baseline_start,
+                duration_ms: baseline_duration_ms,
+                sibling_collection: None,
+            });
+            mark_and_collect_performance_winner(&mut trials, recall_floor)
+        }
+    };
     let completed_at = now_ms();
     let status = if trials.len() >= budget.max_trials {
         CampaignStatus::BudgetExhausted
@@ -357,7 +483,7 @@ where
         status,
         budget,
         trials,
-        pareto_front: pareto_ids,
+        pareto_front: selected_ids,
         created_at: started_at,
         completed_at: Some(completed_at),
     }
@@ -401,6 +527,39 @@ fn mark_and_collect_global_pareto_front(trials: &mut [Trial]) -> Vec<String> {
         }
     }
     front_ids
+}
+
+/// Performance-only selection: among `trials` whose recall clears
+/// `recall_floor` (the caller passes in the DEFAULT `PipelineConfig`'s
+/// own recall, from an explicit baseline evaluation — never a fixed
+/// magic number, so switching to this mode can never regress recall
+/// below what the collection already achieves today), pick the single
+/// lowest-`latency_p50_ms` trial. Returns an empty vec (no winner) if
+/// nothing clears the floor — callers must handle an empty
+/// `pareto_front` gracefully, exactly as they already do for a
+/// `Quality`-mode front that happens to contain zero qualifying trials.
+fn mark_and_collect_performance_winner(trials: &mut [Trial], recall_floor: f64) -> Vec<String> {
+    for t in trials.iter_mut() {
+        t.is_pareto_optimal = false;
+    }
+    let winner_idx = trials
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.objectives.recall >= recall_floor)
+        .min_by(|(_, a), (_, b)| {
+            a.objectives
+                .latency_p50_ms
+                .partial_cmp(&b.objectives.latency_p50_ms)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i);
+    match winner_idx {
+        Some(i) => {
+            trials[i].is_pareto_optimal = true;
+            vec![trials[i].id.clone()]
+        }
+        None => Vec::new(),
+    }
 }
 
 fn now_ms() -> i64 {

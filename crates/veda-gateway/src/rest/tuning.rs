@@ -13,7 +13,8 @@ use crate::rest::collections::ErrorResponse;
 use crate::rest::state::AppState;
 use crate::tenant::{self, Tenant};
 use crate::tuning::campaign::{
-    CampaignBudget, TrialObjectives, TuningCampaign, list_campaigns, run_campaign, save_campaign,
+    CampaignBudget, TrialObjectives, TuningCampaign, list_campaigns, run_campaign_with_mode,
+    save_campaign,
 };
 use crate::tuning::config::PipelineConfig;
 
@@ -30,6 +31,8 @@ pub struct StartCampaignRequest {
     /// Sampling before the inner tier-1 search runs within each.
     #[serde(default = "default_num_bases")]
     pub num_bases: usize,
+    #[serde(default)]
+    pub mode: crate::rest::auto_optimization::TuningMode,
 }
 fn default_max_trials() -> usize {
     40
@@ -62,12 +65,13 @@ pub async fn start_campaign(
         max_trials: req.max_trials,
         max_duration_secs: req.max_duration_secs,
     };
-    let campaign = run_and_persist_campaign(
+    let campaign = run_and_persist_campaign_with_mode(
         &state,
         &scoped_collection,
         &scoped_eval_set_id,
         budget,
         req.num_bases,
+        req.mode.clone(),
     )
     .await
     .map_err(|e| {
@@ -89,12 +93,13 @@ pub async fn start_campaign(
 /// config, then runs the nested search with an evaluator that scores a
 /// trial by running the eval set against the appropriate sibling (or the
 /// live collection, for the tier1-only base).
-pub async fn run_and_persist_campaign(
+pub async fn run_and_persist_campaign_with_mode(
     state: &AppState,
     scoped_collection: &str,
     eval_set_id: &str,
     budget: CampaignBudget,
     num_bases: usize,
+    mode: crate::rest::auto_optimization::TuningMode,
 ) -> Result<TuningCampaign, String> {
     let (vector_field, text_field) = resolve_search_fields(state, scoped_collection).await?;
     let bases = sample_outer_bases(num_bases);
@@ -112,11 +117,12 @@ pub async fn run_and_persist_campaign(
     let live_collection = scoped_collection.to_owned();
     let vector_field_owned = vector_field;
     let text_field_owned = text_field;
-    let campaign = run_campaign(
+    let campaign = run_campaign_with_mode(
         scoped_collection,
         eval_set_id,
         budget,
         bases,
+        mode,
         move |config: PipelineConfig| {
             let eval_set_id = eval_set_id_owned.clone();
             let live_collection = live_collection.clone();
@@ -627,7 +633,7 @@ pub async fn apply_trial(
     // `campaign.collection` is already the tenant-scoped internal key —
     // both `start_campaign` (the HTTP trigger) and the scheduler's
     // `JobKind::TuningCampaign` dispatch pass an already-scoped name into
-    // `run_and_persist_campaign`'s `scoped_collection` parameter, which is
+    // `run_and_persist_campaign_with_mode`'s `scoped_collection` parameter, which is
     // what gets persisted onto `TuningCampaign.collection` verbatim.
     // Re-scoping it here double-prefixes it (e.g. "default__default__
     // rag_test"), which never resolves to a real collection — found via a
@@ -937,6 +943,7 @@ mod tests {
             max_trials: 2,
             max_duration_secs: 60,
             num_bases: 1,
+            mode: crate::rest::auto_optimization::TuningMode::Quality,
         };
         let campaign = start_campaign(
             State(state.clone()),
@@ -966,7 +973,7 @@ mod tests {
     /// `tenant::scope(&tenant, &campaign.collection)`, but every real
     /// campaign-creation path (`start_campaign`, and the scheduler's
     /// `JobKind::TuningCampaign` dispatch) already passes a tenant-scoped
-    /// name into `run_and_persist_campaign`, which persists it onto
+    /// name into `run_and_persist_campaign_with_mode`, which persists it onto
     /// `TuningCampaign.collection` verbatim. Re-scoping an already-scoped
     /// name double-prefixes it (e.g. "default__default__rag_test"), which
     /// never resolves — a real apply against a real campaign 404'd with
@@ -1047,6 +1054,7 @@ mod tests {
             max_trials: 20,
             max_duration_secs: 60,
             num_bases: 5,
+            mode: crate::rest::auto_optimization::TuningMode::Quality,
         };
         let campaign = start_campaign(
             State(state.clone()),
