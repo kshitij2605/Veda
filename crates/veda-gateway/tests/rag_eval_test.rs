@@ -378,3 +378,52 @@ async fn eval_set_size_recommendation_reflects_real_corpus_shape() {
         "recommended must not exceed the chunk count either; got {body}"
     );
 }
+
+#[tokio::test]
+async fn auto_optimization_config_defaults_to_disabled_then_can_be_enabled() {
+    let (base, _tmp) = start_test_server().await;
+    let c = client();
+
+    c.post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "autoopt_test",
+            "shard_count": 1,
+            "fields": [{ "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = c
+        .get(format!(
+            "{base}/v1/collections/autoopt_test/auto-optimization"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["enabled"], json!(false), "default must be disabled");
+
+    let resp = c
+        .put(format!(
+            "{base}/v1/collections/autoopt_test/auto-optimization"
+        ))
+        .json(&json!({ "enabled": true, "target_questions": 12, "mode": "Performance" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let resp = c
+        .get(format!(
+            "{base}/v1/collections/autoopt_test/auto-optimization"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["enabled"], json!(true));
+    assert_eq!(body["target_questions"], json!(12));
+    assert_eq!(body["mode"], json!("Performance"));
+}

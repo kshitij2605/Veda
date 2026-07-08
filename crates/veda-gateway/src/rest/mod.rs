@@ -13,6 +13,7 @@ pub mod admin;
 pub mod agents;
 pub mod aggregate;
 pub mod alias;
+pub mod auto_optimization;
 pub mod changepoint;
 pub mod chunk_preview;
 pub mod collections;
@@ -484,6 +485,11 @@ pub fn build_router(app_state: state::AppState) -> Router {
         .route(
             "/v1/collections/{name}/eval-set-size-recommendation",
             get(rag_eval::eval_set_size_recommendation),
+        )
+        .route(
+            "/v1/collections/{name}/auto-optimization",
+            get(auto_optimization::get_auto_optimization)
+                .put(auto_optimization::set_auto_optimization),
         )
         // Document processing (OCR)
         .route(
