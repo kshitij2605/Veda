@@ -206,15 +206,13 @@ pub async fn maybe_trigger_auto_pipeline(
         max_trials: 40,
         max_duration_secs: 3600,
     };
-    // NOTE: calling today's EXISTING run_and_persist_campaign (no mode
-    // parameter yet — a later task adds that). cfg.mode is intentionally
-    // unused here for now.
-    let campaign = crate::rest::tuning::run_and_persist_campaign(
+    let campaign = crate::rest::tuning::run_and_persist_campaign_with_mode(
         &state,
         &scoped_collection,
         &scoped_eval_set_id,
         budget,
         3,
+        cfg.mode.clone(),
     )
     .await;
     match campaign {
