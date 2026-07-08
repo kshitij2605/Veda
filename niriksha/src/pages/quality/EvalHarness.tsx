@@ -5,18 +5,22 @@ import {
   Play,
   Plus,
   RotateCw,
+  Sparkles,
   Trash2,
 } from 'lucide-react'
 import {
   caseFromConversation,
   createEvalSet,
   deleteEvalSet,
+  generateEvalSet,
+  getEvalSetSizeRecommendation,
   listEvalSets,
   listRuns,
   pct,
   runEvalSet,
   type EvalRun,
   type EvalSet,
+  type EvalSetSizeRecommendation,
 } from '../../api/ragEval'
 import {
   Badge,
@@ -48,6 +52,7 @@ export function EvalHarness() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [generating, setGenerating] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<EvalSet | null>(null)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [runs, setRuns] = useState<EvalRun[]>([])
@@ -130,6 +135,14 @@ export function EvalHarness() {
             onClick={() => setCreating(true)}
           >
             New set
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            leading={<Sparkles size={14} />}
+            onClick={() => setGenerating(true)}
+          >
+            Generate from documents
           </Button>
           <Button
             size="xs"
@@ -225,6 +238,17 @@ export function EvalHarness() {
             setCreating(false)
             await load(false)
             setActiveId(id)
+          }}
+        />
+      )}
+
+      {generating && (
+        <GenerateSetModal
+          onClose={() => setGenerating(false)}
+          onCreated={(id) => {
+            setActiveId(id)
+            setGenerating(false)
+            load(true)
           }}
         />
       )}
@@ -466,6 +490,99 @@ function CreateSetModal({
           </Button>
           <Button variant="primary" size="sm" onClick={submit} disabled={saving}>
             {saving ? 'Creating…' : 'Create'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+function GenerateSetModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void
+  onCreated: (id: string) => void
+}) {
+  const [collection, setCollection] = useState('')
+  const [numCases, setNumCases] = useState(20)
+  const [recommendation, setRecommendation] = useState<EvalSetSizeRecommendation | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const loadRecommendation = async (name: string) => {
+    if (!name.trim()) {
+      setRecommendation(null)
+      return
+    }
+    try {
+      const { data } = await getEvalSetSizeRecommendation(name.trim())
+      setRecommendation(data)
+      setNumCases(data.recommended)
+    } catch {
+      setRecommendation(null)
+    }
+  }
+
+  const submit = async () => {
+    if (!collection.trim()) {
+      setError('Enter a collection name.')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      const { data } = await generateEvalSet(collection.trim(), { num_cases: numCases })
+      onCreated(data.id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Generation failed. Is ANSWER_GEN_* configured?')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Modal open onClose={onClose}>
+      <div className="p-4">
+        <h2 className="mb-3 text-sm font-semibold">Generate an eval set from documents</h2>
+        <label className="mb-1 block text-xs font-medium">Collection</label>
+        <input
+          className="mb-3 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm"
+          value={collection}
+          onChange={(e) => {
+            setCollection(e.target.value)
+            loadRecommendation(e.target.value)
+          }}
+          placeholder="e.g. rag_test"
+        />
+        <label className="mb-1 block text-xs font-medium">
+          Number of questions
+          {recommendation && (
+            <span className="ml-1.5 font-normal text-[var(--color-text-muted)]">
+              ({recommendation.recommended} recommended for this index's size —{' '}
+              {recommendation.document_count} documents, {recommendation.chunk_count} chunks)
+            </span>
+          )}
+        </label>
+        <input
+          type="number"
+          className="mb-3 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm"
+          value={numCases}
+          min={1}
+          max={recommendation?.max}
+          onChange={(e) => {
+            const n = Number(e.target.value)
+            const capped = recommendation ? Math.min(n, recommendation.max) : n
+            setNumCases(Math.max(1, capped))
+          }}
+        />
+        {error && <div className="mb-3 text-xs text-red-500">{error}</div>}
+        <div className="flex gap-2">
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="primary" size="sm" onClick={submit} disabled={saving}>
+            {saving ? 'Generating…' : 'Generate'}
           </Button>
         </div>
       </div>

@@ -109,6 +109,43 @@ export const caseFromConversation = (
     body,
   )
 
+export interface EvalSetSizeRecommendation {
+  recommended: number
+  max: number
+  chunk_count: number
+  document_count: number
+}
+
+export interface GenerateEvalSetRequest {
+  name?: string
+  num_cases: number
+}
+
+export const getEvalSetSizeRecommendation = (collection: string) =>
+  api.get<EvalSetSizeRecommendation>(
+    `/collections/${encodeURIComponent(collection)}/eval-set-size-recommendation`,
+  )
+
+export const generateEvalSet = (collection: string, req: GenerateEvalSetRequest) =>
+  api.post<EvalSet>(`/collections/${encodeURIComponent(collection)}/eval-sets/generate`, req)
+
+export type TuningMode = 'Quality' | 'Performance'
+
+export interface AutoOptimizationConfig {
+  collection: string
+  enabled: boolean
+  target_questions?: number | null
+  mode: TuningMode
+}
+
+export const getAutoOptimizationConfig = (collection: string) =>
+  api.get<AutoOptimizationConfig>(`/collections/${encodeURIComponent(collection)}/auto-optimization`)
+
+export const setAutoOptimizationConfig = (
+  collection: string,
+  req: { enabled: boolean; target_questions?: number | null; mode: TuningMode },
+) => api.put<AutoOptimizationConfig>(`/collections/${encodeURIComponent(collection)}/auto-optimization`, req)
+
 /** Format a 0–1 metric as a percentage, null-safe. */
 export function pct(v: number | null | undefined): string {
   return v == null ? '—' : `${(v * 100).toFixed(0)}%`
