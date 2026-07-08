@@ -142,6 +142,7 @@ pub struct CrawlIngestError {
 #[allow(clippy::too_many_arguments)]
 pub async fn crawl_and_ingest(
     state: &AppState,
+    tenant: &crate::tenant::TenantId,
     collection_name: &str,
     schema: &CollectionSchema,
     urls: &[String],
@@ -212,6 +213,7 @@ pub async fn crawl_and_ingest(
             source_url,
             title: page.title.clone(),
             expires_at,
+            tenant: tenant.clone(),
         };
         let result = ingest_markdown(
             state,
@@ -284,6 +286,7 @@ pub async fn ingest_url(
 
     let outcome = crawl_and_ingest(
         &state,
+        &tenant,
         &name,
         &schema,
         &urls,

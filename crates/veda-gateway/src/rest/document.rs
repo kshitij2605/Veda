@@ -172,6 +172,7 @@ pub async fn process_document(
 
     let result = process_single_file(
         &state,
+        &tenant,
         &name,
         &schema,
         &endpoint,
@@ -301,6 +302,7 @@ pub async fn process_documents_batch(
     for (fname, data) in files {
         let result = process_single_file(
             &state,
+            &tenant,
             &name,
             &schema,
             &endpoint,
@@ -387,6 +389,7 @@ pub(crate) fn parse_chunking_strategy(
 #[allow(clippy::too_many_arguments)]
 async fn process_single_file(
     state: &AppState,
+    tenant: &crate::tenant::TenantId,
     collection_name: &str,
     schema: &veda_core::schema::CollectionSchema,
     flashparse_endpoint: &str,
@@ -558,7 +561,10 @@ async fn process_single_file(
     // OCR-specific image handling stays below.
     let source_meta = super::ingest_common::SourceMeta {
         source_file: Some(file_name.to_owned()),
-        ..Default::default()
+        source_url: None,
+        title: None,
+        expires_at: None,
+        tenant: tenant.clone(),
     };
     let text_result = super::ingest_common::ingest_markdown(
         state,

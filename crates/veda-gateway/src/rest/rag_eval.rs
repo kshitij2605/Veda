@@ -1330,6 +1330,28 @@ pub async fn generate_eval_set(
     Path(collection): Path<String>,
     Json(req): Json<GenerateEvalSetRequest>,
 ) -> Result<Json<EvalSet>, GatewayError> {
+    // A human/UI-triggered generate call always gets a fresh random id
+    // (today's existing behavior, unchanged) — only the auto-optimization
+    // trigger asks for a deterministic, overwritable id.
+    let set = generate_eval_set_for_collection(&state, &tenant, &collection, req, None).await?;
+    Ok(Json(set))
+}
+
+/// The actual generation logic, callable both from the HTTP handler
+/// above and from `auto_optimization::maybe_trigger_auto_pipeline`
+/// (which has no axum request to extract `Path`/`Json` from).
+/// `preferred_id`: when `Some`, the resulting `EvalSet.id` is this exact
+/// value instead of a fresh `eval-{uuid}` — used by the auto-optimization
+/// trigger so repeated regeneration overwrites the same object (via
+/// `SavedObjectStore.put`'s upsert-by-id) rather than accumulating a new
+/// orphaned set on every ingestion.
+pub async fn generate_eval_set_for_collection(
+    state: &AppState,
+    tenant: &crate::tenant::TenantId,
+    collection: &str,
+    req: GenerateEvalSetRequest,
+    preferred_id: Option<String>,
+) -> Result<EvalSet, GatewayError> {
     let llm_config = state.inner.answer_gen_config.read().await.clone();
     if llm_config.is_none() {
         return Err(service_unavailable(
@@ -1338,8 +1360,8 @@ pub async fn generate_eval_set(
     }
     let semaphore = state.inner.answer_gen_semaphore.clone();
 
-    let scoped = tenant::scope(&tenant, &collection);
-    let chunks = load_source_chunks(&state, &scoped).await?;
+    let scoped = tenant::scope(tenant, collection);
+    let chunks = load_source_chunks(state, &scoped).await?;
     if chunks.is_empty() {
         return Err(bad_request(format!(
             "collection '{collection}' has no records to generate cases from"
@@ -1358,14 +1380,16 @@ pub async fn generate_eval_set(
     .await;
 
     let set = EvalSet {
-        id: format!("eval-{}", uuid::Uuid::new_v4()),
+        id: preferred_id.unwrap_or_else(|| format!("eval-{}", uuid::Uuid::new_v4())),
         name: req
             .name
             .unwrap_or_else(|| format!("generated-{collection}")),
         agent_id: None,
         cases,
     };
-    save_and_return_set(&state, &tenant, set).await
+    save_and_return_set(state, tenant, set)
+        .await
+        .map(|Json(s)| s)
 }
 
 #[derive(Serialize)]
@@ -1412,7 +1436,7 @@ pub async fn eval_set_size_recommendation(
 /// Walks both the growing segment and any sealed segments directly (there
 /// is no single "iterate all records" call on `SegmentManager`), mirroring
 /// `records::list_records`'s traversal.
-async fn load_source_chunks(
+pub(crate) async fn load_source_chunks(
     state: &AppState,
     scoped_collection: &str,
 ) -> Result<Vec<SourceChunk>, GatewayError> {

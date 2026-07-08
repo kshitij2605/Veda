@@ -317,6 +317,7 @@ pub async fn run_connector(
 
     let outcome = crawl_and_ingest(
         &state,
+        &tenant,
         &collection_name,
         &schema,
         &urls,
