@@ -18,6 +18,7 @@ import {
   listRuns,
   pct,
   runEvalSet,
+  setAutoOptimizationConfig,
   type EvalRun,
   type EvalSet,
   type EvalSetSizeRecommendation,
@@ -509,6 +510,7 @@ function GenerateSetModal({
   const [recommendation, setRecommendation] = useState<EvalSetSizeRecommendation | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [autoOptimize, setAutoOptimize] = useState(false)
 
   const loadRecommendation = async (name: string) => {
     if (!name.trim()) {
@@ -533,6 +535,9 @@ function GenerateSetModal({
     setError(null)
     try {
       const { data } = await generateEvalSet(collection.trim(), { num_cases: numCases })
+      if (autoOptimize) {
+        await setAutoOptimizationConfig(collection.trim(), { enabled: true, mode: 'Quality' })
+      }
       onCreated(data.id)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Generation failed. Is ANSWER_GEN_* configured?')
@@ -577,6 +582,14 @@ function GenerateSetModal({
           }}
         />
         {error && <div className="mb-3 text-xs text-red-500">{error}</div>}
+        <label className="mb-3 flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            checked={autoOptimize}
+            onChange={(e) => setAutoOptimize(e.target.checked)}
+          />
+          Auto-regenerate this testset and re-tune every time this collection grows
+        </label>
         <div className="flex gap-2">
           <Button variant="ghost" size="sm" onClick={onClose}>
             Cancel
