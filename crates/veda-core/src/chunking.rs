@@ -590,6 +590,13 @@ fn chunk_by_sentence(text: &str, max_chunk_size: usize, chunk_overlap: usize) ->
 
 // ── Page ───────────────────────────────────────────────────────────────
 
+// Safety-net cap for a single page: OCR-produced pages with large
+// embedded tables/figures can exceed embedding-model input limits (e.g.
+// bge-m3's 32768 bytes), so oversized pages are sub-split via
+// chunk_fixed_size rather than embedding one giant chunk. Matches the
+// file-wide default max_chunk_size (see ChunkingStrategy::default()).
+const PAGE_CHUNK_MAX_SIZE: usize = 1500;
+
 fn chunk_by_page(text: &str) -> Vec<TextChunk> {
     let pages: Vec<&str> = text.split("\n---\n").collect();
     let mut chunks = Vec::new();
@@ -598,15 +605,25 @@ fn chunk_by_page(text: &str) -> Vec<TextChunk> {
     for (i, page) in pages.iter().enumerate() {
         let trimmed = page.trim();
         if !trimmed.is_empty() {
-            chunks.push(TextChunk {
-                text: trimmed.to_owned(),
-                index: chunks.len(),
-                start_offset: offset,
-                end_offset: offset + page.len(),
-                heading_path: Vec::new(),
-                page_number: Some(i + 1),
-                content_types: detect_content_types(trimmed),
-            });
+            if trimmed.len() > PAGE_CHUNK_MAX_SIZE {
+                for mut sub in chunk_fixed_size(trimmed, PAGE_CHUNK_MAX_SIZE, 0) {
+                    sub.index = chunks.len();
+                    sub.start_offset += offset;
+                    sub.end_offset += offset;
+                    sub.page_number = Some(i + 1);
+                    chunks.push(sub);
+                }
+            } else {
+                chunks.push(TextChunk {
+                    text: trimmed.to_owned(),
+                    index: chunks.len(),
+                    start_offset: offset,
+                    end_offset: offset + page.len(),
+                    heading_path: Vec::new(),
+                    page_number: Some(i + 1),
+                    content_types: detect_content_types(trimmed),
+                });
+            }
         }
         offset += page.len() + 5; // len of "\n---\n"
     }
