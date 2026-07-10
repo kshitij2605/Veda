@@ -112,7 +112,7 @@ pub struct EvalCase {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<CaseSource>,
     /// Diversity category a synthetic case was generated under:
-    /// "simple" | "reasoning" | "multi_context". `None` for
+    /// "easy" | "medium" | "hard". `None` for
     /// human-authored/graduated cases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub difficulty: Option<String>,
@@ -610,6 +610,189 @@ where
 pub struct SourceChunk {
     pub chunk_id: String,
     pub text: String,
+    /// The document this chunk was chunked from (the `parent_doc_id`
+    /// field stamped by `ingest_common::ingest_markdown`). `None` for
+    /// chunks inserted outside the document pipeline (e.g. raw
+    /// `/insert`), which then each form their own singleton "document"
+    /// group in `document_groups`.
+    pub parent_doc_id: Option<String>,
+}
+
+/// One document's worth of chunks, for proportional-by-length sampling.
+/// `key` is the `parent_doc_id` when present, else the lone chunk's own
+/// id (an orphan chunk is its own singleton "document").
+pub struct DocumentGroup {
+    pub key: String,
+    pub chunk_ids: Vec<String>,
+    pub total_len: usize,
+}
+
+/// Group chunks by `parent_doc_id` (orphans become singleton groups),
+/// computing each group's total text length as its weight. Shared by
+/// `sample_diverse_chunks` and (in a later task) a size-recommendation
+/// endpoint, so both use the identical weighting.
+pub fn document_groups(chunks: &[SourceChunk]) -> Vec<DocumentGroup> {
+    use std::collections::HashMap;
+    let mut groups: HashMap<String, DocumentGroup> = HashMap::new();
+    for c in chunks {
+        let key = c
+            .parent_doc_id
+            .clone()
+            .unwrap_or_else(|| c.chunk_id.clone());
+        let entry = groups.entry(key.clone()).or_insert_with(|| DocumentGroup {
+            key,
+            chunk_ids: Vec::new(),
+            total_len: 0,
+        });
+        entry.chunk_ids.push(c.chunk_id.clone());
+        entry.total_len += c.text.len();
+    }
+    let mut out: Vec<DocumentGroup> = groups.into_values().collect();
+    out.sort_by(|a, b| a.key.cmp(&b.key)); // deterministic order for tests
+    out
+}
+
+/// Cheap heuristic element-type tag for a chunk, used only to spread
+/// generated questions across content types rather than only ever
+/// drawing from the majority type (usually prose).
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+enum ElementType {
+    Table,
+    Image,
+    Text,
+}
+
+fn classify_element(text: &str) -> ElementType {
+    if text.contains("![") && text.contains("](") {
+        return ElementType::Image;
+    }
+    let pipe_lines = text.lines().filter(|l| l.matches('|').count() >= 2).count();
+    if pipe_lines >= 2 {
+        return ElementType::Table;
+    }
+    ElementType::Text
+}
+
+/// Largest-remainder apportionment of `target_count` across `weights`
+/// (parallel to `groups`), guaranteeing the returned counts sum to
+/// exactly `target_count.min(total chunks available)`.
+fn apportion(weights: &[usize], target_count: usize) -> Vec<usize> {
+    let total_weight: usize = weights.iter().sum();
+    if total_weight == 0 || weights.is_empty() {
+        return vec![0; weights.len()];
+    }
+    let mut counts = vec![0usize; weights.len()];
+    let mut remainders: Vec<(usize, f64)> = Vec::with_capacity(weights.len());
+    let mut allocated = 0usize;
+    for (i, &w) in weights.iter().enumerate() {
+        let exact = target_count as f64 * (w as f64 / total_weight as f64);
+        let floor = exact.floor() as usize;
+        counts[i] = floor;
+        allocated += floor;
+        remainders.push((i, exact - floor as f64));
+    }
+    remainders.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut remaining = target_count.saturating_sub(allocated);
+    for (i, _) in remainders {
+        if remaining == 0 {
+            break;
+        }
+        counts[i] += 1;
+        remaining -= 1;
+    }
+
+    // Pure largest-remainder can starve a low-weight group to a zero
+    // allocation even when there's clearly enough budget for every
+    // group to get at least one (e.g. 2 groups, target_count 8, one
+    // group's weight is ~0.3% of the total) — found via a live test
+    // failure ("docA must be represented at least once"). When there's
+    // room for every non-empty group to get >= 1 (target_count is at
+    // least the number of groups), bump any zero-allocation group up to
+    // 1 by taking from whichever group currently holds the most —
+    // preserves the total sum while guaranteeing the diversity
+    // requirement this function exists for.
+    if target_count >= weights.len() {
+        for i in 0..counts.len() {
+            if counts[i] == 0
+                && weights[i] > 0
+                && let Some(donor) = (0..counts.len())
+                    .filter(|&j| j != i && counts[j] > 1)
+                    .max_by_key(|&j| counts[j])
+            {
+                counts[donor] -= 1;
+                counts[i] = 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Diverse, corpus-proportional chunk sampler: groups chunks by document
+/// (weighted by total text length, so a short doc gets fewer questions
+/// than a long one), apportions `target_count` across groups via
+/// largest-remainder, then within each group's allocation draws
+/// round-robin across whichever element types (table/image/text) are
+/// actually present so generation isn't dominated by whichever type
+/// happens to be most common.
+pub fn sample_diverse_chunks(chunks: Vec<SourceChunk>, target_count: usize) -> Vec<SourceChunk> {
+    if chunks.is_empty() || target_count == 0 {
+        return Vec::new();
+    }
+    let by_id: std::collections::HashMap<String, SourceChunk> = chunks
+        .into_iter()
+        .map(|c| (c.chunk_id.clone(), c))
+        .collect();
+    let groups = {
+        let all: Vec<SourceChunk> = by_id.values().cloned().collect();
+        document_groups(&all)
+    };
+    let weights: Vec<usize> = groups.iter().map(|g| g.total_len.max(1)).collect();
+    let allocations = apportion(&weights, target_count);
+
+    let mut out = Vec::new();
+    for (group, alloc) in groups.iter().zip(allocations.iter()) {
+        if *alloc == 0 {
+            continue;
+        }
+        let mut group_chunks: Vec<&SourceChunk> = group
+            .chunk_ids
+            .iter()
+            .filter_map(|id| by_id.get(id))
+            .collect();
+        // Stable order, then bucket by element type for round-robin diversity.
+        group_chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+        let mut by_type: std::collections::HashMap<ElementType, Vec<&SourceChunk>> =
+            std::collections::HashMap::new();
+        for c in &group_chunks {
+            by_type
+                .entry(classify_element(&c.text))
+                .or_default()
+                .push(c);
+        }
+        let mut type_order: Vec<ElementType> = by_type.keys().copied().collect();
+        type_order.sort_by_key(|t| format!("{t:?}"));
+        let mut type_idx = 0usize;
+        let mut cursors: std::collections::HashMap<ElementType, usize> =
+            std::collections::HashMap::new();
+        let mut picked = 0usize;
+        while picked < *alloc && !type_order.is_empty() {
+            let ty = type_order[type_idx % type_order.len()];
+            let bucket = by_type.get(&ty).unwrap();
+            let cursor = cursors.entry(ty).or_insert(0);
+            if *cursor < bucket.len() {
+                out.push(bucket[*cursor].clone());
+                *cursor += 1;
+                picked += 1;
+            }
+            type_idx += 1;
+            if type_order.iter().all(|t| {
+                *cursors.get(t).unwrap_or(&0) >= by_type.get(t).map(|b| b.len()).unwrap_or(0)
+            }) {
+                break; // every bucket in this group exhausted
+            }
+        }
+    }
+    out
 }
 
 /// One LLM-generated question/answer/quality triple for a chunk.
@@ -1123,14 +1306,18 @@ fn default_num_cases() -> usize {
     20
 }
 
-/// Fixed, equal-weighted difficulty mix — DataMorgana-style distribution
-/// control kept intentionally simple for v1 (a configurable mix is a
-/// natural follow-up, not needed for the MVP).
+/// Equal-weighted easy/medium/hard split. `generate_cases`'s sampling
+/// loop round-robins by index (not by weight), so three equal-weight
+/// labels genuinely produce ~equal thirds in the output — this was
+/// already true before this rename (the previous 40/40/20 weights were
+/// silently ignored by the round-robin), just mislabeled as RAGAS-style
+/// simple/reasoning/multi_context instead of the easy/medium/hard the
+/// product actually wants.
 fn default_difficulty_mix() -> Vec<(String, f64)> {
     vec![
-        ("simple".to_owned(), 0.4),
-        ("reasoning".to_owned(), 0.4),
-        ("multi_context".to_owned(), 0.2),
+        ("easy".to_owned(), 1.0),
+        ("medium".to_owned(), 1.0),
+        ("hard".to_owned(), 1.0),
     ]
 }
 
@@ -1143,39 +1330,103 @@ pub async fn generate_eval_set(
     Path(collection): Path<String>,
     Json(req): Json<GenerateEvalSetRequest>,
 ) -> Result<Json<EvalSet>, GatewayError> {
-    let llm_config = state.inner.llm_config.read().await.clone();
+    // A human/UI-triggered generate call always gets a fresh random id
+    // (today's existing behavior, unchanged) — only the auto-optimization
+    // trigger asks for a deterministic, overwritable id.
+    let set = generate_eval_set_for_collection(&state, &tenant, &collection, req, None).await?;
+    Ok(Json(set))
+}
+
+/// The actual generation logic, callable both from the HTTP handler
+/// above and from `auto_optimization::maybe_trigger_auto_pipeline`
+/// (which has no axum request to extract `Path`/`Json` from).
+/// `preferred_id`: when `Some`, the resulting `EvalSet.id` is this exact
+/// value instead of a fresh `eval-{uuid}` — used by the auto-optimization
+/// trigger so repeated regeneration overwrites the same object (via
+/// `SavedObjectStore.put`'s upsert-by-id) rather than accumulating a new
+/// orphaned set on every ingestion.
+pub async fn generate_eval_set_for_collection(
+    state: &AppState,
+    tenant: &crate::tenant::TenantId,
+    collection: &str,
+    req: GenerateEvalSetRequest,
+    preferred_id: Option<String>,
+) -> Result<EvalSet, GatewayError> {
+    let llm_config = state.inner.answer_gen_config.read().await.clone();
     if llm_config.is_none() {
         return Err(service_unavailable(
-            "VEDA_LLM_ENDPOINT not configured. Set the env var to enable eval-set generation.",
+            "ANSWER_GEN_BASE_URL not configured. Set the env var to enable eval-set generation.",
         ));
     }
+    let semaphore = state.inner.answer_gen_semaphore.clone();
 
-    let scoped = tenant::scope(&tenant, &collection);
-    let chunks = load_source_chunks(&state, &scoped).await?;
+    let scoped = tenant::scope(tenant, collection);
+    let chunks = load_source_chunks(state, &scoped).await?;
     if chunks.is_empty() {
         return Err(bad_request(format!(
             "collection '{collection}' has no records to generate cases from"
         )));
     }
 
+    let sampled = sample_diverse_chunks(chunks, req.num_cases);
     let mix = default_difficulty_mix();
-    let cases = generate_cases(&chunks, &mix, req.num_cases, move |chunk, difficulty| {
+    let cases = generate_cases(&sampled, &mix, req.num_cases, move |chunk, difficulty| {
         let llm_config = llm_config.clone();
+        let semaphore = semaphore.clone();
         let text = chunk.text.clone();
         let difficulty = difficulty.to_owned();
-        async move { generate_one_qa(&llm_config, &text, &difficulty).await }
+        async move { generate_one_qa(&llm_config, &semaphore, &text, &difficulty).await }
     })
     .await;
 
     let set = EvalSet {
-        id: format!("eval-{}", uuid::Uuid::new_v4()),
+        id: preferred_id.unwrap_or_else(|| format!("eval-{}", uuid::Uuid::new_v4())),
         name: req
             .name
             .unwrap_or_else(|| format!("generated-{collection}")),
         agent_id: None,
         cases,
     };
-    save_and_return_set(&state, &tenant, set).await
+    save_and_return_set(state, tenant, set)
+        .await
+        .map(|Json(s)| s)
+}
+
+#[derive(Serialize)]
+pub struct EvalSetSizeRecommendation {
+    pub recommended: usize,
+    pub max: usize,
+    pub chunk_count: usize,
+    pub document_count: usize,
+}
+
+/// Recommend a testset size for `collection`: roughly 2 questions per
+/// document (the product's stated "10 docs -> 20 questions" default),
+/// but length-adjusted the same way `sample_diverse_chunks` weights its
+/// allocation, so a corpus of mostly-short documents doesn't recommend
+/// an unreasonably large set. `max` is always the collection's own
+/// chunk count — Niriksha enforces this as a hard ceiling on the
+/// user-editable size input.
+pub async fn eval_set_size_recommendation(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(collection): Path<String>,
+) -> Result<Json<EvalSetSizeRecommendation>, GatewayError> {
+    let scoped = tenant::scope(&tenant, &collection);
+    let chunks = load_source_chunks(&state, &scoped).await?;
+    let groups = document_groups(&chunks);
+    let document_count = groups.len();
+    let chunk_count = chunks.len();
+    // Base recommendation: 2 questions/document, floor 4 (a corpus of 1-2
+    // tiny docs should still get a usable eval set), ceiling at chunk_count.
+    let base = (document_count * 2).max(4);
+    let recommended = base.min(chunk_count);
+    Ok(Json(EvalSetSizeRecommendation {
+        recommended,
+        max: chunk_count,
+        chunk_count,
+        document_count,
+    }))
 }
 
 /// Read up to a bounded number of records' text field(s) as source chunks.
@@ -1185,7 +1436,7 @@ pub async fn generate_eval_set(
 /// Walks both the growing segment and any sealed segments directly (there
 /// is no single "iterate all records" call on `SegmentManager`), mirroring
 /// `records::list_records`'s traversal.
-async fn load_source_chunks(
+pub(crate) async fn load_source_chunks(
     state: &AppState,
     scoped_collection: &str,
 ) -> Result<Vec<SourceChunk>, GatewayError> {
@@ -1209,6 +1460,10 @@ async fn load_source_chunks(
                 out.push(SourceChunk {
                     chunk_id: record.id().to_string(),
                     text,
+                    parent_doc_id: record.get("parent_doc_id").and_then(|v| match v {
+                        veda_core::record::FieldValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    }),
                 });
                 if out.len() >= MAX_SOURCE_CHUNKS {
                     break 'outer;
@@ -1226,6 +1481,10 @@ async fn load_source_chunks(
                     out.push(SourceChunk {
                         chunk_id: record.id().to_string(),
                         text,
+                        parent_doc_id: record.get("parent_doc_id").and_then(|v| match v {
+                            veda_core::record::FieldValue::String(s) => Some(s.clone()),
+                            _ => None,
+                        }),
                     });
                     if out.len() >= MAX_SOURCE_CHUNKS {
                         break 'outer;
@@ -1251,10 +1510,15 @@ fn first_text_field(record: &veda_core::record::Record) -> Option<String> {
 /// it unit-testable per Task 1.2).
 async fn generate_one_qa(
     llm_config: &Option<veda_core::llm_client::LlmConfig>,
+    semaphore: &std::sync::Arc<tokio::sync::Semaphore>,
     chunk_text: &str,
     difficulty: &str,
 ) -> Option<GeneratedQa> {
     let config = llm_config.as_ref()?;
+    // Bound concurrency against the (shared, production) answer-gen
+    // endpoint — never more than `semaphore`'s permit count in flight
+    // regardless of how many chunks are being processed at once.
+    let _permit = semaphore.acquire().await.ok()?;
     let client = veda_core::llm_client::LlmClient::new(config.clone());
     let prompt = format!(
         "Given this text, write one {difficulty} question that is answerable ONLY from \
@@ -1322,7 +1586,103 @@ mod generation_tests {
         SourceChunk {
             chunk_id: id.to_owned(),
             text: text.to_owned(),
+            parent_doc_id: None,
         }
+    }
+
+    fn chunk_with_doc(id: &str, text: &str, doc: &str) -> SourceChunk {
+        SourceChunk {
+            chunk_id: id.to_owned(),
+            text: text.to_owned(),
+            parent_doc_id: Some(doc.to_owned()),
+        }
+    }
+
+    #[test]
+    fn document_groups_weighs_by_total_text_length() {
+        let chunks = vec![
+            chunk_with_doc("c1", "short", "docA"),
+            chunk_with_doc(
+                "c2",
+                "a much longer piece of text than the others here",
+                "docB",
+            ),
+            chunk_with_doc("c3", "also short", "docA"),
+        ];
+        let groups = document_groups(&chunks);
+        assert_eq!(groups.len(), 2, "two distinct parent_doc_ids -> two groups");
+        let doc_b = groups.iter().find(|g| g.key == "docB").unwrap();
+        let doc_a = groups.iter().find(|g| g.key == "docA").unwrap();
+        assert!(
+            doc_b.total_len > doc_a.total_len,
+            "docB's single long chunk should outweigh docA's two short ones"
+        );
+    }
+
+    #[test]
+    fn document_groups_treats_missing_parent_doc_id_as_its_own_singleton_group() {
+        let chunks = vec![SourceChunk {
+            chunk_id: "orphan1".to_owned(),
+            text: "no parent doc id here".to_owned(),
+            parent_doc_id: None,
+        }];
+        let groups = document_groups(&chunks);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].key, "orphan1",
+            "orphan chunks key their own singleton group by chunk id"
+        );
+    }
+
+    #[test]
+    fn sample_diverse_chunks_allocates_proportionally_to_document_length() {
+        // docA: 1 short chunk. docB: 3 long chunks (much more total text).
+        // A target of 8 should give docB noticeably more than docA, not an even 4/4 split.
+        let long = "x".repeat(500);
+        let chunks = vec![
+            chunk_with_doc("a1", "short", "docA"),
+            chunk_with_doc("b1", &long, "docB"),
+            chunk_with_doc("b2", &long, "docB"),
+            chunk_with_doc("b3", &long, "docB"),
+        ];
+        let sampled = sample_diverse_chunks(chunks, 8);
+        // Only 4 distinct chunks exist; sampling target 8 should return all 4
+        // (can't exceed available source chunks), but at least confirm both
+        // documents are represented (diversity requirement).
+        let doc_a_count = sampled
+            .iter()
+            .filter(|c| c.parent_doc_id.as_deref() == Some("docA"))
+            .count();
+        let doc_b_count = sampled
+            .iter()
+            .filter(|c| c.parent_doc_id.as_deref() == Some("docB"))
+            .count();
+        assert!(doc_a_count >= 1, "docA must be represented at least once");
+        assert!(doc_b_count >= 1, "docB must be represented at least once");
+    }
+
+    #[test]
+    fn sample_diverse_chunks_tags_and_surfaces_table_and_image_chunks() {
+        let chunks = vec![
+            chunk_with_doc("t1", "plain prose paragraph about a topic", "doc1"),
+            chunk_with_doc("t2", "| col1 | col2 |\n|---|---|\n| a | b |", "doc1"),
+            chunk_with_doc("t3", "see figure: ![caption](images/1.jpg)", "doc1"),
+        ];
+        let sampled = sample_diverse_chunks(chunks, 3);
+        assert_eq!(
+            sampled.len(),
+            3,
+            "all 3 available chunks should be returned when target == available count"
+        );
+        let ids: Vec<&str> = sampled.iter().map(|c| c.chunk_id.as_str()).collect();
+        assert!(
+            ids.contains(&"t2"),
+            "the table chunk must not be silently dropped"
+        );
+        assert!(
+            ids.contains(&"t3"),
+            "the image chunk must not be silently dropped"
+        );
     }
 
     #[tokio::test]
@@ -1869,7 +2229,16 @@ mod generate_endpoint_tests {
         let state = test_state();
 
         let llm_url = start_mock_llm().await;
+        // `generate_eval_set` reads the dedicated answer-gen config (Task
+        // 2), not `llm_config` — set both so this fixture also still
+        // covers callers (e.g. `judge_via_llm`) that read `llm_config`.
         *state.inner.llm_config.write().await = Some(LlmConfig {
+            endpoint: llm_url.clone(),
+            api_key: None,
+            model: "mock-model".to_owned(),
+            timeout: std::time::Duration::from_secs(5),
+        });
+        *state.inner.answer_gen_config.write().await = Some(LlmConfig {
             endpoint: llm_url,
             api_key: None,
             model: "mock-model".to_owned(),

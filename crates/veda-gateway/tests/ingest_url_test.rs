@@ -247,6 +247,91 @@ async fn test_ingest_url_chunks_embeds_and_inserts_with_source_url() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn test_ingest_markdown_follows_an_alias_to_the_swapped_collection() {
+    // Regression test: found via live E2E testing that ingest_markdown
+    // looked records_managers up by the caller's literal name, never
+    // resolving it through the alias map the way every read path
+    // (search/records/tuning) does. A collection whose alias had been
+    // swapped (e.g. by a tuning campaign applying a trial) silently
+    // ingested new documents into the abandoned base collection while
+    // every read continued to hit the alias target -- reporting success
+    // but the ingested record was never queryable.
+    let (crawl_url, _spy, _crawl_handle) = start_mock_crawl4ai().await;
+    let (base, _tmp) = start_gateway().await;
+    create_web_collection(&base, "aliased_col").await;
+    create_web_collection(&base, "aliased_col@v2").await;
+
+    let alias_resp = client()
+        .put(format!("{base}/v1/admin/collections/aliased_col/alias"))
+        .json(&serde_json::json!({ "target": "aliased_col@v2" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        alias_resp.status(),
+        200,
+        "set_alias failed: {:?}",
+        alias_resp.text().await
+    );
+
+    let _guard = CRAWL_ENV_LOCK.lock().unwrap();
+    // SAFETY: serialized on CRAWL_ENV_LOCK; no concurrent crawl-env access.
+    unsafe {
+        std::env::set_var("VEDA_CRAWL4AI_ENDPOINT", &crawl_url);
+        std::env::set_var("VEDA_CRAWL4AI_TOKEN", "test-token");
+    }
+
+    let resp = client()
+        .post(format!("{base}/v1/collections/aliased_col/ingest-url"))
+        .json(&json!({
+            "url": "https://example.com/doc",
+            "chunker": "fixed_size",
+            "chunk_size": 80,
+            "chunk_overlap": 0
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+
+    unsafe {
+        std::env::remove_var("VEDA_CRAWL4AI_ENDPOINT");
+        std::env::remove_var("VEDA_CRAWL4AI_TOKEN");
+    }
+    drop(_guard);
+
+    assert_eq!(status, 201, "ingest-url failed: {body}");
+    let inserted = body["chunks_inserted"].as_u64().unwrap();
+    assert!(
+        inserted >= 1,
+        "expected at least one chunk inserted: {body}"
+    );
+
+    // The ingested record must be queryable through the alias name --
+    // this is exactly what was broken: ingest_markdown wrote into
+    // "aliased_col" directly, but every read resolves "aliased_col" to
+    // "aliased_col@v2" via the alias, so the record was invisible.
+    let list = client()
+        .get(format!(
+            "{base}/v1/collections/aliased_col/records?limit=100"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.status(), 200);
+    let list_body: Value = list.json().await.unwrap();
+    let records = list_body["records"].as_array().unwrap();
+    assert_eq!(
+        records.len() as u64,
+        inserted,
+        "ingested record(s) not visible through the alias: {list_body}"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_ingest_url_stamps_parent_doc_id_from_source_url() {
     // Regression test: found via live E2E testing on real ingested
     // documents that `ingest_markdown` never wrote a `parent_doc_id`,
