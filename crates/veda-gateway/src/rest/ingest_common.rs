@@ -72,6 +72,16 @@ pub async fn ingest_markdown(
     source_meta: &SourceMeta,
     chunker: &ChunkingStrategy,
 ) -> Result<IngestResult, (StatusCode, String)> {
+    // Every read path (search, records, tuning) resolves the caller's
+    // name through the alias map before touching segment_managers; this
+    // write path must too, or a collection with a swapped alias (e.g.
+    // after a reindex applies a trial) silently ingests into the
+    // abandoned base collection while every read hits the alias target
+    // -- found via live E2E testing: a process-document response reported
+    // success but the record was never queryable.
+    let resolved_name = state.inner.aliases.resolve(collection_name).await;
+    let collection_name = resolved_name.as_str();
+
     let text_chunks = chunk_markdown(markdown, chunker);
 
     let shard_count = schema.shard_count();
