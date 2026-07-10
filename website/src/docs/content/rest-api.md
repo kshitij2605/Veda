@@ -146,6 +146,16 @@ The agentic layer and MCP surface. See [Agents & MCP](/docs/agents-mcp) for the 
 | `GET` | `/v1/eval-sets/{id}/runs` | List past runs |
 | `POST` | `/v1/eval-sets/{id}/cases/from-conversation` | Graduate a production conversation into a regression case |
 
+**Auto-tuning** — see [RAG Auto-Tuning](/docs/auto-tuning).
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/collections/{name}/eval-sets/generate` | Generate a labeled eval set from the collection's own documents (`{ name?, num_cases }`) |
+| `GET` | `/v1/collections/{name}/eval-set-size-recommendation` | Corpus-aware `{ recommended, max, chunk_count, document_count }` |
+| `GET/PUT` | `/v1/collections/{name}/auto-optimization` | Per-collection opt-in: regenerate + re-tune on every ingest (`{ enabled, target_questions?, mode }`) |
+| `POST` | `/v1/collections/{name}/tuning-campaigns` | Run a nested config search → Pareto front (`{ eval_set_id, max_trials?, num_bases?, mode? }`) |
+| `POST` | `/v1/tuning-campaigns/{campaign_id}/trials/{trial_id}/apply` | Apply a trial — tier-1 instant/reversible; tier-2/3 via `/reindex` + alias swap |
+
 **MCP & A2A**
 
 | Method | Path | Description |

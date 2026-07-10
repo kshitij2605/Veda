@@ -36,6 +36,8 @@ A regression-test harness for retrieval and generation quality.
 
 A Niriksha **Eval Harness** page renders sets, runs, and aggregate scores.
 
+> Beyond graduating conversations, Veda can **generate an eval set from your own documents** and **auto-tune the pipeline** (chunker, embedder, index, fusion, rerank) against it — see [RAG Auto-Tuning](/docs/auto-tuning).
+
 ## Vector-backed agent memory
 
 Opt-in long-term memory for agents, backed by Veda's own vector store. `Agent.memory` defaults to **false**, so existing agents are byte-for-byte unchanged. When enabled, each turn is embedded into a per-tenant `_agent_memory` collection, and before each new turn the most semantically-similar prior turns are retrieved and injected — **bounded** — into the system prompt. The whole path is best-effort and off the request lock: a memory read/write failure degrades to a memory-less turn rather than failing the request. There is no external vector DB to provision, because Veda *is* the vector DB.

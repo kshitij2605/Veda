@@ -19,6 +19,7 @@ import logInsights from './content/log-insights.md?raw'
 import resourceSignals from './content/resource-signals.md?raw'
 import serviceReliability from './content/service-reliability.md?raw'
 import ragAiops from './content/rag-aiops.md?raw'
+import autoTuning from './content/auto-tuning.md?raw'
 import contributing from './content/contributing.md?raw'
 import vsElasticsearch from './content/vs-elasticsearch.md?raw'
 import vsPinecone from './content/vs-pinecone.md?raw'
@@ -69,6 +70,7 @@ export const DOCS: DocGroup[] = [
       { slug: 'resource-signals', title: 'Node Resource Signals', md: resourceSignals },
       { slug: 'service-reliability', title: 'Service Reliability', md: serviceReliability },
       { slug: 'rag-aiops', title: 'RAG & AIOps Intelligence', md: ragAiops },
+      { slug: 'auto-tuning', title: 'RAG Auto-Tuning', md: autoTuning },
     ],
   },
   {
