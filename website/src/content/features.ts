@@ -16,6 +16,7 @@ import {
   Globe,
   DatabaseZap,
   Lock,
+  SlidersHorizontal,
 } from 'lucide-react'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
@@ -140,5 +141,12 @@ export const FEATURES: Feature[] = [
     title: 'Runs entirely on your infrastructure',
     blurb:
       'The embedder, OCR, reranker, web search, and the LLM endpoint are all self-hostable and swappable, so the whole stack can run air-gapped on your own hardware. No data leaves your trust boundary and nothing phones home — the privacy and sovereignty posture regulated and on-prem deployments need.',
+  },
+  {
+    icon: SlidersHorizontal,
+    accent: 'var(--color-node-4)',
+    title: 'Self-tuning RAG pipeline',
+    blurb:
+      'Veda generates a labeled test set from your own corpus, then searches its configuration space — chunker, embedder, index, fusion, rerank — for the best recall / faithfulness / latency trade-off. Apply the winner with one click (reversible), and optionally auto-re-tune every time the collection grows.',
   },
 ]
