@@ -61,6 +61,7 @@ export interface StartCampaignRequest {
   max_trials?: number
   max_duration_secs?: number
   num_bases?: number
+  mode?: 'Quality' | 'Performance'
 }
 
 export interface ApplyResponse {

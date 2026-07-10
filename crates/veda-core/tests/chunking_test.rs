@@ -51,6 +51,35 @@ fn page_strategy_splits_on_separators() {
 }
 
 #[test]
+fn page_strategy_subsplits_oversized_pages() {
+    // A single "page" larger than the embedder-safety cap (e.g. an
+    // OCR'd page with a huge embedded table) must be sub-split rather
+    // than embedded as one giant chunk -- see the bge-m3 32768-byte
+    // input-size failure this regression-tests.
+    let huge_page = "word ".repeat(2000); // ~10000 bytes, well over the 1500-byte cap
+    let text = format!("short page\n---\n{huge_page}\n---\nanother short page");
+    let chunks = chunk_markdown(&text, &ChunkingStrategy::Page);
+
+    assert!(
+        chunks.len() > 3,
+        "the oversized middle page must be sub-split into multiple chunks"
+    );
+    for chunk in &chunks {
+        assert!(
+            chunk.text.len() <= 1500,
+            "no chunk may exceed the safety cap, got {} bytes",
+            chunk.text.len()
+        );
+    }
+    // All sub-chunks of the oversized page keep its original page number.
+    let middle_page_chunks: Vec<_> = chunks.iter().filter(|c| c.page_number == Some(2)).collect();
+    assert!(
+        middle_page_chunks.len() > 1,
+        "the oversized page should have produced multiple sub-chunks sharing page_number 2"
+    );
+}
+
+#[test]
 fn fixed_size_chunks_are_approximately_equal() {
     let text = "a ".repeat(500); // 1000 chars
     let chunks = chunk_markdown(

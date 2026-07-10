@@ -27,7 +27,7 @@ use super::state::AppState;
 /// single markdown document. Only the fields the collection schema
 /// actually declares are written; the rest are silently skipped (same
 /// "drop keys not in schema" behaviour as `/insert`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SourceMeta {
     /// Value for a `source_file` string field (OCR path: the file name).
     pub source_file: Option<String>,
@@ -37,6 +37,10 @@ pub struct SourceMeta {
     pub title: Option<String>,
     /// When set, stamp the reserved `_expires_at` TTL field (unix seconds).
     pub expires_at: Option<i64>,
+    /// The tenant this ingestion ran under — needed so the auto-
+    /// optimization trigger (spawned after this function returns) can
+    /// correctly scope its eval-set-generation and campaign calls.
+    pub tenant: crate::tenant::TenantId,
 }
 
 /// Outcome of ingesting one markdown document.
@@ -68,6 +72,16 @@ pub async fn ingest_markdown(
     source_meta: &SourceMeta,
     chunker: &ChunkingStrategy,
 ) -> Result<IngestResult, (StatusCode, String)> {
+    // Every read path (search, records, tuning) resolves the caller's
+    // name through the alias map before touching segment_managers; this
+    // write path must too, or a collection with a swapped alias (e.g.
+    // after a reindex applies a trial) silently ingests into the
+    // abandoned base collection while every read hits the alias target
+    // -- found via live E2E testing: a process-document response reported
+    // success but the record was never queryable.
+    let resolved_name = state.inner.aliases.resolve(collection_name).await;
+    let collection_name = resolved_name.as_str();
+
     let text_chunks = chunk_markdown(markdown, chunker);
 
     let shard_count = schema.shard_count();
@@ -255,6 +269,18 @@ pub async fn ingest_markdown(
     rebuild_executors(state, collection_name)
         .await
         .map_err(|(status, json_err)| (status, json_err.error.clone()))?;
+
+    // Fire-and-forget: never blocks or fails this ingest call. See
+    // `auto_optimization::maybe_trigger_auto_pipeline`'s doc comment.
+    {
+        let state = state.clone();
+        let collection_name = collection_name.to_owned();
+        let tenant = source_meta.tenant.clone();
+        tokio::spawn(async move {
+            super::auto_optimization::maybe_trigger_auto_pipeline(state, tenant, collection_name)
+                .await;
+        });
+    }
 
     Ok(IngestResult {
         chunks_inserted: chunks_out.len(),

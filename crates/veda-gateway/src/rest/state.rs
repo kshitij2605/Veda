@@ -217,6 +217,13 @@ pub struct AppStateInner {
     /// `POST /v1/llm/complete` route returns 503 and LLM-backed UI
     /// affordances (cluster labels, NL→DSL, failure classifier) hide.
     pub llm_config: RwLock<Option<LlmConfig>>,
+    /// Dedicated answer-generation LLM — separate from `llm_config`
+    /// (used by agents/triage). Populated from `ANSWER_GEN_*` env vars.
+    pub answer_gen_config: RwLock<Option<LlmConfig>>,
+    /// Bounds concurrent calls to the answer-gen endpoint. Fixed at 5
+    /// permits (not configurable in v1) — this is shared production
+    /// infra, not a local test double.
+    pub answer_gen_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
     /// Base data directory.
     pub data_dir: PathBuf,
     /// FlashParse OCR endpoint (None = document processing disabled).
@@ -385,6 +392,8 @@ impl AppState {
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 splade_client: RwLock::new(None),
                 llm_config: RwLock::new(None),
+                answer_gen_config: RwLock::new(None),
+                answer_gen_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(5)),
                 data_dir: data_dir.to_owned(),
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT")
                     .ok()
@@ -458,6 +467,8 @@ impl AppState {
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 splade_client: RwLock::new(None),
                 llm_config: RwLock::new(None),
+                answer_gen_config: RwLock::new(None),
+                answer_gen_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(5)),
                 data_dir: data_dir.to_owned(),
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT")
                     .ok()
@@ -512,6 +523,8 @@ impl AppState {
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
                 splade_client: RwLock::new(None),
                 llm_config: RwLock::new(None),
+                answer_gen_config: RwLock::new(None),
+                answer_gen_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(5)),
                 data_dir: data_dir.to_owned(),
                 flashparse_endpoint: std::env::var("VEDA_FLASHPARSE_ENDPOINT")
                     .ok()
@@ -964,6 +977,22 @@ impl AppState {
         let mut guard = self.inner.llm_config.write().await;
         *guard = Some(cfg);
         tracing::info!(model = %model, endpoint = %endpoint, "registered LLM endpoint from environment");
+    }
+
+    /// Load the dedicated answer-generation LLM endpoint from
+    /// `ANSWER_GEN_*` env vars. No-op when unset — eval-set generation's
+    /// `generate_one_qa` then returns `None` per-case and
+    /// `generate_eval_set` degrades to an empty-cases 503, exactly
+    /// mirroring `load_llm_from_env`'s no-op contract.
+    pub async fn load_answer_gen_from_env(&self) {
+        let Some(cfg) = LlmConfig::from_env_answer_gen() else {
+            return;
+        };
+        let endpoint = cfg.endpoint.clone();
+        let model = cfg.model.clone();
+        let mut guard = self.inner.answer_gen_config.write().await;
+        *guard = Some(cfg);
+        tracing::info!(model = %model, endpoint = %endpoint, "registered answer-gen LLM endpoint from environment");
     }
 
     /// Load embedding model configuration from environment variables and register it.
