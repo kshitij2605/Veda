@@ -4,6 +4,8 @@ Because Veda owns the whole RAG stack — the corpus, the chunker, the embedder,
 
 Every step reuses an existing primitive — the embedder, the LLM client, [`/reindex`](/docs/collections#atomic-create-and-load), saved-object persistence — rather than a bespoke subsystem.
 
+![A real run: Veda generates a test set from seven documents, searches its configuration space over eight trials, and the winning trade-off is applied in one click.](/videos/auto-tuning.mp4)
+
 ## Generate a test set from your corpus
 
 `POST /v1/collections/{name}/eval-sets/generate` (`{ name?, num_cases }`) turns your ingested documents into a labeled [eval set](/docs/rag-aiops#eval-harness-the-production-trace-flywheel) of grounded `{ query, expected_chunk_ids, gold_answer, difficulty }` cases — no hand-labeling.

@@ -2,6 +2,8 @@
 
 One search endpoint covers dense vectors, lexical BM25, sparse vectors, hybrid combinations, and cross-modal multi-vector fusion — with SQL-like filtering, reranking, per-phase explain timing, and snapshot reads.
 
+![The same query run three ways against a live collection — dense, BM25, then hybrid — with per-phase timing shown for each.](/videos/search.mp4)
+
 ## Dense vector search
 
 ```bash

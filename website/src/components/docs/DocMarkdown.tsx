@@ -39,9 +39,21 @@ export function DocMarkdown({ md }: { md: string }) {
             {children}
           </h3>
         ),
-        p: ({ children }) => (
-          <p className="mt-4 text-[15.5px] leading-[1.75] text-[var(--color-text-muted)]">{children}</p>
-        ),
+        // Markdown wraps a standalone image in a paragraph. A video embed
+        // renders <figure>/<figcaption>, which is invalid inside <p> and breaks
+        // hydration — so unwrap the paragraph for a lone media embed.
+        p: ({ children, node }) => {
+          const kids = (node as { children?: unknown[] } | undefined)?.children ?? []
+          if (kids.length === 1) {
+            const only = kids[0] as { tagName?: string; properties?: { src?: unknown } }
+            if (only?.tagName === 'img' && /\.(mp4|webm)$/i.test(String(only.properties?.src ?? ''))) {
+              return <>{children}</>
+            }
+          }
+          return (
+            <p className="mt-4 text-[15.5px] leading-[1.75] text-[var(--color-text-muted)]">{children}</p>
+          )
+        },
         a: ({ href, children }) => (
           <a
             href={href}
@@ -83,6 +95,38 @@ export function DocMarkdown({ md }: { md: string }) {
             {children}
           </td>
         ),
+        // Markdown has no video syntax and raw HTML is disabled, so an image
+        // whose src is a video file renders as a player: ![caption](/videos/x.mp4)
+        img: ({ src, alt }) => {
+          const s = String(src ?? '')
+          if (!/\.(mp4|webm)$/i.test(s)) {
+            return (
+              <img
+                src={s}
+                alt={alt ?? ''}
+                className="my-6 w-full rounded-[var(--radius-md)] border border-[var(--color-border)]"
+              />
+            )
+          }
+          return (
+            <figure className="my-8">
+              <video
+                src={s}
+                poster={s.replace(/\.(mp4|webm)$/i, '.jpg')}
+                controls
+                muted
+                playsInline
+                preload="none"
+                className="w-full rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)]"
+              />
+              {alt && (
+                <figcaption className="mt-3 text-[13.5px] leading-[1.6] text-[var(--color-text-subtle)]">
+                  {alt}
+                </figcaption>
+              )}
+            </figure>
+          )
+        },
         pre: ({ children }) => {
           const el = isValidElement(children)
             ? (children as ReactElement<{ className?: string; children?: ReactNode }>)

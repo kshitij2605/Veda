@@ -23,7 +23,7 @@ export function Architecture() {
   return (
     <Section
       id="architecture"
-      number="05"
+      number="06"
       overline="Architecture"
       title="Lightweight by default, deep when you need it"
       lede="Three mandatory services get you running in seconds. Nine index algorithms let you tune recall, latency, and memory per collection."

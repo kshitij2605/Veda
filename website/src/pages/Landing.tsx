@@ -5,6 +5,7 @@ import { Stats } from '../sections/Stats'
 import { Differentiators } from '../sections/Differentiators'
 import { CodeSection } from '../sections/CodeSection'
 import { HowItWorks } from '../sections/HowItWorks'
+import { SeeItInAction } from '../sections/SeeItInAction'
 import { Architecture } from '../sections/Architecture'
 import { CTA } from '../sections/CTA'
 
@@ -18,6 +19,7 @@ export function Landing() {
         <Differentiators />
         <CodeSection />
         <HowItWorks />
+        <SeeItInAction />
         <Architecture />
         <CTA />
       </main>
