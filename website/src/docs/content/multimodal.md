@@ -4,6 +4,8 @@ Veda is multimodal-native: text, images, audio, video, and documents are first-c
 
 Cross-modal retrieval (a text query returning audio/video/image records) works best with a **unified embedding model** — one model that maps every modality into the *same* vector space, so vectors from different modalities are directly comparable. Veda ships a preset for `jina-embeddings-v5-omni-small`, an off-the-shelf open model you run as a sidecar, which does exactly that.
 
+![A live Veda instance: one collection of sound clips and written notes. The query "a dog barking" is plain text, and the top result is the dog recording.](/videos/multimodal.mp4)
+
 ## A unified cross-modal space
 
 `jina-embeddings-v5-omni-small` embeds **text, image, audio, and video** into the **same 1024-d cosine space**, so there's no per-modality model juggling and vectors across modalities are directly comparable. It's a third-party model — Veda doesn't train it; it registers it as a preset and routes each modality's request to it. Opt into the unified space by pointing **both** the text and the multimodal embedding config at the same omni sidecar:
