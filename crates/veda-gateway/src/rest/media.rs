@@ -165,6 +165,33 @@ pub async fn ingest_media(
         )
     })?;
 
+    // Every dense vector field is a dense column in the segment, so a record
+    // must carry a value for each one. This upload only fills `target_field`,
+    // so a collection declaring a second vector field can never accept it:
+    // the storage layer rejects the insert with a bare "record missing
+    // required vector field '<other>'" surfaced as INGEST_FAILED, which says
+    // nothing about what to change. Fail early and name the fix.
+    let unfillable: Vec<&str> = schema
+        .fields()
+        .iter()
+        .filter(|f| matches!(f.field_type(), FieldType::Vector { .. }))
+        .map(|f| f.name())
+        .filter(|n| *n != target_field)
+        .collect();
+    if !unfillable.is_empty() {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "collection '{}' declares dense vector field(s) [{}] that a {modality} upload \
+                 cannot fill, and every record must carry a value for every dense vector field. \
+                 Give a media collection exactly one auto_embed vector field — use one \
+                 collection per modality.",
+                tenant::display_name(collection_name),
+                unfillable.join(", ")
+            ),
+        ));
+    }
+
     // Schema field presence — only stamp metadata the schema declares.
     let has_source_path = schema.get_field("source_path").is_some();
     let has_filename = schema.get_field("filename").is_some();
@@ -372,6 +399,8 @@ pub async fn ingest_media_route(
                 "UNSUPPORTED_MEDIA"
             } else if status == StatusCode::UNPROCESSABLE_ENTITY {
                 "NO_MEDIA_FIELD"
+            } else if status == StatusCode::CONFLICT {
+                "INCOMPATIBLE_SCHEMA"
             } else {
                 "INGEST_FAILED"
             };

@@ -86,11 +86,16 @@ pub async fn embed(
     let dim = model_config.output_dimension;
     let client = EmbeddingClient::new(model_config);
 
-    // 3) Embed.
+    // 3) Embed. A failure here is the embedding sidecar failing, not a bad
+    //    request — the payload was already validated above. Reporting it as
+    //    400 told callers to fix a request that was fine and hid a down
+    //    backend (a missing PyAV in the omni sidecar surfaced as
+    //    "400 embed_bytes failed"). `/ingest-media` already maps the same
+    //    failure to 502; match it so both paths agree.
     let values = match input {
         EmbedInput::Text(t) => client.embed_text(&t).await.map_err(|e| {
             (
-                StatusCode::BAD_REQUEST,
+                StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
                     error: format!("embed_text failed: {e}"),
                 }),
@@ -98,7 +103,7 @@ pub async fn embed(
         })?,
         EmbedInput::Bytes(b) => client.embed_bytes(&b, modality).await.map_err(|e| {
             (
-                StatusCode::BAD_REQUEST,
+                StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
                     error: format!("embed_bytes failed: {e}"),
                 }),
