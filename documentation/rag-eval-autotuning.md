@@ -152,6 +152,40 @@ A **nested, cost-aware** loop avoids re-chunking/re-embedding on every trial:
 3. Every trial across every base carries the full combined config and an objective vector
    `{ recall, faithfulness, latency_p50_ms }`.
 
+### Scoring recall when the base re-chunked
+
+Eval cases pin their ground truth as `expected_chunk_ids`. A **tier-3** base re-chunks the
+corpus, and a re-chunk mints fresh record ids, so id matching can never match anything such a
+trial retrieves.
+
+Left alone this is not a rounding error — it scores *every* chunker-varying trial `recall =
+0.000` by construction, no matter how good the chunking is. The tier-3 dimension of the search
+then can't be won on recall at all, and a chunker that is genuinely worse still reaches the
+Pareto front on another objective and gets offered to the operator as a trade-off worth
+applying. (Found live: a `Page`-chunked base scored a flat 0.000 across all of its trials while
+the two `MarkdownRecursive` bases scored 0.75–1.00, and the 0.000 trial sat on the front on
+faithfulness alone.)
+
+So when a trial's base differs from the live config in tier 3, recall is scored on **content**
+instead of ids:
+
+- The live collection's `chunk_id → text` map is resolved **once per campaign**
+  (`load_source_chunks`), not per trial.
+- Each expected chunk id resolves to its gold text; the trial's top-k results are reduced to a
+  union of case-folded, whitespace-stripped **character 5-grams** (character-level because the
+  corpora include Japanese, which has no whitespace token boundaries).
+- A gold chunk counts as retrieved when **≥ 50%** of its shingles appear in that union. The
+  union — rather than any single retrieved chunk — is the right model: a re-chunk legitimately
+  spreads one gold chunk across several retrieved ones, and surrounding text in a larger chunk
+  must not dilute the score, since containment is measured against the *gold's* shingles.
+- If no expected id resolves to gold text, the case is left **unscored** rather than counted as
+  a miss — the same "unscored signals don't fail" convention the faithfulness proxy uses.
+
+Trials on the live chunking (tier-1 and tier-2 bases, where a straight-copy reindex preserves
+record ids) keep exact id matching. After the fix the same `Page` base scored a real **0.375** —
+still worse than `MarkdownRecursive` on that corpus, which is the correct conclusion, but now
+measured rather than structurally impossible.
+
 ### Quality mode
 
 The classic case: the global Pareto front is computed over *every* trial from *every* base — a

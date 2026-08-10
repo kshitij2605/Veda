@@ -102,6 +102,24 @@ pub async fn run_and_persist_campaign_with_mode(
     mode: crate::rest::auto_optimization::TuningMode,
 ) -> Result<TuningCampaign, String> {
     let (vector_field, text_field) = resolve_search_fields(state, scoped_collection).await?;
+    // Chunk-id -> text for the LIVE collection, resolved once. Trials whose
+    // base re-chunked score recall against this content instead of against
+    // chunk ids, which a re-chunk invalidates (see `content_recall`). A
+    // failure here is not fatal: an empty map just leaves re-chunked trials'
+    // cases unscored, exactly as before this existed.
+    let gold_texts: std::collections::HashMap<String, String> =
+        match crate::rest::rag_eval::load_source_chunks(state, scoped_collection).await {
+            Ok(chunks) => chunks.into_iter().map(|c| (c.chunk_id, c.text)).collect(),
+            Err(e) => {
+                tracing::warn!(
+                    collection = %scoped_collection,
+                    error = ?e,
+                    "tuning campaign: could not load source chunks for content-based recall; \
+                     trials on a re-chunked base will be left unscored on recall"
+                );
+                std::collections::HashMap::new()
+            }
+        };
     let bases = sample_outer_bases(num_bases);
     let sibling_by_base = materialize_bases(state, scoped_collection, &bases).await?;
     // `run_campaign` takes ownership of `bases` (it iterates them as the
@@ -114,6 +132,7 @@ pub async fn run_and_persist_campaign_with_mode(
     let state_ref = state;
     let eval_set_id_owned = eval_set_id.to_owned();
     let sibling_by_base_ref = &sibling_by_base;
+    let gold_texts_ref = &gold_texts;
     let live_collection = scoped_collection.to_owned();
     let vector_field_owned = vector_field;
     let text_field_owned = text_field;
@@ -139,6 +158,7 @@ pub async fn run_and_persist_campaign_with_mode(
                     &text_field,
                     &bases_for_lookup,
                     sibling_by_base_ref,
+                    gold_texts_ref,
                 )
                 .await
             }
@@ -461,6 +481,7 @@ async fn evaluate_one_trial(
     text_field: &str,
     bases: &[PipelineConfig],
     sibling_by_base: &std::collections::HashMap<usize, String>,
+    gold_texts: &std::collections::HashMap<String, String>,
 ) -> TrialObjectives {
     let base_index = bases
         .iter()
@@ -470,6 +491,16 @@ async fn evaluate_one_trial(
         .get(&base_index)
         .cloned()
         .unwrap_or_else(|| live_collection.to_owned());
+
+    // A tier-3 base re-chunks the corpus, and re-chunking mints fresh record
+    // ids, so the eval set's `expected_chunk_ids` — recorded against the live
+    // collection's chunking — cannot match anything this trial retrieves.
+    // Scoring it by id gave every chunker-varying trial recall 0.000 by
+    // construction: a better chunking could never win the outer search, while
+    // a worse one still reached the Pareto front on another objective and was
+    // offered to the operator as a trade-off worth applying. When the base
+    // re-chunked, score recall on CONTENT instead (see `content_recall`).
+    let rechunked = config.tier3 != PipelineConfig::default().tier3;
 
     let Some(set) =
         crate::rest::rag_eval::get_set_pub(&state.inner.saved_objects, eval_set_id).await
@@ -513,13 +544,22 @@ async fn evaluate_one_trial(
         latencies_ms.push(started.elapsed().as_secs_f64() * 1000.0);
 
         if !case.expected_chunk_ids.is_empty() {
-            let got: std::collections::HashSet<&str> = hits.iter().map(|h| h.id.as_str()).collect();
-            let hit_count = case
-                .expected_chunk_ids
-                .iter()
-                .filter(|e| got.contains(e.as_str()))
-                .count();
-            recalls.push(hit_count as f64 / case.expected_chunk_ids.len() as f64);
+            if rechunked {
+                if let Some(r) =
+                    content_recall(&case.expected_chunk_ids, gold_texts, &hits, text_field)
+                {
+                    recalls.push(r);
+                }
+            } else {
+                let got: std::collections::HashSet<&str> =
+                    hits.iter().map(|h| h.id.as_str()).collect();
+                let hit_count = case
+                    .expected_chunk_ids
+                    .iter()
+                    .filter(|e| got.contains(e.as_str()))
+                    .count();
+                recalls.push(hit_count as f64 / case.expected_chunk_ids.len() as f64);
+            }
         }
         let top_hit_text = hits
             .first()
@@ -542,6 +582,87 @@ async fn evaluate_one_trial(
         },
         latency_p50_ms: percentile_50(&latencies_ms).unwrap_or(1000.0),
     }
+}
+
+/// Length of the character shingles used by [`content_recall`].
+///
+/// Character-level, not word-level: the corpora this runs against include
+/// Japanese, which has no whitespace token boundaries, so a word tokenizer
+/// would collapse a whole chunk into one "token".
+const SHINGLE_LEN: usize = 5;
+
+/// Fraction of a gold chunk's shingles that must appear in the retrieved
+/// text before it counts as retrieved. Half is deliberately forgiving: a
+/// re-chunk splits and re-joins boundaries, so a gold chunk is often
+/// *covered* by the top-k without any single retrieved chunk containing all
+/// of it.
+const CONTENT_RECALL_THRESHOLD: f64 = 0.5;
+
+/// Whitespace-insensitive, lowercase character shingles of `text`.
+fn shingles(text: &str) -> std::collections::HashSet<Vec<char>> {
+    let chars: Vec<char> = text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    if chars.len() < SHINGLE_LEN {
+        // Too short to shingle: treat the whole thing as one token so short
+        // chunks still match themselves rather than scoring an automatic 0.
+        return if chars.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            std::collections::HashSet::from([chars])
+        };
+    }
+    chars.windows(SHINGLE_LEN).map(<[char]>::to_vec).collect()
+}
+
+/// Recall for a trial whose base re-chunked the corpus.
+///
+/// The eval set pins ground truth as `expected_chunk_ids`, but a re-chunk
+/// mints new record ids, so id matching scores every such trial 0.000 no
+/// matter how good the chunking is. Instead, resolve each expected id to its
+/// text in the LIVE collection (`gold_texts`, built once per campaign) and
+/// ask whether the trial's top-k *collectively covers* that text — the union
+/// is the right model here, because a re-chunk can legitimately spread one
+/// gold chunk across several retrieved ones.
+///
+/// Returns `None` when no expected id resolves to gold text, so the case is
+/// left unscored rather than counted as a miss (the same "unscored signals
+/// don't fail" convention the faithfulness proxy uses).
+fn content_recall(
+    expected_chunk_ids: &[String],
+    gold_texts: &std::collections::HashMap<String, String>,
+    hits: &[super::search::SearchHit],
+    text_field: &str,
+) -> Option<f64> {
+    let golds: Vec<&String> = expected_chunk_ids
+        .iter()
+        .filter_map(|id| gold_texts.get(id))
+        .collect();
+    if golds.is_empty() {
+        return None;
+    }
+
+    let mut retrieved: std::collections::HashSet<Vec<char>> = std::collections::HashSet::new();
+    for h in hits {
+        if let Some(text) = h.fields.get(text_field).and_then(|v| v.as_str()) {
+            retrieved.extend(shingles(text));
+        }
+    }
+
+    let covered = golds
+        .iter()
+        .filter(|gold| {
+            let gs = shingles(gold);
+            if gs.is_empty() {
+                return false;
+            }
+            let overlap = gs.iter().filter(|s| retrieved.contains(*s)).count();
+            overlap as f64 / gs.len() as f64 >= CONTENT_RECALL_THRESHOLD
+        })
+        .count();
+    Some(covered as f64 / golds.len() as f64)
 }
 
 fn mean_or(xs: &[f64], default: f64) -> f64 {
@@ -672,6 +793,141 @@ pub async fn apply_trial(
         kind: ApplyKind::ReindexAndSwap,
         previous_alias_target,
     }))
+}
+
+#[cfg(test)]
+mod content_recall_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn hit(text: &str) -> super::super::search::SearchHit {
+        let mut fields = serde_json::Map::new();
+        fields.insert("content".into(), serde_json::json!(text));
+        super::super::search::SearchHit {
+            id: uuid::Uuid::new_v4().to_string(),
+            distance: 0.0,
+            fields,
+        }
+    }
+
+    fn golds(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    const GOLD: &str = "Veda searches dense vectors, sparse SPLADE vectors and BM25 together, \
+                        then reranks the shortlist with a cross encoder.";
+
+    #[test]
+    fn gold_chunk_found_verbatim_scores_one() {
+        let g = golds(&[("c1", GOLD)]);
+        let r = content_recall(&["c1".to_owned()], &g, &[hit(GOLD)], "content");
+        assert_eq!(r, Some(1.0));
+    }
+
+    #[test]
+    fn gold_chunk_absent_scores_zero() {
+        let g = golds(&[("c1", GOLD)]);
+        let r = content_recall(
+            &["c1".to_owned()],
+            &g,
+            &[hit(
+                "An unrelated passage about office printers and toner cartridges.",
+            )],
+            "content",
+        );
+        assert_eq!(r, Some(0.0));
+    }
+
+    #[test]
+    fn gold_chunk_split_across_two_retrieved_chunks_still_counts() {
+        // This is the whole point: a re-chunk moves boundaries, so the gold
+        // text is covered by the top-k collectively rather than by any one
+        // retrieved chunk.
+        let g = golds(&[("c1", GOLD)]);
+        let (a, b) = GOLD.split_at(GOLD.len() / 2);
+        let r = content_recall(&["c1".to_owned()], &g, &[hit(a), hit(b)], "content");
+        assert_eq!(
+            r,
+            Some(1.0),
+            "gold text covered by the union of top-k must count as retrieved"
+        );
+    }
+
+    #[test]
+    fn gold_chunk_embedded_in_a_much_larger_page_counts() {
+        // The Page chunker yields whole pages: the gold chunk is a fraction
+        // of one. Containment is measured against the GOLD's shingles, so
+        // extra surrounding text must not dilute the score.
+        let g = golds(&[("c1", GOLD)]);
+        let page = format!("Header material. {GOLD} Footer material and a table of numbers.");
+        let r = content_recall(&["c1".to_owned()], &g, &[hit(&page)], "content");
+        assert_eq!(r, Some(1.0));
+    }
+
+    #[test]
+    fn partial_coverage_below_the_threshold_does_not_count() {
+        let g = golds(&[("c1", GOLD)]);
+        let sliver = &GOLD[..GOLD.len() / 5];
+        let r = content_recall(&["c1".to_owned()], &g, &[hit(sliver)], "content");
+        assert_eq!(r, Some(0.0));
+    }
+
+    #[test]
+    fn scores_the_fraction_of_expected_chunks_covered() {
+        let other = "Row level security scopes every record to its owner field.";
+        let g = golds(&[("c1", GOLD), ("c2", other)]);
+        let r = content_recall(
+            &["c1".to_owned(), "c2".to_owned()],
+            &g,
+            &[hit(GOLD)],
+            "content",
+        );
+        assert_eq!(r, Some(0.5));
+    }
+
+    #[test]
+    fn unresolvable_expected_ids_leave_the_case_unscored() {
+        // No gold text for the id (e.g. the chunk was deleted): return None
+        // so the case is skipped, not counted as a miss.
+        let g = golds(&[("c1", GOLD)]);
+        assert_eq!(
+            content_recall(&["missing".to_owned()], &g, &[hit(GOLD)], "content"),
+            None
+        );
+    }
+
+    #[test]
+    fn matching_is_insensitive_to_whitespace_and_case() {
+        let g = golds(&[("c1", GOLD)]);
+        let reflowed = GOLD.to_uppercase().replace(' ', "\n  ");
+        let r = content_recall(&["c1".to_owned()], &g, &[hit(&reflowed)], "content");
+        assert_eq!(
+            r,
+            Some(1.0),
+            "a re-chunk reflows whitespace; that must not look like different content"
+        );
+    }
+
+    #[test]
+    fn japanese_text_matches_without_whitespace_tokens() {
+        // The corpus this was found on is Japanese: no spaces, so a
+        // word-level tokenizer would degenerate to a single token.
+        let jp = "大塚商会のセキュリティ対策は、ファイアウォールと侵入防止システムを含みます。";
+        let g = golds(&[("c1", jp)]);
+        let page = format!("ページ見出し。{jp} 以下は表です。");
+        let r = content_recall(&["c1".to_owned()], &g, &[hit(&page)], "content");
+        assert_eq!(r, Some(1.0));
+    }
+
+    #[test]
+    fn missing_text_field_on_hits_scores_zero_not_a_panic() {
+        let g = golds(&[("c1", GOLD)]);
+        let r = content_recall(&["c1".to_owned()], &g, &[hit(GOLD)], "no_such_field");
+        assert_eq!(r, Some(0.0));
+    }
 }
 
 #[cfg(test)]
