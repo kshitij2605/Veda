@@ -4,6 +4,8 @@ Upload a document and Veda handles the entire pipeline — OCR, chunking, embedd
 
 > **Pipeline:** upload → FlashParse OCR → markdown + images → chunk (configurable strategy) → embed (optional) → insert into collection
 
+![A real run against a live Veda: a PDF is uploaded, OCR'd and chunked at 600 characters, then queried straight away — the text in the results came out of the page image.](/videos/document-pipeline.mp4)
+
 ## Setup
 
 1. Copy `.env.example` to `.env` and configure.

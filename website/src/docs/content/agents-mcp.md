@@ -4,6 +4,8 @@ Veda ships an agentic layer and a Model Context Protocol (MCP) server, so an LLM
 
 Because Veda is multimodal-native, its agent and MCP tools do **cross-modal retrieval**: a text query can return image, audio, video, or PDF hits, and an image query can return text hits, all through one unified embedding space. That is a retrieval tool no text-only vector database can offer. Every tool call also runs through Veda's JWT auth, tenant scoping, and row-level security.
 
+![A live agent run: the agent chooses its search tool, retrieves five passages from the collection, and the response carries the retrieved chunks plus a faithfulness score.](/videos/agents-mcp.mp4)
+
 ## The built-in agent
 
 A general-purpose agent, `veda-agent`, is always available with access to all tools — no setup required. Ask it a question and it runs a tool-calling loop: it calls the LLM, dispatches any tool calls (search, aggregate, …), feeds the results back, and repeats until it has an answer.
