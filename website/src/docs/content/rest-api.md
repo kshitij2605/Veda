@@ -78,6 +78,11 @@ curl -X POST http://localhost:6340/v1/admin/jobs \
   }'
 ```
 
+`cron` accepts a 5-field Unix expression (`0 3 * * *` = 03:00 daily) as well as
+the 6- and 7-field forms with a leading seconds field. `kind` is an internally
+tagged enum, so it nests as `{"kind": {"kind": "...", ...}}` — the same shape
+SLO `kind` and synthetic-probe `kind` use.
+
 ## Documents
 
 | Method | Path | Description |
@@ -181,8 +186,8 @@ Write skew is allowed (snapshot isolation); lost updates are prevented; read-onl
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/v1/auth/login` | Exchange username/password for a JWT (Argon2id verification) |
-| `GET/POST` | `/v1/saved_objects` | Saved objects used by the Niriksha dashboard |
-| `GET/PUT/DELETE` | `/v1/saved_objects/{id}` | Manage one saved object |
+| `GET` | `/v1/saved_objects` | List saved objects used by the Niriksha dashboard |
+| `PUT/DELETE` | `/v1/saved_objects/{id}` | Upsert (create-or-replace) / delete one saved object. There is no `POST` collection route and no `GET` by id — create with `PUT` on the id you choose, and read via the list |
 
 ## Admin
 
