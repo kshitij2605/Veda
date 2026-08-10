@@ -566,6 +566,7 @@ pub(crate) async fn run_search(
                 ));
             }
         }
+        validate_dense_query(schema, vec_query, req.truncate_to)?;
         let metric = resolve_metric(schema, &vec_query.field);
         let (hits, timings) =
             execute_single_vector(executor, vec_query, req, metric, effective_read_ts)?;
@@ -687,6 +688,7 @@ pub(crate) async fn run_search(
         // Dense + BM25 hybrid via Reciprocal Rank Fusion. Each leg is
         // scored independently; RRF folds the rankings into one set.
         // dense_weight in [0, 1] biases the RRF weighting.
+        validate_dense_query(schema, &hybrid_query.dense, req.truncate_to)?;
         let metric = resolve_metric(schema, &hybrid_query.dense.field);
         let eff_filter = effective_filter(req);
         let (hits, legs) = execute_hybrid_dense_bm25(
@@ -1476,6 +1478,48 @@ fn resolve_sparse_metric(
 }
 
 /// Resolve the distance metric for a field from the schema, defaulting to Cosine.
+/// Validate a dense query leg against the schema before dispatching it.
+///
+/// Both failures here are caller mistakes that used to be invisible or
+/// mis-classified:
+///   - an unknown / non-vector field fell through to `resolve_metric`'s
+///     `unwrap_or(Cosine)` default and searched nothing, so a typo'd field
+///     name returned `200` with zero results instead of saying why;
+///   - a wrong-length query vector reached the executor and came back as a
+///     `500 search failed: Dimension mismatch`, telling clients to retry a
+///     request that can never succeed and charging it to the error budget.
+fn validate_dense_query(
+    schema: &veda_core::schema::CollectionSchema,
+    q: &SingleVectorQuery,
+    truncate_to: Option<u32>,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let bad_request = |error: String| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error }));
+
+    let field = schema
+        .get_field(&q.field)
+        .ok_or_else(|| bad_request(format!("field '{}' not found", q.field)))?;
+
+    let veda_core::types::FieldType::Vector { dimension, .. } = field.field_type() else {
+        return Err(bad_request(format!(
+            "field '{}' is not a dense vector field",
+            q.field
+        )));
+    };
+
+    // MRL truncation is the one case where a shorter query vector is
+    // legitimate — the truncated scan uses `min(truncate_to, q.len())`
+    // components. `truncate_to` itself is validated at the call site.
+    if truncate_to.is_none() && q.values.len() != *dimension as usize {
+        return Err(bad_request(format!(
+            "field '{}' has dimension {dimension}, got a query vector of length {}",
+            q.field,
+            q.values.len()
+        )));
+    }
+
+    Ok(())
+}
+
 fn resolve_metric(
     schema: &veda_core::schema::CollectionSchema,
     field_name: &str,
