@@ -282,6 +282,9 @@ pub async fn ingest_media_route(
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<IngestMediaResponse>), (StatusCode, Json<MediaErrorResponse>)> {
     let name = tenant::scope(&tenant, &name);
+    // Resolve the alias like `/insert` does — otherwise the media record is
+    // written into the abandoned base collection while reads follow the alias.
+    let name = state.inner.aliases.resolve(&name).await;
 
     let schema = {
         let schemas = state.inner.schemas.read().await;

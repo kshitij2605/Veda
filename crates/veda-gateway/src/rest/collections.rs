@@ -643,6 +643,12 @@ pub async fn describe_collection(
     Path(name): Path<String>,
 ) -> Result<Json<DescribeCollectionResponse>, (StatusCode, Json<ErrorResponse>)> {
     let scoped = tenant::scope(&tenant, &name);
+    // Resolve the alias — a tier-2/3 reindex swaps in a sibling whose schema
+    // can differ (different embedding model, so a different vector dimension),
+    // and describing the abandoned base would report a schema that no longer
+    // matches what `/search` and `/insert` on this same name operate on.
+    // `GET /v1/admin/collections/{name}/alias` still reports the mapping.
+    let scoped = state.inner.aliases.resolve(&scoped).await;
     let schemas = state.inner.schemas.read().await;
     let schema = schemas.get(&scoped).ok_or_else(|| {
         (
@@ -876,6 +882,9 @@ pub async fn seal_collection(
         ));
     }
     let scoped = tenant::scope(&tenant, &name);
+    // Resolve the alias — sealing the abandoned base is a no-op that leaves
+    // the live collection unsealed, so its declared index types never build.
+    let scoped = state.inner.aliases.resolve(&scoped).await;
 
     // Confirm the collection exists before touching segment managers.
     {
@@ -958,6 +967,8 @@ pub async fn optimize_collection(
         ));
     }
     let scoped = tenant::scope(&tenant, &name);
+    // Resolve the alias — see `seal_collection`.
+    let scoped = state.inner.aliases.resolve(&scoped).await;
 
     {
         let schemas = state.inner.schemas.read().await;

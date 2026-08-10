@@ -169,6 +169,10 @@ pub async fn aggregate(
     Query(q): Query<AggregateQuery>,
 ) -> Result<Json<AggregateResponse>, GatewayError> {
     let name = tenant::scope(&tenant, &name);
+    // Resolve the alias like `/search` and `/records` do — otherwise the
+    // aggregation runs over the abandoned base collection while every other
+    // read of the same name follows the alias to the swapped-in sibling.
+    let name = state.inner.aliases.resolve(&name).await;
     aggregate_core(&state, &name, &q)
         .await
         .map(Json)
@@ -417,6 +421,8 @@ pub async fn histogram(
     Query(q): Query<HistogramQuery>,
 ) -> Result<Json<HistogramResponse>, GatewayError> {
     let name = tenant::scope(&tenant, &name);
+    // See `aggregate` — the alias must be resolved before the read.
+    let name = state.inner.aliases.resolve(&name).await;
 
     {
         let schemas = state.inner.schemas.read().await;
@@ -561,6 +567,8 @@ pub async fn field_stats(
     Query(q): Query<FieldStatsQuery>,
 ) -> Result<Json<FieldStatsResponse>, GatewayError> {
     let name = tenant::scope(&tenant, &name);
+    // See `aggregate` — the alias must be resolved before the read.
+    let name = state.inner.aliases.resolve(&name).await;
 
     {
         let schemas = state.inner.schemas.read().await;
