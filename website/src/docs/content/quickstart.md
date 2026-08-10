@@ -2,6 +2,8 @@
 
 Get a working Veda cluster and run your first vector search in a few minutes. The only prerequisite is Docker with Compose.
 
+![Two API calls against a live Veda — create a collection, insert three sentences — then a search in plain English finds the right one without sharing a single keyword.](/videos/quickstart.mp4)
+
 ## Start the core services
 
 ```bash

@@ -4,9 +4,9 @@ import { useReveal } from '../lib/useReveal'
 /** Short demos recorded against a running Veda — no mockups. */
 const DEMOS = [
   {
-    href: '/docs/multimodal',
-    label: 'Multimodal search',
-    blurb: 'Type “a dog barking” and get the recording back.',
+    href: '/docs/quickstart',
+    label: 'Quick start',
+    blurb: 'Two calls to a collection you can search.',
   },
   {
     href: '/docs/search',
@@ -14,9 +14,24 @@ const DEMOS = [
     blurb: 'Meaning, keywords, and both blended together.',
   },
   {
+    href: '/docs/document-pipeline',
+    label: 'Document pipeline',
+    blurb: 'A PDF goes in, searchable text comes out.',
+  },
+  {
+    href: '/docs/agents-mcp',
+    label: 'Agents & MCP',
+    blurb: 'Answers that carry the passages behind them.',
+  },
+  {
     href: '/docs/auto-tuning',
     label: 'RAG auto-tuning',
     blurb: 'Veda writes the test set and tunes itself against it.',
+  },
+  {
+    href: '/docs/multimodal',
+    label: 'Multimodal search',
+    blurb: 'Type “a dog barking” and get the recording back.',
   },
 ]
 
@@ -47,7 +62,7 @@ export function SeeItInAction() {
           English; the top hit is an audio file.
         </p>
 
-        <div className="mt-10 grid gap-px overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-border)] sm:grid-cols-3">
+        <div className="mt-10 grid gap-px overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-border)] sm:grid-cols-2 lg:grid-cols-3">
           {DEMOS.map((d) => (
             <a
               key={d.href}
