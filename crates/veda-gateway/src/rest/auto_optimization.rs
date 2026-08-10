@@ -69,8 +69,8 @@ pub async fn get_auto_optimization(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(collection): Path<String>,
-) -> Json<AutoOptimizationConfig> {
-    let scoped = tenant::scope(&tenant, &collection);
+) -> Result<Json<AutoOptimizationConfig>, (StatusCode, Json<ErrorResponse>)> {
+    let scoped = resolve_config_key(&state, &tenant, &collection).await?;
     let cfg = get_auto_optimization_config(&state.inner.saved_objects, &scoped)
         .await
         .unwrap_or(AutoOptimizationConfig {
@@ -79,7 +79,40 @@ pub async fn get_auto_optimization(
             target_questions: None,
             mode: TuningMode::default(),
         });
-    Json(cfg)
+    // Always answer with the name the caller used, not the alias target.
+    Ok(Json(AutoOptimizationConfig { collection, ..cfg }))
+}
+
+/// Resolve the storage key for a collection's auto-optimization config.
+///
+/// The config must be keyed by the *resolved* collection, because that is
+/// the name `ingest_markdown` hands to `maybe_trigger_auto_pipeline` when it
+/// looks the config up after an ingestion. Keying it by the caller's name
+/// instead meant an aliased collection — exactly what applying a tier-2/3
+/// tuning trial produces — never fired its own auto-optimization: the config
+/// sat under the pre-swap name and the lookup never found it.
+///
+/// A missing collection is a 404, matching every other collection-scoped
+/// endpoint. `GET` used to answer 200 with a synthesized default for any
+/// name at all, so a typo looked like a real, un-opted-in collection while
+/// `PUT` on that same name correctly refused.
+async fn resolve_config_key(
+    state: &AppState,
+    tenant: &crate::tenant::TenantId,
+    collection: &str,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let scoped = tenant::scope(tenant, collection);
+    let scoped = state.inner.aliases.resolve(&scoped).await;
+    let schemas = state.inner.schemas.read().await;
+    if !schemas.contains_key(&scoped) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("collection '{collection}' not found"),
+            }),
+        ));
+    }
+    Ok(scoped)
 }
 
 #[derive(Deserialize)]
@@ -97,18 +130,7 @@ pub async fn set_auto_optimization(
     Path(collection): Path<String>,
     Json(req): Json<SetAutoOptimizationRequest>,
 ) -> Result<Json<AutoOptimizationConfig>, (StatusCode, Json<ErrorResponse>)> {
-    let scoped = tenant::scope(&tenant, &collection);
-    {
-        let schemas = state.inner.schemas.read().await;
-        if !schemas.contains_key(&scoped) {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("collection '{collection}' not found"),
-                }),
-            ));
-        }
-    }
+    let scoped = resolve_config_key(&state, &tenant, &collection).await?;
     let cfg = AutoOptimizationConfig {
         collection: scoped.clone(),
         enabled: req.enabled,

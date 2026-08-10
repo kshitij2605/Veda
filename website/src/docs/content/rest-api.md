@@ -156,6 +156,8 @@ The agentic layer and MCP surface. See [Agents & MCP](/docs/agents-mcp) for the 
 | `POST` | `/v1/collections/{name}/tuning-campaigns` | Run a nested config search → Pareto front (`{ eval_set_id, max_trials?, num_bases?, mode? }`) |
 | `POST` | `/v1/tuning-campaigns/{campaign_id}/trials/{trial_id}/apply` | Apply a trial — tier-1 instant/reversible; tier-2/3 via `/reindex` + alias swap |
 
+`mode` is `"Quality"` or `"Performance"` — capitalized exactly, on both endpoints. Any other spelling (`"quality"`) is rejected with `422`.
+
 **MCP & A2A**
 
 | Method | Path | Description |
