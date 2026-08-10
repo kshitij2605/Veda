@@ -105,6 +105,11 @@ pub async fn rerank(
     Json(req): Json<RerankRequest>,
 ) -> Result<Json<RerankResponse>, (StatusCode, Json<ErrorResponse>)> {
     let name = tenant::scope(&tenant, &name);
+    // Resolve the alias like `/search` does — the `candidates` path fetches
+    // record text out of this collection, and ids handed back by a search
+    // (which follows the alias) only exist in the alias target. Without this
+    // every candidate misses and the handler returns an empty 200.
+    let name = state.inner.aliases.resolve(&name).await;
     let start = Instant::now();
 
     // Decide what we're reranking: literal documents or fetched-by-id.
