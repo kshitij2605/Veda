@@ -33,6 +33,11 @@ const DEMOS = [
     label: 'Multimodal search',
     blurb: 'Type “a dog barking” and get the recording back.',
   },
+  {
+    href: '/docs/llm-observability',
+    label: 'LLM cache & guardrails',
+    blurb: 'Ask twice, pay once. Reworded questions still hit.',
+  },
 ]
 
 export function SeeItInAction() {

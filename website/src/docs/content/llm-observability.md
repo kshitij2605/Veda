@@ -2,6 +2,8 @@
 
 This is the lane where most observability tools are thinnest: they *ingest* the GenAI traces an app emits but can't score grounding, can't cache by meaning, and can't screen by meaning — they observe the LLM from the outside. Veda already shipped the half that needs the model's own signals (answer [citations + faithfulness scoring](/docs/rag-aiops#faithfulness-citations), a [RAG/agent eval harness](/docs/rag-aiops#eval-harness-the-production-trace-flywheel), native [GenAI-semconv spans + cost/token metrics](/docs/apm-observability#genai-rag-tracing-run-metrics-cost)). This layer adds the part nobody else in the lane can: because **Veda owns the embedder, the retriever, the agent loop, and the faithfulness scorer**, it can turn its vector engine *into* the LLM layer.
 
+![A live run: the same question asked cold takes 4394ms, then reworded ("decide" becomes "work out") comes back in 1614ms from the semantic cache — cache_hit true, zero tokens, zero model time.](/videos/llm-observability.mp4)
+
 A near-duplicate prompt is a vector search away from a **cached answer with no LLM call**; an unsafe prompt is a cosine away from a **blocked request**; a recurring bad answer is a cluster away from a **named failure mode**. Where most tools *observe* LLM apps, Veda **observes *and* optimizes/secures** them. Every feature reuses an existing primitive (collections + embeddings + the agent executor + the faithfulness scorer + the [Ops Advisor](/docs/ops-advisor)) and degrades gracefully — regex-only guardrails and a fail-open path without an embedder. The three new agent flags (`cache` / `guardrails` / `trace`) are **opt-in (default false)**, so existing agents are unchanged.
 
 ## Semantic response cache
