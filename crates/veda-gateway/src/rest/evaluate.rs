@@ -74,6 +74,9 @@ pub async fn evaluate(
     axum::extract::Query(q): axum::extract::Query<EvaluateQuery>,
 ) -> Result<Json<EvaluateResponse>, (StatusCode, Json<ErrorResponse>)> {
     let name = tenant::scope(&tenant, &name);
+    // Resolve the alias like every other read path — otherwise the data-
+    // quality report describes the abandoned base collection, not the live one.
+    let name = state.inner.aliases.resolve(&name).await;
     let schema = {
         let schemas = state.inner.schemas.read().await;
         schemas.get(&name).cloned().ok_or_else(|| {

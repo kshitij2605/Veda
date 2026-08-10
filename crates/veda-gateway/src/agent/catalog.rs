@@ -253,7 +253,15 @@ impl ToolCatalog {
             "correlate_incident" => super::tools::ops::correlate_incident(ctx, args).await,
             "web_search" => super::tools::web::web_search(ctx, args).await,
             "fetch_url" => super::tools::web::fetch_url(ctx, args).await,
-            other => ToolOutcome::error(format!("unknown tool: {other}")),
+            // A tool id that doesn't exist is the caller naming something
+            // that isn't there, not an internal failure — `execute_tool`
+            // maps the kind straight to a status, and the documented
+            // contract for /v1/agent-tools/{id}/execute is
+            // invalid->400, not-found->404, internal->500. `error()`
+            // (an alias for `internal`) made it a 500. The message is
+            // unchanged: MCP matches on "unknown tool" to return the
+            // JSON-RPC "method not found" code.
+            other => ToolOutcome::not_found(format!("unknown tool: {other}")),
         }
     }
 }

@@ -68,6 +68,13 @@ pub async fn embed_insert(
     Json(req): Json<EmbedInsertRequest>,
 ) -> Result<(StatusCode, Json<EmbedInsertResponse>), (StatusCode, Json<ErrorResponse>)> {
     let name = tenant::scope(&tenant, &name);
+    // An alias points a name at a swapped-in sibling (what `/reindex` and
+    // tuning-apply produce), so every operation addressed to the name must
+    // act on the target. `/insert` and every read path already resolve;
+    // without this the write lands in the abandoned base collection while
+    // reads follow the alias, so the caller gets a 201 for a record that is
+    // never queryable.
+    let name = state.inner.aliases.resolve(&name).await;
     let start = Instant::now();
     let schema = {
         let schemas = state.inner.schemas.read().await;

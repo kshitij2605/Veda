@@ -1361,6 +1361,11 @@ pub async fn generate_eval_set_for_collection(
     let semaphore = state.inner.answer_gen_semaphore.clone();
 
     let scoped = tenant::scope(tenant, collection);
+    // Resolve the alias before sampling. After a tuning trial is applied the
+    // alias points at the re-chunked sibling; generating from the abandoned
+    // base would build the test set out of the OLD chunking, so the campaign
+    // that follows would be scored against stale ground truth.
+    let scoped = state.inner.aliases.resolve(&scoped).await;
     let chunks = load_source_chunks(state, &scoped).await?;
     if chunks.is_empty() {
         return Err(bad_request(format!(
@@ -1413,6 +1418,10 @@ pub async fn eval_set_size_recommendation(
     Path(collection): Path<String>,
 ) -> Result<Json<EvalSetSizeRecommendation>, GatewayError> {
     let scoped = tenant::scope(&tenant, &collection);
+    // Same alias resolution as `generate_eval_set_for_collection` — the
+    // recommendation counts chunks/documents, so it has to count the ones
+    // generation will actually sample from.
+    let scoped = state.inner.aliases.resolve(&scoped).await;
     let chunks = load_source_chunks(&state, &scoped).await?;
     let groups = document_groups(&chunks);
     let document_count = groups.len();

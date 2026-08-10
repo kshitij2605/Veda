@@ -91,6 +91,9 @@ pub async fn ingest_logs(
     Json(req): Json<IngestLogsRequest>,
 ) -> Result<(StatusCode, Json<IngestLogsResponse>), (StatusCode, Json<ErrorResponse>)> {
     let scoped = tenant::scope(&tenant, &name);
+    // Resolve the alias like `/insert` does — otherwise lines are written
+    // into the abandoned base collection while reads follow the alias.
+    let scoped = state.inner.aliases.resolve(&scoped).await;
 
     let schema = {
         let schemas = state.inner.schemas.read().await;

@@ -42,7 +42,9 @@ curl -X POST localhost:6340/v1/collections/sounds/ingest-media \
 # → { status: "ingested", records_inserted: 1, vector_dim: 1024, modality: "Audio", blob_key: "…" }
 ```
 
-The collection needs a vector field with `auto_embed { source: <blob field>, modality: image|audio|video }`, a `media_blob` blob field for the raw bytes, and optionally `source_path` / `class` string fields. Each `auto_embed` vector field is pinned to **one** modality, so a media collection has one vector field per modality you want to ingest. A file whose modality has no matching `auto_embed` field returns `NO_MEDIA_FIELD` (`422`).
+The collection needs a vector field with `auto_embed { source: <blob field>, modality: image|audio|video }`, a `media_blob` blob field for the raw bytes, and optionally `source_path` / `class` string fields. A file whose modality has no matching `auto_embed` field returns `NO_MEDIA_FIELD` (`422`).
+
+> **One media vector field per collection.** Each `auto_embed` vector field is pinned to **one** modality, and every dense vector field is a dense column that every record must fill — so a collection declaring both an image field and a video field can hold neither: whichever modality you upload leaves the other column empty. Give a media collection exactly one `auto_embed` vector field and use **one collection per modality**; `ingest-media` rejects a multi-vector-field collection up front with `INCOMPATIBLE_SCHEMA` (`409`). Cross-modal search still works across those collections because a unified model puts every modality in the same space.
 
 ## Cross-modal search
 
