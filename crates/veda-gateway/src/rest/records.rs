@@ -836,8 +836,18 @@ async fn insert_via_log(
         })?;
         let mut applied_ids = Vec::with_capacity(req.records.len());
         for raw in req.records.iter() {
-            let record = parse_record_public(raw, &schema)
+            let mut record = parse_record_public(raw, &schema)
                 .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
+            // Log-primary is the data-plane path going forward; it must
+            // carry the same `_indexed_at` guarantee as `insert_impl`'s
+            // fall-through branch, or every guardrail-flagged/age-checked
+            // read downstream sees these records as unscreened AND
+            // ageless. No chunk text/embedding to screen here — skipped.
+            crate::rest::ingest_common::stamp_guardrail_fields(
+                &mut record,
+                &crate::agent::guardrails::ChunkVerdict::skipped(),
+                crate::rest::ingest_common::now_secs(),
+            );
             let rid = record.id().to_string();
             let payload = bytes::Bytes::from(serde_json::to_vec(&record).map_err(|e| {
                 (
@@ -879,8 +889,17 @@ async fn insert_via_log(
     })?;
 
     for raw in req.records.iter() {
-        let record = parse_record_public(raw, &schema)
+        let mut record = parse_record_public(raw, &schema)
             .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
+        // Stamped before the record is serialized into the log payload, so
+        // the field survives both the inline apply below and the deferred
+        // `LogApplier` tick (VEDA_LOG_APPLIER=1), which re-inserts from the
+        // same persisted bytes. No chunk text/embedding here — skipped.
+        crate::rest::ingest_common::stamp_guardrail_fields(
+            &mut record,
+            &crate::agent::guardrails::ChunkVerdict::skipped(),
+            crate::rest::ingest_common::now_secs(),
+        );
         let rid = record.id().to_string();
         let shard_id =
             veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
