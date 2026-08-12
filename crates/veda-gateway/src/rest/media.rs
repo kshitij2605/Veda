@@ -251,6 +251,15 @@ pub async fn ingest_media(
             record.set("content", FieldValue::String(meta.content.clone()));
         }
 
+        // Media records carry a placeholder like "[media: clip.mp4]" and an
+        // image/audio embedding, so text-phrased screening is not interpretable.
+        // Stamp `_indexed_at` only → reported as `skipped`, never as clean.
+        crate::rest::ingest_common::stamp_guardrail_fields(
+            &mut record,
+            &crate::agent::guardrails::ChunkVerdict::skipped(),
+            crate::rest::ingest_common::now_secs(),
+        );
+
         let shard_id =
             veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
 
