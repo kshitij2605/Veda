@@ -156,6 +156,14 @@ pub async fn ingest_markdown(
     }
     drop(registry);
 
+    // Screening uses the TEXT-modality embedding. Collections with only
+    // image/audio vector fields yield no candidate, so their chunks are
+    // skipped rather than compared against text-phrased patterns.
+    let primary_text_vector_field: String = text_embed_targets
+        .first()
+        .map(|(f, _)| f.clone())
+        .unwrap_or_default();
+
     let mut chunks_out: Vec<(String, String)> = Vec::new();
 
     {
@@ -236,6 +244,17 @@ pub async fn ingest_markdown(
                 }
             }
 
+            // Screen the chunk using the embedding just computed — no extra
+            // embed call. Fails open: a skipped verdict stamps only
+            // `_indexed_at`.
+            let verdict = match record.get(primary_text_vector_field.as_str()) {
+                Some(veda_core::record::FieldValue::Vector(v)) => {
+                    crate::agent::guardrails::screen_chunk(state, v.as_slice(), &chunk.text).await
+                }
+                _ => crate::agent::guardrails::ChunkVerdict::skipped(),
+            };
+            stamp_guardrail_fields(&mut record, &verdict, now_secs());
+
             let record_id = record.id().to_string();
             let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
                 &record.id(),
@@ -286,4 +305,45 @@ pub async fn ingest_markdown(
         chunks_inserted: chunks_out.len(),
         chunks: chunks_out,
     })
+}
+
+/// Stamp `_indexed_at` plus, when screening ran, the guardrail verdict.
+///
+/// A `skipped` verdict stamps ONLY `_indexed_at`: leaving
+/// `_guardrail_flagged` absent is what makes the chunk report as
+/// `unscreened` rather than as screened-clean.
+pub fn stamp_guardrail_fields(
+    record: &mut veda_core::record::Record,
+    verdict: &crate::agent::guardrails::ChunkVerdict,
+    now_secs: i64,
+) {
+    use veda_core::record::{
+        FieldValue, GUARDRAIL_CATEGORY_FIELD, GUARDRAIL_FLAGGED_FIELD, GUARDRAIL_SCORE_FIELD,
+        INDEXED_AT_FIELD,
+    };
+
+    record.set(INDEXED_AT_FIELD, FieldValue::Int64(now_secs));
+    if !verdict.screened {
+        return;
+    }
+    record.set(GUARDRAIL_FLAGGED_FIELD, FieldValue::Bool(verdict.flagged));
+    record.set(GUARDRAIL_SCORE_FIELD, FieldValue::Float64(verdict.score));
+    if let Some(cat) = verdict.category {
+        let name = serde_json::to_value(cat)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        if !name.is_empty() {
+            record.set(GUARDRAIL_CATEGORY_FIELD, FieldValue::String(name));
+        }
+    }
+}
+
+/// Unix epoch seconds, injected nowhere — call sites pass this in so tests
+/// stay deterministic where they need to.
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }

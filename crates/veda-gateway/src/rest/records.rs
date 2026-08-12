@@ -213,6 +213,15 @@ pub(crate) async fn insert_impl(
                 })?;
         }
 
+        // Plain `/insert` has no chunk text/embedding to screen against —
+        // stamp a skipped verdict so the record still carries `_indexed_at`
+        // (and is never mistaken for screened-clean).
+        crate::rest::ingest_common::stamp_guardrail_fields(
+            &mut record,
+            &crate::agent::guardrails::ChunkVerdict::skipped(),
+            crate::rest::ingest_common::now_secs(),
+        );
+
         // Jump consistent hash for stable routing across shard-count changes.
         let shard_id =
             veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
