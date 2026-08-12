@@ -419,6 +419,60 @@ mod tests {
         (state, tenant, id)
     }
 
+    /// Like [`seeded_state`], but the inserted record already carries a
+    /// flagged guardrail verdict. The fields are set directly on the
+    /// `Record` (mirroring `stamp_guardrail_fields`) and, deliberately, are
+    /// NOT added to `text_schema`'s field list — on every real collection
+    /// these are RESERVED fields, never schema-declared.
+    async fn seeded_flagged_state(
+        tmp: &std::path::Path,
+        user_collection: &str,
+    ) -> (AppState, crate::tenant::TenantId, uuid::Uuid) {
+        let state = AppState::new(tmp);
+        let tenant = crate::tenant::TenantId::default_tenant();
+        let scoped = crate::tenant::scope(&tenant, user_collection);
+        let schema = text_schema(&scoped);
+        let col_dir = tmp.join(&scoped);
+        std::fs::create_dir_all(&col_dir).unwrap();
+        crate::rest::collections::materialize_collection_locally(&state, &schema, &col_dir)
+            .await
+            .expect("materialize");
+
+        let mut rec = Record::new();
+        rec.set(
+            "embedding",
+            FieldValue::Vector(DenseVector::new(vec![1.0, 0.0, 0.0, 0.0])),
+        );
+        rec.set("title", FieldValue::String("hostile content".to_owned()));
+        rec.set(
+            veda_core::record::GUARDRAIL_FLAGGED_FIELD,
+            FieldValue::Bool(true),
+        );
+        rec.set(
+            veda_core::record::GUARDRAIL_SCORE_FIELD,
+            FieldValue::Float64(0.9),
+        );
+        rec.set(
+            veda_core::record::GUARDRAIL_CATEGORY_FIELD,
+            FieldValue::String("indirect_injection".to_owned()),
+        );
+        rec.set(
+            veda_core::record::INDEXED_AT_FIELD,
+            FieldValue::Int64(1_786_000_000),
+        );
+        let id = rec.id();
+        {
+            let mut managers = state.inner.segment_managers.write().await;
+            let shard_map = managers.get_mut(&scoped).unwrap();
+            let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
+                &id,
+                schema.shard_count(),
+            );
+            shard_map.get_mut(&shard_id).unwrap().insert(rec).unwrap();
+        }
+        (state, tenant, id)
+    }
+
     #[test]
     fn builtin_specs_count_is_fifteen() {
         let cat = ToolCatalog::new();
@@ -677,6 +731,42 @@ mod tests {
             )
             .await;
         assert!(out.is_error);
+    }
+
+    /// Critical gap this closes: `get_record` returns a bare `{id, fields}`
+    /// object, which carries neither `hits` nor `records`, so the
+    /// dispatch-level `apply_retrieval_guard` (which only screens those two
+    /// array shapes) passes it through untouched. Without a check inside
+    /// `get_record` itself, a model that saw a chunk's id reported in a
+    /// `search`/`filter_query` response's `retrieval_guard.dropped_chunks`
+    /// could turn around and fetch the withheld content verbatim via
+    /// `get_record` — the array-shaped guard would be enforcement theater.
+    #[tokio::test]
+    async fn dispatch_get_record_withholds_flagged_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant, id) = seeded_flagged_state(tmp.path(), "docs").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat
+            .dispatch(
+                &ctx,
+                "get_record",
+                serde_json::json!({ "collection": "docs", "id": id.to_string() }),
+            )
+            .await;
+        assert!(!out.is_error, "outcome: {:?}", out.content);
+        assert_eq!(out.content["id"], id.to_string(), "{:?}", out.content);
+        assert_eq!(out.content["withheld"], true, "{:?}", out.content);
+        assert!(
+            out.content.get("fields").is_none(),
+            "flagged content must not leak through get_record: {:?}",
+            out.content
+        );
+        assert_eq!(
+            out.content["retrieval_guard"]["dropped"], 1,
+            "{:?}",
+            out.content
+        );
     }
 
     fn rls_schema(name: &str) -> CollectionSchema {
@@ -1133,5 +1223,82 @@ mod tests {
             batch_size: 8,
         });
         assert!(select_query_model(&text_only, None, Modality::Image).is_err());
+    }
+
+    // ── apply_retrieval_guard (sync, in-crate) ──────────────────────────
+
+    fn synthetic_hit(id: &str, flagged: bool, indexed_at: i64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "distance": 0.1,
+            "fields": {
+                "content": "text",
+                "_guardrail_flagged": flagged,
+                "_guardrail_score": if flagged { 0.9 } else { 0.1 },
+                "_indexed_at": indexed_at,
+            }
+        })
+    }
+
+    #[test]
+    fn apply_retrieval_guard_drops_flagged_hit_and_updates_count() {
+        let outcome = ToolOutcome::ok(serde_json::json!({
+            "hits": [synthetic_hit("a", false, 1), synthetic_hit("b", true, 1)],
+            "count": 2,
+        }));
+        let out = apply_retrieval_guard(outcome, None);
+        assert!(!out.is_error);
+        let hits = out.content["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1, "{:?}", out.content);
+        assert_eq!(hits[0]["id"], "a");
+        assert_eq!(out.content["count"], 1, "{:?}", out.content);
+        assert_eq!(
+            out.content["retrieval_guard"]["dropped"], 1,
+            "{:?}",
+            out.content
+        );
+        assert_eq!(
+            out.content["retrieval_guard"]["kept"], 1,
+            "{:?}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn apply_retrieval_guard_screens_records_key_too() {
+        // `filter_query`'s success payload uses `records`, not `hits`.
+        let outcome = ToolOutcome::ok(serde_json::json!({
+            "records": [synthetic_hit("a", false, 1), synthetic_hit("b", true, 1)],
+            "count": 2,
+        }));
+        let out = apply_retrieval_guard(outcome, None);
+        let records = out.content["records"].as_array().unwrap();
+        assert_eq!(records.len(), 1, "{:?}", out.content);
+        assert!(out.content.get("hits").is_none(), "{:?}", out.content);
+        assert_eq!(
+            out.content["retrieval_guard"]["dropped"], 1,
+            "{:?}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn apply_retrieval_guard_leaves_payloads_without_hits_or_records_untouched() {
+        let outcome = ToolOutcome::ok(serde_json::json!({ "inserted": 3 }));
+        let out = apply_retrieval_guard(outcome.clone(), None);
+        assert_eq!(
+            out, outcome,
+            "payload with neither key must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn apply_retrieval_guard_error_outcomes_are_not_reachable_here() {
+        // apply_retrieval_guard itself has no error short-circuit (that
+        // lives in `dispatch`); confirm it still degrades harmlessly if
+        // ever handed content shaped like an error (no hits/records key).
+        let outcome = ToolOutcome::invalid_args("bad args");
+        let out = apply_retrieval_guard(outcome.clone(), None);
+        assert_eq!(out, outcome);
     }
 }
