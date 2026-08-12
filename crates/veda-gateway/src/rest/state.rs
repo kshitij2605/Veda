@@ -350,6 +350,10 @@ pub struct AppStateInner {
     /// triples so each check is one embed + N cosines. Best-effort — stays
     /// `None` when nothing can embed text.
     pub guardrail_patterns: tokio::sync::Mutex<Option<crate::agent::guardrails::EmbeddedPatterns>>,
+    /// Lazily-embedded cache of the retrieved-content pattern set. Separate
+    /// from `guardrail_patterns` so adding document-phrased patterns cannot
+    /// change input-screening behaviour.
+    pub retrieval_patterns: tokio::sync::Mutex<Option<crate::agent::guardrails::EmbeddedPatterns>>,
 }
 
 /// Build a swappable TSO + the matching `dyn Tso` handle that
@@ -428,6 +432,7 @@ impl AppState {
                 log_buffer: Arc::new(LogBuffer::with_default_capacity()),
                 log_categorizer: Arc::new(LogCategorizer::new()),
                 guardrail_patterns: tokio::sync::Mutex::new(None),
+                retrieval_patterns: tokio::sync::Mutex::new(None),
             }),
         }
     }
@@ -503,6 +508,7 @@ impl AppState {
                 log_buffer: Arc::new(LogBuffer::with_default_capacity()),
                 log_categorizer: Arc::new(LogCategorizer::new()),
                 guardrail_patterns: tokio::sync::Mutex::new(None),
+                retrieval_patterns: tokio::sync::Mutex::new(None),
             }),
         }
     }
@@ -559,6 +565,7 @@ impl AppState {
                 log_buffer: Arc::new(LogBuffer::with_default_capacity()),
                 log_categorizer: Arc::new(LogCategorizer::new()),
                 guardrail_patterns: tokio::sync::Mutex::new(None),
+                retrieval_patterns: tokio::sync::Mutex::new(None),
             }),
         }
     }
