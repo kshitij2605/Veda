@@ -1505,7 +1505,7 @@ pub(crate) async fn load_source_chunks(
     Ok(out)
 }
 
-fn first_text_field(record: &veda_core::record::Record) -> Option<String> {
+pub(crate) fn first_text_field(record: &veda_core::record::Record) -> Option<String> {
     record.fields().values().find_map(|v| match v {
         veda_core::record::FieldValue::String(s) if !s.trim().is_empty() => Some(s.clone()),
         _ => None,
