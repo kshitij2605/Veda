@@ -66,6 +66,12 @@ pub enum JobKind {
         max_trials: usize,
         max_duration_secs: u64,
     },
+    /// Re-screen a collection's records for retrieval guardrails, for
+    /// corpora indexed before the feature shipped or after a
+    /// pattern-set change.
+    RescanGuardrails {
+        collection: String,
+    },
 }
 
 /// A single scheduled job entry.
@@ -308,6 +314,20 @@ async fn dispatch(kind: &JobKind, state: &AppState) {
                 crate::rest::auto_optimization::TuningMode::Quality,
             )
             .await;
+        }
+        JobKind::RescanGuardrails { collection } => {
+            // Resolve the alias the same way the HTTP endpoint does —
+            // a stale reindexed-away base collection must not silently
+            // eat a scheduled rescan.
+            let scoped = state.inner.aliases.resolve(collection).await;
+            let result = crate::rest::collections::rescan_guardrails_impl(state, &scoped).await;
+            tracing::info!(
+                collection = %collection,
+                scanned = result.scanned,
+                flagged = result.flagged,
+                skipped = result.skipped,
+                "scheduler: guardrail rescan complete"
+            );
         }
     }
 }

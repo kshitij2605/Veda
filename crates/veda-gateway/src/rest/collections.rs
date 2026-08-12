@@ -1354,6 +1354,165 @@ pub async fn reindex_collection(
         .map(Json)
 }
 
+/// Result of a guardrail re-scan.
+#[derive(Debug, Serialize)]
+pub struct RescanGuardrailsResponse {
+    pub scanned: usize,
+    pub flagged: usize,
+    pub skipped: usize,
+}
+
+/// Re-screen every record in a collection and PERSIST the guardrail
+/// verdict onto each record.
+///
+/// Needed for two cases the ingest path cannot cover: corpora indexed
+/// before retrieval guardrails shipped, and applying an updated pattern
+/// set. Counting without writing the verdict back would leave the
+/// collection exactly as exposed as before while reporting success — an
+/// unstamped chunk classifies as `unscreened` and passes through
+/// enforcement unscreened.
+pub async fn rescan_guardrails(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(name): Path<String>,
+) -> Result<Json<RescanGuardrailsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let scoped = tenant::scope(&tenant, &name);
+    let scoped = state.inner.aliases.resolve(&scoped).await;
+    {
+        let schemas = state.inner.schemas.read().await;
+        if !schemas.contains_key(&scoped) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("collection '{name}' not found"),
+                }),
+            ));
+        }
+    }
+    Ok(Json(rescan_guardrails_impl(&state, &scoped).await))
+}
+
+/// Shared re-scan body, used by both the HTTP handler above and
+/// `JobKind::RescanGuardrails`'s scheduler dispatch. `scoped` must
+/// already be tenant-scoped and alias-resolved.
+///
+/// Segments are immutable once sealed, so there is no in-place field
+/// update. Persistence instead follows the same shape as `/reindex`'s
+/// record-copy step (`copy_source_records_to_sibling` below): soft-delete
+/// the record's current doc via `SegmentManager::delete_record` and
+/// re-insert a mutated clone carrying the stamped fields, under the same
+/// record id.
+///
+/// That alone is enough for `GET`/`list`/BM25 search, which read
+/// `segment_managers` live and already skip deleted docs. Dense/ANN
+/// search instead reads a `SegmentManager` rebuilt fresh from disk (see
+/// `rebuild_executors`), so a soft-delete of an ALREADY-SEALED doc
+/// additionally needs that sealed segment's `delete_bitmap.bin` flushed
+/// back to disk before the rebuild, or the stale copy would still surface
+/// there — `SegmentManager::persist_sealed_delete_bitmaps` does that
+/// (added for this endpoint; nothing else in the codebase persisted a
+/// post-creation delete_bitmap update before).
+pub(crate) async fn rescan_guardrails_impl(
+    state: &AppState,
+    scoped: &str,
+) -> RescanGuardrailsResponse {
+    // 1. Snapshot every live record across shards/segments under a read
+    // lock, then release it before screening — screening does a real
+    // embed call, which must never run while holding this lock (mirrors
+    // `copy_source_records_to_sibling`'s "pull under read lock, release
+    // before the next step" shape).
+    let records: Vec<veda_core::record::Record> = {
+        let managers = state.inner.segment_managers.read().await;
+        let mut out = Vec::new();
+        if let Some(shards) = managers.get(scoped) {
+            for sm in shards.values() {
+                let gs = sm.growing_segment();
+                for doc_id in 0..gs.count() {
+                    if gs.is_deleted(doc_id) {
+                        continue;
+                    }
+                    if let Some(rec) = gs.get_record(doc_id) {
+                        out.push(rec.clone());
+                    }
+                }
+                for handle in sm.sealed_segments() {
+                    for doc_id in 0..handle.metadata.row_count as u32 {
+                        if handle.reader.delete_bitmap().is_deleted(doc_id) {
+                            continue;
+                        }
+                        if let Ok(rec) = handle.reader.get_record(doc_id) {
+                            out.push(rec);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    };
+
+    // 2. Screen each record off any lock.
+    let embedder = crate::rest::rag_eval::text_embedder_pub(state).await;
+    let mut scanned = 0usize;
+    let mut flagged = 0usize;
+    let mut skipped = 0usize;
+    let mut updated: Vec<veda_core::record::Record> = Vec::with_capacity(records.len());
+    for mut record in records {
+        scanned += 1;
+        let text = crate::rest::rag_eval::first_text_field(&record);
+        let verdict = match (&embedder, text.as_deref()) {
+            (Some(client), Some(t)) => match client.embed_text(t).await {
+                Ok(v) => crate::agent::guardrails::screen_chunk(state, &v, t).await,
+                Err(_) => crate::agent::guardrails::ChunkVerdict::skipped(),
+            },
+            _ => crate::agent::guardrails::ChunkVerdict::skipped(),
+        };
+        if !verdict.screened {
+            skipped += 1;
+        } else if verdict.flagged {
+            flagged += 1;
+        }
+        crate::rest::ingest_common::stamp_guardrail_fields(
+            &mut record,
+            &verdict,
+            crate::rest::ingest_common::now_secs(),
+        );
+        updated.push(record);
+    }
+
+    // 3. Persist: soft-delete each record's current doc and re-insert the
+    // stamped clone under the same id, then seal + flush + rebuild so the
+    // live segment managers and the disk-backed query executor agree.
+    let shard_count = {
+        let schemas = state.inner.schemas.read().await;
+        schemas.get(scoped).map(|s| s.shard_count())
+    };
+    if let Some(shard_count) = shard_count {
+        let mut managers = state.inner.segment_managers.write().await;
+        if let Some(shards) = managers.get_mut(scoped) {
+            for record in updated {
+                let id = record.id();
+                let shard_id =
+                    veda_coordinator::shard_router::ShardRouter::assign_shard(&id, shard_count);
+                if let Some(sm) = shards.get_mut(&shard_id) {
+                    let _ = sm.delete_record(id);
+                    let _ = sm.insert(record);
+                }
+            }
+            for sm in shards.values_mut() {
+                let _ = sm.seal_growing();
+                let _ = sm.persist_sealed_delete_bitmaps();
+            }
+        }
+    }
+    let _ = crate::rest::records::rebuild_executors(state, scoped).await;
+
+    RescanGuardrailsResponse {
+        scanned,
+        flagged,
+        skipped,
+    }
+}
+
 /// Phase G reindex pipeline helper. Iterates the source
 /// collection's segment managers, pulls every non-tombstoned
 /// record out of every shard's growing + sealed segments, and
