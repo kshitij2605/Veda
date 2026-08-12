@@ -10,7 +10,8 @@
 use serde::{Deserialize, Serialize};
 
 use veda_core::record::{
-    GUARDRAIL_CATEGORY_FIELD, GUARDRAIL_FLAGGED_FIELD, GUARDRAIL_SCORE_FIELD, INDEXED_AT_FIELD,
+    EXPIRES_AT_FIELD, GUARDRAIL_CATEGORY_FIELD, GUARDRAIL_FLAGGED_FIELD, GUARDRAIL_SCORE_FIELD,
+    INDEXED_AT_FIELD,
 };
 
 /// How a retrieved hit was classified for enforcement.
@@ -36,7 +37,11 @@ pub struct DroppedChunk {
     pub score: f64,
 }
 
-/// A temporal anomaly found in the retained set. Populated in Task 5.
+/// A temporal anomaly in the retained set.
+///
+/// `kind` is `"stale"` (age far above the set median), `"expired"` (past
+/// `_expires_at`), or `"conflict"` (a near-duplicate that is materially older
+/// than its twin — the newer is preferred and this one is reported).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TemporalFinding {
     pub kind: String,
@@ -123,6 +128,134 @@ pub fn enforce_retrieved(
 
     report.kept = kept.len();
     (kept, report)
+}
+
+/// A hit older than this multiple of the retained set's median age is stale.
+pub const STALENESS_MEDIAN_MULTIPLE: f64 = 3.0;
+/// Cosine at or above which two hits are treated as near-duplicates.
+pub const DUPLICATE_COSINE_THRESHOLD: f32 = 0.95;
+/// Age ratio between near-duplicates that constitutes a temporal conflict.
+pub const CONFLICT_AGE_RATIO: f64 = 2.0;
+
+fn hit_id(hit: &serde_json::Value) -> String {
+    hit.get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn hit_age_secs(hit: &serde_json::Value, now_secs: i64) -> Option<i64> {
+    hit.get("fields")
+        .and_then(|f| f.get(INDEXED_AT_FIELD))
+        .and_then(serde_json::Value::as_i64)
+        .map(|ts| now_secs.saturating_sub(ts))
+}
+
+fn hit_vector(hit: &serde_json::Value) -> Option<Vec<f32>> {
+    let fields = hit.get("fields")?.as_object()?;
+    for value in fields.values() {
+        if let Some(arr) = value.as_array()
+            && arr.len() > 1
+            && arr.iter().all(serde_json::Value::is_number)
+        {
+            return Some(
+                arr.iter()
+                    .filter_map(|v| v.as_f64())
+                    .map(|f| f as f32)
+                    .collect(),
+            );
+        }
+    }
+    None
+}
+
+fn cosine_f32(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for i in 0..n {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+/// Staleness + conflict findings over the retained hits.
+///
+/// Returns an empty vector when fewer than one hit carries `_indexed_at` —
+/// with no ages there is nothing to compare, and guessing would be worse than
+/// silence.
+pub fn temporal_check(hits: &[serde_json::Value], now_secs: i64) -> Vec<TemporalFinding> {
+    let mut findings = Vec::new();
+
+    // Expired is per-hit and needs no comparison set.
+    for hit in hits {
+        let expired = hit
+            .get("fields")
+            .and_then(|f| f.get(EXPIRES_AT_FIELD))
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|ts| ts <= now_secs);
+        if expired {
+            findings.push(TemporalFinding {
+                kind: "expired".to_owned(),
+                id: hit_id(hit),
+                age_secs: hit_age_secs(hit, now_secs).unwrap_or(0),
+            });
+        }
+    }
+
+    let mut ages: Vec<(usize, i64)> = hits
+        .iter()
+        .enumerate()
+        .filter_map(|(i, h)| hit_age_secs(h, now_secs).map(|a| (i, a)))
+        .collect();
+    if ages.is_empty() {
+        return findings;
+    }
+
+    // Staleness: age far above the median.
+    let mut sorted: Vec<i64> = ages.iter().map(|(_, a)| *a).collect();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2] as f64;
+    if median > 0.0 {
+        for (i, age) in &ages {
+            if *age as f64 > median * STALENESS_MEDIAN_MULTIPLE {
+                findings.push(TemporalFinding {
+                    kind: "stale".to_owned(),
+                    id: hit_id(&hits[*i]),
+                    age_secs: *age,
+                });
+            }
+        }
+    }
+
+    // Conflict: near-duplicate content whose ages differ materially. Report
+    // the OLDER of each pair — the newer is the one to prefer.
+    ages.sort_unstable_by_key(|(_, a)| *a);
+    for x in 0..ages.len() {
+        for y in (x + 1)..ages.len() {
+            let (i, newer) = ages[x];
+            let (j, older) = ages[y];
+            if newer <= 0 || (older as f64) < newer as f64 * CONFLICT_AGE_RATIO {
+                continue;
+            }
+            let (Some(vi), Some(vj)) = (hit_vector(&hits[i]), hit_vector(&hits[j])) else {
+                continue;
+            };
+            if cosine_f32(&vi, &vj) >= DUPLICATE_COSINE_THRESHOLD {
+                findings.push(TemporalFinding {
+                    kind: "conflict".to_owned(),
+                    id: hit_id(&hits[j]),
+                    age_secs: older,
+                });
+            }
+        }
+    }
+
+    findings
 }
 
 #[cfg(test)]
@@ -227,5 +360,93 @@ mod tests {
         for k in ["kept", "dropped", "unscreened", "skipped"] {
             assert!(v.get(k).is_some(), "{k} must always be serialized: {v}");
         }
+    }
+
+    fn aged_hit(id: &str, indexed_at: i64, vec: Vec<f32>) -> serde_json::Value {
+        let mut fields = serde_json::Map::new();
+        fields.insert("content".into(), json!("text"));
+        fields.insert("_guardrail_flagged".into(), json!(false));
+        fields.insert("_indexed_at".into(), json!(indexed_at));
+        fields.insert("vec".into(), json!(vec));
+        json!({ "id": id, "distance": 0.1, "fields": fields })
+    }
+
+    const NOW: i64 = 1_000_000;
+
+    #[test]
+    fn flags_a_stale_outlier() {
+        // Three recent hits, one ~10x older than the median age.
+        let hits = vec![
+            aged_hit("a", NOW - 100, vec![1.0, 0.0]),
+            aged_hit("b", NOW - 110, vec![0.0, 1.0]),
+            aged_hit("c", NOW - 120, vec![0.0, 0.0]),
+            aged_hit("old", NOW - 5_000, vec![0.5, 0.5]),
+        ];
+        let findings = temporal_check(&hits, NOW);
+        assert!(
+            findings.iter().any(|f| f.id == "old" && f.kind == "stale"),
+            "the outlier must be reported: {findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| f.id == "a"),
+            "recent hits must not be reported: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn flags_an_expired_hit() {
+        let mut h = aged_hit("exp", NOW - 100, vec![1.0, 0.0]);
+        h["fields"]["_expires_at"] = json!(NOW - 10);
+        let findings = temporal_check(&[h], NOW);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "expired" && f.id == "exp")
+        );
+    }
+
+    #[test]
+    fn flags_a_near_duplicate_conflict_across_ages() {
+        // Same direction (cosine 1.0) but ages differ by >2x.
+        let hits = vec![
+            aged_hit("new", NOW - 100, vec![1.0, 0.0]),
+            aged_hit("stale_dup", NOW - 400, vec![1.0, 0.0]),
+        ];
+        let findings = temporal_check(&hits, NOW);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "conflict" && f.id == "stale_dup"),
+            "the older near-duplicate is the one reported: {findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| f.id == "new"),
+            "the newer of a conflicting pair is preferred, not reported: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn distinct_content_is_not_a_conflict() {
+        let hits = vec![
+            aged_hit("a", NOW - 100, vec![1.0, 0.0]),
+            aged_hit("b", NOW - 400, vec![0.0, 1.0]),
+        ];
+        let findings = temporal_check(&hits, NOW);
+        assert!(
+            !findings.iter().any(|f| f.kind == "conflict"),
+            "orthogonal vectors are not near-duplicates: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn reports_nothing_without_age_data() {
+        let hits = vec![
+            hit("a", Some(false), 0.0, None),
+            hit("b", Some(false), 0.0, None),
+        ];
+        assert!(
+            temporal_check(&hits, NOW).is_empty(),
+            "no ages → no guessing"
+        );
     }
 }
