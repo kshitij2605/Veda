@@ -231,7 +231,7 @@ impl ToolCatalog {
 
     /// Route a tool call to its built-in implementation by id. Unknown
     /// ids return an error [`ToolOutcome`] rather than panicking.
-    pub async fn dispatch(
+    async fn dispatch_inner(
         &self,
         ctx: &ToolContext<'_>,
         tool_id: &str,
@@ -264,6 +264,102 @@ impl ToolCatalog {
             other => ToolOutcome::not_found(format!("unknown tool: {other}")),
         }
     }
+
+    /// Dispatch a tool, then apply retrieval guardrails to its output.
+    ///
+    /// This is the single choke point every LLM-facing transport shares —
+    /// `executor.rs` (converse / converse-stream / A2A), `rest/mcp.rs`
+    /// (tools/call) and `rest/agents.rs` (`/agent-tools/{id}/execute`). Doing
+    /// enforcement here rather than at each call site makes it structurally
+    /// impossible to add a transport that bypasses it.
+    ///
+    /// Any tool whose success payload carries a `hits` or `records` array
+    /// (the two shapes `search`/`filter_query` use) is screened; the
+    /// convention is documented so a future content-returning tool inherits
+    /// enforcement for free.
+    pub async fn dispatch(
+        &self,
+        ctx: &ToolContext<'_>,
+        tool_id: &str,
+        args: serde_json::Value,
+    ) -> ToolOutcome {
+        let collection = args
+            .get("collection")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let outcome = self.dispatch_inner(ctx, tool_id, args).await;
+        if outcome.is_error {
+            return outcome;
+        }
+        let vector_field = resolve_vector_field(ctx, collection.as_deref()).await;
+        apply_retrieval_guard(outcome, vector_field.as_deref())
+    }
+}
+
+/// Resolve the name of the collection's first vector field for a tool call's
+/// `collection` argument, so [`apply_retrieval_guard`] can pass it into
+/// `temporal_check`'s conflict detection.
+///
+/// Follows the same scope + alias-resolve idiom as the read paths (see
+/// `rest::tuning::resolve_search_fields`) rather than trusting the caller's
+/// raw name — this project has repeatedly shipped bugs where a handler read
+/// the unresolved name and silently operated on an abandoned base
+/// collection after a reindex swapped the alias.
+///
+/// Returns `None` on any failure (no `collection` arg, unknown collection,
+/// no vector field): this must never error and never block the tool result,
+/// it only means conflict detection is skipped while staleness/expiry still
+/// run.
+async fn resolve_vector_field(ctx: &ToolContext<'_>, collection: Option<&str>) -> Option<String> {
+    let coll = collection?;
+    let scoped = crate::tenant::scope(ctx.tenant, coll);
+    let scoped = ctx.state.inner.aliases.resolve(&scoped).await;
+    let schemas = ctx.state.inner.schemas.read().await;
+    schemas
+        .get(&scoped)
+        .and_then(|schema| schema.vector_fields().first().map(|f| f.name().to_owned()))
+}
+
+/// Drop flagged hits from a tool payload and attach the report.
+///
+/// Returns the outcome unchanged when the payload has no `hits`/`records`
+/// array — most tools (`upsert_record`, `get_resources`, …) are unaffected.
+/// Checks `hits` (used by `search`) and `records` (used by `filter_query`)
+/// because both are content-returning, LLM-facing arrays of retrieved
+/// chunks; the kept array is written back under the same key it was found
+/// under so each tool's existing response shape is preserved.
+fn apply_retrieval_guard(mut outcome: ToolOutcome, vector_field: Option<&str>) -> ToolOutcome {
+    use crate::agent::retrieval_guard::{enforce_retrieved, temporal_check};
+
+    let Some(obj) = outcome.content.as_object_mut() else {
+        return outcome;
+    };
+    let key = if obj.contains_key("hits") {
+        "hits"
+    } else if obj.contains_key("records") {
+        "records"
+    } else {
+        return outcome;
+    };
+    let Some(hits) = obj.get_mut(key).and_then(|h| h.as_array_mut()) else {
+        return outcome;
+    };
+
+    let taken = std::mem::take(hits);
+    let (kept, mut report) = enforce_retrieved(taken, true);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    report.temporal = temporal_check(&kept, now, vector_field);
+
+    obj.insert("count".into(), serde_json::json!(kept.len()));
+    obj.insert(key.to_owned(), serde_json::Value::Array(kept));
+    obj.insert(
+        "retrieval_guard".into(),
+        serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+    );
+    outcome
 }
 
 #[cfg(test)]
