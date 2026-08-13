@@ -18,7 +18,7 @@ use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use veda_core::error::{Result, VedaError};
 
-use crate::block_max::BLOCK_SIZE;
+use crate::block_max::{BLOCK_SIZE, PostingCursor, PruneStats, block_max_wand};
 
 /// Lucene-default BM25 parameter k1.
 pub const BM25_K1: f32 = 1.2;
@@ -147,6 +147,62 @@ static ENGLISH_STOPWORDS: &[&str] = &[
 struct BlockIndex {
     blocks: Vec<(u32, f32)>,
     list_max: f32,
+}
+
+/// A `PostingCursor` over one term's BM25 postings.
+///
+/// Borrows the index's posting vector and block metadata; holds no copies.
+///
+/// Satisfies the trait's `block_last_doc() >= doc()` invariant by
+/// construction: postings are sorted ascending by doc_id (enforced in
+/// `build_blocks`) and `blocks[i]` records the last doc of the same chunk
+/// that contains position `i * BLOCK_SIZE`, so the block containing `pos`
+/// always ends at or after the doc at `pos`.
+struct Bm25Cursor<'a> {
+    postings: &'a [(u32, u32, Vec<u32>)],
+    blocks: &'a [(u32, f32)],
+    list_max: f32,
+    doc_lengths: &'a [u32],
+    idf: f32,
+    avg_dl: f32,
+    pos: usize,
+}
+
+impl PostingCursor for Bm25Cursor<'_> {
+    fn doc(&self) -> Option<u32> {
+        self.postings.get(self.pos).map(|p| p.0)
+    }
+
+    fn advance_to(&mut self, target: u32) {
+        // Postings are doc-sorted, so the first index at or past `target`
+        // is a partition point over the remaining slice.
+        let from = self.pos.min(self.postings.len());
+        self.pos = from + self.postings[from..].partition_point(|p| p.0 < target);
+    }
+
+    fn next(&mut self) {
+        self.pos += 1;
+    }
+
+    fn block_max(&self) -> f32 {
+        self.blocks
+            .get(self.pos / BLOCK_SIZE)
+            .map_or(f32::MIN, |b| b.1)
+    }
+
+    fn block_last_doc(&self) -> Option<u32> {
+        self.blocks.get(self.pos / BLOCK_SIZE).map(|b| b.0)
+    }
+
+    fn list_max(&self) -> f32 {
+        self.list_max
+    }
+
+    fn score(&self) -> f32 {
+        let (doc_id, tf, _) = self.postings[self.pos];
+        let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0);
+        bm25_impact(self.idf, tf, dl, self.avg_dl)
+    }
 }
 
 /// Per-segment BM25 inverted index.
@@ -321,44 +377,148 @@ impl Bm25Index {
     }
 
     /// Rank docs by BM25 score against `query`. Returns `(doc_id, score)`
-    /// pairs sorted by score desc, truncated to `k`. Docs with zero
-    /// overlap on tokenized terms are omitted.
+    /// sorted by score descending, ties broken by doc_id ascending,
+    /// truncated to `k`. Docs with zero overlap on tokenized terms are
+    /// omitted.
     pub fn search(&self, query: &str, k: usize) -> Vec<(u32, f32)> {
+        self.search_with_theta(query, k, 1.0)
+    }
+
+    /// `search` with explicit pruning aggressiveness.
+    ///
+    /// `theta` of `1.0` (the default) is rank-safe: the result is identical
+    /// to exhaustive scoring. Higher values prune harder and may omit true
+    /// top-k results. Values below `1.0` and non-finite values are clamped
+    /// to `1.0` by the core.
+    pub fn search_with_theta(&self, query: &str, k: usize, theta: f32) -> Vec<(u32, f32)> {
+        self.search_with_stats(query, k, theta).0
+    }
+
+    /// `search_with_theta` plus traversal statistics. Exists so tests can
+    /// assert that pruning is actually happening rather than merely that
+    /// results stay correct — a pruning path that silently never prunes
+    /// passes every correctness test.
+    pub fn search_with_stats(
+        &self,
+        query: &str,
+        k: usize,
+        theta: f32,
+    ) -> (Vec<(u32, f32)>, PruneStats) {
         let n = self.doc_count() as f32;
         if n == 0.0 || k == 0 {
-            return Vec::new();
+            return (Vec::new(), PruneStats::default());
         }
+        let terms = self.unique_query_terms(query);
+        if self.block_indexes.is_empty() {
+            return (self.search_exhaustive(&terms, k), PruneStats::default());
+        }
+
         let avg_dl = self.avg_doc_length();
-        let q_tokens = run_analyzer(self.tokenizer, &self.analyzer, query);
-
-        // Dedup query terms — repeated tokens don't add new evidence in
-        // standard BM25 (we already sum across all matching docs).
-        let mut seen: std::collections::HashSet<&String> =
-            std::collections::HashSet::with_capacity(q_tokens.len());
-        let mut unique_q_tokens: Vec<&String> = Vec::with_capacity(q_tokens.len());
-        for t in &q_tokens {
-            if seen.insert(t) {
-                unique_q_tokens.push(t);
-            }
-        }
-
-        let mut scores: HashMap<u32, f32> = HashMap::new();
-        for term in unique_q_tokens {
-            let Some(postings) = self.postings.get(term) else {
+        let mut cursors = Vec::with_capacity(terms.len());
+        for term in &terms {
+            let (Some(postings), Some(bi)) =
+                (self.postings.get(*term), self.block_indexes.get(*term))
+            else {
                 continue;
             };
-            let df = postings.len() as f32;
-            let idf = bm25_idf(n, df);
+            if postings.is_empty() {
+                continue;
+            }
+            cursors.push(Bm25Cursor {
+                postings,
+                blocks: &bi.blocks,
+                list_max: bi.list_max,
+                doc_lengths: &self.doc_lengths,
+                idf: bm25_idf(n, postings.len() as f32),
+                avg_dl,
+                pos: 0,
+            });
+        }
+        let (mut hits, stats) = block_max_wand(cursors, k, theta);
+
+        // block_max_wand sums each returned doc's per-cursor contributions
+        // in whichever order that doc's cursors happened to be tied in at
+        // scoring time — driven by the traversal's own history of skips and
+        // advances, so it varies from doc to doc. f32 addition is not
+        // associative, so a different summation order can round to a
+        // different last bit than `search_exhaustive`'s fixed term-order
+        // sum for the same doc, even though every individual per-term
+        // impact value is identical either way. `block_max_wand` still owns
+        // which docs are kept or pruned; this only normalizes the reported
+        // score to the same deterministic order the exhaustive oracle uses,
+        // so theta=1.0 stays bit-identical to it.
+        for (doc_id, score) in &mut hits {
+            *score = self.exact_score(*doc_id, &terms, n, avg_dl);
+        }
+        hits.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        (hits, stats)
+    }
+
+    /// Score one doc against `terms`, in the same term order and
+    /// accumulation pattern `search_exhaustive` uses, so a score computed
+    /// here is bit-identical to the exhaustive oracle's for that doc.
+    /// Requires `self.postings` sorted ascending by doc_id (guaranteed by
+    /// `build_blocks`, which every caller of this method has already run).
+    fn exact_score(&self, doc_id: u32, terms: &[&String], n: f32, avg_dl: f32) -> f32 {
+        let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0);
+        let mut score = 0.0f32;
+        for term in terms {
+            let Some(postings) = self.postings.get(*term) else {
+                continue;
+            };
+            if let Ok(i) = postings.binary_search_by_key(&doc_id, |p| p.0) {
+                let idf = bm25_idf(n, postings.len() as f32);
+                score += bm25_impact(idf, postings[i].1, dl, avg_dl);
+            }
+        }
+        score
+    }
+
+    /// Analyzed query terms with duplicates removed — repeated tokens add
+    /// no new evidence in standard BM25.
+    ///
+    /// Returns the owned `String` keys stored in `postings`, so the
+    /// references borrow from `self` rather than from a temporary token
+    /// vector. A token absent from the index yields no term, which matches
+    /// the exhaustive path's behaviour of skipping unknown terms.
+    fn unique_query_terms(&self, query: &str) -> Vec<&String> {
+        let q_tokens = run_analyzer(self.tokenizer, &self.analyzer, query);
+        let mut seen: std::collections::HashSet<&String> =
+            std::collections::HashSet::with_capacity(q_tokens.len());
+        let mut unique = Vec::with_capacity(q_tokens.len());
+        for t in &q_tokens {
+            if let Some((key, _)) = self.postings.get_key_value(t)
+                && seen.insert(key)
+            {
+                unique.push(key);
+            }
+        }
+        unique
+    }
+
+    /// Exhaustive scoring: every posting of every query term accumulated
+    /// into a map, then sorted. Used by growing segments, which mutate too
+    /// often for block metadata to stay valid, and as the oracle the
+    /// pruning path is tested against.
+    fn search_exhaustive(&self, terms: &[&String], k: usize) -> Vec<(u32, f32)> {
+        let n = self.doc_count() as f32;
+        let avg_dl = self.avg_doc_length();
+        let mut scores: HashMap<u32, f32> = HashMap::new();
+        for term in terms {
+            let Some(postings) = self.postings.get(*term) else {
+                continue;
+            };
+            let idf = bm25_idf(n, postings.len() as f32);
             for &(doc_id, tf, _) in postings {
                 let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0);
                 *scores.entry(doc_id).or_insert(0.0) += bm25_impact(idf, tf, dl, avg_dl);
             }
         }
         let mut result: Vec<(u32, f32)> = scores.into_iter().collect();
-        // Score descending, then doc_id ascending. The doc_id tie-break is
-        // what makes the result a total order: without it, equal-scoring
-        // docs come back in HashMap iteration order, which is neither
-        // stable across runs nor comparable against a second implementation.
         result.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -1272,5 +1432,153 @@ mod tests {
             idx.block_indexes["alpha"].blocks, first,
             "rebuild must be idempotent"
         );
+    }
+
+    /// Build one corpus twice: with blocks (pruning path) and without
+    /// (exhaustive path). Same data, same struct — the only difference is
+    /// which traversal runs.
+    fn paired_indexes(docs: u32) -> (Bm25Index, Bm25Index) {
+        let build = || {
+            let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+            for doc_id in 0..docs {
+                let a = (doc_id % 5) as usize + 1;
+                let b = (doc_id % 11) as usize;
+                let c = (doc_id % 3) as usize;
+                let mut text = "alpha ".repeat(a);
+                text.push_str(&"beta ".repeat(b));
+                text.push_str(&"gamma ".repeat(c));
+                text.push_str("delta");
+                idx.insert(doc_id, &text);
+            }
+            idx
+        };
+        let plain = build();
+        let mut blocked = build();
+        blocked.build_blocks();
+        (plain, blocked)
+    }
+
+    #[test]
+    fn pruned_search_matches_exhaustive_search() {
+        let (plain, blocked) = paired_indexes(3000);
+        assert!(!plain.has_blocks());
+        assert!(blocked.has_blocks());
+        for query in [
+            "alpha",
+            "beta",
+            "alpha beta",
+            "alpha beta gamma delta",
+            "alpha alpha beta",
+            "delta zzz_absent",
+            "zzz_absent",
+        ] {
+            for k in [1usize, 5, 10, 100, 5000] {
+                assert_eq!(
+                    blocked.search_with_theta(query, k, 1.0),
+                    plain.search(query, k),
+                    "query {query:?} k {k}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pruned_search_matches_on_a_corpus_smaller_than_one_block() {
+        let (plain, blocked) = paired_indexes(7);
+        for k in [1usize, 3, 100] {
+            assert_eq!(
+                blocked.search_with_theta("alpha beta", k, 1.0),
+                plain.search("alpha beta", k)
+            );
+        }
+    }
+
+    #[test]
+    fn pruning_actually_skips_blocks() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        // "common" is in every doc and scores low; "rare" is in a handful and
+        // scores high. Once the heap fills from "rare", most of "common"'s
+        // blocks cannot reach the threshold.
+        for doc_id in 0..20_000u32 {
+            if doc_id % 500 == 0 {
+                idx.insert(doc_id, "common rare rare rare rare rare");
+            } else {
+                idx.insert(doc_id, "common");
+            }
+        }
+        idx.build_blocks();
+        let (_, stats) = idx.search_with_stats("common rare", 10, 1.0);
+        assert!(
+            stats.blocks_skipped > 0,
+            "no blocks skipped — pruning is inert on a corpus built to force it"
+        );
+    }
+
+    #[test]
+    fn search_without_blocks_uses_the_exhaustive_path() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..1000u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        // No build_blocks call — this is the growing-segment shape.
+        let (hits, stats) = idx.search_with_stats("alpha", 10, 1.0);
+        assert_eq!(hits, idx.search("alpha", 10));
+        assert_eq!(stats, crate::block_max::PruneStats::default());
+    }
+
+    #[test]
+    fn theta_above_one_stays_within_k_and_returns_real_hits() {
+        let (plain, blocked) = paired_indexes(3000);
+        // Every genuine match, scored exhaustively, as the reference set.
+        let all_matches: HashMap<u32, f32> = plain
+            .search("alpha beta gamma", usize::MAX)
+            .into_iter()
+            .collect();
+
+        let approx = blocked.search_with_theta("alpha beta gamma", 10, 8.0);
+        assert!(approx.len() <= 10);
+        assert!(
+            !approx.is_empty(),
+            "aggressive pruning must not empty the result"
+        );
+        for (doc_id, score) in &approx {
+            // Approximate mode may omit true top-k members. It must never
+            // invent a doc that is not a match, nor report a wrong score.
+            let expected = all_matches
+                .get(doc_id)
+                .unwrap_or_else(|| panic!("doc {doc_id} is not a match at all"));
+            assert_eq!(score, expected, "doc {doc_id} scored wrongly");
+        }
+    }
+
+    #[test]
+    fn search_delegates_to_theta_one() {
+        let (_, blocked) = paired_indexes(500);
+        assert_eq!(
+            blocked.search("alpha beta", 20),
+            blocked.search_with_theta("alpha beta", 20, 1.0)
+        );
+    }
+
+    #[test]
+    fn cursor_block_last_doc_is_never_behind_current_doc() {
+        // The core relies on block_last_doc() >= doc() for forward progress.
+        // A violation is silent truncation in release builds, so pin it here
+        // directly rather than relying on the debug_assert firing.
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..1000u32 {
+            idx.insert(doc_id, "alpha");
+        }
+        idx.build_blocks();
+        let postings = &idx.postings["alpha"];
+        let bi = &idx.block_indexes["alpha"];
+        for (pos, posting) in postings.iter().enumerate() {
+            let doc = posting.0;
+            let block_last = bi.blocks[pos / crate::block_max::BLOCK_SIZE].0;
+            assert!(
+                block_last >= doc,
+                "pos {pos}: block_last_doc {block_last} is behind doc {doc}"
+            );
+        }
     }
 }
