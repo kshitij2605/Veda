@@ -549,7 +549,8 @@ impl SegmentManager {
     }
 
     /// Flush every sealed segment's in-memory delete bitmap back to its
-    /// `delete_bitmap.bin` file.
+    /// `delete_bitmap.bin` file — skipping segments whose bitmap hasn't
+    /// changed (see `DeleteBitmap::save_if_dirty`).
     ///
     /// `delete_record` only mutates a sealed segment's bitmap in memory.
     /// Search that goes through the query executor (dense/ANN search)
@@ -557,13 +558,13 @@ impl SegmentManager {
     /// `rebuild_executors`), which re-reads `delete_bitmap.bin` via
     /// `SegmentReader::open` — it never sees an in-memory-only deletion.
     /// Callers that soft-delete a sealed record and need that deletion to
-    /// survive such a rebuild must call this afterward.
-    pub fn persist_sealed_delete_bitmaps(&self) -> Result<()> {
-        for handle in &self.sealed_segments {
+    /// survive such a rebuild (or a restart) must call this afterward.
+    pub fn persist_sealed_delete_bitmaps(&mut self) -> Result<()> {
+        for handle in &mut self.sealed_segments {
             handle
                 .reader
-                .delete_bitmap()
-                .save(&handle.dir.join(crate::segment::DELETE_BITMAP_FILE))?;
+                .delete_bitmap_mut()
+                .save_if_dirty(&handle.dir.join(crate::segment::DELETE_BITMAP_FILE))?;
         }
         Ok(())
     }

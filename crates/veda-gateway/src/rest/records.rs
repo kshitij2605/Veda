@@ -784,6 +784,27 @@ pub async fn delete_records(
         }
     }
 
+    // `delete_record` only marks a SEALED segment's delete bitmap in
+    // memory. Without flushing it to `delete_bitmap.bin`, the deletion is
+    // invisible to dense/ANN search (which reads a `SegmentManager`
+    // rebuilt fresh from disk — see `rebuild_executors`) the moment that
+    // rebuild next runs, and to every reader after a restart: a delete the
+    // caller was told succeeded, and that a same-process `GET` even
+    // confirms, would silently resurrect. Flush every shard now that any
+    // deletes above have landed, so the guarantee holds regardless of
+    // whether this call touched a growing-segment doc (no-op here) or a
+    // sealed one.
+    for sm in shard_map.values_mut() {
+        sm.persist_sealed_delete_bitmaps().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("persist delete bitmap: {e}"),
+                }),
+            )
+        })?;
+    }
+
     Ok(Json(DeleteRecordsResponse { deleted }))
 }
 

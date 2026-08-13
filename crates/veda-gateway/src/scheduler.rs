@@ -320,14 +320,30 @@ async fn dispatch(kind: &JobKind, state: &AppState) {
             // a stale reindexed-away base collection must not silently
             // eat a scheduled rescan.
             let scoped = state.inner.aliases.resolve(collection).await;
-            let result = crate::rest::collections::rescan_guardrails_impl(state, &scoped).await;
-            tracing::info!(
-                collection = %collection,
-                scanned = result.scanned,
-                flagged = result.flagged,
-                skipped = result.skipped,
-                "scheduler: guardrail rescan complete"
-            );
+            // Errors must not be swallowed as a quiet success: the rescan
+            // now rebuilds into a sibling and swaps the alias, so a
+            // failure here means the live collection was never touched —
+            // worth a `warn`, not the same `info` line a real completion
+            // gets.
+            match crate::rest::collections::rescan_guardrails_impl(state, &scoped).await {
+                Ok(result) => {
+                    tracing::info!(
+                        collection = %collection,
+                        scanned = result.scanned,
+                        flagged = result.flagged,
+                        skipped = result.skipped,
+                        "scheduler: guardrail rescan complete"
+                    );
+                }
+                Err((status, err)) => {
+                    tracing::warn!(
+                        collection = %collection,
+                        status = %status,
+                        error = %err.0.error,
+                        "scheduler: guardrail rescan failed"
+                    );
+                }
+            }
         }
     }
 }

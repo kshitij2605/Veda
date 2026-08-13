@@ -328,6 +328,13 @@ pub fn stamp_guardrail_fields(
     }
     record.set(GUARDRAIL_FLAGGED_FIELD, FieldValue::Bool(verdict.flagged));
     record.set(GUARDRAIL_SCORE_FIELD, FieldValue::Float64(verdict.score));
+    // A re-verdict must not leave a stale category from a PREVIOUS stamp:
+    // clear it first, then set it again only if this verdict carries one.
+    // Otherwise a chunk that used to flag "pii" but now screens clean
+    // (pattern set changed, or a re-scan recomputes it) would end up
+    // `flagged = false, category = "pii"` — reads as "clean but still
+    // tagged pii" to any downstream consumer.
+    record.remove(GUARDRAIL_CATEGORY_FIELD);
     if let Some(cat) = verdict.category {
         let name = serde_json::to_value(cat)
             .ok()
@@ -346,4 +353,55 @@ pub fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::guardrails::{ChunkVerdict, GuardrailCategory};
+    use veda_core::record::{GUARDRAIL_CATEGORY_FIELD, GUARDRAIL_FLAGGED_FIELD, Record};
+
+    /// M8: a record previously flagged `pii` that re-screens clean must not
+    /// keep reporting `_guardrail_category = "pii"` alongside
+    /// `_guardrail_flagged = false` — that combination reads as "clean but
+    /// still tagged pii" to any downstream consumer.
+    #[test]
+    fn a_clean_re_verdict_clears_a_stale_category() {
+        let mut record = Record::new();
+        // Simulate a prior stamp that flagged this record as PII.
+        let flagged = ChunkVerdict {
+            flagged: true,
+            category: Some(GuardrailCategory::Pii),
+            score: 0.9,
+            matched: Some("email".into()),
+            screened: true,
+        };
+        stamp_guardrail_fields(&mut record, &flagged, 1_000);
+        assert!(record.get(GUARDRAIL_CATEGORY_FIELD).is_some());
+
+        // Re-stamp with a clean verdict (e.g. a re-scan after the pattern
+        // set changed, or content that no longer matches).
+        stamp_guardrail_fields(&mut record, &ChunkVerdict::clean(), 2_000);
+
+        assert_eq!(
+            record.get(GUARDRAIL_FLAGGED_FIELD),
+            Some(&veda_core::record::FieldValue::Bool(false))
+        );
+        assert!(
+            record.get(GUARDRAIL_CATEGORY_FIELD).is_none(),
+            "a clean re-verdict must clear the stale category, not just flip flagged to false"
+        );
+    }
+
+    /// A `skipped` verdict must stamp ONLY `_indexed_at` — never
+    /// `_guardrail_flagged = false`. Absent means "unscreened"; a present
+    /// `false` means "screened and clean". Conflating the two is the
+    /// fail-open bug this reserved-field scheme exists to prevent.
+    #[test]
+    fn a_skipped_verdict_never_stamps_flagged_false() {
+        let mut record = Record::new();
+        stamp_guardrail_fields(&mut record, &ChunkVerdict::skipped(), 1_000);
+        assert!(record.get(GUARDRAIL_FLAGGED_FIELD).is_none());
+        assert!(record.get(GUARDRAIL_CATEGORY_FIELD).is_none());
+    }
 }
