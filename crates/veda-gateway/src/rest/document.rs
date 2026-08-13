@@ -7,9 +7,7 @@ use serde::Serialize;
 use tracing::instrument;
 use veda_core::chunking::ChunkingStrategy;
 use veda_core::embedding::Modality;
-use veda_core::embedding_client::EmbeddingClient;
 use veda_core::record::{FieldValue, Record};
-use veda_core::types::FieldType;
 use veda_core::vector::DenseVector;
 
 use veda_storage::blob_store::{ArcBlobStore, BlobStore};
@@ -556,6 +554,42 @@ async fn process_single_file(
         )
     };
 
+    // Text chunks and image records fill the SAME dense vector columns —
+    // storage requires every record to carry every one of them, so a schema
+    // whose columns cannot all be filled from both is unsatisfiable. Resolve
+    // them once through the resolver `ingest_markdown` uses, so the two loops
+    // cannot disagree, and reject an unsatisfiable schema here — before a
+    // single record is written — rather than letting the storage layer answer
+    // "record missing required vector field", which names no fix and leaves
+    // the text half already inserted. Same contract as `/ingest-media`'s
+    // INCOMPATIBLE_SCHEMA guard.
+    let dense_targets = super::ingest_common::resolve_dense_targets(state, schema).await;
+    // The schema asks for image records when it can store them (`image_blob`)
+    // or declares a vector column for a media modality. A plain text
+    // collection still ignores a document's images, exactly as before.
+    let wants_images = has_image_blob_field || dense_targets.iter().any(|t| t.declared_media);
+    if wants_images && !images.is_empty() {
+        let unfillable = super::ingest_common::unfillable_columns(&dense_targets, Modality::Image);
+        if !unfillable.is_empty() {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(OcrErrorResponse {
+                    error: OcrError {
+                        code: "INCOMPATIBLE_SCHEMA".to_owned(),
+                        message: super::ingest_common::incompatible_schema_message(
+                            collection_name,
+                            &unfillable,
+                            Modality::Image,
+                        ),
+                        suggestion: "Give the collection one vector field backed by a \
+                                     multimodal model, or use one collection per modality."
+                            .to_owned(),
+                    },
+                }),
+            ));
+        }
+    }
+
     // Text chunks go through the shared markdown-ingest pipeline (chunk ->
     // embed text vector fields + SPLADE -> insert -> seal -> rebuild). The
     // OCR-specific image handling stays below.
@@ -576,13 +610,24 @@ async fn process_single_file(
     )
     .await
     .map_err(|(status, msg)| {
+        // A 409 out of the shared pipeline is the schema guard, not an insert
+        // failure — surface it under the same code `/ingest-media` uses.
+        let (code, suggestion) = if status == StatusCode::CONFLICT {
+            (
+                "INCOMPATIBLE_SCHEMA",
+                "Give the collection one vector field backed by a multimodal model, \
+                 or use one collection per modality.",
+            )
+        } else {
+            ("INSERT_FAILED", "Check collection schema and server logs.")
+        };
         (
             status,
             Json(OcrErrorResponse {
                 error: OcrError {
-                    code: "INSERT_FAILED".to_owned(),
+                    code: code.to_owned(),
                     message: msg,
-                    suggestion: "Check collection schema and server logs.".to_owned(),
+                    suggestion: suggestion.to_owned(),
                 },
             }),
         )
@@ -607,47 +652,6 @@ async fn process_single_file(
         inserted_ids.push(record_id.clone());
     }
 
-    // Discover image embedding targets for the image-insert path. Image
-    // vector fields are fed by the multimodal model (auto_embed-declared
-    // image/video/audio fields, or name-heuristic "image" fields).
-    let mut image_embed_targets: Vec<(String, EmbeddingClient)> = Vec::new();
-    {
-        let registry = state.inner.embedding_registry.read().await;
-        let multimodal_models = registry.find_by_modality(Modality::Image);
-        for field_def in schema.fields() {
-            if let FieldType::Vector { auto_embed, .. } = field_def.field_type() {
-                let field_name = field_def.name();
-                if let Some(cfg) = auto_embed {
-                    use veda_core::types::AutoEmbedModality;
-                    let modality = match cfg.modality {
-                        AutoEmbedModality::Text => Modality::Text,
-                        AutoEmbedModality::Image => Modality::Image,
-                        AutoEmbedModality::Video => Modality::Video,
-                        AutoEmbedModality::Audio => Modality::Audio,
-                    };
-                    if !matches!(cfg.modality, AutoEmbedModality::Text) {
-                        let models = registry.find_by_modality(modality);
-                        if !models.is_empty() {
-                            image_embed_targets.push((
-                                field_name.to_owned(),
-                                EmbeddingClient::new(models[0].clone()),
-                            ));
-                        }
-                    }
-                    continue;
-                }
-                let lower = field_name.to_lowercase();
-                let is_image_field = lower.contains("image") && !lower.contains("text");
-                if is_image_field && !multimodal_models.is_empty() {
-                    image_embed_targets.push((
-                        field_name.to_owned(),
-                        EmbeddingClient::new(multimodal_models[0].clone()),
-                    ));
-                }
-            }
-        }
-    }
-
     // Insert image records.
     {
         let mut managers = state.inner.segment_managers.write().await;
@@ -658,9 +662,7 @@ async fn process_single_file(
         // Get blob store for storing extracted images.
         let blob_store = state.inner.blob_store.read().await.clone();
 
-        // Insert image records only if the schema has image-related fields (blob or embedding).
-        let should_insert_images = has_image_blob_field || !image_embed_targets.is_empty();
-        for (img_name, img_data) in images.iter().filter(|_| should_insert_images) {
+        for (img_name, img_data) in images.iter().filter(|_| wants_images) {
             let mut record = Record::new();
             if has_image_blob_field {
                 let blob_key = format!("{}/{}/{}", collection_name, record.id(), img_name);
@@ -680,17 +682,38 @@ async fn process_single_file(
                 record.set("source_file", FieldValue::String(file_name.to_owned()));
             }
 
-            // Embed image data into vector fields.
-            for (target_field, client) in &image_embed_targets {
+            // Embed the image into EVERY dense vector column — the same
+            // columns the text chunks filled. With a multimodal model that is
+            // the unified vector space: one column holding both this image
+            // and the document's text, searchable together.
+            for target in &dense_targets {
+                let Some(client) = target.client.as_ref() else {
+                    continue;
+                };
                 match client.embed_bytes(img_data, Modality::Image).await {
                     Ok(vector) => {
-                        record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
+                        record.set(&target.field, FieldValue::Vector(DenseVector::new(vector)));
                     }
                     Err(e) => {
-                        tracing::warn!(field = %target_field, error = %e, "image embedding failed, skipping vector field");
+                        tracing::warn!(field = %target.field, error = %e, "image embedding failed, skipping vector field");
                     }
                 }
             }
+
+            // §4.10: these records carry an `[image: x.png]` placeholder and
+            // an IMAGE embedding, so text-phrased screening is not
+            // interpretable — same situation as `/ingest-media`, which
+            // stamps `skipped`. Without this they carried no `_indexed_at`
+            // at all and classified `Unscreened`, which corrupts the single
+            // signal the fail-open decision (§6) rests on: after a full
+            // rescan an operator would still see `unscreened > 0` and be
+            // unable to tell pre-feature data from the document pipeline's
+            // own images.
+            crate::rest::ingest_common::stamp_guardrail_fields(
+                &mut record,
+                &crate::agent::guardrails::ChunkVerdict::skipped(),
+                crate::rest::ingest_common::now_secs(),
+            );
 
             let record_id = record.id().to_string();
             let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(

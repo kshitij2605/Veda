@@ -279,6 +279,10 @@ pub async fn embed_insert(
 
         // Generate embeddings for each auto_embed mapping.
         let mut embed_ok = true;
+        // Track the first text-modality target/source-text pair so
+        // ingest-time guardrail screening can reuse the embedding just
+        // computed below, rather than issuing an extra embed call.
+        let mut text_screen_target: Option<(String, String)> = None;
         for (target_field, mapping) in &req.auto_embed {
             let source_value = match raw.get(&mapping.source_field) {
                 Some(v) => v,
@@ -344,6 +348,13 @@ pub async fn embed_insert(
                 }
             };
 
+            if matches!(modality, Modality::Text) && text_screen_target.is_none() {
+                text_screen_target = Some((
+                    target_field.clone(),
+                    source_value.as_str().unwrap_or("").to_owned(),
+                ));
+            }
+
             // Inject the vector into the augmented record.
             augmented.insert(
                 target_field.clone(),
@@ -356,7 +367,7 @@ pub async fn embed_insert(
         }
 
         // Parse the augmented record using existing logic.
-        let record = match parse_record_for_embed(&augmented, &schema) {
+        let mut record = match parse_record_for_embed(&augmented, &schema) {
             Ok(r) => r,
             Err(e) => {
                 errors.push(RecordError {
@@ -366,6 +377,24 @@ pub async fn embed_insert(
                 continue;
             }
         };
+
+        // Screen using the text-modality embedding just computed above — no
+        // extra embed call. Fails open: a skipped verdict stamps only
+        // `_indexed_at`.
+        let verdict = match &text_screen_target {
+            Some((target_field, text)) => match record.get(target_field) {
+                Some(FieldValue::Vector(v)) => {
+                    crate::agent::guardrails::screen_chunk(&state, v.as_slice(), text).await
+                }
+                _ => crate::agent::guardrails::ChunkVerdict::skipped(),
+            },
+            None => crate::agent::guardrails::ChunkVerdict::skipped(),
+        };
+        crate::rest::ingest_common::stamp_guardrail_fields(
+            &mut record,
+            &verdict,
+            crate::rest::ingest_common::now_secs(),
+        );
 
         let shard_id =
             veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);

@@ -283,6 +283,10 @@ fn core_admin_router() -> Router<state::AppState> {
             post(admin::mvcc_checkpoint),
         )
         .route(
+            "/v1/admin/collections/{name}/rescan-guardrails",
+            post(collections::rescan_guardrails),
+        )
+        .route(
             "/v1/admin/jobs",
             get(jobs::list_jobs).post(jobs::create_job),
         )

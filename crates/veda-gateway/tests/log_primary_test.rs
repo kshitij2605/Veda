@@ -108,6 +108,53 @@ async fn log_primary_insert_then_read_finds_record() {
 }
 
 #[tokio::test]
+async fn log_primary_insert_stamps_indexed_at() {
+    // Retrieval guardrails: every write path must carry `_indexed_at`, not
+    // just the non-log-primary `insert_impl` fall-through. No embedder is
+    // registered here, so the verdict is `skipped` — stamps `_indexed_at`
+    // only, never a false `_guardrail_flagged`.
+    let (base, _tmp) = start_log_primary_server().await;
+    let c = Client::new();
+
+    let resp = c
+        .post(format!("{base}/v1/collections"))
+        .json(&schema())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let resp = c
+        .post(format!("{base}/v1/collections/primary_docs/insert"))
+        .json(&json!({
+            "records": [ { "vec": [1.0, 0.0, 0.0, 0.0], "label": "first" } ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "insert via log primary should succeed");
+    let body: Value = resp.json().await.unwrap();
+    let id = body["ids"][0].as_str().unwrap().to_owned();
+
+    let resp = c
+        .get(format!("{base}/v1/collections/primary_docs/records/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "get: {}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    let fields = &body["fields"];
+    assert!(
+        fields["_indexed_at"].as_i64().is_some(),
+        "_indexed_at must be stamped on the log-primary insert path: {body}"
+    );
+    assert!(
+        fields.get("_guardrail_flagged").is_none(),
+        "with no embedder the record is unscreened; it must NOT claim to be clean: {body}"
+    );
+}
+
+#[tokio::test]
 async fn log_primary_txn_write_for_unknown_txn_is_404() {
     // Prod-5 / Phase G: writes carrying `X-Veda-Txn-Id` route
     // through the TxnCoordinator instead of the v0 503 stub.

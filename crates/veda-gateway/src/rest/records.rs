@@ -213,6 +213,15 @@ pub(crate) async fn insert_impl(
                 })?;
         }
 
+        // Plain `/insert` has no chunk text/embedding to screen against —
+        // stamp a skipped verdict so the record still carries `_indexed_at`
+        // (and is never mistaken for screened-clean).
+        crate::rest::ingest_common::stamp_guardrail_fields(
+            &mut record,
+            &crate::agent::guardrails::ChunkVerdict::skipped(),
+            crate::rest::ingest_common::now_secs(),
+        );
+
         // Jump consistent hash for stable routing across shard-count changes.
         let shard_id =
             veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
@@ -775,6 +784,27 @@ pub async fn delete_records(
         }
     }
 
+    // `delete_record` only marks a SEALED segment's delete bitmap in
+    // memory. Without flushing it to `delete_bitmap.bin`, the deletion is
+    // invisible to dense/ANN search (which reads a `SegmentManager`
+    // rebuilt fresh from disk — see `rebuild_executors`) the moment that
+    // rebuild next runs, and to every reader after a restart: a delete the
+    // caller was told succeeded, and that a same-process `GET` even
+    // confirms, would silently resurrect. Flush every shard now that any
+    // deletes above have landed, so the guarantee holds regardless of
+    // whether this call touched a growing-segment doc (no-op here) or a
+    // sealed one.
+    for sm in shard_map.values_mut() {
+        sm.persist_sealed_delete_bitmaps().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("persist delete bitmap: {e}"),
+                }),
+            )
+        })?;
+    }
+
     Ok(Json(DeleteRecordsResponse { deleted }))
 }
 
@@ -827,8 +857,18 @@ async fn insert_via_log(
         })?;
         let mut applied_ids = Vec::with_capacity(req.records.len());
         for raw in req.records.iter() {
-            let record = parse_record_public(raw, &schema)
+            let mut record = parse_record_public(raw, &schema)
                 .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
+            // Log-primary is the data-plane path going forward; it must
+            // carry the same `_indexed_at` guarantee as `insert_impl`'s
+            // fall-through branch, or every guardrail-flagged/age-checked
+            // read downstream sees these records as unscreened AND
+            // ageless. No chunk text/embedding to screen here — skipped.
+            crate::rest::ingest_common::stamp_guardrail_fields(
+                &mut record,
+                &crate::agent::guardrails::ChunkVerdict::skipped(),
+                crate::rest::ingest_common::now_secs(),
+            );
             let rid = record.id().to_string();
             let payload = bytes::Bytes::from(serde_json::to_vec(&record).map_err(|e| {
                 (
@@ -870,8 +910,17 @@ async fn insert_via_log(
     })?;
 
     for raw in req.records.iter() {
-        let record = parse_record_public(raw, &schema)
+        let mut record = parse_record_public(raw, &schema)
             .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
+        // Stamped before the record is serialized into the log payload, so
+        // the field survives both the inline apply below and the deferred
+        // `LogApplier` tick (VEDA_LOG_APPLIER=1), which re-inserts from the
+        // same persisted bytes. No chunk text/embedding here — skipped.
+        crate::rest::ingest_common::stamp_guardrail_fields(
+            &mut record,
+            &crate::agent::guardrails::ChunkVerdict::skipped(),
+            crate::rest::ingest_common::now_secs(),
+        );
         let rid = record.id().to_string();
         let shard_id =
             veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);

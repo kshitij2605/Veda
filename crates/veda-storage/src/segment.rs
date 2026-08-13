@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use veda_core::error::{Result, VedaError};
-use veda_core::record::{EXPIRES_AT_FIELD, FieldValue, Record};
+use veda_core::record::{
+    EXPIRES_AT_FIELD, FieldValue, GUARDRAIL_CATEGORY_FIELD, GUARDRAIL_FLAGGED_FIELD,
+    GUARDRAIL_SCORE_FIELD, INDEXED_AT_FIELD, Record,
+};
 use veda_core::schema::CollectionSchema;
 use veda_core::types::{FieldType, SegmentId};
 
@@ -26,7 +29,7 @@ const VECTORS_DIR: &str = "vectors";
 const SPARSE_DIR: &str = "sparse";
 const MULTIVEC_DIR: &str = "multivec";
 const SCALARS_DIR: &str = "scalars";
-const DELETE_BITMAP_FILE: &str = "delete_bitmap.bin";
+pub(crate) const DELETE_BITMAP_FILE: &str = "delete_bitmap.bin";
 const METADATA_FILE: &str = "metadata.json";
 const BLOB_REFS_FILE: &str = "blob_refs.json";
 const RECORDS_FILE: &str = "records.jsonl";
@@ -498,9 +501,18 @@ impl SegmentWriter {
                         scalar_data.insert(name.to_owned(), value.clone());
                     }
                 }
-                // Persist the reserved TTL field even when not in the schema.
-                if let Some(v) = record.get(EXPIRES_AT_FIELD) {
-                    scalar_data.insert(EXPIRES_AT_FIELD.to_owned(), v.clone());
+                // Persist the reserved TTL / retrieval-guardrail fields even
+                // when not declared in the schema.
+                for reserved in [
+                    EXPIRES_AT_FIELD,
+                    GUARDRAIL_FLAGGED_FIELD,
+                    GUARDRAIL_SCORE_FIELD,
+                    GUARDRAIL_CATEGORY_FIELD,
+                    INDEXED_AT_FIELD,
+                ] {
+                    if let Some(v) = record.get(reserved) {
+                        scalar_data.insert(reserved.to_owned(), v.clone());
+                    }
                 }
                 let line = serde_json::to_string(&scalar_data)?;
                 writeln!(self.record_writer, "{line}")?;
