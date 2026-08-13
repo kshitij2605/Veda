@@ -663,8 +663,13 @@ impl Bm25Index {
 
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)?;
-        let idx: Self = serde_json::from_slice(&bytes)
+        let mut idx: Self = serde_json::from_slice(&bytes)
             .map_err(|e| VedaError::Storage(format!("bm25 load parse: {e}")))?;
+        // A loaded index is read-only by construction, so block metadata
+        // stays valid for its lifetime. Deriving it here — rather than
+        // persisting it — keeps the on-disk format unchanged, so indexes
+        // written before this feature load with no migration.
+        idx.build_blocks();
         Ok(idx)
     }
 }
@@ -1713,5 +1718,122 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Task 6: build blocks at segment open ────────────────────────────
+
+    #[test]
+    fn load_builds_blocks_and_preserves_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.bm25");
+
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..2000u32 {
+            let a = (doc_id % 5) as usize + 1;
+            let mut text = "alpha ".repeat(a);
+            text.push_str("beta gamma");
+            idx.insert(doc_id, &text);
+        }
+        let before = idx.search("alpha beta", 25);
+        idx.save(&path).unwrap();
+
+        let loaded = Bm25Index::load(&path).unwrap();
+        assert!(
+            loaded.has_blocks(),
+            "load must leave the index ready to prune"
+        );
+        assert_eq!(
+            loaded.search("alpha beta", 25),
+            before,
+            "turning pruning on must not change results"
+        );
+    }
+
+    #[test]
+    fn saved_file_contains_no_block_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.bm25");
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..200u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        idx.build_blocks();
+        idx.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("block_indexes") && !raw.contains("list_max"),
+            "block metadata is derived and must never be persisted"
+        );
+    }
+
+    #[test]
+    fn an_index_saved_before_this_feature_still_loads() {
+        // A file written by the previous version has no block fields at all.
+        // #[serde(skip)] means it must load unchanged and then build blocks,
+        // so existing sealed segments need no migration.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.bm25");
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..300u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        idx.save(&path).unwrap();
+
+        let loaded = Bm25Index::load(&path).unwrap();
+        assert_eq!(loaded.doc_count(), 300);
+        assert!(loaded.has_blocks());
+    }
+
+    #[test]
+    fn a_loaded_index_actually_prunes() {
+        // The point of the task: after load, real queries must take the
+        // pruning path, not merely be capable of it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.bm25");
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..20_000u32 {
+            if doc_id % 500 == 0 {
+                idx.insert(doc_id, "common rare rare rare rare rare");
+            } else {
+                idx.insert(doc_id, "common");
+            }
+        }
+        idx.save(&path).unwrap();
+
+        let loaded = Bm25Index::load(&path).unwrap();
+        let (_, stats) = loaded.search_with_stats("common rare", 10, 1.0);
+        assert!(
+            stats.blocks_skipped > 0,
+            "a loaded index did not prune — the feature is wired up but inert"
+        );
+    }
+
+    #[test]
+    fn inserting_after_load_falls_back_to_exhaustive() {
+        // insert() clears block metadata, so a growing index cannot consult
+        // stale bounds. Results must stay correct across that transition.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.bm25");
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..300u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        idx.save(&path).unwrap();
+
+        let mut loaded = Bm25Index::load(&path).unwrap();
+        assert!(loaded.has_blocks());
+        loaded.insert(300, "alpha gamma");
+        assert!(
+            !loaded.has_blocks(),
+            "insert must invalidate block metadata"
+        );
+
+        // The newly inserted doc must be findable — this is the bug that
+        // clearing block_indexes prevents.
+        let hits = loaded.search("gamma", 5);
+        assert!(
+            hits.iter().any(|(id, _)| *id == 300),
+            "a doc matching only a term added after the build was not returned"
+        );
     }
 }
