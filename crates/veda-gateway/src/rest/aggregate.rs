@@ -97,6 +97,13 @@ pub struct AggregateQuery {
 #[derive(Debug, Serialize)]
 pub struct AggregateResponse {
     pub groups: Vec<AggregateGroup>,
+    /// How many records the retrieval guard withheld from this aggregation.
+    /// `None` on the raw REST path, which never withholds (decision 5); on
+    /// the LLM-facing tool path this is what keeps the skip from being
+    /// silent — a `count` that quietly excludes rows would otherwise be
+    /// indistinguishable from a corpus that never had them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,7 +180,10 @@ pub async fn aggregate(
     // aggregation runs over the abandoned base collection while every other
     // read of the same name follows the alias to the swapped-in sibling.
     let name = state.inner.aliases.resolve(&name).await;
-    aggregate_core(&state, &name, &q)
+    // `false`: the raw REST endpoint never withholds, matching `/search`'s
+    // annotate-don't-drop contract (design decision 5). Only the LLM-facing
+    // `aggregate` tool passes `true`.
+    aggregate_core(&state, &name, &q, false)
         .await
         .map(Json)
         .map_err(|e| match e.kind {
@@ -186,10 +196,24 @@ pub async fn aggregate(
 /// Core aggregation over a *tenant-scoped* collection name. Shared by the
 /// REST `/aggregate` handler and the agent `aggregate` tool so both apply
 /// identical record-walk, filter, and metric semantics.
+///
+/// `drop_hostile` splits the two callers' *security* semantics while keeping
+/// their aggregation semantics identical. With `group_by` set to a text
+/// field, `groups[].key` is that field's verbatim value, so
+/// `group_by=content&filter=_guardrail_flagged = true` is a complete dump of
+/// exactly the chunks every other LLM-facing path withholds — and the
+/// dispatch-level guard cannot see it, because an aggregate payload carries
+/// neither `hits` nor `records`. The tool path therefore passes `true` and
+/// hostile-flagged records are skipped in the record walk (same policy
+/// function as everywhere else: `retrieval_guard::record_is_hostile`,
+/// so PII stays exempt); the raw REST endpoint passes `false` and its
+/// behaviour is unchanged, because dropping there would corrupt the recall
+/// measurement `/search` deliberately preserves (decision 5).
 pub async fn aggregate_core(
     state: &AppState,
     name: &str,
     q: &AggregateQuery,
+    drop_hostile: bool,
 ) -> Result<AggregateResponse, AggError> {
     // Validate collection exists.
     {
@@ -229,6 +253,7 @@ pub async fn aggregate_core(
     let bucket_key = "".to_owned(); // used when no group_by
 
     let mut first_non_numeric = false; // track whether we saw any non-numeric values to detect type error
+    let mut withheld: u64 = 0;
 
     for sm in shard_map.values() {
         // Growing segment
@@ -239,6 +264,10 @@ pub async fn aggregate_core(
             }
             if let Some(rec) = gs.get_record(doc_id) {
                 if rec.is_expired_at(now) {
+                    continue;
+                }
+                if drop_hostile && crate::agent::retrieval_guard::record_is_hostile(rec) {
+                    withheld += 1;
                     continue;
                 }
                 if let Some(ref fe) = filter_expr
@@ -267,6 +296,10 @@ pub async fn aggregate_core(
                 }
                 if let Ok(rec) = handle.reader.get_record(doc_id) {
                     if rec.is_expired_at(now) {
+                        continue;
+                    }
+                    if drop_hostile && crate::agent::retrieval_guard::record_is_hostile(&rec) {
+                        withheld += 1;
                         continue;
                     }
                     if let Some(ref fe) = filter_expr
@@ -325,7 +358,10 @@ pub async fn aggregate_core(
         .collect();
     groups.sort_by(|a, b| a.key.cmp(&b.key));
 
-    Ok(AggregateResponse { groups })
+    Ok(AggregateResponse {
+        groups,
+        withheld: drop_hostile.then_some(withheld),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

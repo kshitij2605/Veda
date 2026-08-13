@@ -692,6 +692,21 @@ async fn process_single_file(
                 }
             }
 
+            // §4.10: these records carry an `[image: x.png]` placeholder and
+            // an IMAGE embedding, so text-phrased screening is not
+            // interpretable — same situation as `/ingest-media`, which
+            // stamps `skipped`. Without this they carried no `_indexed_at`
+            // at all and classified `Unscreened`, which corrupts the single
+            // signal the fail-open decision (§6) rests on: after a full
+            // rescan an operator would still see `unscreened > 0` and be
+            // unable to tell pre-feature data from the document pipeline's
+            // own images.
+            crate::rest::ingest_common::stamp_guardrail_fields(
+                &mut record,
+                &crate::agent::guardrails::ChunkVerdict::skipped(),
+                crate::rest::ingest_common::now_secs(),
+            );
+
             let record_id = record.id().to_string();
             let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
                 &record.id(),

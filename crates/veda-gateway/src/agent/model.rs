@@ -284,6 +284,15 @@ pub struct ConverseResponse {
     /// omitted (defaults to `None`) when guardrails are off or absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardrails: Option<crate::agent::guardrails::GuardrailReport>,
+    /// Retrieval-guardrail outcome for this turn, rolled up across every
+    /// retrieving tool call (counts summed, `dropped_chunks`/`temporal`
+    /// concatenated). **Omitted when the turn made no retrieving tool
+    /// call** — "did not retrieve" and "retrieved, all clean" are different
+    /// facts, and the fail-open-on-`unscreened` decision (design §6) is only
+    /// auditable if an operator can tell them apart. Additive +
+    /// serde-back-compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieval_guard: Option<crate::agent::retrieval_guard::RetrievalGuardReport>,
 }
 
 #[cfg(test)]
@@ -427,6 +436,7 @@ mod tests {
             grounding: None,
             cache_hit: true,
             guardrails: None,
+            retrieval_guard: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["cache_hit"], true, "cache_hit must serialize: {v}");
@@ -447,9 +457,14 @@ mod tests {
             grounding: None,
             cache_hit: false,
             guardrails: None,
+            retrieval_guard: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("metrics").is_none(), "metrics should be skipped: {v}");
+        assert!(
+            v.get("retrieval_guard").is_none(),
+            "a turn that never retrieved must omit retrieval_guard: {v}"
+        );
         assert!(
             v.get("citations").is_none(),
             "empty citations should be skipped: {v}"

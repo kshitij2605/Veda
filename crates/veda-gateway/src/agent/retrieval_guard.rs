@@ -5,13 +5,16 @@
 //!
 //! Everything here is PURE and operates on the JSON hit shape the agent tools
 //! emit (`{ id, distance, fields }`), so it is unit-testable with no state,
-//! no embedder and no LLM.
+//! no embedder and no LLM. The two exceptions are [`record_is_hostile`],
+//! which applies the same policy to a `Record` for the paths that never build
+//! a JSON hit (the `aggregate` tool), and [`enforcement_enabled`], which
+//! reads the operator kill switch out of the environment.
 
 use serde::{Deserialize, Serialize};
 
 use veda_core::record::{
     EXPIRES_AT_FIELD, GUARDRAIL_CATEGORY_FIELD, GUARDRAIL_FLAGGED_FIELD, GUARDRAIL_SCORE_FIELD,
-    INDEXED_AT_FIELD,
+    INDEXED_AT_FIELD, Record,
 };
 
 /// How a retrieved hit was classified for enforcement.
@@ -76,6 +79,61 @@ pub struct RetrievalGuardReport {
     pub temporal: Vec<TemporalFinding>,
 }
 
+impl RetrievalGuardReport {
+    /// Fold another retrieval's report into this one: counts add, findings
+    /// concatenate. Used to roll one turn's several tool calls up into the
+    /// single turn-level report `/converse` returns.
+    fn merge(&mut self, other: RetrievalGuardReport) {
+        self.kept += other.kept;
+        self.dropped += other.dropped;
+        self.unscreened += other.unscreened;
+        self.skipped += other.skipped;
+        self.flagged_not_dropped += other.flagged_not_dropped;
+        self.dropped_chunks.extend(other.dropped_chunks);
+        self.temporal.extend(other.temporal);
+    }
+}
+
+/// Roll every retrieving tool call in one agent turn up into a single
+/// turn-level report, for the top-level `retrieval_guard` field on
+/// `/converse` and the `/converse/stream` `done` frame.
+///
+/// Returns `None` when the turn made no retrieving tool call at all, so the
+/// field is *omitted* rather than reported as an all-zero report — "the agent
+/// never retrieved" and "the agent retrieved and everything was clean" are
+/// different facts and the design (§6) rests on an operator being able to
+/// tell them apart.
+///
+/// Reads the per-call reports back out of the recorded steps rather than
+/// threading a second channel out of the executor: `dispatch` already wrote
+/// one into every tool result, and the steps are the same data the transports
+/// serialize, so there is no way for the two to disagree.
+pub fn collect_from_steps(
+    steps: &[crate::agent::model::AgentStep],
+) -> Option<RetrievalGuardReport> {
+    let mut out: Option<RetrievalGuardReport> = None;
+    for step in steps {
+        let crate::agent::model::AgentStep::ToolResult {
+            result, is_error, ..
+        } = step
+        else {
+            continue;
+        };
+        if *is_error {
+            continue;
+        }
+        let Some(value) = result.get("retrieval_guard") else {
+            continue;
+        };
+        let Ok(report) = serde_json::from_value::<RetrievalGuardReport>(value.clone()) else {
+            continue;
+        };
+        out.get_or_insert_with(RetrievalGuardReport::default)
+            .merge(report);
+    }
+    out
+}
+
 /// Classify one hit from its stored fields.
 pub fn classify_hit(fields: &serde_json::Map<String, serde_json::Value>) -> HitClass {
     match fields
@@ -113,6 +171,72 @@ pub fn classify_hit(fields: &serde_json::Map<String, serde_json::Value>) -> HitC
 /// decoupled from the detection layer, per its module doc.
 pub fn category_is_hostile(category: Option<&str>) -> bool {
     !matches!(category, Some("pii"))
+}
+
+/// Environment variable that turns query-time *dropping* off.
+pub const ENFORCE_ENV: &str = "VEDA_RETRIEVAL_GUARD";
+
+/// Whether query-time enforcement (dropping) is on. **Defaults to on** — the
+/// switch can only ever weaken enforcement, never enable it by accident.
+///
+/// The choke point in `agent::catalog::dispatch` is deliberately always-on
+/// rather than routed through the agent's `guardrails` flag (design §4.9):
+/// per-agent opt-in would mean the default agent ships unprotected. But
+/// always-on with no override leaves an operator whose corpus trips a
+/// false-positive pattern with no remedy short of editing and redeploying
+/// the code, which is not an acceptable production posture for a control
+/// that silently removes content from answers.
+///
+/// So: `VEDA_RETRIEVAL_GUARD=off` (also `0`/`false`/`no`/`disabled`, any
+/// case) degrades every LLM-facing path to annotate-only — hits are still
+/// classified and still reported in `RetrievalGuardReport`
+/// (`flagged_not_dropped` counts what *would* have been dropped), nothing is
+/// removed. Any other value, or an unset variable, enforces.
+///
+/// Read per call rather than cached: this is one `getenv` per tool dispatch,
+/// far below the cost of the search it accompanies, and a cached value would
+/// make the switch require a restart — the opposite of an incident remedy.
+pub fn enforcement_enabled() -> bool {
+    enforcement_from_env_value(std::env::var(ENFORCE_ENV).ok().as_deref())
+}
+
+/// Pure half of [`enforcement_enabled`], separated so the parsing is testable
+/// without mutating process-wide environment state.
+pub fn enforcement_from_env_value(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no" | "disabled"
+        ),
+        None => true,
+    }
+}
+
+/// Whether a stored [`Record`] must be withheld from an LLM, applying the
+/// exact same policy [`enforce_retrieved`] applies to a JSON hit.
+///
+/// Needed because not every model-reachable read builds a `{id, fields}` hit.
+/// The `aggregate` tool returns `groups[].key`, which with
+/// `group_by=<text field>` is the field's *verbatim value* — so
+/// `group_by=content, filter=_guardrail_flagged = true` would hand a model
+/// exactly the text every other path withholds, and the array-shaped guard
+/// would never see it (the payload has neither `hits` nor `records`). The
+/// aggregation walks `Record`s, which carry the verdict, so the skip belongs
+/// there; this is the shared predicate so the rule is not written twice.
+pub fn record_is_hostile(rec: &Record) -> bool {
+    use veda_core::record::FieldValue;
+
+    if !matches!(
+        rec.get(GUARDRAIL_FLAGGED_FIELD),
+        Some(FieldValue::Bool(true))
+    ) {
+        return false;
+    }
+    let category = match rec.get(GUARDRAIL_CATEGORY_FIELD) {
+        Some(FieldValue::String(s)) => Some(s.as_str()),
+        _ => None,
+    };
+    category_is_hostile(category)
 }
 
 /// Partition hits by policy. Only [`HitClass::ScreenedFlagged`] hits with a
@@ -229,6 +353,24 @@ fn cosine_f32(a: &[f32], b: &[f32]) -> f32 {
 /// additionally requires `vector_field`, the name of the field holding each
 /// hit's embedding; pass `None` to skip conflict detection entirely (e.g.
 /// when the caller has not resolved the collection's vector field).
+///
+/// ## Known limitation — conflict detection is inert on the `search` path
+///
+/// Conflict detection needs each hit's stored vector to be present inside
+/// `hit.fields`. `filter_query` satisfies that (its `record_json` copies
+/// every field, vectors included), so conflicts are detected there. `search`
+/// does not: `builtins::search` deliberately skips vector fields when
+/// hydrating hits, and the reserved-field top-up does not add them back — so
+/// `resolve_vector_field` names a field that is never present and
+/// [`hit_vector`] always returns `None`. Staleness and expiry are unaffected
+/// and work on both paths.
+///
+/// This is documented rather than fixed: hydrating raw embeddings into every
+/// search hit would bloat every LLM-facing payload by (dimensions × top-k)
+/// floats to serve a secondary signal. A cheaper hit-to-hit comparison
+/// (content hash, or reusing the distances the index already computed) is the
+/// eventual fix; until then the honest statement is that conflict findings
+/// come from `filter_query` only.
 pub fn temporal_check(
     hits: &[serde_json::Value],
     now_secs: i64,
@@ -458,6 +600,123 @@ mod tests {
         assert_eq!(kept.len(), 0, "both must be dropped, failing closed");
         assert_eq!(report.dropped, 2);
         assert_eq!(report.flagged_not_dropped, 0);
+    }
+
+    /// The kill switch can only ever weaken enforcement: absent or
+    /// unrecognised values must still enforce.
+    #[test]
+    fn kill_switch_defaults_to_enforcing() {
+        assert!(enforcement_from_env_value(None));
+        assert!(enforcement_from_env_value(Some("on")));
+        assert!(enforcement_from_env_value(Some("1")));
+        assert!(enforcement_from_env_value(Some("")));
+        assert!(enforcement_from_env_value(Some("something-unexpected")));
+        for off in ["off", "OFF", " off ", "0", "false", "no", "disabled"] {
+            assert!(
+                !enforcement_from_env_value(Some(off)),
+                "{off} must disable dropping"
+            );
+        }
+    }
+
+    /// With the switch off, a hostile hit is kept but still reported — the
+    /// operator remedy must degrade to annotate-only, never to blind.
+    #[test]
+    fn enforcement_off_keeps_and_still_reports() {
+        let hits = vec![hit("b", Some(true), 0.9, Some(1))];
+        let (kept, report) = enforce_retrieved(hits, enforcement_from_env_value(Some("off")));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(report.dropped, 0);
+        assert_eq!(report.flagged_not_dropped, 1);
+    }
+
+    #[test]
+    fn record_is_hostile_matches_the_hit_policy() {
+        use veda_core::record::FieldValue;
+
+        let mut clean = Record::new();
+        clean.set(GUARDRAIL_FLAGGED_FIELD, FieldValue::Bool(false));
+        assert!(!record_is_hostile(&clean));
+
+        let unscreened = Record::new();
+        assert!(!record_is_hostile(&unscreened));
+
+        let mut pii = Record::new();
+        pii.set(GUARDRAIL_FLAGGED_FIELD, FieldValue::Bool(true));
+        pii.set(
+            GUARDRAIL_CATEGORY_FIELD,
+            FieldValue::String("pii".to_owned()),
+        );
+        assert!(!record_is_hostile(&pii), "PII is exempt here too");
+
+        let mut hostile = Record::new();
+        hostile.set(GUARDRAIL_FLAGGED_FIELD, FieldValue::Bool(true));
+        hostile.set(
+            GUARDRAIL_CATEGORY_FIELD,
+            FieldValue::String("indirect_injection".to_owned()),
+        );
+        assert!(record_is_hostile(&hostile));
+
+        // Missing category on a flagged record fails closed.
+        let mut no_category = Record::new();
+        no_category.set(GUARDRAIL_FLAGGED_FIELD, FieldValue::Bool(true));
+        assert!(record_is_hostile(&no_category));
+    }
+
+    #[test]
+    fn collect_from_steps_sums_counts_and_concatenates_findings() {
+        use crate::agent::model::AgentStep;
+
+        let step = |dropped: usize, id: &str| AgentStep::ToolResult {
+            tool_call_id: id.to_owned(),
+            result: json!({
+                "hits": [],
+                "retrieval_guard": {
+                    "kept": 2, "dropped": dropped, "unscreened": 1, "skipped": 0,
+                    "flagged_not_dropped": 1,
+                    "dropped_chunks": [{ "id": id, "category": "jailbreak", "score": 0.9 }],
+                    "temporal": [{ "kind": "stale", "id": id, "age_secs": 10 }],
+                }
+            }),
+            is_error: false,
+            duration_ms: None,
+        };
+
+        let steps = vec![
+            AgentStep::Reasoning {
+                text: "thinking".to_owned(),
+            },
+            step(1, "a"),
+            step(2, "b"),
+        ];
+        let report = collect_from_steps(&steps).expect("a retrieving turn must report");
+        assert_eq!(report.kept, 4);
+        assert_eq!(report.dropped, 3);
+        assert_eq!(report.unscreened, 2);
+        assert_eq!(report.flagged_not_dropped, 2);
+        assert_eq!(report.dropped_chunks.len(), 2);
+        assert_eq!(report.temporal.len(), 2);
+    }
+
+    #[test]
+    fn collect_from_steps_is_none_without_a_retrieving_call() {
+        use crate::agent::model::AgentStep;
+
+        let steps = vec![
+            AgentStep::Reasoning {
+                text: "no tools".to_owned(),
+            },
+            AgentStep::ToolResult {
+                tool_call_id: "c1".to_owned(),
+                result: json!({ "ok": true }),
+                is_error: false,
+                duration_ms: None,
+            },
+        ];
+        assert!(
+            collect_from_steps(&steps).is_none(),
+            "no retrieval must omit the field, not report zeros"
+        );
     }
 
     #[test]
