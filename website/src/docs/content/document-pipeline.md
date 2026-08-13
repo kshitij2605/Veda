@@ -87,6 +87,14 @@ curl -X POST http://localhost:6340/v1/collections/my-docs/search -d '{
 }'
 ```
 
+## Vector fields and extracted images
+
+A dense vector field is a **mandatory column**: every record in the collection must carry a value for every one of them. The pipeline writes two kinds of record — one per text chunk, and one per extracted image (when the collection has an `image_blob` field or a media-modality vector field) — and **both fill the same vector fields**. A text chunk embeds its text into them; an image record embeds its bytes.
+
+That means the embedding model backing those fields must accept both. Register a unified multimodal model (`jina-v5-omni-small` embeds text, image, audio and video into one 1024-d space; the Qwen3-VL embedders cover text/image/video) and one vector field holds a document's prose and its figures in a single vector space, searchable together.
+
+If a document contains images and no registered model can embed images into one of the collection's vector fields, the request is rejected up front with `409 INCOMPATIBLE_SCHEMA`, naming the field — nothing is inserted. Use one vector field backed by a multimodal model, or one collection per modality. A text-only collection (no `image_blob`, no media vector field) is unaffected: a document's images are ignored as before.
+
 ## Options
 
 | Option | Description |
