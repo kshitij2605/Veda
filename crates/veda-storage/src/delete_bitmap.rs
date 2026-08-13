@@ -71,6 +71,23 @@ impl DeleteBitmap {
         file.write_all(&bytes)?;
         file.sync_all()?;
         fs::rename(&tmp_path, path)?;
+        // `file.sync_all()` above only guarantees the FILE's contents are
+        // durable; on filesystems like ext4 the RENAME that makes it
+        // visible at `path` is a separate metadata operation that can
+        // still be lost on a power-cut, reverting a persisted delete back
+        // to whatever `path` held before (or to nothing, on a first
+        // write). Fsync the containing directory too, so the rename
+        // itself survives. Best-effort: if the directory can't be opened
+        // (e.g. no read access, or a platform where opening a directory
+        // as a file isn't supported), the just-renamed file is almost
+        // certainly still intact — this narrows an already-rare crash
+        // window rather than being the load-bearing guarantee the
+        // temp+fsync+rename above is.
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
         Ok(())
     }
 

@@ -316,16 +316,23 @@ async fn dispatch(kind: &JobKind, state: &AppState) {
             .await;
         }
         JobKind::RescanGuardrails { collection } => {
-            // Resolve the alias the same way the HTTP endpoint does —
-            // a stale reindexed-away base collection must not silently
-            // eat a scheduled rescan.
-            let scoped = state.inner.aliases.resolve(collection).await;
+            // `collection` is the ALIAS KEY (the stable base scoped
+            // name) — resolve it to find where the current live data
+            // actually is, but pass BOTH into `rescan_guardrails_impl`.
+            // Passing only the resolved name here would re-key the
+            // resolved name instead of the base on every run after the
+            // first, chaining `X -> X@v2 -> X@v3 -> …` with each run's
+            // verdicts unreachable past the first (`AliasMap::resolve` is
+            // single-hop) — see `rescan_guardrails_impl`'s doc comment.
+            let resolved = state.inner.aliases.resolve(collection).await;
             // Errors must not be swallowed as a quiet success: the rescan
             // now rebuilds into a sibling and swaps the alias, so a
             // failure here means the live collection was never touched —
             // worth a `warn`, not the same `info` line a real completion
             // gets.
-            match crate::rest::collections::rescan_guardrails_impl(state, &scoped).await {
+            match crate::rest::collections::rescan_guardrails_impl(state, collection, &resolved)
+                .await
+            {
                 Ok(result) => {
                     tracing::info!(
                         collection = %collection,
