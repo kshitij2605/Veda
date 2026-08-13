@@ -722,9 +722,11 @@ pub async fn get_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolO
     ToolOutcome::not_found(format!("record '{record_id}' not found"))
 }
 
-/// Apply the same drop-if-flagged policy `apply_retrieval_guard`
+/// Apply the same category-aware drop policy `apply_retrieval_guard`
 /// (`agent/catalog.rs`) applies to `hits`/`records` arrays to a single
-/// fetched record, withholding its content when flagged.
+/// fetched record, withholding its content when hostile-flagged
+/// (PII-flagged is exempt and comes back intact — see
+/// `retrieval_guard::category_is_hostile`).
 ///
 /// `get_record` is a targeted fetch-by-id, so its bare `{id, fields}`
 /// payload never carries a `hits`/`records` array and the dispatch-level
