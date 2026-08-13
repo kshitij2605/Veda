@@ -57,13 +57,19 @@ pub struct TemporalFinding {
 ///
 /// `unscreened` and `skipped` are always serialized, even at zero: an
 /// operator must be able to tell "nothing was hostile" from "nothing was
-/// checked".
+/// checked". `flagged_not_dropped` is the same idea applied to category
+/// policy (2026-08-13 ruling): a flagged hit whose category is exempt from
+/// dropping (currently only `Pii` — see [`category_is_hostile`]), or one
+/// that stayed flagged-but-kept because `drop_flagged` was false, must be
+/// just as visible as an outright drop. "Detected but allowed" must never
+/// be invisible.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct RetrievalGuardReport {
     pub kept: usize,
     pub dropped: usize,
     pub unscreened: usize,
     pub skipped: usize,
+    pub flagged_not_dropped: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_chunks: Vec<DroppedChunk>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -85,8 +91,36 @@ pub fn classify_hit(fields: &serde_json::Map<String, serde_json::Value>) -> HitC
     }
 }
 
-/// Partition hits by policy. Only [`HitClass::ScreenedFlagged`] is ever
-/// dropped, and only when `drop_flagged` is true.
+/// Whether a flagged hit's guardrail category is hostile — content an LLM
+/// must never see — as opposed to exempt-from-dropping.
+///
+/// 2026-08-13 ruling: live calibration on a clean 149-chunk business corpus
+/// found `_guardrail_flagged` chunks were being dropped purely because they
+/// contained a PII pattern (an email/phone/etc. in an otherwise-benign
+/// vendor contact deck) — `screen_chunk` reuses the existing PII regex
+/// layer, and dropping never distinguished "hostile instructions" from
+/// "contact details present". This feature targets OWASP's
+/// injection/poisoning/temporal vectors; PII in retrieved content is a
+/// different concern, and a user asking "who do I contact about X" getting
+/// contact details silently stripped is the worse failure. So: `Pii` is
+/// detected and reported (`RetrievalGuardReport::flagged_not_dropped`) but
+/// passed through; every other category is hostile and dropped.
+///
+/// An unrecognised or missing category on a flagged hit is treated as
+/// hostile — fails closed, since an unfamiliar category is more likely a
+/// new threat than a benign one. Matches on the raw string (rather than
+/// depending on `agent::guardrails::GuardrailCategory`) to keep this module
+/// decoupled from the detection layer, per its module doc.
+pub fn category_is_hostile(category: Option<&str>) -> bool {
+    !matches!(category, Some("pii"))
+}
+
+/// Partition hits by policy. Only [`HitClass::ScreenedFlagged`] hits with a
+/// hostile category (see [`category_is_hostile`]) are ever dropped, and
+/// only when `drop_flagged` is true. A flagged hit that is kept anyway
+/// (PII-exempt, or `drop_flagged` is false) still counts toward
+/// `RetrievalGuardReport::flagged_not_dropped` — flagged-but-allowed must
+/// never be silent.
 pub fn enforce_retrieved(
     hits: Vec<serde_json::Value>,
     drop_flagged: bool,
@@ -95,11 +129,8 @@ pub fn enforce_retrieved(
     let mut report = RetrievalGuardReport::default();
 
     for hit in hits {
-        let class = hit
-            .get("fields")
-            .and_then(|f| f.as_object())
-            .map(classify_hit)
-            .unwrap_or(HitClass::Unscreened);
+        let fields = hit.get("fields").and_then(|f| f.as_object());
+        let class = fields.map(classify_hit).unwrap_or(HitClass::Unscreened);
 
         match class {
             HitClass::ScreenedSkipped => report.skipped += 1,
@@ -107,25 +138,27 @@ pub fn enforce_retrieved(
             _ => {}
         }
 
-        if class == HitClass::ScreenedFlagged && drop_flagged {
-            let fields = hit.get("fields").and_then(|f| f.as_object());
-            report.dropped += 1;
-            report.dropped_chunks.push(DroppedChunk {
-                id: hit
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned(),
-                category: fields
-                    .and_then(|f| f.get(GUARDRAIL_CATEGORY_FIELD))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                score: fields
-                    .and_then(|f| f.get(GUARDRAIL_SCORE_FIELD))
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0),
-            });
-            continue;
+        if class == HitClass::ScreenedFlagged {
+            let category = fields
+                .and_then(|f| f.get(GUARDRAIL_CATEGORY_FIELD))
+                .and_then(|v| v.as_str());
+            if category_is_hostile(category) && drop_flagged {
+                report.dropped += 1;
+                report.dropped_chunks.push(DroppedChunk {
+                    id: hit
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    category: category.map(str::to_owned),
+                    score: fields
+                        .and_then(|f| f.get(GUARDRAIL_SCORE_FIELD))
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0),
+                });
+                continue;
+            }
+            report.flagged_not_dropped += 1;
         }
         kept.push(hit);
     }
@@ -356,6 +389,10 @@ mod tests {
             report.dropped_chunks[0].category.as_deref(),
             Some("indirect_injection")
         );
+        assert_eq!(
+            report.flagged_not_dropped, 0,
+            "a hostile-category hit that was dropped must not also count as flagged_not_dropped"
+        );
     }
 
     #[test]
@@ -365,6 +402,62 @@ mod tests {
         assert_eq!(kept.len(), 1, "drop_flagged=false must keep every hit");
         assert_eq!(report.dropped, 0);
         assert_eq!(report.kept, 1);
+        assert_eq!(
+            report.flagged_not_dropped, 1,
+            "flagged-but-kept must be visible even in annotate-only mode"
+        );
+    }
+
+    /// 2026-08-13 ruling: PII is detected and reported, never dropped —
+    /// silently stripping contact details from an answer is a worse
+    /// failure than the injection/poisoning vectors this feature targets.
+    #[test]
+    fn pii_flagged_hits_are_kept_and_counted_not_dropped() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("content".into(), json!("call me at 555-123-4567"));
+        fields.insert(GUARDRAIL_FLAGGED_FIELD.to_owned(), json!(true));
+        fields.insert(GUARDRAIL_SCORE_FIELD.to_owned(), json!(1.0));
+        fields.insert(GUARDRAIL_CATEGORY_FIELD.to_owned(), json!("pii"));
+        fields.insert(INDEXED_AT_FIELD.to_owned(), json!(1));
+        let hit = json!({ "id": "p", "distance": 0.1, "fields": fields });
+
+        let (kept, report) = enforce_retrieved(vec![hit], true);
+        assert_eq!(
+            kept.len(),
+            1,
+            "PII must pass through even with drop_flagged=true"
+        );
+        assert_eq!(report.dropped, 0);
+        assert_eq!(report.dropped_chunks.len(), 0);
+        assert_eq!(
+            report.flagged_not_dropped, 1,
+            "PII must still be reported as flagged"
+        );
+    }
+
+    /// Fail closed: an unrecognised (or missing) category on a flagged hit
+    /// is treated as hostile, since an unfamiliar category is more likely a
+    /// new threat than a benign one.
+    #[test]
+    fn unknown_or_missing_category_on_flagged_hit_is_dropped() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("content".into(), json!("text"));
+        fields.insert(GUARDRAIL_FLAGGED_FIELD.to_owned(), json!(true));
+        fields.insert(GUARDRAIL_SCORE_FIELD.to_owned(), json!(0.9));
+        // No `_guardrail_category` at all.
+        fields.insert(INDEXED_AT_FIELD.to_owned(), json!(1));
+        let no_category = json!({ "id": "nc", "distance": 0.1, "fields": fields.clone() });
+
+        fields.insert(
+            GUARDRAIL_CATEGORY_FIELD.to_owned(),
+            json!("some_future_category"),
+        );
+        let unknown_category = json!({ "id": "uc", "distance": 0.1, "fields": fields });
+
+        let (kept, report) = enforce_retrieved(vec![no_category, unknown_category], true);
+        assert_eq!(kept.len(), 0, "both must be dropped, failing closed");
+        assert_eq!(report.dropped, 2);
+        assert_eq!(report.flagged_not_dropped, 0);
     }
 
     #[test]
@@ -380,7 +473,13 @@ mod tests {
     fn counts_are_present_even_when_zero() {
         let (_, report) = enforce_retrieved(vec![], true);
         let v = serde_json::to_value(&report).unwrap();
-        for k in ["kept", "dropped", "unscreened", "skipped"] {
+        for k in [
+            "kept",
+            "dropped",
+            "unscreened",
+            "skipped",
+            "flagged_not_dropped",
+        ] {
             assert!(v.get(k).is_some(), "{k} must always be serialized: {v}");
         }
     }
