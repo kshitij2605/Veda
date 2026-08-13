@@ -149,7 +149,14 @@ the temporal check reports `insufficient_age_data` rather than guessing.
 
 Pure. Partitions hits on their stored `_guardrail_flagged` field per the policy, and classifies
 each hit as `screened_clean`, `screened_flagged`, `screened_skipped` (§4.10) or `unscreened`
-(§6). Only `screened_flagged` is dropped.
+(§6). **Post-ship correction (2026-08-13):** dropping is category-aware, not a blanket rule on
+`screened_flagged`. `_guardrail_category` decides: `PromptInjection`/`Jailbreak`/`Unsafe`/
+`IndirectInjection` are hostile and dropped; `Pii` is exempt — detected and reported
+(`RetrievalGuardReport.flagged_not_dropped`) but passed through, since live calibration found
+PII-only chunks (an email/phone in an otherwise-benign document) being dropped identically to
+injection attempts, degrading answers for no security benefit. An unrecognised or missing
+category on a flagged hit is treated as hostile and dropped (fails closed). See
+`category_is_hostile` in `retrieval_guard.rs`.
 
 ### 4.6 `temporal_check(kept: &[Hit]) -> Vec<TemporalFinding>`
 
@@ -264,9 +271,9 @@ This must be stated in the docs as a known limitation, not buried.
 |---|---|
 | `POST /v1/agents/{id}/converse` | response gains `retrieval_guard` |
 | `POST /v1/agents/{id}/converse/stream` | `done` frame gains `retrieval_guard` |
-| `POST /v1/mcp` (`tools/call`) | flagged chunks dropped from tool results |
-| `POST /v1/agent-tools/{id}/execute` | flagged chunks dropped from tool results |
-| `POST /v1/a2a/{agent_id}` | flagged chunks dropped |
+| `POST /v1/mcp` (`tools/call`) | hostile-flagged chunks dropped from tool results; PII-flagged chunks pass through, reported |
+| `POST /v1/agent-tools/{id}/execute` | hostile-flagged chunks dropped from tool results; PII-flagged chunks pass through, reported |
+| `POST /v1/a2a/{agent_id}` | hostile-flagged chunks dropped; PII-flagged chunks pass through, reported |
 | `POST /v1/collections/{name}/search` | each hit gains its stored verdict; **nothing dropped** |
 | `POST /v1/admin/collections/{name}/rescan-guardrails` | new |
 
