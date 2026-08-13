@@ -37,6 +37,12 @@ pub trait PostingCursor {
     fn block_max(&self) -> f32;
 
     /// Last doc_id in the current block, used to skip the block wholesale.
+    ///
+    /// Must be `>= doc()` whenever `doc()` is `Some`. The traversal skips
+    /// a block by jumping straight to `last + 1`, and relies on `last`
+    /// never trailing the cursor's own position for that jump to make
+    /// forward progress; a cursor that violates this can stall the
+    /// traversal.
     fn block_last_doc(&self) -> Option<u32>;
 
     /// Upper bound on the contribution of any posting in the whole list.
@@ -111,7 +117,7 @@ pub fn block_max_wand<C: PostingCursor>(
 
     let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(k + 1);
 
-    loop {
+    'outer: loop {
         cursors.retain(|c| c.doc().is_some());
         if cursors.is_empty() {
             break;
@@ -140,25 +146,13 @@ pub fn block_max_wand<C: PostingCursor>(
             }
         }
         let Some(p) = pivot else {
-            // No remaining document can reach the threshold: every block
-            // left in every cursor is provably unreachable too. Walk them
-            // off block-by-block (never scoring a posting) so the stat
-            // reflects the work actually avoided, rather than abandoning
-            // the cursors silently and undercounting it. `doc()` — not
-            // `block_last_doc()` — is the trait's authoritative exhaustion
-            // signal, so it gates the loop; a cursor implementation is
-            // free to return a stale block for an already-exhausted
-            // position (`block_max`/`block_last_doc` are documented as
-            // meaningful only while a current block exists), and trusting
-            // it as the terminator would spin forever re-issuing a no-op
-            // advance on a cursor that can no longer move.
-            for c in cursors.iter_mut() {
-                while c.doc().is_some() {
-                    let last = c.block_last_doc().unwrap_or(u32::MAX);
-                    stats.blocks_skipped += 1;
-                    c.advance_to(last.saturating_add(1));
-                }
-            }
+            // No remaining document can reach the threshold: drop
+            // everything still in flight and stop immediately. This is
+            // BMW's single biggest win, and it must stay cheap — walking
+            // the abandoned tail block-by-block just to count it would
+            // turn "we already know the answer" into real, unbounded
+            // seek traffic against a long posting list, exactly when the
+            // caller asked for more pruning (higher theta), not less.
             break;
         };
         let pivot_doc = match cursors[p].doc() {
@@ -182,11 +176,25 @@ pub fn block_max_wand<C: PostingCursor>(
             // could jump past pivot_doc itself. Guaranteed progress: each
             // branch strictly advances the cursor's doc.
             for c in cursors[..p].iter_mut() {
-                while c.doc().is_some_and(|d| d < pivot_doc) {
+                while let Some(d) = c.doc().filter(|&d| d < pivot_doc) {
                     match c.block_last_doc() {
                         Some(last) if last < pivot_doc => {
+                            debug_assert!(
+                                last >= d,
+                                "PostingCursor::block_last_doc() must be >= doc()"
+                            );
+                            let target = last.saturating_add(1);
+                            if target <= d {
+                                // Only reachable via a cursor that violates
+                                // the block_last_doc >= doc() contract (the
+                                // assertion above already caught this in
+                                // debug builds) or sits at doc = u32::MAX;
+                                // either way nothing can move it forward,
+                                // so stop rather than spin.
+                                break 'outer;
+                            }
                             stats.blocks_skipped += 1;
-                            c.advance_to(last.saturating_add(1));
+                            c.advance_to(target);
                         }
                         _ => c.advance_to(pivot_doc),
                     }
@@ -209,7 +217,16 @@ pub fn block_max_wand<C: PostingCursor>(
             stats.blocks_skipped += 1;
             let block_end = cursors[..end]
                 .iter()
-                .filter_map(|c| c.block_last_doc())
+                .filter_map(|c| {
+                    let last = c.block_last_doc();
+                    if let Some(l) = last {
+                        debug_assert!(
+                            l >= pivot_doc,
+                            "PostingCursor::block_last_doc() must be >= doc()"
+                        );
+                    }
+                    last
+                })
                 .min()
                 .map_or(u32::MAX, |d| d.saturating_add(1));
             let next_after_pivot = cursors.get(end).and_then(|c| c.doc()).unwrap_or(u32::MAX);
@@ -217,6 +234,12 @@ pub fn block_max_wand<C: PostingCursor>(
             let target = block_end
                 .min(next_after_pivot)
                 .max(pivot_doc.saturating_add(1));
+            if target <= pivot_doc {
+                // Only reachable at doc = u32::MAX, where nothing (not even
+                // pivot_doc + 1) can exceed the current position; stop
+                // rather than spin.
+                break;
+            }
             for c in cursors[..end].iter_mut() {
                 if c.doc().is_some_and(|d| d < target) {
                     c.advance_to(target);
@@ -458,13 +481,36 @@ mod tests {
     }
 
     #[test]
+    fn block_max_check_skips_low_scoring_blocks() {
+        // A single list: with only one cursor, `p` is always 0 (there is
+        // no second cursor to trail behind, so the catch-up branch can
+        // never fire) and `list_max` is the list's true maximum, so the
+        // pivot search can never fail either. Any nonzero
+        // `blocks_skipped` observed here can therefore only have come
+        // from the block-max rejection (`block_sum < bound`) itself,
+        // unlike `blocks_are_actually_skipped`, whose two-list, uniform
+        // per-list scores make `block_max == list_max` for every block
+        // and so give that check no coverage at all.
+        let mut postings: Vec<(u32, f32)> =
+            (0u32..128).map(|d| (d, (d % 17) as f32 + 1.0)).collect();
+        postings.extend((128u32..20_000).map(|d| (d, 0.01)));
+        let lists = vec![postings];
+        let (hits, stats) = block_max_wand(cursors_for(&lists), 10, 1.0);
+        assert_eq!(hits, exhaustive(&lists, 10));
+        assert!(
+            stats.blocks_skipped > 0,
+            "no blocks skipped — the block-max check specifically is inert"
+        );
+    }
+
+    #[test]
     fn theta_above_one_prunes_at_least_as_much() {
         let common: Vec<(u32, f32)> = (0u32..20_000).map(|d| (d, 0.01)).collect();
         let rare: Vec<(u32, f32)> = (0u32..40).map(|d| (d * 500, 50.0)).collect();
         let lists = vec![common, rare];
         let (_, exact) = block_max_wand(cursors_for(&lists), 10, 1.0);
         let (approx_hits, approx) = block_max_wand(cursors_for(&lists), 10, 4.0);
-        assert!(approx.blocks_skipped >= exact.blocks_skipped);
+        assert!(approx.docs_evaluated <= exact.docs_evaluated);
         assert!(approx_hits.len() <= 10);
     }
 
