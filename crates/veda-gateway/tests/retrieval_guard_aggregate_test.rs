@@ -165,6 +165,40 @@ async fn aggregate_tool_guard_applies_without_a_filter() {
     assert_eq!(body["retrieval_guard"]["withheld_records"], 1, "{body}");
 }
 
+/// `withheld_records` counts what THIS query excluded, not how many hostile
+/// records the collection holds. The skip runs after the filter, so a query
+/// the hostile record never matched reports zero — reporting 1 there would
+/// tell an operator their narrow aggregation hit hostile content when it
+/// never touched any.
+#[tokio::test]
+async fn withheld_records_counts_only_records_the_filter_selected() {
+    let (base, _tmp) = start_test_server().await;
+    setup(&base).await;
+
+    let resp = client()
+        .post(format!("{base}/v1/agent-tools/aggregate/execute"))
+        .json(&json!({
+            "collection": "rg_agg", "field": "content", "metric": "count",
+            "group_by": "content", "filter": "_guardrail_flagged = false"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    assert!(status.is_success(), "aggregate tool: {status} {body}");
+    let text = serde_json::to_string(&body).unwrap();
+
+    // The filter already excluded the hostile row, so nothing was withheld.
+    assert_eq!(
+        body["retrieval_guard"]["withheld_records"], 0,
+        "the hostile row was never in this query's scope: {body}"
+    );
+    // ...and it is still absent from the output, which is the part that matters.
+    assert!(!text.contains(HOSTILE_CONTENT), "{text}");
+    assert!(text.contains(BENIGN_CONTENT), "{text}");
+}
+
 /// Regression guard for design decision 5: the RAW endpoint annotates and
 /// never drops. An operator measuring "what did enforcement cost us?" reads
 /// this endpoint, and it must see the whole corpus — including the flagged

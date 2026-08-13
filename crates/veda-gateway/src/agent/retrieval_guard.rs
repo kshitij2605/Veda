@@ -66,13 +66,26 @@ pub struct TemporalFinding {
 /// that stayed flagged-but-kept because `drop_flagged` was false, must be
 /// just as visible as an outright drop. "Detected but allowed" must never
 /// be invisible.
+///
+/// `withheld_records` is the record-walk equivalent of `dropped`, reported by
+/// the `aggregate` tool: that path never builds a JSON hit, so it has no
+/// `kept`/`dropped` to report and no `dropped_chunks` (naming the withheld
+/// ids there would hand a model the oracle the drop exists to deny).
+///
+/// The container carries `#[serde(default)]` because those producers emit
+/// only the subset of counts they actually measure — deserializing a partial
+/// report must yield zeros for the rest, never fail. A failure here is
+/// invisible: [`collect_from_steps`] skips a step it cannot parse, so a
+/// missing field would silently erase that call from the turn-level report.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
 pub struct RetrievalGuardReport {
     pub kept: usize,
     pub dropped: usize,
     pub unscreened: usize,
     pub skipped: usize,
     pub flagged_not_dropped: usize,
+    pub withheld_records: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_chunks: Vec<DroppedChunk>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -89,6 +102,7 @@ impl RetrievalGuardReport {
         self.unscreened += other.unscreened;
         self.skipped += other.skipped;
         self.flagged_not_dropped += other.flagged_not_dropped;
+        self.withheld_records += other.withheld_records;
         self.dropped_chunks.extend(other.dropped_chunks);
         self.temporal.extend(other.temporal);
     }
@@ -696,6 +710,31 @@ mod tests {
         assert_eq!(report.flagged_not_dropped, 2);
         assert_eq!(report.dropped_chunks.len(), 2);
         assert_eq!(report.temporal.len(), 2);
+    }
+
+    /// The `aggregate` tool emits only the one count it measures. Before the
+    /// container `#[serde(default)]`, that partial object failed to
+    /// deserialize and the step was skipped whole — so an aggregate-only turn
+    /// reported *no* `retrieval_guard` at all, which the API documents as
+    /// meaning "the agent never retrieved".
+    #[test]
+    fn collect_from_steps_reads_the_aggregate_partial_report() {
+        use crate::agent::model::AgentStep;
+
+        let steps = vec![AgentStep::ToolResult {
+            tool_call_id: "agg".to_owned(),
+            result: json!({
+                "groups": [],
+                "retrieval_guard": { "withheld_records": 3 }
+            }),
+            is_error: false,
+            duration_ms: None,
+        }];
+        let report =
+            collect_from_steps(&steps).expect("an aggregate-only turn DID retrieve; must report");
+        assert_eq!(report.withheld_records, 3);
+        assert_eq!(report.kept, 0);
+        assert_eq!(report.dropped, 0);
     }
 
     #[test]

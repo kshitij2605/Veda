@@ -217,7 +217,8 @@ Endpoints marked Raft-only return `503` in single-node mode — see [Cluster mod
 Ingest screens each chunk's text embedding and stamps the four reserved fields above. On every
 LLM-facing path (`/converse`, `/converse/stream`, MCP `tools/call`, `/agent-tools/{id}/execute`,
 `/a2a/{agent_id}`), the response carries a `retrieval_guard` report — `{ kept, dropped,
-unscreened, skipped, flagged_not_dropped, dropped_chunks: [{ id, category, score }] }` —
+unscreened, skipped, flagged_not_dropped, withheld_records, dropped_chunks: [{ id, category,
+score }] }` —
 and `get_record` applies the same policy to a directly-fetched record (withholding it if
 dropped). On `/converse` and the `/converse/stream` `done` frame the report is at the **top
 level**, rolled up across every retrieving tool call in the turn; a turn that retrieved nothing
@@ -226,7 +227,10 @@ instead annotates each hit with `_guardrail_class` and never drops.
 
 The `aggregate` **tool** skips hostile-flagged records in its record walk and reports
 `retrieval_guard.withheld_records`, because `group_by` on a text field returns each group's key
-verbatim and would otherwise emit the withheld text. The raw `GET
+verbatim and would otherwise emit the withheld text. That count is per-query — the skip runs
+after the `filter`, so it reports what this aggregation excluded, not how many hostile records
+the collection holds — and it rolls up into the turn-level report like every other count, so an
+`aggregate`-only turn still reports `retrieval_guard`. The raw `GET
 /v1/collections/{name}/aggregate` endpoint is unaffected and still counts every record — like
 `/search`, the data API annotates and never drops, so recall measurement stays intact.
 
