@@ -1084,7 +1084,12 @@ pub async fn reindex_collection_internal(
     req: ReindexRequest,
 ) -> Result<ReindexResponse, (StatusCode, Json<ErrorResponse>)> {
     let mut scan_counts = GuardrailScanCounts::default();
-    reindex_collection_internal_ex(state, scoped_name, req, &mut scan_counts).await
+    // Ordinary reindex callers never pre-resolve an alias (`reindex_collection`
+    // below uses `tenant::scope` only), so `scoped_name` is both the alias
+    // key (`base_name`) and the data source (`read_from`) — unchanged from
+    // before this function grew that distinction for the guardrail rescan
+    // path below.
+    reindex_collection_internal_ex(state, scoped_name, scoped_name, req, &mut scan_counts).await
 }
 
 /// Guardrail-scan counters produced when `ReindexRequest.rescreen_guardrails`
@@ -1100,16 +1105,37 @@ pub(crate) struct GuardrailScanCounts {
 /// `rescan_guardrails_impl` reads to get the `scanned`/`flagged`/`skipped`
 /// counts out of the copy step without changing `ReindexResponse`'s public
 /// shape (which every other `/reindex` caller depends on).
+///
+/// `base_name` and `read_from` are deliberately separate. `base_name` is
+/// the ALIAS KEY — the stable, never-resolved scoped name (e.g. `"X"`) —
+/// and is what sibling-name derivation and the final alias swap both use.
+/// `read_from` is where the CURRENT live data actually is: for an
+/// ordinary reindex the two are identical (see `reindex_collection_internal`
+/// above), but a guardrail rescan resolves the alias first, so on a
+/// SECOND rescan `base_name` is still `"X"` while `read_from` is `"X@v2"`.
+/// Collapsing them into one parameter (an earlier version of this
+/// function did) is a real bug: `AliasMap::resolve` is single-hop, so if
+/// the alias key were also the resolved name, the second rescan would set
+/// `"X@v2" -> "X@v3"` instead of `"X" -> "X@v3"`, leaving `"X"` still
+/// pointing at the stale `"X@v2"` and every verdict from the second rescan
+/// onward permanently unreachable — while the endpoint keeps returning
+/// 200 with full counts. Using `read_from` (not `base_name`) as the data
+/// source is equally required: rebuilding from the base name would use
+/// whatever was materialized under `"X"` BEFORE the first swap, silently
+/// dropping everything ingested since (all writes since the first swap
+/// went through the alias to `"X@v2"`, not to `"X"`).
 async fn reindex_collection_internal_ex(
     state: &AppState,
-    scoped_name: &str,
+    base_name: &str,
+    read_from: &str,
     req: ReindexRequest,
     scan_counts: &mut GuardrailScanCounts,
 ) -> Result<ReindexResponse, (StatusCode, Json<ErrorResponse>)> {
-    // 1. Look up the current schema.
+    // 1. Look up the current schema — from `read_from`, the actual
+    //    current data, not `base_name`.
     let schema_json = {
         let schemas = state.inner.schemas.read().await;
-        match schemas.get(scoped_name) {
+        match schemas.get(read_from) {
             Some(s) => serde_json::to_string(s).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1124,7 +1150,7 @@ async fn reindex_collection_internal_ex(
                     Json(ErrorResponse {
                         error: format!(
                             "collection '{}' not found",
-                            tenant::display_name(scoped_name)
+                            tenant::display_name(read_from)
                         ),
                     }),
                 ));
@@ -1134,24 +1160,28 @@ async fn reindex_collection_internal_ex(
 
     // 2. Pick the next sibling version. Today we just append
     //    `@v2`; a v2 of v2 would be `@v3`. Keep it simple. This operates
-    //    directly on `scoped_name` (already tenant-prefixed) — tenant ids
+    //    directly on `base_name` (already tenant-prefixed) — tenant ids
     //    can't contain '@' (see `TenantId::parse`), so bumping the whole
     //    scoped string is equivalent to bumping the unscoped display name
-    //    and re-adding the prefix.
+    //    and re-adding the prefix. Using `base_name` here (not
+    //    `read_from`) is what keeps repeated rescans/reindexes bumping
+    //    "X@v2", "X@v3", "X@v4", … relative to the STABLE base, rather
+    //    than the collision guard below trying to bump off of whatever
+    //    the alias currently resolves to.
     let mut scoped_new = if let Some(suffix) = req.sibling_suffix.as_deref() {
-        format!("{scoped_name}{suffix}")
-    } else if let Some(prefix) = scoped_name.strip_suffix("@v2") {
+        format!("{base_name}{suffix}")
+    } else if let Some(prefix) = base_name.strip_suffix("@v2") {
         format!("{prefix}@v3")
-    } else if scoped_name.contains("@v") {
+    } else if base_name.contains("@v") {
         // generic vN bump
 
-        bump_version_suffix(scoped_name).unwrap_or_else(|| format!("{scoped_name}@v2"))
+        bump_version_suffix(base_name).unwrap_or_else(|| format!("{base_name}@v2"))
     } else {
-        format!("{scoped_name}@v2")
+        format!("{base_name}@v2")
     };
     // Guard against colliding with an already-materialized sibling from a
     // PRIOR /reindex call on this same base — the computation above only
-    // looks at `scoped_name`'s OWN suffix, not at what siblings already
+    // looks at `base_name`'s OWN suffix, not at what siblings already
     // exist, so reindexing "rag_test" (no `@v` suffix) twice always
     // computes "rag_test@v2" both times. On collision,
     // `materialize_collection_locally` silently no-ops (it only checks
@@ -1284,15 +1314,11 @@ async fn reindex_collection_internal_ex(
     //    - Chunker config + re_embed → as above, plus embed
     //      each new chunk via the gateway's embedding client.
     let copied = if req.chunker.is_some() {
-        rechunk_source_into_sibling(state, scoped_name, &scoped_new, &req).await?
+        rechunk_source_into_sibling(state, read_from, &scoped_new, &req).await?
     } else {
-        let (n, counts) = copy_source_records_to_sibling(
-            state,
-            scoped_name,
-            &scoped_new,
-            req.rescreen_guardrails,
-        )
-        .await?;
+        let (n, counts) =
+            copy_source_records_to_sibling(state, read_from, &scoped_new, req.rescreen_guardrails)
+                .await?;
         *scan_counts = counts;
         n
     };
@@ -1353,7 +1379,7 @@ async fn reindex_collection_internal_ex(
         let raft_guard = state.inner.raft.read().await;
         if let Some(coord) = raft_guard.as_ref() {
             let swap = veda_coordinator::raft_types::ClusterCommand::SetCollectionAlias {
-                alias: scoped_name.to_owned(),
+                alias: base_name.to_owned(),
                 target: scoped_new.clone(),
             };
             if let Err(e) = coord.execute(swap).await {
@@ -1373,7 +1399,7 @@ async fn reindex_collection_internal_ex(
     state
         .inner
         .aliases
-        .set(scoped_name.to_owned(), scoped_new.clone())
+        .set(base_name.to_owned(), scoped_new.clone())
         .await;
     Ok(ReindexResponse {
         target,
@@ -1417,11 +1443,11 @@ pub async fn rescan_guardrails(
     Tenant(tenant): Tenant,
     Path(name): Path<String>,
 ) -> Result<Json<RescanGuardrailsResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let scoped = tenant::scope(&tenant, &name);
-    let scoped = state.inner.aliases.resolve(&scoped).await;
+    let base = tenant::scope(&tenant, &name);
+    let resolved = state.inner.aliases.resolve(&base).await;
     {
         let schemas = state.inner.schemas.read().await;
-        if !schemas.contains_key(&scoped) {
+        if !schemas.contains_key(&resolved) {
             return Err((
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
@@ -1430,12 +1456,24 @@ pub async fn rescan_guardrails(
             ));
         }
     }
-    rescan_guardrails_impl(&state, &scoped).await.map(Json)
+    rescan_guardrails_impl(&state, &base, &resolved)
+        .await
+        .map(Json)
 }
 
 /// Shared re-scan body, used by both the HTTP handler above and
-/// `JobKind::RescanGuardrails`'s scheduler dispatch. `scoped` must
-/// already be tenant-scoped and alias-resolved.
+/// `JobKind::RescanGuardrails`'s scheduler dispatch.
+///
+/// `base` is the tenant-scoped name BEFORE alias resolution (the alias
+/// KEY, e.g. `"X"`); `resolved` is what that alias currently points at
+/// (the data source, e.g. `"X"` on the first rescan, `"X@v2"` on the
+/// second, and so on). Callers must pass both — collapsing them into one
+/// value is exactly the bug a previous version of this function had (see
+/// `reindex_collection_internal_ex`'s doc comment): `AliasMap::resolve`
+/// is single-hop, so re-keying the ALREADY-RESOLVED name on a second
+/// rescan sets `"X@v2" -> "X@v3"` instead of `"X" -> "X@v3"`, leaving
+/// `"X"` stuck pointing at the stale `"X@v2"` forever after, with every
+/// later rescan's verdicts unreachable despite a 200 response.
 ///
 /// Segments are immutable once sealed, so there is no in-place field
 /// update. An earlier version of this function hand-rolled one anyway
@@ -1461,14 +1499,15 @@ pub async fn rescan_guardrails(
 /// swapped, so a failed rescan can't report success.
 pub(crate) async fn rescan_guardrails_impl(
     state: &AppState,
-    scoped: &str,
+    base: &str,
+    resolved: &str,
 ) -> Result<RescanGuardrailsResponse, (StatusCode, Json<ErrorResponse>)> {
     let req = ReindexRequest {
         rescreen_guardrails: true,
         ..Default::default()
     };
     let mut scan_counts = GuardrailScanCounts::default();
-    reindex_collection_internal_ex(state, scoped, req, &mut scan_counts).await?;
+    reindex_collection_internal_ex(state, base, resolved, req, &mut scan_counts).await?;
 
     Ok(RescanGuardrailsResponse {
         scanned: scan_counts.scanned,
@@ -1544,10 +1583,18 @@ async fn copy_source_records_to_sibling(
     // record's own reserved `_guardrail_category` field, e.g. the literal
     // string "pii", screen THAT, come back clean, and overwrite a
     // genuinely flagged record to `_guardrail_flagged = false`).
-    // Screening reuses the record's own ALREADY-STORED vector for that
-    // field rather than re-embedding: it's the vector actually indexed,
-    // it needs no embedder at rescan time, and it can't drift from a
-    // model change between the original ingest and this rescan.
+    //
+    // When found, screening reuses the record's own ALREADY-STORED vector
+    // for that field rather than re-embedding: no embedder needed at
+    // rescan time, and it's the vector actually indexed. This is NOT
+    // drift-proof, though: `screen_chunk` embeds the guardrail PATTERN
+    // set with whatever text-modality model is CURRENTLY registered. If
+    // the record's stored vector was produced by a different (e.g. older)
+    // model, comparing it against the current patterns compares two
+    // different embedding spaces — `categorize::cosine` returns `0.0` on
+    // a dimension mismatch, so the semantic layer simply never fires
+    // rather than firing on a meaningless score; the lexical/pii layer
+    // (regex-based, not embedding-based) is unaffected either way.
     let screen_target: Option<(String, String)> = if rescreen_guardrails {
         dst_schema.fields().iter().find_map(|f| {
             if let veda_core::types::FieldType::Vector {
@@ -1564,9 +1611,37 @@ async fn copy_source_records_to_sibling(
         None
     };
 
+    // Collections whose vectors are CLIENT-supplied (no schema `auto_embed`
+    // at all) are exactly the pre-guardrails corpora this endpoint exists
+    // to remediate, and `screen_target` above is `None` for every one of
+    // them — without a fallback, every record in such a collection would
+    // report `skipped` with no way to actually screen it. Fall back to
+    // embedding the record's text with whatever text-modality model is
+    // currently registered, same as `screen_chunk`'s own pattern-embedding
+    // path does. The fallback text field is still chosen deterministically
+    // from the SCHEMA (the first `FieldType::String` field, in schema
+    // declaration order) rather than the record's own field map — the
+    // reserved guardrail fields are never declared on a `CollectionSchema`,
+    // so this can't reintroduce the same "picks up `_guardrail_category`"
+    // failure the primary path avoids.
+    let fallback_text_field: Option<String> = if rescreen_guardrails && screen_target.is_none() {
+        dst_schema.fields().iter().find_map(|f| {
+            matches!(f.field_type(), veda_core::types::FieldType::String)
+                .then(|| f.name().to_owned())
+        })
+    } else {
+        None
+    };
+    let fallback_embedder = if fallback_text_field.is_some() {
+        crate::rest::rag_eval::text_embedder_pub(state).await
+    } else {
+        None
+    };
+
     // Screen off any lock — `screen_chunk` can do a real embed call (to
-    // embed the guardrail pattern set on a cache miss) and must never run
-    // while holding `segment_managers`.
+    // embed the guardrail pattern set on a cache miss), and the fallback
+    // path above embeds the record's own text too; neither may run while
+    // holding `segment_managers`.
     let mut scan_counts = GuardrailScanCounts::default();
     let mut staged: Vec<veda_core::record::Record> = Vec::with_capacity(records.len());
     for mut record in records {
@@ -1591,7 +1666,28 @@ async fn copy_source_records_to_sibling(
                         _ => crate::agent::guardrails::ChunkVerdict::skipped(),
                     }
                 }
-                None => crate::agent::guardrails::ChunkVerdict::skipped(),
+                None => match (&fallback_text_field, &fallback_embedder) {
+                    (Some(text_field), Some(client)) => {
+                        let text = match record.get(text_field) {
+                            Some(veda_core::record::FieldValue::String(s))
+                                if !s.trim().is_empty() =>
+                            {
+                                Some(s.clone())
+                            }
+                            _ => None,
+                        };
+                        match text {
+                            Some(t) => match client.embed_text(&t).await {
+                                Ok(v) => {
+                                    crate::agent::guardrails::screen_chunk(state, &v, &t).await
+                                }
+                                Err(_) => crate::agent::guardrails::ChunkVerdict::skipped(),
+                            },
+                            None => crate::agent::guardrails::ChunkVerdict::skipped(),
+                        }
+                    }
+                    _ => crate::agent::guardrails::ChunkVerdict::skipped(),
+                },
             };
             if !verdict.screened {
                 scan_counts.skipped += 1;
