@@ -101,7 +101,7 @@ impl PartialOrd for Entry {
 /// `1.0` and non-finite values are clamped to `1.0` — they could only make
 /// the traversal slower without changing the result.
 pub fn block_max_wand<C: PostingCursor>(
-    mut cursors: Vec<C>,
+    cursors: Vec<C>,
     k: usize,
     theta: f32,
 ) -> (Vec<(u32, f32)>, PruneStats) {
@@ -115,14 +115,23 @@ pub fn block_max_wand<C: PostingCursor>(
         1.0
     };
 
-    let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(k + 1);
+    // Pair each cursor with its original construction index so that ties —
+    // multiple cursors positioned at the same doc — always resolve in the
+    // caller's original order, no matter how the traversal's history of
+    // skips and advances happened to interleave them beforehand. This is
+    // what lets a doc-sorted, term-ordered pivot sum come out bit-identical
+    // to a term-ordered exhaustive sum: same values, same order, same
+    // starting point, every time.
+    let mut cursors: Vec<(usize, C)> = cursors.into_iter().enumerate().collect();
+
+    let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(k.saturating_add(1));
 
     'outer: loop {
-        cursors.retain(|c| c.doc().is_some());
+        cursors.retain(|(_, c)| c.doc().is_some());
         if cursors.is_empty() {
             break;
         }
-        cursors.sort_by_key(|c| c.doc().unwrap_or(u32::MAX));
+        cursors.sort_by_key(|(i, c)| (c.doc().unwrap_or(u32::MAX), *i));
 
         // Until the heap is full nothing may be pruned, so the bound is
         // -inf rather than 0.0 — a corpus whose scores are all zero must
@@ -138,7 +147,7 @@ pub fn block_max_wand<C: PostingCursor>(
         // that exactly ties the threshold can still win on doc_id.
         let mut acc = 0.0f32;
         let mut pivot = None;
-        for (i, c) in cursors.iter().enumerate() {
+        for (i, (_, c)) in cursors.iter().enumerate() {
             acc += c.list_max();
             if acc >= bound {
                 pivot = Some(i);
@@ -155,11 +164,11 @@ pub fn block_max_wand<C: PostingCursor>(
             // caller asked for more pruning (higher theta), not less.
             break;
         };
-        let pivot_doc = match cursors[p].doc() {
+        let pivot_doc = match cursors[p].1.doc() {
             Some(d) => d,
             None => break,
         };
-        let first_doc = match cursors[0].doc() {
+        let first_doc = match cursors[0].1.doc() {
             Some(d) => d,
             None => break,
         };
@@ -175,7 +184,7 @@ pub fn block_max_wand<C: PostingCursor>(
             // pivot_doc) gets a plain seek, since skipping it outright
             // could jump past pivot_doc itself. Guaranteed progress: each
             // branch strictly advances the cursor's doc.
-            for c in cursors[..p].iter_mut() {
+            for (_, c) in cursors[..p].iter_mut() {
                 while let Some(d) = c.doc().filter(|&d| d < pivot_doc) {
                     match c.block_last_doc() {
                         Some(last) if last < pivot_doc => {
@@ -209,15 +218,15 @@ pub fn block_max_wand<C: PostingCursor>(
         // so the "necessary" range for the block-level bound must extend
         // to cover them — stopping at `p` would understate the bound and
         // could skip a doc that actually reaches the threshold.
-        let end = p + cursors[p..].partition_point(|c| c.doc() == Some(pivot_doc));
+        let end = p + cursors[p..].partition_point(|(_, c)| c.doc() == Some(pivot_doc));
 
         // Block-max check. `<` (not `<=`) preserves exact ties, as above.
-        let block_sum: f32 = cursors[..end].iter().map(|c| c.block_max()).sum();
+        let block_sum: f32 = cursors[..end].iter().map(|(_, c)| c.block_max()).sum();
         if block_sum < bound {
             stats.blocks_skipped += 1;
             let block_end = cursors[..end]
                 .iter()
-                .filter_map(|c| {
+                .filter_map(|(_, c)| {
                     let last = c.block_last_doc();
                     if let Some(l) = last {
                         debug_assert!(
@@ -229,7 +238,10 @@ pub fn block_max_wand<C: PostingCursor>(
                 })
                 .min()
                 .map_or(u32::MAX, |d| d.saturating_add(1));
-            let next_after_pivot = cursors.get(end).and_then(|c| c.doc()).unwrap_or(u32::MAX);
+            let next_after_pivot = cursors
+                .get(end)
+                .and_then(|(_, c)| c.doc())
+                .unwrap_or(u32::MAX);
             // Never overshoot the next candidate, and always make progress.
             let target = block_end
                 .min(next_after_pivot)
@@ -240,7 +252,7 @@ pub fn block_max_wand<C: PostingCursor>(
                 // rather than spin.
                 break;
             }
-            for c in cursors[..end].iter_mut() {
+            for (_, c) in cursors[..end].iter_mut() {
                 if c.doc().is_some_and(|d| d < target) {
                     c.advance_to(target);
                 }
@@ -249,9 +261,12 @@ pub fn block_max_wand<C: PostingCursor>(
         }
 
         // Score the pivot. Cursors are doc-sorted and cursors[0] is at the
-        // pivot, so every cursor positioned there forms a prefix.
+        // pivot, so every cursor positioned there forms a prefix. The
+        // stable-by-original-index sort above means this prefix is always
+        // visited in the same original construction order, so the sum
+        // below matches a term-ordered exhaustive sum exactly.
         let mut score = 0.0f32;
-        for c in cursors.iter_mut() {
+        for (_, c) in cursors.iter_mut() {
             if c.doc() == Some(pivot_doc) {
                 score += c.score();
                 c.next();

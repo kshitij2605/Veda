@@ -233,9 +233,12 @@ pub struct Bm25Index {
     /// older persisted indexes that lack this field load cleanly.
     #[serde(default)]
     analyzer: AnalyzerConfig,
-    /// Block-max metadata, keyed by term. Empty until `build_blocks` runs,
-    /// which happens only for read-only (sealed) indexes — a growing index
-    /// invalidates these on every insert, so it keeps the exhaustive path.
+    /// Block-max metadata, keyed by term. Empty until `build_blocks` runs.
+    /// `insert` clears it, so a segment that keeps growing after a build
+    /// falls back to the exhaustive search path until `build_blocks` runs
+    /// again — a term added since the last build would otherwise exist in
+    /// `postings` but have no cursor, and be silently dropped from every
+    /// query that matches only it.
     ///
     /// Never serialized: derived cheaply at load from data already in memory.
     #[serde(skip)]
@@ -272,6 +275,12 @@ impl Bm25Index {
     /// Add `text` for `doc_id`. Caller is responsible for inserting in
     /// increasing doc_id order (the segment writer does this).
     pub fn insert(&mut self, doc_id: u32, text: &str) {
+        // Any block-max metadata from a prior `build_blocks` is now stale —
+        // a new term may exist in `postings` without a matching cursor, and
+        // existing block maxima no longer bound their (possibly grown)
+        // blocks. Clearing forces the next search back onto the exhaustive
+        // path rather than silently skipping terms.
+        self.block_indexes.clear();
         let positional_tokens = run_analyzer_positional(self.tokenizer, &self.analyzer, text);
         // doc_length = number of raw tokenizer positions (including removed
         // stopwords), so BM25 length normalization stays consistent with the
@@ -434,48 +443,7 @@ impl Bm25Index {
                 pos: 0,
             });
         }
-        let (mut hits, stats) = block_max_wand(cursors, k, theta);
-
-        // block_max_wand sums each returned doc's per-cursor contributions
-        // in whichever order that doc's cursors happened to be tied in at
-        // scoring time — driven by the traversal's own history of skips and
-        // advances, so it varies from doc to doc. f32 addition is not
-        // associative, so a different summation order can round to a
-        // different last bit than `search_exhaustive`'s fixed term-order
-        // sum for the same doc, even though every individual per-term
-        // impact value is identical either way. `block_max_wand` still owns
-        // which docs are kept or pruned; this only normalizes the reported
-        // score to the same deterministic order the exhaustive oracle uses,
-        // so theta=1.0 stays bit-identical to it.
-        for (doc_id, score) in &mut hits {
-            *score = self.exact_score(*doc_id, &terms, n, avg_dl);
-        }
-        hits.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.0.cmp(&b.0))
-        });
-        (hits, stats)
-    }
-
-    /// Score one doc against `terms`, in the same term order and
-    /// accumulation pattern `search_exhaustive` uses, so a score computed
-    /// here is bit-identical to the exhaustive oracle's for that doc.
-    /// Requires `self.postings` sorted ascending by doc_id (guaranteed by
-    /// `build_blocks`, which every caller of this method has already run).
-    fn exact_score(&self, doc_id: u32, terms: &[&String], n: f32, avg_dl: f32) -> f32 {
-        let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0);
-        let mut score = 0.0f32;
-        for term in terms {
-            let Some(postings) = self.postings.get(*term) else {
-                continue;
-            };
-            if let Ok(i) = postings.binary_search_by_key(&doc_id, |p| p.0) {
-                let idf = bm25_idf(n, postings.len() as f32);
-                score += bm25_impact(idf, postings[i].1, dl, avg_dl);
-            }
-        }
-        score
+        block_max_wand(cursors, k, theta)
     }
 
     /// Analyzed query terms with duplicates removed — repeated tokens add
@@ -519,6 +487,10 @@ impl Bm25Index {
             }
         }
         let mut result: Vec<(u32, f32)> = scores.into_iter().collect();
+        // Score descending, then doc_id ascending. The doc_id tie-break is
+        // what makes the result a total order: without it, equal-scoring
+        // docs come back in HashMap iteration order, which is neither
+        // stable across runs nor comparable against a second implementation.
         result.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -1563,8 +1535,14 @@ mod tests {
     #[test]
     fn cursor_block_last_doc_is_never_behind_current_doc() {
         // The core relies on block_last_doc() >= doc() for forward progress.
-        // A violation is silent truncation in release builds, so pin it here
-        // directly rather than relying on the debug_assert firing.
+        // A violation is silent truncation in release builds, so drive a
+        // real Bm25Cursor through the corpus with the same advance_to/next
+        // operations the traversal uses, and pin the invariant at every
+        // step. Re-deriving `bi.blocks[pos / BLOCK_SIZE].0` inline (as an
+        // earlier version of this test did) duplicates the very index
+        // arithmetic under test: change Bm25Cursor's own block indexing and
+        // that version keeps passing while the silent-truncation scenario
+        // it exists to catch goes live.
         let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
         for doc_id in 0..1000u32 {
             idx.insert(doc_id, "alpha");
@@ -1572,13 +1550,55 @@ mod tests {
         idx.build_blocks();
         let postings = &idx.postings["alpha"];
         let bi = &idx.block_indexes["alpha"];
-        for (pos, posting) in postings.iter().enumerate() {
-            let doc = posting.0;
-            let block_last = bi.blocks[pos / crate::block_max::BLOCK_SIZE].0;
+        let mut cursor = Bm25Cursor {
+            postings,
+            blocks: &bi.blocks,
+            list_max: bi.list_max,
+            doc_lengths: &idx.doc_lengths,
+            idf: bm25_idf(idx.doc_count() as f32, postings.len() as f32),
+            avg_dl: idx.avg_doc_length(),
+            pos: 0,
+        };
+        let mut steps = 0;
+        while let Some(doc) = cursor.doc() {
             assert!(
-                block_last >= doc,
-                "pos {pos}: block_last_doc {block_last} is behind doc {doc}"
+                cursor.block_last_doc().is_some_and(|last| last >= doc),
+                "doc {doc}: block_last_doc {:?} is behind doc",
+                cursor.block_last_doc()
             );
+            // Alternate next()/advance_to() so both of the cursor's forward-
+            // progress operations are exercised, not just one.
+            if doc % 3 == 0 {
+                cursor.advance_to(doc + 7);
+            } else {
+                cursor.next();
+            }
+            steps += 1;
+        }
+        assert!(steps > 0, "cursor never advanced — test would be vacuous");
+    }
+
+    /// Same corpus and query as `pruned_search_matches_exhaustive_search`,
+    /// but with the query terms permuted. Term order feeds directly into
+    /// both the exhaustive path's summation order and the order cursors are
+    /// constructed in for the pruning path, so this guards against a fix
+    /// that only happens to work for one particular term ordering.
+    ///
+    /// Deliberately NOT asserted: that the two permutations equal each
+    /// other. Summation order is tied to term order for both paths, so nothing
+    /// guarantees identical results across permutations — only that each
+    /// permutation's pruned result matches ITS OWN exhaustive oracle.
+    #[test]
+    fn pruned_search_matches_exhaustive_search_under_term_permutation() {
+        let (plain, blocked) = paired_indexes(3000);
+        for query in ["alpha beta gamma delta", "delta gamma beta alpha"] {
+            for k in [1usize, 5, 10, 100, 5000] {
+                assert_eq!(
+                    blocked.search_with_theta(query, k, 1.0),
+                    plain.search(query, k),
+                    "query {query:?} k {k}"
+                );
+            }
         }
     }
 }
