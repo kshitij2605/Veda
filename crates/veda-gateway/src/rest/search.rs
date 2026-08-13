@@ -747,7 +747,21 @@ pub(crate) async fn run_search(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let results = populate_hit_fields(state, name, schema, results, now_secs).await;
+    let mut results = populate_hit_fields(state, name, schema, results, now_secs).await;
+
+    // Annotate every hit with its screening class. `/search` is a DATA API:
+    // it must never drop a hit, or recall measurement in the eval harness and
+    // the tuning campaigns would silently change. Enforcement happens only on
+    // LLM-facing paths (see `ToolCatalog::dispatch`).
+    for hit in &mut results {
+        let class = crate::agent::retrieval_guard::classify_hit(&hit.fields);
+        let name = serde_json::to_value(class)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unscreened".to_owned());
+        hit.fields
+            .insert("_guardrail_class".to_owned(), serde_json::json!(name));
+    }
 
     let took_ms = start.elapsed().as_millis() as u64;
     metrics::histogram!(m::SEARCH_DURATION, "collection" => crate::tenant::display_name(name).to_owned())
@@ -902,11 +916,37 @@ async fn populate_hit_fields(
                 map.insert(name.to_string(), super::records::field_value_to_json(value));
             }
         }
+        // The retrieval-guardrail/TTL fields are RESERVED, not
+        // schema-declared (the WAL writer persists them even when no
+        // `CollectionSchema` lists them) — the loop above never hydrates
+        // them, which would leave `classify_hit` (see the annotation step
+        // in `run_search`) with nothing to classify on and every hit would
+        // read `unscreened` on every real collection. Mirrors the identical
+        // fix in `agent/tools/builtins.rs::search`.
+        for reserved in RESERVED_GUARD_FIELDS {
+            if let Some(value) = rec.get(reserved) {
+                map.insert(
+                    (*reserved).to_owned(),
+                    super::records::field_value_to_json(value),
+                );
+            }
+        }
         hit.fields = map;
         out.push(hit);
     }
     out
 }
+
+/// The retrieval-guardrail/TTL fields, reserved rather than
+/// schema-declared. Mirrors the identical inline list in
+/// `agent/tools/builtins.rs` and `veda-storage/src/segment.rs`'s WAL writer.
+const RESERVED_GUARD_FIELDS: [&str; 5] = [
+    veda_core::record::EXPIRES_AT_FIELD,
+    veda_core::record::GUARDRAIL_FLAGGED_FIELD,
+    veda_core::record::GUARDRAIL_SCORE_FIELD,
+    veda_core::record::GUARDRAIL_CATEGORY_FIELD,
+    veda_core::record::INDEXED_AT_FIELD,
+];
 
 fn execute_single_vector(
     executor: &DistributedQueryExecutor,

@@ -892,6 +892,13 @@ pub async fn converse(
         .unwrap_or(&conversation.id)
         .to_owned();
 
+    // Roll the turn's per-tool-call reports up to the top level. Nested
+    // inside `steps[].result.retrieval_guard` they are technically present
+    // but not a surface an operator or client reads; design §7 promises the
+    // field here, and §6's fail-open-on-`unscreened` decision is only
+    // defensible if those counts are actually visible.
+    let retrieval_guard = crate::agent::retrieval_guard::collect_from_steps(&result.steps);
+
     Ok(Json(ConverseResponse {
         conversation_id: user_facing_cid,
         response: result.response,
@@ -901,6 +908,7 @@ pub async fn converse(
         grounding,
         cache_hit,
         guardrails,
+        retrieval_guard,
     }))
 }
 
@@ -942,6 +950,7 @@ async fn run_streaming_turn(
                 citations: Vec::new(),
                 grounding: None,
                 cache_hit: false,
+                retrieval_guard: None,
             };
         }
     };
@@ -961,6 +970,7 @@ async fn run_streaming_turn(
                 citations: Vec::new(),
                 grounding: None,
                 cache_hit: false,
+                retrieval_guard: None,
             };
         }
     };
@@ -1012,6 +1022,7 @@ async fn run_streaming_turn(
                 citations: Vec::new(),
                 grounding: None,
                 cache_hit: false,
+                retrieval_guard: None,
             };
         }
     }
@@ -1053,6 +1064,7 @@ async fn run_streaming_turn(
                 citations: Vec::new(),
                 grounding: None,
                 cache_hit: true,
+                retrieval_guard: None,
             };
         }
         metrics::counter!("veda_llm_cache_misses_total", "model" => model_name.clone())
@@ -1198,6 +1210,10 @@ async fn run_streaming_turn(
     conversation.steps.extend(result.steps.iter().cloned());
     store::save_conversation(&state.inner.saved_objects, conversation).await;
 
+    // Same roll-up as the blocking `/converse` — see there for why the
+    // report belongs at the top level and not only nested in the steps.
+    let retrieval_guard = crate::agent::retrieval_guard::collect_from_steps(&result.steps);
+
     StreamDonePayload {
         conversation_id: user_facing_cid,
         response: result.response,
@@ -1205,6 +1221,7 @@ async fn run_streaming_turn(
         citations,
         grounding,
         cache_hit: false,
+        retrieval_guard,
     }
 }
 
@@ -1224,6 +1241,13 @@ struct StreamDonePayload {
     /// loop was skipped). Defaults to `false`.
     #[serde(default)]
     cache_hit: bool,
+    /// Turn-level retrieval-guardrail report, mirroring
+    /// [`ConverseResponse::retrieval_guard`]: rolled up across the turn's
+    /// retrieving tool calls, and omitted entirely when the turn retrieved
+    /// nothing (including every early return below — a refusal, a cache
+    /// serve and an unresolved agent all retrieve nothing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retrieval_guard: Option<crate::agent::retrieval_guard::RetrievalGuardReport>,
 }
 
 /// `POST /v1/agents/{id}/converse/stream` — the streaming twin of
@@ -1378,6 +1402,7 @@ async fn emit_done(
         citations: Vec::new(),
         grounding: None,
         cache_hit: false,
+        retrieval_guard: None,
     });
     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
     let event = Event::default().event("done").data(data);
@@ -1796,6 +1821,7 @@ mod tests {
             grounding: Some(g),
             cache_hit: false,
             guardrails: None,
+            retrieval_guard: None,
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["citations"][0]["chunk_id"], "id-1");
@@ -1824,6 +1850,7 @@ mod tests {
             grounding,
             cache_hit: false,
             guardrails: None,
+            retrieval_guard: None,
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert!(v.get("citations").is_none(), "empty citations skipped: {v}");

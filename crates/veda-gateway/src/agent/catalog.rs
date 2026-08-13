@@ -231,7 +231,7 @@ impl ToolCatalog {
 
     /// Route a tool call to its built-in implementation by id. Unknown
     /// ids return an error [`ToolOutcome`] rather than panicking.
-    pub async fn dispatch(
+    async fn dispatch_inner(
         &self,
         ctx: &ToolContext<'_>,
         tool_id: &str,
@@ -264,6 +264,109 @@ impl ToolCatalog {
             other => ToolOutcome::not_found(format!("unknown tool: {other}")),
         }
     }
+
+    /// Dispatch a tool, then apply retrieval guardrails to its output.
+    ///
+    /// This is the single choke point every LLM-facing transport shares —
+    /// `executor.rs` (converse / converse-stream / A2A), `rest/mcp.rs`
+    /// (tools/call) and `rest/agents.rs` (`/agent-tools/{id}/execute`). Doing
+    /// enforcement here rather than at each call site makes it structurally
+    /// impossible to add a transport that bypasses it.
+    ///
+    /// Any tool whose success payload carries a `hits` or `records` array
+    /// (the two shapes `search`/`filter_query` use) is screened; the
+    /// convention is documented so a future content-returning tool inherits
+    /// enforcement for free.
+    pub async fn dispatch(
+        &self,
+        ctx: &ToolContext<'_>,
+        tool_id: &str,
+        args: serde_json::Value,
+    ) -> ToolOutcome {
+        let collection = args
+            .get("collection")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let outcome = self.dispatch_inner(ctx, tool_id, args).await;
+        if outcome.is_error {
+            return outcome;
+        }
+        let vector_field = resolve_vector_field(ctx, collection.as_deref()).await;
+        apply_retrieval_guard(outcome, vector_field.as_deref())
+    }
+}
+
+/// Resolve the name of the collection's first vector field for a tool call's
+/// `collection` argument, so [`apply_retrieval_guard`] can pass it into
+/// `temporal_check`'s conflict detection.
+///
+/// Follows the same scope + alias-resolve idiom as the read paths (see
+/// `rest::tuning::resolve_search_fields`) rather than trusting the caller's
+/// raw name — this project has repeatedly shipped bugs where a handler read
+/// the unresolved name and silently operated on an abandoned base
+/// collection after a reindex swapped the alias.
+///
+/// Returns `None` on any failure (no `collection` arg, unknown collection,
+/// no vector field): this must never error and never block the tool result,
+/// it only means conflict detection is skipped while staleness/expiry still
+/// run.
+async fn resolve_vector_field(ctx: &ToolContext<'_>, collection: Option<&str>) -> Option<String> {
+    let coll = collection?;
+    let scoped = crate::tenant::scope(ctx.tenant, coll);
+    let scoped = ctx.state.inner.aliases.resolve(&scoped).await;
+    let schemas = ctx.state.inner.schemas.read().await;
+    schemas
+        .get(&scoped)
+        .and_then(|schema| schema.vector_fields().first().map(|f| f.name().to_owned()))
+}
+
+/// Drop flagged hits from a tool payload and attach the report.
+///
+/// Returns the outcome unchanged when the payload has no `hits`/`records`
+/// array — most tools (`upsert_record`, `get_resources`, …) are unaffected.
+/// Checks `hits` (used by `search`) and `records` (used by `filter_query`)
+/// because both are content-returning, LLM-facing arrays of retrieved
+/// chunks; the kept array is written back under the same key it was found
+/// under so each tool's existing response shape is preserved.
+///
+/// Dropping is on by default and is **not** gated on the agent's `guardrails`
+/// flag — a per-agent opt-in would ship the default agent unprotected. The
+/// one override is the operator kill switch `VEDA_RETRIEVAL_GUARD=off`
+/// ([`crate::agent::retrieval_guard::enforcement_enabled`]), which degrades this to
+/// annotate-only: hits are still classified and still reported, none are
+/// removed.
+fn apply_retrieval_guard(mut outcome: ToolOutcome, vector_field: Option<&str>) -> ToolOutcome {
+    use crate::agent::retrieval_guard::{enforce_retrieved, enforcement_enabled, temporal_check};
+
+    let Some(obj) = outcome.content.as_object_mut() else {
+        return outcome;
+    };
+    let key = if obj.contains_key("hits") {
+        "hits"
+    } else if obj.contains_key("records") {
+        "records"
+    } else {
+        return outcome;
+    };
+    let Some(hits) = obj.get_mut(key).and_then(|h| h.as_array_mut()) else {
+        return outcome;
+    };
+
+    let taken = std::mem::take(hits);
+    let (kept, mut report) = enforce_retrieved(taken, enforcement_enabled());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    report.temporal = temporal_check(&kept, now, vector_field);
+
+    obj.insert("count".into(), serde_json::json!(kept.len()));
+    obj.insert(key.to_owned(), serde_json::Value::Array(kept));
+    obj.insert(
+        "retrieval_guard".into(),
+        serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+    );
+    outcome
 }
 
 #[cfg(test)]
@@ -310,6 +413,61 @@ mod tests {
             FieldValue::Vector(DenseVector::new(vec![1.0, 0.0, 0.0, 0.0])),
         );
         rec.set("title", FieldValue::String("hello world".to_owned()));
+        let id = rec.id();
+        {
+            let mut managers = state.inner.segment_managers.write().await;
+            let shard_map = managers.get_mut(&scoped).unwrap();
+            let shard_id = veda_coordinator::shard_router::ShardRouter::assign_shard(
+                &id,
+                schema.shard_count(),
+            );
+            shard_map.get_mut(&shard_id).unwrap().insert(rec).unwrap();
+        }
+        (state, tenant, id)
+    }
+
+    /// Like [`seeded_state`], but the inserted record already carries a
+    /// flagged guardrail verdict in the given `category`. The fields are set
+    /// directly on the `Record` (mirroring `stamp_guardrail_fields`) and,
+    /// deliberately, are NOT added to `text_schema`'s field list — on every
+    /// real collection these are RESERVED fields, never schema-declared.
+    async fn seeded_flagged_state_with_category(
+        tmp: &std::path::Path,
+        user_collection: &str,
+        category: &str,
+    ) -> (AppState, crate::tenant::TenantId, uuid::Uuid) {
+        let state = AppState::new(tmp);
+        let tenant = crate::tenant::TenantId::default_tenant();
+        let scoped = crate::tenant::scope(&tenant, user_collection);
+        let schema = text_schema(&scoped);
+        let col_dir = tmp.join(&scoped);
+        std::fs::create_dir_all(&col_dir).unwrap();
+        crate::rest::collections::materialize_collection_locally(&state, &schema, &col_dir)
+            .await
+            .expect("materialize");
+
+        let mut rec = Record::new();
+        rec.set(
+            "embedding",
+            FieldValue::Vector(DenseVector::new(vec![1.0, 0.0, 0.0, 0.0])),
+        );
+        rec.set("title", FieldValue::String("flagged content".to_owned()));
+        rec.set(
+            veda_core::record::GUARDRAIL_FLAGGED_FIELD,
+            FieldValue::Bool(true),
+        );
+        rec.set(
+            veda_core::record::GUARDRAIL_SCORE_FIELD,
+            FieldValue::Float64(0.9),
+        );
+        rec.set(
+            veda_core::record::GUARDRAIL_CATEGORY_FIELD,
+            FieldValue::String(category.to_owned()),
+        );
+        rec.set(
+            veda_core::record::INDEXED_AT_FIELD,
+            FieldValue::Int64(1_786_000_000),
+        );
         let id = rec.id();
         {
             let mut managers = state.inner.segment_managers.write().await;
@@ -581,6 +739,76 @@ mod tests {
             )
             .await;
         assert!(out.is_error);
+    }
+
+    /// Critical gap this closes: `get_record` returns a bare `{id, fields}`
+    /// object, which carries neither `hits` nor `records`, so the
+    /// dispatch-level `apply_retrieval_guard` (which only screens those two
+    /// array shapes) passes it through untouched. Without a check inside
+    /// `get_record` itself, a model that saw a chunk's id reported in a
+    /// `search`/`filter_query` response's `retrieval_guard.dropped_chunks`
+    /// could turn around and fetch the withheld content verbatim via
+    /// `get_record` — the array-shaped guard would be enforcement theater.
+    #[tokio::test]
+    async fn dispatch_get_record_withholds_flagged_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant, id) =
+            seeded_flagged_state_with_category(tmp.path(), "docs", "indirect_injection").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat
+            .dispatch(
+                &ctx,
+                "get_record",
+                serde_json::json!({ "collection": "docs", "id": id.to_string() }),
+            )
+            .await;
+        assert!(!out.is_error, "outcome: {:?}", out.content);
+        assert_eq!(out.content["id"], id.to_string(), "{:?}", out.content);
+        assert_eq!(out.content["withheld"], true, "{:?}", out.content);
+        assert!(
+            out.content.get("fields").is_none(),
+            "flagged content must not leak through get_record: {:?}",
+            out.content
+        );
+        assert_eq!(
+            out.content["retrieval_guard"]["dropped"], 1,
+            "{:?}",
+            out.content
+        );
+    }
+
+    /// 2026-08-13 ruling: PII is exempt from dropping, and `get_record` must
+    /// apply the SAME category policy as the array-shaped guard
+    /// (`apply_retrieval_guard`/`enforce_retrieved`) — a PII-flagged record
+    /// fetched directly by id must come back with its content intact, not
+    /// withheld.
+    #[tokio::test]
+    async fn dispatch_get_record_does_not_withhold_pii() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant, id) =
+            seeded_flagged_state_with_category(tmp.path(), "docs", "pii").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat
+            .dispatch(
+                &ctx,
+                "get_record",
+                serde_json::json!({ "collection": "docs", "id": id.to_string() }),
+            )
+            .await;
+        assert!(!out.is_error, "outcome: {:?}", out.content);
+        assert_eq!(out.content["id"], id.to_string(), "{:?}", out.content);
+        assert!(
+            out.content.get("withheld").is_none(),
+            "PII must not be withheld: {:?}",
+            out.content
+        );
+        assert_eq!(
+            out.content["fields"]["title"], "flagged content",
+            "{:?}",
+            out.content
+        );
     }
 
     fn rls_schema(name: &str) -> CollectionSchema {
@@ -1037,5 +1265,130 @@ mod tests {
             batch_size: 8,
         });
         assert!(select_query_model(&text_only, None, Modality::Image).is_err());
+    }
+
+    // ── apply_retrieval_guard (sync, in-crate) ──────────────────────────
+
+    fn synthetic_hit(id: &str, flagged: bool, indexed_at: i64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "distance": 0.1,
+            "fields": {
+                "content": "text",
+                "_guardrail_flagged": flagged,
+                "_guardrail_score": if flagged { 0.9 } else { 0.1 },
+                "_indexed_at": indexed_at,
+            }
+        })
+    }
+
+    #[test]
+    fn apply_retrieval_guard_drops_flagged_hit_and_updates_count() {
+        let outcome = ToolOutcome::ok(serde_json::json!({
+            "hits": [synthetic_hit("a", false, 1), synthetic_hit("b", true, 1)],
+            "count": 2,
+        }));
+        let out = apply_retrieval_guard(outcome, None);
+        assert!(!out.is_error);
+        let hits = out.content["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1, "{:?}", out.content);
+        assert_eq!(hits[0]["id"], "a");
+        assert_eq!(out.content["count"], 1, "{:?}", out.content);
+        assert_eq!(
+            out.content["retrieval_guard"]["dropped"], 1,
+            "{:?}",
+            out.content
+        );
+        assert_eq!(
+            out.content["retrieval_guard"]["kept"], 1,
+            "{:?}",
+            out.content
+        );
+    }
+
+    fn synthetic_hit_with_category(
+        id: &str,
+        flagged: bool,
+        category: &str,
+        indexed_at: i64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "distance": 0.1,
+            "fields": {
+                "content": "text",
+                "_guardrail_flagged": flagged,
+                "_guardrail_score": if flagged { 0.9 } else { 0.1 },
+                "_guardrail_category": category,
+                "_indexed_at": indexed_at,
+            }
+        })
+    }
+
+    /// 2026-08-13 ruling: PII must be detected and reported, but never
+    /// dropped, at the dispatch-level choke point too — not just inside
+    /// `retrieval_guard::enforce_retrieved`'s own unit tests.
+    #[test]
+    fn apply_retrieval_guard_keeps_pii_and_reports_flagged_not_dropped() {
+        let outcome = ToolOutcome::ok(serde_json::json!({
+            "hits": [
+                synthetic_hit("a", false, 1),
+                synthetic_hit_with_category("b", true, "pii", 1),
+            ],
+            "count": 2,
+        }));
+        let out = apply_retrieval_guard(outcome, None);
+        assert!(!out.is_error);
+        let hits = out.content["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 2, "PII must not be dropped: {:?}", out.content);
+        assert_eq!(out.content["count"], 2, "{:?}", out.content);
+        assert_eq!(
+            out.content["retrieval_guard"]["dropped"], 0,
+            "{:?}",
+            out.content
+        );
+        assert_eq!(
+            out.content["retrieval_guard"]["flagged_not_dropped"], 1,
+            "{:?}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn apply_retrieval_guard_screens_records_key_too() {
+        // `filter_query`'s success payload uses `records`, not `hits`.
+        let outcome = ToolOutcome::ok(serde_json::json!({
+            "records": [synthetic_hit("a", false, 1), synthetic_hit("b", true, 1)],
+            "count": 2,
+        }));
+        let out = apply_retrieval_guard(outcome, None);
+        let records = out.content["records"].as_array().unwrap();
+        assert_eq!(records.len(), 1, "{:?}", out.content);
+        assert!(out.content.get("hits").is_none(), "{:?}", out.content);
+        assert_eq!(
+            out.content["retrieval_guard"]["dropped"], 1,
+            "{:?}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn apply_retrieval_guard_leaves_payloads_without_hits_or_records_untouched() {
+        let outcome = ToolOutcome::ok(serde_json::json!({ "inserted": 3 }));
+        let out = apply_retrieval_guard(outcome.clone(), None);
+        assert_eq!(
+            out, outcome,
+            "payload with neither key must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn apply_retrieval_guard_error_outcomes_are_not_reachable_here() {
+        // apply_retrieval_guard itself has no error short-circuit (that
+        // lives in `dispatch`); confirm it still degrades harmlessly if
+        // ever handed content shaped like an error (no hits/records key).
+        let outcome = ToolOutcome::invalid_args("bad args");
+        let out = apply_retrieval_guard(outcome.clone(), None);
+        assert_eq!(out, outcome);
     }
 }

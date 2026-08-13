@@ -13,6 +13,7 @@ pub mod guardrails;
 pub mod index;
 pub mod memory;
 pub mod model;
+pub mod retrieval_guard;
 pub mod store;
 pub mod tools;
 pub mod trace_store;

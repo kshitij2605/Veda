@@ -141,13 +141,26 @@ pub fn extract_citations(steps: &[AgentStep]) -> Vec<Citation> {
     out
 }
 
-/// First non-empty string value in a fields map (object iteration order).
+/// First non-empty string value in a fields map (object iteration order),
+/// skipping Veda's `_`-prefixed reserved fields.
+///
+/// The skip is load-bearing, not cosmetic. `fields` is a `serde_json::Map`
+/// backed by a `BTreeMap`, so keys sort lexicographically and every reserved
+/// key (`_guardrail_category`, `_guardrail_flagged`, …) sorts before any
+/// ordinary lowercase field name. `_guardrail_category` is a *string*, so on
+/// a PII-flagged hit — which the 2026-08-13 category policy deliberately
+/// KEEPS — the "document text" picked here was the literal `"pii"`. That
+/// became the citation snippet shown to the user and, worse, the context
+/// string fed to the faithfulness judge, scoring the answer against the word
+/// "pii" instead of against the retrieved passage.
 fn first_stringy_field(map: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
-    map.values().find_map(|v| {
-        v.as_str()
-            .filter(|s| !s.trim().is_empty())
-            .map(str::to_owned)
-    })
+    map.iter()
+        .filter(|(key, _)| !key.starts_with('_'))
+        .find_map(|(_, v)| {
+            v.as_str()
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_owned)
+        })
 }
 
 /// Truncate `s` to at most `cap` characters (char-safe), appending an
@@ -411,6 +424,45 @@ mod tests {
         assert_eq!(cites[0].score, Some(0.12));
         assert_eq!(cites[1].chunk_id, "id-2");
         assert_eq!(cites[1].snippet.as_deref(), Some("vectors"));
+    }
+
+    /// A PII-flagged hit is deliberately KEPT (2026-08-13 category policy),
+    /// and it arrives carrying the reserved verdict fields. Those sort first
+    /// in the `BTreeMap` behind `fields`, so before this fix the snippet —
+    /// and the faithfulness judge's context — was the literal string
+    /// `"pii"` rather than the passage.
+    #[test]
+    fn extract_citations_skip_reserved_fields_for_the_snippet() {
+        let steps = vec![
+            AgentStep::ToolCall {
+                tool_call_id: "c1".to_owned(),
+                tool_id: "search".to_owned(),
+                args: serde_json::json!({ "collection": "docs", "query": "contact" }),
+            },
+            AgentStep::ToolResult {
+                tool_call_id: "c1".to_owned(),
+                result: search_result(serde_json::json!([{
+                    "id": "id-pii",
+                    "distance": 0.2,
+                    "fields": {
+                        "_guardrail_category": "pii",
+                        "_guardrail_flagged": true,
+                        "_guardrail_score": 1.0,
+                        "_indexed_at": 1_786_000_000i64,
+                        "content": "route billing questions to eve@example.com",
+                    }
+                }])),
+                is_error: false,
+                duration_ms: None,
+            },
+        ];
+        let cites = extract_citations(&steps);
+        assert_eq!(cites.len(), 1);
+        assert_eq!(
+            cites[0].snippet.as_deref(),
+            Some("route billing questions to eve@example.com"),
+            "the snippet must be the document text, not a reserved field value"
+        );
     }
 
     #[test]

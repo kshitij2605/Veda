@@ -56,6 +56,12 @@ Read-only OLAP-style aggregations over the columnar store. All three honor the f
 curl "http://localhost:6340/v1/collections/products/aggregate?field=price&metric=avg&group_by=category&filter=price%20%3C%20500"
 ```
 
+**Note:** `group_by` on a text field returns each group's key verbatim, so this endpoint can
+return the text of guardrail-flagged records. That is deliberate for the raw data API — like
+`/search`, it annotates and never drops, so recall measurement stays intact. The `aggregate`
+**tool** that agents and MCP clients call does skip hostile-flagged records; see
+[Retrieval guardrails](#retrieval-guardrails) below.
+
 ## Scheduled jobs
 
 Admin-only cron scheduler. A job is a cron expression plus a typed kind — `ttl_sweep`, `reindex`, `compact`, or `evaluate`, each scoped to a collection — deliberately not arbitrary code. Jobs persist in the data directory and reload on restart. (`ttl_sweep` is fully wired today; the other kinds are registered hooks.)
@@ -87,7 +93,7 @@ SLO `kind` and synthetic-probe `kind` use.
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/v1/collections/{name}/process-document` | OCR → chunk → embed → insert one file (multipart `file`) |
+| `POST` | `/v1/collections/{name}/process-document` | OCR → chunk → embed → insert one file (multipart `file`). Text chunks and extracted images fill the **same** dense vector fields, so a collection that ingests images needs a multimodal model; a schema whose vector field no image can fill is rejected with `409 INCOMPATIBLE_SCHEMA` before anything is written — see [Document pipeline](/docs/document-pipeline) |
 | `POST` | `/v1/collections/{name}/process-documents` | Batch variant (multipart `files`) |
 | `POST` | `/v1/collections/{name}/ingest-url` | Crawl a URL → clean markdown → chunk → embed → insert (`{ url\|urls, deep_crawl?, max_pages?, chunker?, ttl_secs? }`); see [Web Connectors](/docs/web-connectors); `503` if crawl4ai unconfigured |
 | `POST` | `/v1/chunk/preview` | Preview how text would be chunked under a strategy |
@@ -202,8 +208,62 @@ Write skew is allowed (snapshot isolation); lost updates are prevented; read-onl
 | `GET/POST` | `/v1/admin/replica/safe_ts` | Replica read watermark |
 | `POST` | `/v1/admin/cluster/join` · `DELETE /v1/admin/cluster/nodes/{id}` | Raft membership changes |
 | `POST` | `/v1/admin/collections/{name}/mvcc_checkpoint` | Atomic MVCC snapshot + WAL truncate |
+| `POST` | `/v1/admin/collections/{name}/rescan-guardrails` | Re-screen every record and persist the retrieval-guardrail verdict (`_guardrail_flagged`/`_guardrail_score`/`_guardrail_category`/`_indexed_at`); rebuilds through `/reindex` and atomically swaps the alias; returns `{ scanned, flagged, skipped }`. **Known limitation:** superseded siblings from repeated `/rescan-guardrails` or `/reindex` calls are never dropped, so repeated rescans grow storage |
 
 Endpoints marked Raft-only return `503` in single-node mode — see [Cluster modes](/docs/installation#cluster-modes).
+
+### Retrieval guardrails
+
+Ingest screens each chunk's text embedding and stamps the four reserved fields above. On every
+LLM-facing path (`/converse`, `/converse/stream`, MCP `tools/call`, `/agent-tools/{id}/execute`,
+`/a2a/{agent_id}`), the response carries a `retrieval_guard` report — `{ kept, dropped,
+unscreened, skipped, flagged_not_dropped, withheld_records, dropped_chunks: [{ id, category,
+score }] }` —
+and `get_record` applies the same policy to a directly-fetched record (withholding it if
+dropped). On `/converse` and the `/converse/stream` `done` frame the report is at the **top
+level**, rolled up across every retrieving tool call in the turn; a turn that retrieved nothing
+omits the field entirely rather than reporting zeros. `POST /v1/collections/{name}/search`
+instead annotates each hit with `_guardrail_class` and never drops.
+
+The `aggregate` **tool** skips hostile-flagged records in its record walk and reports
+`retrieval_guard.withheld_records`, because `group_by` on a text field returns each group's key
+verbatim and would otherwise emit the withheld text. That count is per-query — the skip runs
+after the `filter`, so it reports what this aggregation excluded, not how many hostile records
+the collection holds — and it rolls up into the turn-level report like every other count, so an
+`aggregate`-only turn still reports `retrieval_guard`. The raw `GET
+/v1/collections/{name}/aggregate` endpoint is unaffected and still counts every record — like
+`/search`, the data API annotates and never drops, so recall measurement stays intact.
+
+**Kill switch.** `VEDA_RETRIEVAL_GUARD=off` (also `0`/`false`/`no`/`disabled`) degrades every
+LLM-facing path to annotate-only: hits are still classified and counted (`flagged_not_dropped`
+reports what would have been dropped), nothing is removed. Unset — or set to anything else —
+enforces. It is read per tool dispatch, so it takes effect without a restart. Enforcement is
+otherwise unconditional and is **not** gated on an agent's `guardrails` flag, which governs
+input/output safety guardrails only.
+
+**Dropping is category-aware.** `PromptInjection`, `Jailbreak`, `Unsafe`, and `IndirectInjection`
+are hostile — those chunks are dropped before the LLM sees them and counted in `dropped` /
+`dropped_chunks`. `Pii` (an email, phone number, etc. detected in the chunk text) is detected and
+reported but passed through unchanged, counted in `flagged_not_dropped` instead: this feature
+targets OWASP's injection/poisoning/temporal vectors, and silently stripping a genuine contact
+detail out of an answer to "who do I contact about X" was found to be a worse failure than the
+threats it targets. An unrecognised or missing category on a flagged chunk is treated as hostile
+and dropped — fails closed, since an unfamiliar category is more likely a new threat than a
+benign one.
+
+**Known limitations**
+
+- Chunks indexed before this feature carry no verdict, are reported as `unscreened`, and are
+  passed through; run the re-scan to close that gap.
+- **Plain `POST /v1/collections/{name}/insert` is never screened.** Screening runs against a text
+  embedding Veda computed itself, so it only happens on `process-document`, `ingest-url` and
+  `embed-insert`. `/insert` takes client-supplied vectors, so every record it writes is stamped
+  `skipped` — this includes the Python SDK's normal client-side-embedding path. Unlike the
+  pre-feature case above, one upgrade-time re-scan does not close it: it recurs with every
+  `/insert`, so a corpus ingested that way needs the re-scan run on a cadence.
+- **Temporal conflict detection is active on the `filter_query` tool and inert on `search`.** It
+  compares hits' stored vectors, and `search` deliberately omits vector fields from hydrated hits
+  (hydrating them would inflate every LLM-facing payload). Staleness and expiry work on both.
 
 ## Ops Advisor (Insights)
 

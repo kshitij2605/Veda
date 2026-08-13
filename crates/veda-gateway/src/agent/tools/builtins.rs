@@ -18,6 +18,7 @@ use veda_query::filter::record_eval::evaluate_record;
 use veda_query::search::VectorSearchRequest;
 
 use crate::agent::catalog::{ToolContext, ToolOutcome, ToolSpec};
+use crate::agent::retrieval_guard::enforcement_enabled;
 use crate::rest::aggregate::{AggErrorKind, AggregateQuery, aggregate_core};
 use crate::rest::records::{field_value_to_json, parse_record_public, record_passes_rls_owner};
 
@@ -569,6 +570,21 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
                             fields.insert(name.to_string(), field_value_to_json(value));
                         }
                     }
+                    // The retrieval-guardrail/TTL fields are RESERVED, not
+                    // schema-declared (segment.rs's WAL writer persists them
+                    // "even when not declared in the schema") — no
+                    // `CollectionSchema` a real `/v1/collections` call
+                    // produces ever lists them, so the loop above never
+                    // hydrates them and every hit classifies `Unscreened`.
+                    // Fetch them directly so the dispatch-level guard
+                    // (`apply_retrieval_guard` in `agent/catalog.rs`) has
+                    // something to classify on every real collection, not
+                    // only ones a test happens to declare them on.
+                    for reserved in RESERVED_GUARD_FIELDS {
+                        if let Some(value) = rec.get(reserved) {
+                            fields.insert((*reserved).to_owned(), field_value_to_json(value));
+                        }
+                    }
                 }
             }
             project_fields(&mut fields, &keep_fields);
@@ -677,7 +693,7 @@ pub async fn get_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolO
                 ) {
                     return ToolOutcome::not_found("record not found");
                 }
-                return ToolOutcome::ok(record_json(rec));
+                return guarded_record_outcome(rec);
             }
         }
         for handle in sm.sealed_segments() {
@@ -698,13 +714,44 @@ pub async fn get_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolO
                     ) {
                         return ToolOutcome::not_found("record not found");
                     }
-                    return ToolOutcome::ok(record_json(&rec));
+                    return guarded_record_outcome(&rec);
                 }
             }
         }
     }
 
     ToolOutcome::not_found(format!("record '{record_id}' not found"))
+}
+
+/// Apply the same category-aware drop policy `apply_retrieval_guard`
+/// (`agent/catalog.rs`) applies to `hits`/`records` arrays to a single
+/// fetched record, withholding its content when hostile-flagged
+/// (PII-flagged is exempt and comes back intact — see
+/// `retrieval_guard::category_is_hostile`).
+///
+/// `get_record` is a targeted fetch-by-id, so its bare `{id, fields}`
+/// payload never carries a `hits`/`records` array and the dispatch-level
+/// guard passes it through untouched. Without a check here, a model that
+/// saw a chunk's id reported in a `search`/`filter_query` response's
+/// `retrieval_guard.dropped_chunks` (reported there precisely so the drop
+/// is never silent) could call `get_record` on that same id and retrieve
+/// the withheld content verbatim — the array-shaped guard would have been
+/// enforcement theater. `enforce_retrieved` is reused rather than
+/// reimplemented so the exact same classification logic applies here as
+/// everywhere else.
+fn guarded_record_outcome(rec: &Record) -> ToolOutcome {
+    use crate::agent::retrieval_guard::enforce_retrieved;
+
+    let hit = record_json(rec);
+    let (mut kept, report) = enforce_retrieved(vec![hit], enforcement_enabled());
+    match kept.pop() {
+        Some(hit) => ToolOutcome::ok(hit),
+        None => ToolOutcome::ok(serde_json::json!({
+            "id": rec.id().to_string(),
+            "withheld": true,
+            "retrieval_guard": serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+        })),
+    }
 }
 
 pub async fn route(_ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
@@ -740,14 +787,28 @@ pub async fn aggregate(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOu
         group_by: args["group_by"].as_str().map(str::to_owned),
         filter: args["filter"].as_str().map(str::to_owned),
     };
-    match aggregate_core(ctx.state, scoped.as_str(), &query).await {
+    // `true` = withhold hostile-flagged records from the aggregation. This
+    // tool is model-reachable on every LLM transport, and `group_by` on a
+    // text field emits each group's key VERBATIM — so without this,
+    // `group_by=content&filter=_guardrail_flagged = true` returns the full
+    // text of every chunk the rest of the feature withholds, and
+    // `dropped_chunks[].id` tells a model exactly what to ask for. The raw
+    // REST `/aggregate` keeps its annotate-don't-drop behaviour (it passes
+    // `false`) — see `aggregate_core`.
+    match aggregate_core(ctx.state, scoped.as_str(), &query, enforcement_enabled()).await {
         Ok(resp) => {
             let groups: Vec<serde_json::Value> = resp
                 .groups
                 .into_iter()
                 .map(|g| serde_json::json!({ "key": g.key, "value": g.value }))
                 .collect();
-            ToolOutcome::ok(serde_json::json!({ "groups": groups }))
+            // Report the skip rather than silently returning short counts —
+            // the same "a drop is never silent" rule the hit-shaped guard
+            // follows.
+            ToolOutcome::ok(serde_json::json!({
+                "groups": groups,
+                "retrieval_guard": { "withheld_records": resp.withheld.unwrap_or(0) },
+            }))
         }
         Err(e) => match e.kind {
             AggErrorKind::NotFound => ToolOutcome::not_found(e.message),
@@ -847,6 +908,18 @@ pub async fn filter_query(ctx: &ToolContext<'_>, args: serde_json::Value) -> Too
     ToolOutcome::ok(serde_json::json!({ "records": records, "count": count }))
 }
 
+/// The retrieval-guardrail/TTL fields, reserved rather than
+/// schema-declared. Mirrors the identical inline list in
+/// `veda-storage/src/segment.rs`'s WAL writer (the other place that must
+/// not rely on schema declaration to see them).
+const RESERVED_GUARD_FIELDS: [&str; 5] = [
+    veda_core::record::EXPIRES_AT_FIELD,
+    veda_core::record::GUARDRAIL_FLAGGED_FIELD,
+    veda_core::record::GUARDRAIL_SCORE_FIELD,
+    veda_core::record::GUARDRAIL_CATEGORY_FIELD,
+    veda_core::record::INDEXED_AT_FIELD,
+];
+
 /// Narrow a hit's `fields` map to only the requested `keep` names.
 ///
 /// Pure and testable. `None` (or, per the caller, an empty request array)
@@ -854,6 +927,13 @@ pub async fn filter_query(ctx: &ToolContext<'_>, args: serde_json::Value) -> Too
 /// that is absent from the map is simply skipped (no error). Field order
 /// follows the `keep` list. Only the record `fields` map is affected;
 /// the hit's `id`/`distance` are never touched (they live outside this map).
+///
+/// The reserved guardrail/TTL fields (see [`RESERVED_GUARD_FIELDS`])
+/// survive projection even when not requested: they are what
+/// `apply_retrieval_guard` (`agent/catalog.rs`) reads to classify and drop
+/// a hit at the tool-dispatch choke point. Without this, `"fields":
+/// ["content"]` would silently strip the verdict before enforcement ever
+/// saw it — a one-argument, model-reachable bypass.
 fn project_fields(
     fields: &mut serde_json::Map<String, serde_json::Value>,
     keep: &Option<Vec<String>>,
@@ -863,6 +943,11 @@ fn project_fields(
     for name in keep {
         if let Some(value) = fields.remove(name) {
             projected.insert(name.clone(), value);
+        }
+    }
+    for reserved in RESERVED_GUARD_FIELDS {
+        if let Some(value) = fields.remove(reserved) {
+            projected.insert(reserved.to_owned(), value);
         }
     }
     *fields = projected;
