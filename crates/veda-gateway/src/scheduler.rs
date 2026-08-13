@@ -66,13 +66,16 @@ pub enum JobKind {
         max_trials: usize,
         max_duration_secs: u64,
     },
-    /// Re-screen a collection's records for retrieval guardrails, for
-    /// corpora indexed before the feature shipped or after a
-    /// pattern-set change.
-    RescanGuardrails {
-        collection: String,
-    },
 }
+// NOTE (2026-08-13, pre-merge): a `RescanGuardrails { collection }` variant
+// was deliberately REMOVED before release. The rescan materialises a full
+// copy of the collection (`/reindex` into a sibling + alias swap) and never
+// drops the superseded sibling, which is an acceptable one-off cost for the
+// manual admin endpoint (`POST /v1/admin/collections/{name}/rescan-guardrails`,
+// where an operator chooses to pay it and the growth is documented) but is
+// unbounded disk growth as a cron kind: a nightly full-corpus copy, forever,
+// ending in a full disk. The manual endpoint is unaffected. Reinstate the
+// variant once superseded siblings are reclaimed.
 
 /// A single scheduled job entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,43 +317,6 @@ async fn dispatch(kind: &JobKind, state: &AppState) {
                 crate::rest::auto_optimization::TuningMode::Quality,
             )
             .await;
-        }
-        JobKind::RescanGuardrails { collection } => {
-            // `collection` is the ALIAS KEY (the stable base scoped
-            // name) — resolve it to find where the current live data
-            // actually is, but pass BOTH into `rescan_guardrails_impl`.
-            // Passing only the resolved name here would re-key the
-            // resolved name instead of the base on every run after the
-            // first, chaining `X -> X@v2 -> X@v3 -> …` with each run's
-            // verdicts unreachable past the first (`AliasMap::resolve` is
-            // single-hop) — see `rescan_guardrails_impl`'s doc comment.
-            let resolved = state.inner.aliases.resolve(collection).await;
-            // Errors must not be swallowed as a quiet success: the rescan
-            // now rebuilds into a sibling and swaps the alias, so a
-            // failure here means the live collection was never touched —
-            // worth a `warn`, not the same `info` line a real completion
-            // gets.
-            match crate::rest::collections::rescan_guardrails_impl(state, collection, &resolved)
-                .await
-            {
-                Ok(result) => {
-                    tracing::info!(
-                        collection = %collection,
-                        scanned = result.scanned,
-                        flagged = result.flagged,
-                        skipped = result.skipped,
-                        "scheduler: guardrail rescan complete"
-                    );
-                }
-                Err((status, err)) => {
-                    tracing::warn!(
-                        collection = %collection,
-                        status = %status,
-                        error = %err.0.error,
-                        "scheduler: guardrail rescan failed"
-                    );
-                }
-            }
         }
     }
 }
