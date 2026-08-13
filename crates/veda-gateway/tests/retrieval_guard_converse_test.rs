@@ -41,14 +41,30 @@ const HOSTILE_CONTENT: &str =
 /// would let one test's second completion answer another test's first
 /// request.
 async fn start_mock_llm() -> (String, tokio::task::JoinHandle<()>) {
+    start_mock_llm_calling(
+        "filter_query",
+        "{\"collection\":\"rg_conv\",\"filter\":\"_indexed_at > 0\",\"limit\":10}",
+    )
+    .await
+}
+
+/// The same mock, driving an arbitrary single tool call — used to cover the
+/// `aggregate` path, whose report shape differs from the hit-shaped one.
+async fn start_mock_llm_calling(
+    tool: &'static str,
+    arguments: &'static str,
+) -> (String, tokio::task::JoinHandle<()>) {
     use axum::Router;
     use axum::extract::State;
     use axum::routing::post;
     use std::sync::Arc;
 
-    async fn completions(State(calls): State<Arc<AtomicUsize>>) -> axum::Json<Value> {
+    async fn completions(
+        State((calls, call)): State<(Arc<AtomicUsize>, (&'static str, &'static str))>,
+    ) -> axum::Json<Value> {
         let n = calls.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
+            let (tool, arguments) = call;
             return axum::Json(json!({
                 "choices": [{
                     "message": {
@@ -57,10 +73,7 @@ async fn start_mock_llm() -> (String, tokio::task::JoinHandle<()>) {
                         "tool_calls": [{
                             "id": "call_1",
                             "type": "function",
-                            "function": {
-                                "name": "filter_query",
-                                "arguments": "{\"collection\":\"rg_conv\",\"filter\":\"_indexed_at > 0\",\"limit\":10}"
-                            }
+                            "function": { "name": tool, "arguments": arguments }
                         }]
                     },
                     "finish_reason": "tool_calls"
@@ -79,7 +92,7 @@ async fn start_mock_llm() -> (String, tokio::task::JoinHandle<()>) {
 
     let router = Router::new()
         .route("/v1/chat/completions", post(completions))
-        .with_state(Arc::new(AtomicUsize::new(0)));
+        .with_state((Arc::new(AtomicUsize::new(0)), (tool, arguments)));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}/v1/chat/completions");
@@ -227,6 +240,48 @@ async fn converse_omits_retrieval_guard_when_nothing_was_retrieved() {
         body.get("retrieval_guard").is_none(),
         "no successful retrieval → the field must be omitted: {body}"
     );
+}
+
+/// A turn whose ONLY retrieving call is `aggregate` still reports at the top
+/// level, carrying that path's `withheld_records` count.
+///
+/// `aggregate` emits only the one count it measures, and the turn-level
+/// roll-up reads the per-call reports back out of the recorded steps. A
+/// report that could not deserialize that partial shape made the step
+/// invisible, so this turn omitted `retrieval_guard` entirely — which the
+/// rustdoc, the design and the API reference all define as "the agent never
+/// retrieved". It did retrieve, and it withheld a record while doing so.
+#[tokio::test]
+async fn converse_reports_the_aggregate_withheld_count_at_the_top_level() {
+    let (llm_url, _llm) = start_mock_llm_calling(
+        "aggregate",
+        "{\"collection\":\"rg_conv\",\"field\":\"content\",\"metric\":\"count\",\"group_by\":\"content\"}",
+    )
+    .await;
+    let base = start_test_server_with_llm(&llm_url).await;
+    setup(&base).await;
+
+    let resp = client()
+        .post(format!("{base}/v1/agents/veda-agent/converse"))
+        .json(&json!({ "input": "how many chunks per passage?" }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    assert!(status.is_success(), "converse: {status} {body}");
+
+    let report = &body["retrieval_guard"];
+    assert!(
+        report.is_object(),
+        "an aggregate-only turn DID retrieve, so the field must be present: {body}"
+    );
+    assert_eq!(
+        report["withheld_records"], 1,
+        "the aggregate skip must reach the top-level report: {body}"
+    );
+    let text = serde_json::to_string(&body).unwrap();
+    assert!(!text.contains(HOSTILE_CONTENT), "{text}");
 }
 
 #[tokio::test]

@@ -266,13 +266,17 @@ pub async fn aggregate_core(
                 if rec.is_expired_at(now) {
                     continue;
                 }
-                if drop_hostile && crate::agent::retrieval_guard::record_is_hostile(rec) {
-                    withheld += 1;
-                    continue;
-                }
                 if let Some(ref fe) = filter_expr
                     && !evaluate_record(fe, rec)
                 {
+                    continue;
+                }
+                // After the filter, so the count means "what THIS query
+                // excluded" rather than "hostile records exist somewhere in
+                // the collection" — still before any accumulation, so a
+                // hostile record can never reach a group key.
+                if drop_hostile && crate::agent::retrieval_guard::record_is_hostile(rec) {
+                    withheld += 1;
                     continue;
                 }
                 accumulate_record(
@@ -298,13 +302,15 @@ pub async fn aggregate_core(
                     if rec.is_expired_at(now) {
                         continue;
                     }
-                    if drop_hostile && crate::agent::retrieval_guard::record_is_hostile(&rec) {
-                        withheld += 1;
-                        continue;
-                    }
                     if let Some(ref fe) = filter_expr
                         && !evaluate_record(fe, &rec)
                     {
+                        continue;
+                    }
+                    // Filter first, then withhold — see the growing-segment
+                    // walk above.
+                    if drop_hostile && crate::agent::retrieval_guard::record_is_hostile(&rec) {
+                        withheld += 1;
                         continue;
                     }
                     accumulate_record(
