@@ -56,6 +56,10 @@ Read-only OLAP-style aggregations over the columnar store. All three honor the f
 curl "http://localhost:6340/v1/collections/products/aggregate?field=price&metric=avg&group_by=category&filter=price%20%3C%20500"
 ```
 
+**Known limitation:** `aggregate` with `group_by` on a text field can emit flagged content
+verbatim as a group key — group keys are bare values with no verdict to classify, so retrieval
+guardrails (see below) do not screen them.
+
 ## Scheduled jobs
 
 Admin-only cron scheduler. A job is a cron expression plus a typed kind — `ttl_sweep`, `reindex`, `compact`, or `evaluate`, each scoped to a collection — deliberately not arbitrary code. Jobs persist in the data directory and reload on restart. (`ttl_sweep` is fully wired today; the other kinds are registered hooks.)
@@ -202,7 +206,7 @@ Write skew is allowed (snapshot isolation); lost updates are prevented; read-onl
 | `GET/POST` | `/v1/admin/replica/safe_ts` | Replica read watermark |
 | `POST` | `/v1/admin/cluster/join` · `DELETE /v1/admin/cluster/nodes/{id}` | Raft membership changes |
 | `POST` | `/v1/admin/collections/{name}/mvcc_checkpoint` | Atomic MVCC snapshot + WAL truncate |
-| `POST` | `/v1/admin/collections/{name}/rescan-guardrails` | Re-screen every record and persist the retrieval-guardrail verdict (`_guardrail_flagged`/`_guardrail_score`/`_guardrail_category`/`_indexed_at`); rebuilds through `/reindex` and atomically swaps the alias; returns `{ scanned, flagged, skipped }` |
+| `POST` | `/v1/admin/collections/{name}/rescan-guardrails` | Re-screen every record and persist the retrieval-guardrail verdict (`_guardrail_flagged`/`_guardrail_score`/`_guardrail_category`/`_indexed_at`); rebuilds through `/reindex` and atomically swaps the alias; returns `{ scanned, flagged, skipped }`. **Known limitation:** superseded siblings from repeated `/rescan-guardrails` or `/reindex` calls are never dropped, so repeated rescans grow storage |
 
 Endpoints marked Raft-only return `503` in single-node mode — see [Cluster modes](/docs/installation#cluster-modes).
 
@@ -211,9 +215,20 @@ Endpoints marked Raft-only return `503` in single-node mode — see [Cluster mod
 Ingest screens each chunk's text embedding and stamps the four reserved fields above. On every
 LLM-facing path (`/converse`, `/converse/stream`, MCP `tools/call`, `/agent-tools/{id}/execute`,
 `/a2a/{agent_id}`), the response carries a `retrieval_guard` report — `{ kept, dropped,
-unscreened, skipped, dropped_chunks: [{ id, category, score }] }` — and any flagged chunk is
-dropped before the LLM sees it. `POST /v1/collections/{name}/search` instead annotates each hit
-with `_guardrail_class` and never drops.
+unscreened, skipped, flagged_not_dropped, dropped_chunks: [{ id, category, score }] }` —
+and `get_record` applies the same policy to a directly-fetched record (withholding it if
+dropped). `POST /v1/collections/{name}/search` instead annotates each hit with
+`_guardrail_class` and never drops.
+
+**Dropping is category-aware.** `PromptInjection`, `Jailbreak`, `Unsafe`, and `IndirectInjection`
+are hostile — those chunks are dropped before the LLM sees them and counted in `dropped` /
+`dropped_chunks`. `Pii` (an email, phone number, etc. detected in the chunk text) is detected and
+reported but passed through unchanged, counted in `flagged_not_dropped` instead: this feature
+targets OWASP's injection/poisoning/temporal vectors, and silently stripping a genuine contact
+detail out of an answer to "who do I contact about X" was found to be a worse failure than the
+threats it targets. An unrecognised or missing category on a flagged chunk is treated as hostile
+and dropped — fails closed, since an unfamiliar category is more likely a new threat than a
+benign one.
 
 **Known limitation:** chunks indexed before this feature carry no verdict, are reported as
 `unscreened`, and are passed through; run the re-scan to close that gap.

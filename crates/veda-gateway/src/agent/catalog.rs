@@ -420,13 +420,14 @@ mod tests {
     }
 
     /// Like [`seeded_state`], but the inserted record already carries a
-    /// flagged guardrail verdict. The fields are set directly on the
-    /// `Record` (mirroring `stamp_guardrail_fields`) and, deliberately, are
-    /// NOT added to `text_schema`'s field list — on every real collection
-    /// these are RESERVED fields, never schema-declared.
-    async fn seeded_flagged_state(
+    /// flagged guardrail verdict in the given `category`. The fields are set
+    /// directly on the `Record` (mirroring `stamp_guardrail_fields`) and,
+    /// deliberately, are NOT added to `text_schema`'s field list — on every
+    /// real collection these are RESERVED fields, never schema-declared.
+    async fn seeded_flagged_state_with_category(
         tmp: &std::path::Path,
         user_collection: &str,
+        category: &str,
     ) -> (AppState, crate::tenant::TenantId, uuid::Uuid) {
         let state = AppState::new(tmp);
         let tenant = crate::tenant::TenantId::default_tenant();
@@ -443,7 +444,7 @@ mod tests {
             "embedding",
             FieldValue::Vector(DenseVector::new(vec![1.0, 0.0, 0.0, 0.0])),
         );
-        rec.set("title", FieldValue::String("hostile content".to_owned()));
+        rec.set("title", FieldValue::String("flagged content".to_owned()));
         rec.set(
             veda_core::record::GUARDRAIL_FLAGGED_FIELD,
             FieldValue::Bool(true),
@@ -454,7 +455,7 @@ mod tests {
         );
         rec.set(
             veda_core::record::GUARDRAIL_CATEGORY_FIELD,
-            FieldValue::String("indirect_injection".to_owned()),
+            FieldValue::String(category.to_owned()),
         );
         rec.set(
             veda_core::record::INDEXED_AT_FIELD,
@@ -744,7 +745,8 @@ mod tests {
     #[tokio::test]
     async fn dispatch_get_record_withholds_flagged_content() {
         let tmp = tempfile::tempdir().unwrap();
-        let (state, tenant, id) = seeded_flagged_state(tmp.path(), "docs").await;
+        let (state, tenant, id) =
+            seeded_flagged_state_with_category(tmp.path(), "docs", "indirect_injection").await;
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
         let out = cat
@@ -764,6 +766,39 @@ mod tests {
         );
         assert_eq!(
             out.content["retrieval_guard"]["dropped"], 1,
+            "{:?}",
+            out.content
+        );
+    }
+
+    /// 2026-08-13 ruling: PII is exempt from dropping, and `get_record` must
+    /// apply the SAME category policy as the array-shaped guard
+    /// (`apply_retrieval_guard`/`enforce_retrieved`) — a PII-flagged record
+    /// fetched directly by id must come back with its content intact, not
+    /// withheld.
+    #[tokio::test]
+    async fn dispatch_get_record_does_not_withhold_pii() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant, id) =
+            seeded_flagged_state_with_category(tmp.path(), "docs", "pii").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat
+            .dispatch(
+                &ctx,
+                "get_record",
+                serde_json::json!({ "collection": "docs", "id": id.to_string() }),
+            )
+            .await;
+        assert!(!out.is_error, "outcome: {:?}", out.content);
+        assert_eq!(out.content["id"], id.to_string(), "{:?}", out.content);
+        assert!(
+            out.content.get("withheld").is_none(),
+            "PII must not be withheld: {:?}",
+            out.content
+        );
+        assert_eq!(
+            out.content["fields"]["title"], "flagged content",
             "{:?}",
             out.content
         );
@@ -1259,6 +1294,54 @@ mod tests {
         );
         assert_eq!(
             out.content["retrieval_guard"]["kept"], 1,
+            "{:?}",
+            out.content
+        );
+    }
+
+    fn synthetic_hit_with_category(
+        id: &str,
+        flagged: bool,
+        category: &str,
+        indexed_at: i64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "distance": 0.1,
+            "fields": {
+                "content": "text",
+                "_guardrail_flagged": flagged,
+                "_guardrail_score": if flagged { 0.9 } else { 0.1 },
+                "_guardrail_category": category,
+                "_indexed_at": indexed_at,
+            }
+        })
+    }
+
+    /// 2026-08-13 ruling: PII must be detected and reported, but never
+    /// dropped, at the dispatch-level choke point too — not just inside
+    /// `retrieval_guard::enforce_retrieved`'s own unit tests.
+    #[test]
+    fn apply_retrieval_guard_keeps_pii_and_reports_flagged_not_dropped() {
+        let outcome = ToolOutcome::ok(serde_json::json!({
+            "hits": [
+                synthetic_hit("a", false, 1),
+                synthetic_hit_with_category("b", true, "pii", 1),
+            ],
+            "count": 2,
+        }));
+        let out = apply_retrieval_guard(outcome, None);
+        assert!(!out.is_error);
+        let hits = out.content["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 2, "PII must not be dropped: {:?}", out.content);
+        assert_eq!(out.content["count"], 2, "{:?}", out.content);
+        assert_eq!(
+            out.content["retrieval_guard"]["dropped"], 0,
+            "{:?}",
+            out.content
+        );
+        assert_eq!(
+            out.content["retrieval_guard"]["flagged_not_dropped"], 1,
             "{:?}",
             out.content
         );
