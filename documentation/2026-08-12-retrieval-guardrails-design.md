@@ -42,7 +42,7 @@ implementation does not relitigate them.
 |---|---|---|
 | 1 | Cover **all three** OWASP vectors | Injection and poisoning share one mechanism; temporal is separate but buildable from data Veda already has |
 | 2 | **Ingest-time screening, query-time enforcement** | The chunk embedding already exists at ingest, so screening costs ~one cosine per chunk against a dozen vectors — effectively free. Enforcement must be at query time because policy and the retrieved *set* are only known then |
-| 3 | A flagged chunk is **dropped from context**, and the answer is produced from the rest | The attack never reaches the model, the user still gets an answer, citations stay honest. Blocking the whole turn lets one poisoned document deny service for unrelated queries |
+| 3 | A **hostile**-flagged chunk is **dropped from context** (PII-flagged is exempt — §4.5), and the answer is produced from the rest | The attack never reaches the model, the user still gets an answer, citations stay honest. Blocking the whole turn lets one poisoned document deny service for unrelated queries |
 | 4 | Temporal = **staleness + conflict** | Both derive from data already present. Staleness alone misses the attack shape; conflict alone misses a lone stale chunk |
 | 5 | **Drop on LLM-facing paths, annotate on raw `/search`** | `/search` is a data API; silently dropping hits would corrupt recall measurement in the eval harness and tuning campaigns, and hide what was flagged from operators |
 | 6 | Verdict stored as **reserved record fields** | Follows the `_expires_at` precedent, needs no new storage subsystem, is compaction-safe, and is **filterable** — so "what did enforcement cost us in recall?" is an ordinary query rather than a research project |
@@ -82,8 +82,17 @@ rather than duplicated.
 
 Takes an **already-computed** chunk embedding plus the chunk text. Runs:
 
-1. the existing `pii_match` regex layer over `text`;
-2. cosine of `embedding` against the embedded pattern set, taking the max.
+1. cosine of `embedding` against the embedded pattern set, taking the max — if this flags, it
+   wins outright and `pii_match` is never even consulted;
+2. only if step 1 did not flag: the existing `pii_match` regex layer over `text`.
+
+**Post-ship correction (2026-08-13):** this order (semantic first, PII only on a semantic miss)
+is load-bearing, not incidental — `Pii` is exempt from dropping (§4.5) while every other category
+is hostile, so a chunk gets exactly one reported category and it must not be `Pii` when the
+chunk is ALSO genuinely hostile. The original implementation checked `pii_match` first and
+returned immediately on a match, so a hostile chunk that also happened to contain an email/phone/
+etc. was reported as `Pii` and passed through — a one-token drop bypass, closed by reordering
+`screen_chunk_with`. See `category_is_hostile` in `retrieval_guard.rs`.
 
 Returns a `ChunkVerdict { flagged, category, score, matched }` — the same shape as the existing
 `GuardrailVerdict` minus `action` (action is a query-time concern).
@@ -117,8 +126,9 @@ measurement, exactly as `DEFAULT_THRESHOLD`'s 0.80 → 0.65 recalibration was.
 **Measured (2026-08-13):** 10 real Japanese business PDFs (149 chunks, jina-omni embedder, no
 planted attacks) ingested via `process-document` into a calibration collection, then
 `aggregate?field=_guardrail_flagged&group_by=_guardrail_flagged`. 3/149 (2.01%) flagged — all
-three were the PII regex layer (score `1.0`, resolved before the cosine comparison runs) hitting
-a genuine email address and a genuine phone number in vendor contact/screenshot content, not a
+three were the PII regex layer (score `1.0`; the semantic layer runs first and did not flag any
+of the three, so PII was each chunk's sole finding) hitting a genuine email address and a
+genuine phone number in vendor contact/screenshot content, not a
 semantic near-miss. The semantic `IndirectInjection` layer flagged 0/149, with the highest
 observed similarity on any non-PII chunk at `0.354` — comfortably below the threshold. Because
 `RETRIEVED_THRESHOLD` only gates the semantic layer, it has no mechanism to move this
@@ -208,7 +218,7 @@ injection still reaches the model — it does not close the gap.
 | Agent state | Input handling | Retrieval handling |
 |---|---|---|
 | `guardrails = false` | off | off — no screening, no enforcement |
-| `guardrails = true` | unchanged (`Flag` today) | **drop flagged chunks** |
+| `guardrails = true` | unchanged (`Flag` today) | **drop hostile-flagged chunks** (PII-flagged pass through, reported — §4.5) |
 
 `GuardrailMode` semantics for input are untouched. An operator who wants detect-only visibility
 into retrieval without dropping gets it by reading `_guardrail_flagged` on `/search`, which

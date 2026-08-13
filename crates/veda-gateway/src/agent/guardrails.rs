@@ -61,9 +61,10 @@ pub const DEFAULT_THRESHOLD: f32 = 0.65;
 /// `/home/mac/test/rag_anything-veda/bulk_module/tmp`) via
 /// `guard_cal/aggregate?field=_guardrail_flagged&group_by=_guardrail_flagged`.
 /// 3/149 chunks flagged (2.01%) — but all 3 were the **PII regex layer**
-/// (score `1.0`, checked before the cosine comparison ever runs; see
-/// [`screen_chunk_with`]), matching a real email address and a real phone
-/// number embedded in vendor contact/screenshot content. The **semantic**
+/// (score `1.0`; the semantic layer runs first and did not flag any of the
+/// three, so PII was each chunk's sole finding — see [`screen_chunk_with`]),
+/// matching a real email address and a real phone number embedded in
+/// vendor contact/screenshot content. The **semantic**
 /// `IndirectInjection` layer flagged **zero** of the 149 chunks; the highest
 /// similarity observed on any non-PII chunk was `0.354`, a comfortable
 /// `0.246` below this threshold. Since `RETRIEVED_THRESHOLD` only gates the
