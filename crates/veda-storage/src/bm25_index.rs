@@ -446,6 +446,42 @@ impl Bm25Index {
         block_max_wand(cursors, k, theta)
     }
 
+    /// BM25 bag-of-words score for each doc in `doc_ids`, in the same
+    /// order. Docs that match none of the analyzed query terms score `0.0`,
+    /// as do doc_ids not present in the index.
+    ///
+    /// Exists so `search_phrase` can score only the docs that already
+    /// passed positional matching, instead of scoring the entire corpus and
+    /// discarding almost all of it. Accumulates term-by-term in the same
+    /// order as `search_exhaustive`, so the scores it produces are
+    /// bit-identical to that path's.
+    fn score_docs(&self, query: &str, doc_ids: &[u32]) -> Vec<f32> {
+        let n = self.doc_count() as f32;
+        if n == 0.0 || doc_ids.is_empty() {
+            return vec![0.0; doc_ids.len()];
+        }
+        let avg_dl = self.avg_doc_length();
+        let wanted: std::collections::HashSet<u32> = doc_ids.iter().copied().collect();
+        let mut acc: HashMap<u32, f32> = HashMap::with_capacity(wanted.len());
+        for term in self.unique_query_terms(query) {
+            let Some(postings) = self.postings.get(term) else {
+                continue;
+            };
+            let idf = bm25_idf(n, postings.len() as f32);
+            for &(doc_id, tf, _) in postings {
+                if !wanted.contains(&doc_id) {
+                    continue;
+                }
+                let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0);
+                *acc.entry(doc_id).or_insert(0.0) += bm25_impact(idf, tf, dl, avg_dl);
+            }
+        }
+        doc_ids
+            .iter()
+            .map(|d| *acc.get(d).unwrap_or(&0.0))
+            .collect()
+    }
+
     /// Analyzed query terms with duplicates removed — repeated tokens add
     /// no new evidence in standard BM25.
     ///
@@ -600,14 +636,13 @@ impl Bm25Index {
             return Vec::new();
         }
 
-        // Score matched docs with the standard BM25 bag-of-words score.
-        let bm25_hits = self.search(phrase, usize::MAX);
-        let score_map: HashMap<u32, f32> = bm25_hits.into_iter().collect();
-
-        let mut result: Vec<(u32, f32)> = matched
-            .into_iter()
-            .map(|id| (id, *score_map.get(&id).unwrap_or(&0.0)))
-            .collect();
+        // Score only the docs that passed positional matching. Scoring the
+        // whole corpus here was unbounded work for a result set that is
+        // usually tiny — and once block metadata exists, a k of usize::MAX
+        // would route this straight into the pruning path, where it
+        // overflows the heap capacity and disables pruning entirely.
+        let scores = self.score_docs(phrase, &matched);
+        let mut result: Vec<(u32, f32)> = matched.into_iter().zip(scores).collect();
         // Score descending, then doc_id ascending — see the identical
         // comparator in `search` for why the tie-break matters.
         result.sort_by(|a, b| {
@@ -1247,6 +1282,84 @@ mod tests {
             !ids.contains(&0),
             "removed stopword must leave a position gap (Lucene positionIncrement): {ids:?}"
         );
+    }
+
+    #[test]
+    fn score_docs_matches_full_search_scores() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..500u32 {
+            let a = (doc_id % 4) as usize + 1;
+            let mut text = "alpha ".repeat(a);
+            text.push_str("beta gamma");
+            idx.insert(doc_id, &text);
+        }
+        let full: HashMap<u32, f32> = idx.search("alpha beta", usize::MAX).into_iter().collect();
+        let picked: Vec<u32> = vec![3, 17, 200, 499];
+        let scores = idx.score_docs("alpha beta", &picked);
+        assert_eq!(scores.len(), picked.len());
+        for (doc_id, got) in picked.iter().zip(scores) {
+            assert_eq!(got, full[doc_id], "doc {doc_id}");
+        }
+    }
+
+    #[test]
+    fn score_docs_returns_zero_for_a_non_matching_doc() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        idx.insert(0, "alpha");
+        idx.insert(1, "zzz");
+        let scores = idx.score_docs("alpha", &[1]);
+        assert_eq!(scores, vec![0.0]);
+    }
+
+    #[test]
+    fn score_docs_handles_duplicate_and_unknown_doc_ids() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..10u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        // A doc_id repeated must score the same both times; a doc_id past the
+        // end of the index must score 0.0 rather than panicking.
+        let scores = idx.score_docs("alpha", &[3, 3, 9999]);
+        assert_eq!(scores.len(), 3);
+        assert_eq!(scores[0], scores[1]);
+        assert!(scores[0] > 0.0);
+        assert_eq!(scores[2], 0.0);
+    }
+
+    #[test]
+    fn phrase_scores_are_unchanged_by_the_rewrite() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..200u32 {
+            idx.insert(doc_id, "the quick brown fox jumps");
+        }
+        let hits = idx.search_phrase("quick brown", 0, 10);
+        assert_eq!(hits.len(), 10);
+        let bag: HashMap<u32, f32> = idx.search("quick brown", usize::MAX).into_iter().collect();
+        for (doc_id, score) in &hits {
+            assert_eq!(
+                *score, bag[doc_id],
+                "phrase score must stay the bag-of-words score"
+            );
+        }
+    }
+
+    #[test]
+    fn phrase_search_works_on_an_index_with_blocks() {
+        // Guards the task-ordering hazard: once block metadata exists,
+        // search_phrase must not route a k = usize::MAX request into the
+        // pruning path. Overflow-checks are on in test builds, so a regression
+        // here panics rather than failing quietly.
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..1000u32 {
+            idx.insert(doc_id, "the quick brown fox jumps");
+        }
+        idx.build_blocks();
+        assert!(idx.has_blocks());
+        let hits = idx.search_phrase("quick brown", 0, 5);
+        assert_eq!(hits.len(), 5);
+        for (_, score) in &hits {
+            assert!(*score > 0.0);
+        }
     }
 
     #[test]
