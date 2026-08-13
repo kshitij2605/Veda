@@ -18,6 +18,8 @@ use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use veda_core::error::{Result, VedaError};
 
+use crate::block_max::BLOCK_SIZE;
+
 /// Lucene-default BM25 parameter k1.
 pub const BM25_K1: f32 = 1.2;
 /// Lucene-default BM25 parameter b.
@@ -136,11 +138,24 @@ static ENGLISH_STOPWORDS: &[&str] = &[
     "my", "we", "our", "you", "your", "he", "she", "it", "they", "them", "their",
 ];
 
+/// Per-term block metadata: `(last_doc_id_in_block, max_impact_in_block)`,
+/// one entry per `BLOCK_SIZE` postings, in the same order as the postings
+/// themselves, plus the maximum across the whole list.
+///
+/// Derived data — never serialized. See `build_blocks`.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct BlockIndex {
+    blocks: Vec<(u32, f32)>,
+    list_max: f32,
+}
+
 /// Per-segment BM25 inverted index.
 ///
-/// `postings` is `term → Vec<(doc_id, term_freq, positions)>` sorted by
-/// doc_id at save time so queries can short-circuit AND-style scoring
-/// later. Positions are sorted ascending and record the raw tokenizer
+/// `postings` is `term → Vec<(doc_id, term_freq, positions)>`. Insertion
+/// order is only sorted by doc_id if callers honour `insert`'s "increasing
+/// doc_id order" contract — nothing here enforces it. `build_blocks` is the
+/// one place that sorts unconditionally, because block-max bounds require
+/// it. Positions are sorted ascending and record the raw tokenizer
 /// output position (before stopword removal) so that phrase queries
 /// correctly account for gaps left by removed stopwords — mirroring
 /// Lucene's `positionIncrement` semantics.
@@ -162,6 +177,13 @@ pub struct Bm25Index {
     /// older persisted indexes that lack this field load cleanly.
     #[serde(default)]
     analyzer: AnalyzerConfig,
+    /// Block-max metadata, keyed by term. Empty until `build_blocks` runs,
+    /// which happens only for read-only (sealed) indexes — a growing index
+    /// invalidates these on every insert, so it keeps the exhaustive path.
+    ///
+    /// Never serialized: derived cheaply at load from data already in memory.
+    #[serde(skip)]
+    block_indexes: HashMap<String, BlockIndex>,
 }
 
 impl Bm25Index {
@@ -232,6 +254,70 @@ impl Bm25Index {
         } else {
             (self.total_tokens as f64 / self.doc_lengths.len() as f64) as f32
         }
+    }
+
+    /// Whether block-max metadata is available, i.e. whether the pruning
+    /// path can run.
+    pub fn has_blocks(&self) -> bool {
+        !self.block_indexes.is_empty()
+    }
+
+    /// Sort every posting list by doc_id, then derive per-term block-max
+    /// metadata from it.
+    ///
+    /// Call once, after the index is complete and will not be inserted into
+    /// again. Idempotent. Cheap relative to the JSON parse that produced the
+    /// postings, which is why none of this is persisted.
+    ///
+    /// The sort is not incidental. `insert` appends and never orders, so a
+    /// caller that ignores its "increasing doc_id order" contract leaves the
+    /// list unsorted — and a maximum taken over an out-of-order block is not
+    /// a bound for that block's doc range, while the posting cursor binary
+    /// searches these lists. Sorting here turns an assumed invariant into an
+    /// enforced one.
+    ///
+    /// Bounds use the same `bm25_idf` / `bm25_impact` helpers that scoring
+    /// uses, so a bound can never drift from the score it bounds.
+    pub fn build_blocks(&mut self) {
+        self.block_indexes.clear();
+        let n = self.doc_count() as f32;
+        if n == 0.0 {
+            return;
+        }
+        let avg_dl = self.avg_doc_length();
+
+        for postings in self.postings.values_mut() {
+            if postings.windows(2).any(|w| w[0].0 > w[1].0) {
+                postings.sort_by_key(|p| p.0);
+            }
+        }
+
+        let mut built: HashMap<String, BlockIndex> = HashMap::with_capacity(self.postings.len());
+        for (term, postings) in &self.postings {
+            if postings.is_empty() {
+                continue;
+            }
+            let idf = bm25_idf(n, postings.len() as f32);
+            let mut blocks = Vec::with_capacity(postings.len().div_ceil(BLOCK_SIZE));
+            let mut list_max = f32::MIN;
+            for chunk in postings.chunks(BLOCK_SIZE) {
+                let mut block_max = f32::MIN;
+                for &(doc_id, tf, _) in chunk {
+                    let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0);
+                    let impact = bm25_impact(idf, tf, dl, avg_dl);
+                    if impact > block_max {
+                        block_max = impact;
+                    }
+                }
+                if block_max > list_max {
+                    list_max = block_max;
+                }
+                // `chunks` never yields an empty chunk.
+                blocks.push((chunk[chunk.len() - 1].0, block_max));
+            }
+            built.insert(term.clone(), BlockIndex { blocks, list_max });
+        }
+        self.block_indexes = built;
     }
 
     /// Rank docs by BM25 score against `query`. Returns `(doc_id, score)`
@@ -1069,5 +1155,122 @@ mod tests {
         let denom = tf_f + BM25_K1 * (1.0 - BM25_B + BM25_B * 120.0 / 100.0f32.max(1.0));
         let want = idf * tf_f * (BM25_K1 + 1.0) / denom.max(1e-6);
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn build_blocks_populates_and_reports() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        assert!(!idx.has_blocks(), "empty index has no blocks");
+        for doc_id in 0..300u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        assert!(!idx.has_blocks(), "blocks are not built implicitly");
+        idx.build_blocks();
+        assert!(idx.has_blocks());
+    }
+
+    #[test]
+    fn build_blocks_on_empty_index_is_a_noop() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        idx.build_blocks();
+        assert!(!idx.has_blocks());
+        assert!(idx.search("anything", 5).is_empty());
+    }
+
+    #[test]
+    fn build_blocks_sorts_out_of_order_postings() {
+        // insert() appends, so inserting descending leaves the posting list
+        // descending. A block maximum computed over an unsorted list is not a
+        // bound for that block's doc range, and the cursor in the next task
+        // binary-searches these postings. build_blocks must enforce order.
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in (0..500u32).rev() {
+            idx.insert(doc_id, "alpha");
+        }
+        assert!(
+            idx.postings["alpha"].windows(2).any(|w| w[0].0 > w[1].0),
+            "fixture precondition: postings really are out of order before build"
+        );
+        idx.build_blocks();
+        assert!(
+            idx.postings["alpha"].windows(2).all(|w| w[0].0 < w[1].0),
+            "build_blocks must leave postings sorted ascending by doc_id"
+        );
+        // And the block boundaries must agree with the sorted order.
+        let bi = &idx.block_indexes["alpha"];
+        for (b, chunk) in idx.postings["alpha"]
+            .chunks(crate::block_max::BLOCK_SIZE)
+            .enumerate()
+        {
+            assert_eq!(bi.blocks[b].0, chunk.last().unwrap().0);
+        }
+    }
+
+    #[test]
+    fn block_max_bounds_every_member_posting() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        // Varied lengths and term frequencies so impacts differ within blocks.
+        for doc_id in 0..1000u32 {
+            let repeats = (doc_id % 7) as usize + 1;
+            let filler = (doc_id % 13) as usize;
+            let mut text = "alpha ".repeat(repeats);
+            text.push_str(&"filler ".repeat(filler));
+            text.push_str("beta gamma");
+            idx.insert(doc_id, &text);
+        }
+        idx.build_blocks();
+
+        let n = idx.doc_count() as f32;
+        let avg_dl = idx.avg_doc_length();
+        for (term, postings) in &idx.postings {
+            let bi = idx
+                .block_indexes
+                .get(term)
+                .unwrap_or_else(|| panic!("no block index for {term}"));
+            let idf = bm25_idf(n, postings.len() as f32);
+            for (i, &(doc_id, tf, _)) in postings.iter().enumerate() {
+                let dl = idx.doc_lengths[doc_id as usize];
+                let impact = bm25_impact(idf, tf, dl, avg_dl);
+                let (_, block_max) = bi.blocks[i / crate::block_max::BLOCK_SIZE];
+                assert!(
+                    block_max >= impact,
+                    "term {term} posting {i}: block_max {block_max} < impact {impact}"
+                );
+                assert!(
+                    bi.list_max >= block_max,
+                    "term {term}: list_max {} < block_max {block_max}",
+                    bi.list_max
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn block_last_doc_is_the_final_doc_in_each_block() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..500u32 {
+            idx.insert(doc_id, "alpha");
+        }
+        idx.build_blocks();
+        let postings = &idx.postings["alpha"];
+        let bi = &idx.block_indexes["alpha"];
+        for (b, chunk) in postings.chunks(crate::block_max::BLOCK_SIZE).enumerate() {
+            assert_eq!(bi.blocks[b].0, chunk.last().unwrap().0);
+        }
+    }
+
+    #[test]
+    fn blocks_survive_a_second_build() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..200u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        idx.build_blocks();
+        let first = idx.block_indexes["alpha"].blocks.clone();
+        idx.build_blocks();
+        assert_eq!(
+            idx.block_indexes["alpha"].blocks, first,
+            "rebuild must be idempotent"
+        );
     }
 }
