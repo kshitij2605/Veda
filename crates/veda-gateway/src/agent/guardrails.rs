@@ -54,10 +54,27 @@ pub const DEFAULT_THRESHOLD: f32 = 0.65;
 ///
 /// `DEFAULT_THRESHOLD` was calibrated against user-phrased attacks; the
 /// document-phrased patterns in [`retrieved_patterns`] have a different
-/// similarity distribution, so they get their own cutoff. 0.60 is the
-/// starting value; revise it against the false-positive measurement on a
-/// known-clean corpus and record the measurement here, exactly as
-/// `DEFAULT_THRESHOLD`'s 0.80 → 0.65 recalibration was recorded.
+/// similarity distribution, so they get their own cutoff.
+///
+/// **Measured 2026-08-13** against 10 real Japanese business PDFs (149
+/// OCR'd/chunked/embedded records, jina-omni embedder, no planted attacks —
+/// `/home/mac/test/rag_anything-veda/bulk_module/tmp`) via
+/// `guard_cal/aggregate?field=_guardrail_flagged&group_by=_guardrail_flagged`.
+/// 3/149 chunks flagged (2.01%) — but all 3 were the **PII regex layer**
+/// (score `1.0`, checked before the cosine comparison ever runs; see
+/// [`screen_chunk_with`]), matching a real email address and a real phone
+/// number embedded in vendor contact/screenshot content. The **semantic**
+/// `IndirectInjection` layer flagged **zero** of the 149 chunks; the highest
+/// similarity observed on any non-PII chunk was `0.354`, a comfortable
+/// `0.246` below this threshold. Since `RETRIEVED_THRESHOLD` only gates the
+/// semantic layer, it has **no mechanism** to change the PII-driven flags —
+/// raising it in 0.05 steps per the calibration playbook would not have
+/// lowered the measured rate, so it stays at its provisional **0.60**,
+/// which the data shows is already well clear of this corpus's semantic
+/// near-miss ceiling. A PII regex hit on genuine contact information is
+/// arguably correct behaviour, not a false positive of *this* threshold —
+/// but it is out of this constant's scope to retune (the PII layer is
+/// shared with the input-side guardrails).
 pub const RETRIEVED_THRESHOLD: f32 = 0.60;
 
 /// What a flagged span was classified as.

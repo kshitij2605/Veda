@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-13
+
+Retrieval guardrails — closes the OWASP 2026-07-12 indirect-injection vector (hostile instructions carried *inside retrieved documents* rather than in the user's prompt), which the existing input/output guardrails (v0.5.0) could not see. Every chunk is screened at ingest against its already-computed text embedding and stamped with four reserved fields (`_guardrail_flagged`, `_guardrail_score`, `_guardrail_category`, `_indexed_at`); every LLM-facing path (`/converse`, `/converse/stream`, MCP `tools/call`, `/agent-tools/{id}/execute`, `/a2a/{agent_id}`) drops flagged chunks before the LLM sees them and attaches a `retrieval_guard` report, while raw `POST /search` only annotates (`_guardrail_class`) and never drops, so recall stays observable. A new `POST /v1/admin/collections/{name}/rescan-guardrails` re-screens and persists verdicts onto an existing collection (rebuilds through `/reindex`, atomic alias swap). See `documentation/2026-08-12-retrieval-guardrails-design.md`.
+
+### Added
+- **Retrieval guardrails** — `screen_chunk` cosines each chunk's text embedding against a document-phrased `IndirectInjection` pattern set (distinct from the input-side patterns; `RETRIEVED_THRESHOLD = 0.60`, measured against a 10-PDF/149-chunk known-clean Japanese business corpus: the semantic layer flagged 0/149 — the observed near-miss ceiling was 0.354, well clear of the threshold — while the always-on PII regex layer flagged 3/149 (2.01%) on genuine email/phone contact info, unrelated to this threshold) and stamps the four reserved fields on every ingest path (`process-document`, `embed-insert`, `insert`). `ToolCatalog::dispatch` enforces the drop at the tool-dispatch choke point on every LLM-facing surface; `get_record` withholds a flagged record outright.
+- **`POST /v1/admin/collections/{name}/rescan-guardrails`** — re-screens every record in a collection and persists the verdict, for corpora indexed before this feature shipped or after a pattern-set update. Also registered as a schedulable `JobKind`.
+
+### Known limitations
+- **Chunks indexed before this feature carry no verdict, are reported as `unscreened`, and are passed through; run the re-scan to close that gap.** Treating an unstamped chunk as hostile would empty every existing collection on upgrade, so enforcement fails open on missing verdicts by design — this is the one deliberate asymmetry in the model.
+- `aggregate` with `group_by` on a text field can emit flagged content verbatim as a group key; group keys are bare values with no verdict to classify, so they are not screened.
+- Superseded rescan siblings (from repeated `/rescan-guardrails` or `/reindex` calls) are never dropped, so repeated rescans grow storage.
+
 ## [0.5.1] - 2026-06-21
 
 Multimodal E2E follow-up — closes the three caveats the v0.5.0 campaign left open (OCR, SPLADE sparse, and live index-type validation) by standing up the missing sidecars and landing the fixes they surfaced. Real **FlashParse** (GLM-OCR + PP-DocLayoutV3) validated `process-document` end-to-end (2-page PDF → 3 OCR'd pages in ~42s → 3 chunks incl. a real table + 4 images → embedded into **both** dense and SPLADE → all searchable); a real **SPLADE encoder** verified sparse search (4/5 top-1); and all **10 CPU index types** build + search end-to-end through the API (recall@10 vs flat: flat/hnsw/diskann/rabitq_rerank/sq8 1.00, sq4 0.99, ivfpq 0.97, rabitq/hnsw_rabitq/rabitq_ext_rerank 0.90; `cagra` SKIP — no cuVS in this build). See `reports/2026-06-21-e2e-report.md` (§7) and `reports/2026-06-21-e2e-bug-findings.md`.
