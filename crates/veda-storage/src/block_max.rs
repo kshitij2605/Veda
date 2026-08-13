@@ -17,6 +17,13 @@ use std::collections::BinaryHeap;
 /// enough that a block's maximum stays a tight bound on its members.
 pub const BLOCK_SIZE: usize = 128;
 
+/// Ceiling on the heap's preallocated capacity. Purely a preallocation
+/// hint — the heap never holds more than `k` entries regardless of this
+/// value — so capping it just avoids an oversized (or, at `k ==
+/// usize::MAX`, outright panicking) allocation request for a `k` no real
+/// top-k result set would ever reach.
+const MAX_HEAP_PREALLOC: usize = 4096;
+
 /// A cursor over one term's postings, positioned at a document.
 ///
 /// Implementors must visit postings in ascending `doc_id` order — the
@@ -100,6 +107,20 @@ impl PartialOrd for Entry {
 /// prune more aggressively and may omit true top-k results. Values below
 /// `1.0` and non-finite values are clamped to `1.0` — they could only make
 /// the traversal slower without changing the result.
+///
+/// A document's score is the sum of every cursor positioned on it at
+/// scoring time, added in `cursors`' *original* order — the order the
+/// `Vec` was passed in, not the doc-sorted order the traversal sorts them
+/// into internally (ties in that internal sort are broken by original
+/// position specifically so this holds). `f32` addition is not
+/// associative, so this order is significant, and it feeds heap admission,
+/// pivot selection and block-skip thresholds, not just the reported score
+/// — a caller that wants `theta = 1.0` results identical to some reference
+/// scorer, bit for bit, must build `cursors` in the same order that
+/// reference scorer sums a document's terms in (e.g. query term order),
+/// not e.g. an order derived from iterating a `HashMap`, which would make
+/// scores — and, at tie boundaries, which documents are admitted at all —
+/// nondeterministic from run to run.
 pub fn block_max_wand<C: PostingCursor>(
     cursors: Vec<C>,
     k: usize,
@@ -124,7 +145,8 @@ pub fn block_max_wand<C: PostingCursor>(
     // starting point, every time.
     let mut cursors: Vec<(usize, C)> = cursors.into_iter().enumerate().collect();
 
-    let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(k.saturating_add(1));
+    let mut heap: BinaryHeap<Entry> =
+        BinaryHeap::with_capacity(k.saturating_add(1).min(MAX_HEAP_PREALLOC));
 
     'outer: loop {
         cursors.retain(|(_, c)| c.doc().is_some());
@@ -541,5 +563,47 @@ mod tests {
         let lists = vec![vec![(1u32, 1.0f32), (2, 2.0), (3, 3.0)]];
         let (hits, _) = block_max_wand(cursors_for(&lists), 2, f32::NAN);
         assert_eq!(hits, exhaustive(&lists, 2));
+    }
+
+    /// Regression test for the `(doc, original_index)` tie-break in the
+    /// per-iteration `sort_by_key`: this is the one property that makes
+    /// `block_max_wand`'s pivot-doc score sum bit-identical to a
+    /// term-ordered exhaustive sum. Every other test in this module uses
+    /// scores that are exact multiples of `0.25` (or small integers), which
+    /// are exactly representable in binary and so sum to the same `f32`
+    /// result regardless of addition order — none of them would notice if
+    /// the `*i` were deleted from that sort key.
+    ///
+    /// Four lists, three of which are present or absent on a different
+    /// period (5, 11, 3) so their relative doc-tie order keeps reshuffling
+    /// across iterations instead of staying list-order the whole time, plus
+    /// a fourth present on every doc — this is the structure under which an
+    /// earlier round of this same feature was caught producing 1-ULP
+    /// mismatches against an oracle. `1.0 / 3.0` is not exactly
+    /// representable in binary, so the different summation order the
+    /// traversal takes without the tie-break genuinely lands on a different
+    /// last mantissa bit here (confirmed by hand while writing this test:
+    /// temporarily deleting the `*i` tie-break made this test fail with a
+    /// concrete `left != right` diff; restoring it made it pass again).
+    #[test]
+    fn tie_break_keeps_non_dyadic_sums_bit_identical_to_exhaustive() {
+        const UNIT: f32 = 1.0 / 3.0;
+        let always: Vec<(u32, f32)> = (0u32..3000)
+            .map(|d| (d, UNIT * ((d % 5) + 1) as f32))
+            .collect();
+        let period_11: Vec<(u32, f32)> = (0u32..3000)
+            .filter(|d| d % 11 != 0)
+            .map(|d| (d, UNIT * ((d % 11) + 1) as f32))
+            .collect();
+        let period_3: Vec<(u32, f32)> = (0u32..3000)
+            .filter(|d| d % 3 != 0)
+            .map(|d| (d, UNIT * ((d % 3) + 1) as f32))
+            .collect();
+        let constant: Vec<(u32, f32)> = (0u32..3000).map(|d| (d, UNIT)).collect();
+        let lists = vec![always, period_11, period_3, constant];
+        for k in [1usize, 5, 10, 100, 1000, 5000] {
+            let (hits, _) = block_max_wand(cursors_for(&lists), k, 1.0);
+            assert_eq!(hits, exhaustive(&lists, k), "k {k}");
+        }
     }
 }
