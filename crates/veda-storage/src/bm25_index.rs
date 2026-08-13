@@ -23,6 +23,28 @@ pub const BM25_K1: f32 = 1.2;
 /// Lucene-default BM25 parameter b.
 pub const BM25_B: f32 = 0.75;
 
+/// BM25 inverse document frequency, Lucene practical form with the `+1`
+/// floor. `n` = document count, `df` = documents containing the term.
+///
+/// This is the single definition of IDF. `search`, block-max construction
+/// and the posting cursor all call it, so an upper bound computed for
+/// pruning can never drift from the score it is bounding.
+#[inline]
+pub(crate) fn bm25_idf(n: f32, df: f32) -> f32 {
+    ((n - df + 0.5) / (df + 0.5) + 1.0).ln()
+}
+
+/// Score contribution of one posting: `idf` for the term, `tf` within the
+/// document, `dl` document length, `avg_dl` mean document length.
+///
+/// This is the single definition of the BM25 term score. See `bm25_idf`.
+#[inline]
+pub(crate) fn bm25_impact(idf: f32, tf: u32, dl: u32, avg_dl: f32) -> f32 {
+    let tf_f = tf as f32;
+    let denom = tf_f + BM25_K1 * (1.0 - BM25_B + BM25_B * dl as f32 / avg_dl.max(1.0));
+    idf * tf_f * (BM25_K1 + 1.0) / denom.max(1e-6)
+}
+
 /// Identifier for a tokenizer choice. Persisted with each index so a
 /// query at read time uses the same tokenizer that built the postings.
 ///
@@ -240,18 +262,22 @@ impl Bm25Index {
                 continue;
             };
             let df = postings.len() as f32;
-            // BM25 IDF with the +1 floor (Lucene practical form).
-            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+            let idf = bm25_idf(n, df);
             for &(doc_id, tf, _) in postings {
-                let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0) as f32;
-                let tf_f = tf as f32;
-                let denom = tf_f + BM25_K1 * (1.0 - BM25_B + BM25_B * dl / avg_dl.max(1.0));
-                let s = idf * tf_f * (BM25_K1 + 1.0) / denom.max(1e-6);
-                *scores.entry(doc_id).or_insert(0.0) += s;
+                let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0);
+                *scores.entry(doc_id).or_insert(0.0) += bm25_impact(idf, tf, dl, avg_dl);
             }
         }
         let mut result: Vec<(u32, f32)> = scores.into_iter().collect();
-        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Score descending, then doc_id ascending. The doc_id tie-break is
+        // what makes the result a total order: without it, equal-scoring
+        // docs come back in HashMap iteration order, which is neither
+        // stable across runs nor comparable against a second implementation.
+        result.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
         result.truncate(k);
         result
     }
@@ -364,7 +390,13 @@ impl Bm25Index {
             .into_iter()
             .map(|id| (id, *score_map.get(&id).unwrap_or(&0.0)))
             .collect();
-        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Score descending, then doc_id ascending — see the identical
+        // comparator in `search` for why the tie-break matters.
+        result.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
         result.truncate(k);
         result
     }
@@ -997,5 +1029,45 @@ mod tests {
             !ids.contains(&0),
             "removed stopword must leave a position gap (Lucene positionIncrement): {ids:?}"
         );
+    }
+
+    #[test]
+    fn equal_scores_are_ordered_by_doc_id() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        // Identical documents inserted out of any helpful order produce
+        // identical BM25 scores, so only the tie-break decides the order.
+        for doc_id in [4u32, 0, 3, 1, 2] {
+            idx.insert(doc_id, "alpha beta");
+        }
+        let hits = idx.search("alpha", 5);
+        let ids: Vec<u32> = hits.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![0, 1, 2, 3, 4],
+            "ties must break by doc_id ascending"
+        );
+    }
+
+    #[test]
+    fn search_is_deterministic_across_repeated_calls() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..50u32 {
+            idx.insert(doc_id, "alpha beta gamma");
+        }
+        let first = idx.search("alpha beta", 10);
+        for _ in 0..20 {
+            assert_eq!(idx.search("alpha beta", 10), first);
+        }
+    }
+
+    #[test]
+    fn impact_helper_matches_inline_formula() {
+        // Guards against the helper drifting from the expression it replaced.
+        let idf = bm25_idf(100.0, 10.0);
+        let got = bm25_impact(idf, 3, 120, 100.0);
+        let tf_f = 3.0f32;
+        let denom = tf_f + BM25_K1 * (1.0 - BM25_B + BM25_B * 120.0 / 100.0f32.max(1.0));
+        let want = idf * tf_f * (BM25_K1 + 1.0) / denom.max(1e-6);
+        assert_eq!(got, want);
     }
 }
