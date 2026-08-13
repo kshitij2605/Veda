@@ -766,6 +766,16 @@ pub struct ReindexRequest {
     /// evaluating candidate configs.
     #[serde(default, skip_deserializing)]
     pub skip_alias_swap: bool,
+    /// Internal-only: re-screen every copied record for retrieval
+    /// guardrails as it is written into the sibling, using the schema's
+    /// text-modality `auto_embed` vector field (the record's own already-
+    /// stored vector — no re-embed call, no embedder dependency).
+    /// `skip_deserializing` — never settable from the public `/reindex`
+    /// HTTP body; set only by `rescan_guardrails_impl`. Only takes effect
+    /// on the straight-copy path (`chunker: None`) — a guardrail rescan
+    /// never re-chunks.
+    #[serde(default, skip_deserializing)]
+    pub rescreen_guardrails: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1073,6 +1083,29 @@ pub async fn reindex_collection_internal(
     scoped_name: &str,
     req: ReindexRequest,
 ) -> Result<ReindexResponse, (StatusCode, Json<ErrorResponse>)> {
+    let mut scan_counts = GuardrailScanCounts::default();
+    reindex_collection_internal_ex(state, scoped_name, req, &mut scan_counts).await
+}
+
+/// Guardrail-scan counters produced when `ReindexRequest.rescreen_guardrails`
+/// is set. Always left at its default (all zero) for an ordinary reindex.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct GuardrailScanCounts {
+    pub scanned: usize,
+    pub flagged: usize,
+    pub skipped: usize,
+}
+
+/// `reindex_collection_internal`'s real body, plus an out-parameter that
+/// `rescan_guardrails_impl` reads to get the `scanned`/`flagged`/`skipped`
+/// counts out of the copy step without changing `ReindexResponse`'s public
+/// shape (which every other `/reindex` caller depends on).
+async fn reindex_collection_internal_ex(
+    state: &AppState,
+    scoped_name: &str,
+    req: ReindexRequest,
+    scan_counts: &mut GuardrailScanCounts,
+) -> Result<ReindexResponse, (StatusCode, Json<ErrorResponse>)> {
     // 1. Look up the current schema.
     let schema_json = {
         let schemas = state.inner.schemas.read().await;
@@ -1253,7 +1286,15 @@ pub async fn reindex_collection_internal(
     let copied = if req.chunker.is_some() {
         rechunk_source_into_sibling(state, scoped_name, &scoped_new, &req).await?
     } else {
-        copy_source_records_to_sibling(state, scoped_name, &scoped_new).await?
+        let (n, counts) = copy_source_records_to_sibling(
+            state,
+            scoped_name,
+            &scoped_new,
+            req.rescreen_guardrails,
+        )
+        .await?;
+        *scan_counts = counts;
+        n
     };
 
     // Seal the sibling's growing segments so the copied/rechunked data is
@@ -1389,7 +1430,7 @@ pub async fn rescan_guardrails(
             ));
         }
     }
-    Ok(Json(rescan_guardrails_impl(&state, &scoped).await))
+    rescan_guardrails_impl(&state, &scoped).await.map(Json)
 }
 
 /// Shared re-scan body, used by both the HTTP handler above and
@@ -1397,120 +1438,43 @@ pub async fn rescan_guardrails(
 /// already be tenant-scoped and alias-resolved.
 ///
 /// Segments are immutable once sealed, so there is no in-place field
-/// update. Persistence instead follows the same shape as `/reindex`'s
-/// record-copy step (`copy_source_records_to_sibling` below): soft-delete
-/// the record's current doc via `SegmentManager::delete_record` and
-/// re-insert a mutated clone carrying the stamped fields, under the same
-/// record id.
+/// update. An earlier version of this function hand-rolled one anyway
+/// (soft-delete the live doc, re-insert a stamped clone under the same
+/// id, directly against the live collection) and that shape had real
+/// bugs: a non-deterministic text-field choice that could re-screen the
+/// record's own `_guardrail_category` string on a second rescan and
+/// silently un-flag it; `let _ = …` on every persistence call, so a
+/// partial write reported success while leaving stale and stamped copies
+/// both live; shard re-assignment against records already correctly
+/// placed, which could permanently duplicate a record a rerun couldn't
+/// heal; and a crash window between sealing and persisting bitmaps.
 ///
-/// That alone is enough for `GET`/`list`/BM25 search, which read
-/// `segment_managers` live and already skip deleted docs. Dense/ANN
-/// search instead reads a `SegmentManager` rebuilt fresh from disk (see
-/// `rebuild_executors`), so a soft-delete of an ALREADY-SEALED doc
-/// additionally needs that sealed segment's `delete_bitmap.bin` flushed
-/// back to disk before the rebuild, or the stale copy would still surface
-/// there — `SegmentManager::persist_sealed_delete_bitmaps` does that
-/// (added for this endpoint; nothing else in the codebase persisted a
-/// post-creation delete_bitmap update before).
+/// Instead this reuses `/reindex`'s existing, tested, crash-safe
+/// mechanism: rebuild into a sibling collection and atomically swap the
+/// alias onto it (`reindex_collection_internal_ex` with
+/// `ReindexRequest.rescreen_guardrails: true`, which makes
+/// `copy_source_records_to_sibling` screen and stamp each record as it
+/// writes it into the sibling — see that function for how it picks a
+/// deterministic text field, off-lock screening, and per-record error
+/// isolation). The live collection is never mutated in place; a failure
+/// anywhere in the rebuild propagates as an error and the alias is never
+/// swapped, so a failed rescan can't report success.
 pub(crate) async fn rescan_guardrails_impl(
     state: &AppState,
     scoped: &str,
-) -> RescanGuardrailsResponse {
-    // 1. Snapshot every live record across shards/segments under a read
-    // lock, then release it before screening — screening does a real
-    // embed call, which must never run while holding this lock (mirrors
-    // `copy_source_records_to_sibling`'s "pull under read lock, release
-    // before the next step" shape).
-    let records: Vec<veda_core::record::Record> = {
-        let managers = state.inner.segment_managers.read().await;
-        let mut out = Vec::new();
-        if let Some(shards) = managers.get(scoped) {
-            for sm in shards.values() {
-                let gs = sm.growing_segment();
-                for doc_id in 0..gs.count() {
-                    if gs.is_deleted(doc_id) {
-                        continue;
-                    }
-                    if let Some(rec) = gs.get_record(doc_id) {
-                        out.push(rec.clone());
-                    }
-                }
-                for handle in sm.sealed_segments() {
-                    for doc_id in 0..handle.metadata.row_count as u32 {
-                        if handle.reader.delete_bitmap().is_deleted(doc_id) {
-                            continue;
-                        }
-                        if let Ok(rec) = handle.reader.get_record(doc_id) {
-                            out.push(rec);
-                        }
-                    }
-                }
-            }
-        }
-        out
+) -> Result<RescanGuardrailsResponse, (StatusCode, Json<ErrorResponse>)> {
+    let req = ReindexRequest {
+        rescreen_guardrails: true,
+        ..Default::default()
     };
+    let mut scan_counts = GuardrailScanCounts::default();
+    reindex_collection_internal_ex(state, scoped, req, &mut scan_counts).await?;
 
-    // 2. Screen each record off any lock.
-    let embedder = crate::rest::rag_eval::text_embedder_pub(state).await;
-    let mut scanned = 0usize;
-    let mut flagged = 0usize;
-    let mut skipped = 0usize;
-    let mut updated: Vec<veda_core::record::Record> = Vec::with_capacity(records.len());
-    for mut record in records {
-        scanned += 1;
-        let text = crate::rest::rag_eval::first_text_field(&record);
-        let verdict = match (&embedder, text.as_deref()) {
-            (Some(client), Some(t)) => match client.embed_text(t).await {
-                Ok(v) => crate::agent::guardrails::screen_chunk(state, &v, t).await,
-                Err(_) => crate::agent::guardrails::ChunkVerdict::skipped(),
-            },
-            _ => crate::agent::guardrails::ChunkVerdict::skipped(),
-        };
-        if !verdict.screened {
-            skipped += 1;
-        } else if verdict.flagged {
-            flagged += 1;
-        }
-        crate::rest::ingest_common::stamp_guardrail_fields(
-            &mut record,
-            &verdict,
-            crate::rest::ingest_common::now_secs(),
-        );
-        updated.push(record);
-    }
-
-    // 3. Persist: soft-delete each record's current doc and re-insert the
-    // stamped clone under the same id, then seal + flush + rebuild so the
-    // live segment managers and the disk-backed query executor agree.
-    let shard_count = {
-        let schemas = state.inner.schemas.read().await;
-        schemas.get(scoped).map(|s| s.shard_count())
-    };
-    if let Some(shard_count) = shard_count {
-        let mut managers = state.inner.segment_managers.write().await;
-        if let Some(shards) = managers.get_mut(scoped) {
-            for record in updated {
-                let id = record.id();
-                let shard_id =
-                    veda_coordinator::shard_router::ShardRouter::assign_shard(&id, shard_count);
-                if let Some(sm) = shards.get_mut(&shard_id) {
-                    let _ = sm.delete_record(id);
-                    let _ = sm.insert(record);
-                }
-            }
-            for sm in shards.values_mut() {
-                let _ = sm.seal_growing();
-                let _ = sm.persist_sealed_delete_bitmaps();
-            }
-        }
-    }
-    let _ = crate::rest::records::rebuild_executors(state, scoped).await;
-
-    RescanGuardrailsResponse {
-        scanned,
-        flagged,
-        skipped,
-    }
+    Ok(RescanGuardrailsResponse {
+        scanned: scan_counts.scanned,
+        flagged: scan_counts.flagged,
+        skipped: scan_counts.skipped,
+    })
 }
 
 /// Phase G reindex pipeline helper. Iterates the source
@@ -1524,13 +1488,14 @@ async fn copy_source_records_to_sibling(
     state: &AppState,
     src: &str,
     dst: &str,
-) -> Result<usize, (StatusCode, Json<ErrorResponse>)> {
+    rescreen_guardrails: bool,
+) -> Result<(usize, GuardrailScanCounts), (StatusCode, Json<ErrorResponse>)> {
     // Pull records from source under a read lock, then release
     // before grabbing the write lock for the destination.
     let records: Vec<veda_core::record::Record> = {
         let managers = state.inner.segment_managers.read().await;
         let Some(src_shards) = managers.get(src) else {
-            return Ok(0); // source has nothing materialised
+            return Ok((0, GuardrailScanCounts::default())); // source has nothing materialised
         };
         let mut out = Vec::new();
         for sm in src_shards.values() {
@@ -1569,6 +1534,79 @@ async fn copy_source_records_to_sibling(
             }),
         ));
     };
+
+    // When re-screening, identify the one text-modality `auto_embed`
+    // vector field the schema declares (mirrors `ingest_common::
+    // ingest_markdown`'s `primary_text_vector_field` selection). This is
+    // a DETERMINISTIC, schema-driven choice — not "any string field on
+    // the record" (a prior version of this code picked the first string
+    // field off a `HashMap`, which on a SECOND rescan could pick up the
+    // record's own reserved `_guardrail_category` field, e.g. the literal
+    // string "pii", screen THAT, come back clean, and overwrite a
+    // genuinely flagged record to `_guardrail_flagged = false`).
+    // Screening reuses the record's own ALREADY-STORED vector for that
+    // field rather than re-embedding: it's the vector actually indexed,
+    // it needs no embedder at rescan time, and it can't drift from a
+    // model change between the original ingest and this rescan.
+    let screen_target: Option<(String, String)> = if rescreen_guardrails {
+        dst_schema.fields().iter().find_map(|f| {
+            if let veda_core::types::FieldType::Vector {
+                auto_embed: Some(cfg),
+                ..
+            } = f.field_type()
+                && matches!(cfg.modality, veda_core::types::AutoEmbedModality::Text)
+            {
+                return Some((f.name().to_owned(), cfg.source.clone()));
+            }
+            None
+        })
+    } else {
+        None
+    };
+
+    // Screen off any lock — `screen_chunk` can do a real embed call (to
+    // embed the guardrail pattern set on a cache miss) and must never run
+    // while holding `segment_managers`.
+    let mut scan_counts = GuardrailScanCounts::default();
+    let mut staged: Vec<veda_core::record::Record> = Vec::with_capacity(records.len());
+    for mut record in records {
+        if rescreen_guardrails {
+            scan_counts.scanned += 1;
+            let verdict = match &screen_target {
+                Some((vec_field, text_field)) => {
+                    let text = match record.get(text_field) {
+                        Some(veda_core::record::FieldValue::String(s)) => Some(s.clone()),
+                        _ => None,
+                    };
+                    let vector = match record.get(vec_field) {
+                        Some(veda_core::record::FieldValue::Vector(v)) => {
+                            Some(v.as_slice().to_vec())
+                        }
+                        _ => None,
+                    };
+                    match (text, vector) {
+                        (Some(t), Some(v)) => {
+                            crate::agent::guardrails::screen_chunk(state, &v, &t).await
+                        }
+                        _ => crate::agent::guardrails::ChunkVerdict::skipped(),
+                    }
+                }
+                None => crate::agent::guardrails::ChunkVerdict::skipped(),
+            };
+            if !verdict.screened {
+                scan_counts.skipped += 1;
+            } else if verdict.flagged {
+                scan_counts.flagged += 1;
+            }
+            crate::rest::ingest_common::stamp_guardrail_fields(
+                &mut record,
+                &verdict,
+                crate::rest::ingest_common::now_secs(),
+            );
+        }
+        staged.push(record);
+    }
+
     let shard_count = dst_schema.shard_count();
     let mut managers = state.inner.segment_managers.write().await;
     let Some(dst_shards) = managers.get_mut(dst) else {
@@ -1580,18 +1618,22 @@ async fn copy_source_records_to_sibling(
         ));
     };
     let mut copied = 0usize;
-    for record in records {
+    for record in staged {
         let shard_id =
             veda_coordinator::shard_router::ShardRouter::assign_shard(&record.id(), shard_count);
         let Some(sm) = dst_shards.get_mut(&shard_id) else {
             continue;
         };
-        // Best-effort — duplicates between retries collide; ignore.
+        // Best-effort — duplicates between retries collide; ignore. This
+        // is pre-existing `/reindex` behaviour, unchanged by rescreening:
+        // `scan_counts` above already reflects what was screened
+        // regardless of whether an individual record's insert into the
+        // sibling later fails.
         if sm.insert(record).is_ok() {
             copied += 1;
         }
     }
-    Ok(copied)
+    Ok((copied, scan_counts))
 }
 
 /// Phase G real pipeline: re-chunk source records via the
