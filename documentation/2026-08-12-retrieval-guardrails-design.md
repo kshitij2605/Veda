@@ -185,6 +185,16 @@ literals, so the tuning is one edit.
 
 Top-k is small, so the pairwise comparison over stored vectors is cheap.
 
+**Known limitation as shipped (2026-08-13): conflict detection is active on `filter_query` and
+inert on `search`.** Conflict needs each hit's stored vector to be present in the hit's `fields`.
+`filter_query` serialises every field, vectors included, so it works there. `search` deliberately
+skips vector fields when hydrating hits, and the reserved-field top-up does not add them back, so
+the resolved vector-field name is never present and no pair is ever compared. Staleness and
+expiry are unaffected and work on both paths. This is documented rather than fixed: hydrating raw
+embeddings into every search hit would inflate every LLM-facing payload by (dimensions × top-k)
+floats to serve a secondary signal. The fix is a cheaper hit-to-hit comparison — a content hash,
+or reusing the distances the index already computed — and is deferred.
+
 ### 4.7 `RetrievalGuardReport`
 
 Attached to responses on LLM-facing paths, alongside the existing `GuardrailReport`:
@@ -198,31 +208,59 @@ Attached to responses on LLM-facing paths, alongside the existing `GuardrailRepo
 `unscreened` and `skipped` are reported separately and always present, even when zero — an
 operator must be able to tell "nothing was hostile" from "nothing was checked".
 
+**As shipped**, the report is attached at the **top level** of `/converse` and of the
+`/converse/stream` `done` frame, rolled up across every retrieving tool call in the turn (counts
+summed, `dropped_chunks`/`temporal` concatenated), *and* per-call inside
+`steps[].result.retrieval_guard`. A turn that made no retrieving tool call **omits** the
+top-level field entirely rather than reporting an all-zero report: "did not retrieve" and
+"retrieved, all clean" are different facts, and §6's argument rests on being able to tell them
+apart.
+
 ### 4.8 Re-scan job
 
 `POST /v1/admin/collections/{name}/rescan-guardrails` — re-screens an existing collection and
 stamps the reserved fields. Needed for two cases: corpora indexed before this ships, and
-applying an updated pattern set. Registered as a `JobKind` so it can also be scheduled
-(`crates/veda-gateway/src/scheduler.rs` already has the enum and the 5-field cron support).
+applying an updated pattern set.
+
+**Post-ship correction (2026-08-13):** the design said "registered as a `JobKind` so it can also
+be scheduled". That variant was **removed before release**. The rescan rebuilds the collection
+through `/reindex` into a sibling and swaps the alias, and superseded siblings are never
+reclaimed — an acceptable one-off cost for a manual admin action an operator chooses to take,
+but as a cron kind it is a nightly full-corpus copy, forever, ending in a full disk. The manual
+endpoint is unchanged. The `JobKind` can return once superseded siblings are reclaimed.
 
 ### 4.9 Configuration and the default
 
-Retrieval enforcement is governed by the agent's existing opt-in guardrails flag, but it is
-**not** routed through `GuardrailMode`'s `Flag`/`Block` distinction. That distinction exists for
-*input* handling, where `Flag` (annotate and proceed) is a sensible detect-only posture because
-the user's own prompt is what it is. For *retrieved* content, annotate-and-proceed means the
-injection still reaches the model — it does not close the gap.
+Retrieval enforcement is **not** routed through `GuardrailMode`'s `Flag`/`Block` distinction.
+That distinction exists for *input* handling, where `Flag` (annotate and proceed) is a sensible
+detect-only posture because the user's own prompt is what it is. For *retrieved* content,
+annotate-and-proceed means the injection still reaches the model — it does not close the gap.
 
-**Therefore:**
+**Post-ship correction (2026-08-13):** an earlier version of this table said `guardrails = false`
+→ "off — no screening, no enforcement". That never described the code and would have been the
+wrong design: enforcement lives at `ToolCatalog::dispatch`, the choke point every LLM-facing
+transport shares, and is *always on* there. Gating it on the per-agent `guardrails` flag would
+ship the default agent — the one every out-of-the-box `/converse` call uses — unprotected. What
+is actually true:
 
-| Agent state | Input handling | Retrieval handling |
+| Surface | Screening | Enforcement |
 |---|---|---|
-| `guardrails = false` | off | off — no screening, no enforcement |
-| `guardrails = true` | unchanged (`Flag` today) | **drop hostile-flagged chunks** (PII-flagged pass through, reported — §4.5) |
+| Ingest (every path) | always on, fails open (§6) | n/a |
+| Any LLM-facing path, any agent, `guardrails` either way | n/a | **always drops hostile-flagged chunks** (PII-flagged pass through, reported — §4.5) |
+| Raw `POST /search`, raw `GET .../aggregate` | n/a | annotate only, never drops (decision 5) |
+| Any LLM-facing path with `VEDA_RETRIEVAL_GUARD=off` | n/a | annotate only — classified and reported, nothing removed |
 
-`GuardrailMode` semantics for input are untouched. An operator who wants detect-only visibility
-into retrieval without dropping gets it by reading `_guardrail_flagged` on `/search`, which
-annotates and never drops (§7) — so the observability path exists without weakening enforcement.
+The agent's `guardrails` flag continues to govern **input/output** safety guardrails only, with
+`GuardrailMode` semantics untouched.
+
+`VEDA_RETRIEVAL_GUARD` is the operator kill switch: set it to `off` (also `0`/`false`/`no`/
+`disabled`, any case) to degrade every LLM-facing path to annotate-only. Unset, or set to
+anything else, enforces — the switch can only ever weaken enforcement, never enable it by
+accident. It exists because a control that silently removes content from answers needs a remedy
+for a false-positive pattern hit that does not require editing and redeploying the code. It is
+read per dispatch, so it takes effect without a restart, and the report still counts what would
+have been dropped (`flagged_not_dropped`), so turning it off is never the same as turning it
+blind.
 
 ### 4.10 Records without meaningful text
 
@@ -230,10 +268,17 @@ annotates and never drops (§7) — so the observability path exists without wea
 Semantic screening of that placeholder is meaningless, and the record's vector is an image/audio
 embedding, not a text embedding, so cosine against text-phrased patterns is not interpretable.
 
-Such records are stamped `_guardrail_flagged = false`, `_guardrail_score = 0.0` and
-`_indexed_at`, and are classified `screened_skipped` in the report rather than
-`screened_clean` — the distinction between "checked and clean" and "not applicable" must stay
-visible.
+Such records stamp `_indexed_at` and leave `_guardrail_flagged` absent, which is what classifies
+them `screened_skipped` in the report rather than `screened_clean` — the distinction between
+"checked and clean" and "not applicable" must stay visible.
+
+This covers **both** media paths: `/ingest-media`, and the image records `process-document`
+inserts for each extracted image (`[image: x.png]` placeholders carrying an image embedding).
+The document pipeline originally inserted its image records bare, with no `_indexed_at` at all,
+so they classified `unscreened` — corrupting the one signal §6's fail-open decision rests on
+(after a full rescan an operator would still see `unscreened > 0` and be unable to tell
+pre-feature data from the pipeline's own output). Fixed 2026-08-13; the two media paths now
+agree.
 
 For collections with several vector fields, screening uses the **text-modality** embedding. If
 none exists, the record is `screened_skipped`.
@@ -273,18 +318,30 @@ behaviour runs the re-scan first.
 
 This must be stated in the docs as a known limitation, not buried.
 
+**A second, ongoing source of unstamped content (2026-08-13).** Screening needs a text embedding
+computed *server-side*, so it only runs on the paths that compute one: `process-document`,
+`ingest-url` and `embed-insert`. Plain `POST /insert` takes client-supplied vectors and never
+gets one, so it always stamps a `skipped` verdict — including the Python SDK's normal
+client-side-embedding flow. Records written that way are never screened until a re-scan runs.
+This is not a legacy-data condition that a single upgrade-time re-scan closes; it recurs with
+every `/insert`. Ingest behaviour is deliberately unchanged (screening from the client's vector
+would compare an unknown embedding space against Veda's pattern vectors), so the remedy stays
+the re-scan, and the limitation is documented alongside `unscreened`.
+
 ---
 
 ## 7. API surface changes
 
 | Surface | Change |
 |---|---|
-| `POST /v1/agents/{id}/converse` | response gains `retrieval_guard` |
-| `POST /v1/agents/{id}/converse/stream` | `done` frame gains `retrieval_guard` |
+| `POST /v1/agents/{id}/converse` | response gains a top-level `retrieval_guard`, rolled up across the turn; omitted when the turn retrieved nothing |
+| `POST /v1/agents/{id}/converse/stream` | `done` frame gains the same top-level `retrieval_guard` |
 | `POST /v1/mcp` (`tools/call`) | hostile-flagged chunks dropped from tool results; PII-flagged chunks pass through, reported |
 | `POST /v1/agent-tools/{id}/execute` | hostile-flagged chunks dropped from tool results; PII-flagged chunks pass through, reported |
 | `POST /v1/a2a/{agent_id}` | hostile-flagged chunks dropped; PII-flagged chunks pass through, reported |
+| `aggregate` **tool** (any LLM-facing transport) | hostile-flagged records skipped in the record walk, so a `group_by` on a text field cannot emit withheld text as a group key; the skip is reported as `retrieval_guard.withheld_records` |
 | `POST /v1/collections/{name}/search` | each hit gains its stored verdict; **nothing dropped** |
+| `GET /v1/collections/{name}/aggregate` (raw REST) | **unchanged** — annotates nothing, drops nothing (decision 5) |
 | `POST /v1/admin/collections/{name}/rescan-guardrails` | new |
 
 Backwards compatibility: all response additions are additive. Existing clients ignore the new

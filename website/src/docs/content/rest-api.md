@@ -56,9 +56,11 @@ Read-only OLAP-style aggregations over the columnar store. All three honor the f
 curl "http://localhost:6340/v1/collections/products/aggregate?field=price&metric=avg&group_by=category&filter=price%20%3C%20500"
 ```
 
-**Known limitation:** `aggregate` with `group_by` on a text field can emit flagged content
-verbatim as a group key — group keys are bare values with no verdict to classify, so retrieval
-guardrails (see below) do not screen them.
+**Note:** `group_by` on a text field returns each group's key verbatim, so this endpoint can
+return the text of guardrail-flagged records. That is deliberate for the raw data API — like
+`/search`, it annotates and never drops, so recall measurement stays intact. The `aggregate`
+**tool** that agents and MCP clients call does skip hostile-flagged records; see
+[Retrieval guardrails](#retrieval-guardrails) below.
 
 ## Scheduled jobs
 
@@ -217,8 +219,23 @@ LLM-facing path (`/converse`, `/converse/stream`, MCP `tools/call`, `/agent-tool
 `/a2a/{agent_id}`), the response carries a `retrieval_guard` report — `{ kept, dropped,
 unscreened, skipped, flagged_not_dropped, dropped_chunks: [{ id, category, score }] }` —
 and `get_record` applies the same policy to a directly-fetched record (withholding it if
-dropped). `POST /v1/collections/{name}/search` instead annotates each hit with
-`_guardrail_class` and never drops.
+dropped). On `/converse` and the `/converse/stream` `done` frame the report is at the **top
+level**, rolled up across every retrieving tool call in the turn; a turn that retrieved nothing
+omits the field entirely rather than reporting zeros. `POST /v1/collections/{name}/search`
+instead annotates each hit with `_guardrail_class` and never drops.
+
+The `aggregate` **tool** skips hostile-flagged records in its record walk and reports
+`retrieval_guard.withheld_records`, because `group_by` on a text field returns each group's key
+verbatim and would otherwise emit the withheld text. The raw `GET
+/v1/collections/{name}/aggregate` endpoint is unaffected and still counts every record — like
+`/search`, the data API annotates and never drops, so recall measurement stays intact.
+
+**Kill switch.** `VEDA_RETRIEVAL_GUARD=off` (also `0`/`false`/`no`/`disabled`) degrades every
+LLM-facing path to annotate-only: hits are still classified and counted (`flagged_not_dropped`
+reports what would have been dropped), nothing is removed. Unset — or set to anything else —
+enforces. It is read per tool dispatch, so it takes effect without a restart. Enforcement is
+otherwise unconditional and is **not** gated on an agent's `guardrails` flag, which governs
+input/output safety guardrails only.
 
 **Dropping is category-aware.** `PromptInjection`, `Jailbreak`, `Unsafe`, and `IndirectInjection`
 are hostile — those chunks are dropped before the LLM sees them and counted in `dropped` /
@@ -230,8 +247,19 @@ threats it targets. An unrecognised or missing category on a flagged chunk is tr
 and dropped — fails closed, since an unfamiliar category is more likely a new threat than a
 benign one.
 
-**Known limitation:** chunks indexed before this feature carry no verdict, are reported as
-`unscreened`, and are passed through; run the re-scan to close that gap.
+**Known limitations**
+
+- Chunks indexed before this feature carry no verdict, are reported as `unscreened`, and are
+  passed through; run the re-scan to close that gap.
+- **Plain `POST /v1/collections/{name}/insert` is never screened.** Screening runs against a text
+  embedding Veda computed itself, so it only happens on `process-document`, `ingest-url` and
+  `embed-insert`. `/insert` takes client-supplied vectors, so every record it writes is stamped
+  `skipped` — this includes the Python SDK's normal client-side-embedding path. Unlike the
+  pre-feature case above, one upgrade-time re-scan does not close it: it recurs with every
+  `/insert`, so a corpus ingested that way needs the re-scan run on a cadence.
+- **Temporal conflict detection is active on the `filter_query` tool and inert on `search`.** It
+  compares hits' stored vectors, and `search` deliberately omits vector fields from hydrated hits
+  (hydrating them would inflate every LLM-facing payload). Staleness and expiry work on both.
 
 ## Ops Advisor (Insights)
 
