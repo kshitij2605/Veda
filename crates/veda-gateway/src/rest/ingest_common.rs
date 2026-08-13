@@ -3,13 +3,16 @@
 //! Both the OCR document path (`process-document`) and the web-ingestion
 //! path (`/ingest-url`) need the exact same chunk -> embed -> insert flow:
 //! split markdown into chunks via the configured chunker, auto-embed the
-//! chunk text into the collection's text vector fields (and SPLADE sparse
+//! chunk text into the collection's dense vector fields (and SPLADE sparse
 //! fields), build one record per chunk carrying `content` + provenance
 //! metadata, insert, seal, and rebuild query executors.
 //!
 //! [`ingest_markdown`] factors that flow out so neither caller duplicates
-//! it. The OCR path keeps its image-specific handling separately and calls
-//! this helper only for the text chunks.
+//! it. The OCR path keeps its image-record insertion separate and calls this
+//! helper only for the text chunks — but both must fill the SAME dense
+//! vector columns, since storage makes every one of them mandatory on every
+//! record. [`resolve_dense_targets`] is the single place that decides which
+//! column is filled by which embedder, shared by both loops.
 
 use axum::http::StatusCode;
 use veda_core::chunking::{ChunkingStrategy, chunk_markdown};
@@ -58,6 +61,134 @@ pub struct IngestResult {
 /// query time. Mirrors the convention in `ingest_logs.rs` / `records.rs`.
 const EXPIRES_AT_FIELD: &str = "_expires_at";
 
+/// One dense vector column, the embedder resolved for it, and which record
+/// types that embedder can actually fill it from.
+///
+/// Storage treats every `FieldType::Vector` column as **mandatory**: a record
+/// that omits one is rejected outright (`growing_segment.rs` / `segment.rs`:
+/// "record missing required vector field"). So the two `process-document`
+/// ingest loops — text chunks here, image records in `document.rs` — cannot
+/// each own their own half of the schema; whichever record type is written
+/// first fails. Both resolve their targets through [`resolve_dense_targets`]
+/// instead, so both fill the *same* columns, and Veda's unified-vector-space
+/// design point falls straight out of it: one omni model (`jina-v5-omni-small`
+/// and friends support `Text` and `Image`) embeds chunk text and image bytes
+/// into one column, one space.
+///
+/// The capability flags exist so an unsatisfiable schema — a column whose
+/// model cannot accept one of the record types — is caught up front by
+/// [`unfillable_columns`] instead of surfacing as the storage layer's message,
+/// which names no fix.
+pub struct DenseVectorTarget {
+    /// Name of the dense vector column.
+    pub field: String,
+    /// The embedder resolved for the column's declared modality. `None` when
+    /// no registered model declares it — the column cannot be filled at all.
+    pub client: Option<EmbeddingClient>,
+    /// The resolved model accepts text input.
+    pub supports_text: bool,
+    /// The resolved model accepts image input.
+    pub supports_image: bool,
+    /// The schema declares this column for a non-text modality — explicitly
+    /// via `auto_embed`, or through the legacy `*image*` name heuristic. Such
+    /// a column is a standing request for image records.
+    pub declared_media: bool,
+}
+
+/// Resolve every dense vector column of `schema` to an embedder, using the
+/// column's declared modality (`auto_embed.modality`, else the legacy
+/// `*image*`-but-not-`*text*` name heuristic) to pick the model — first
+/// registered model that declares that modality, unchanged from before.
+///
+/// What changed is that the result is shared: the caller decides which
+/// columns it can fill from the capability flags rather than each ingest loop
+/// applying its own modality filter and silently ignoring the other's
+/// columns.
+pub async fn resolve_dense_targets(
+    state: &AppState,
+    schema: &CollectionSchema,
+) -> Vec<DenseVectorTarget> {
+    use veda_core::types::AutoEmbedModality;
+
+    let registry = state.inner.embedding_registry.read().await;
+    let mut targets = Vec::new();
+    for field_def in schema.fields() {
+        let FieldType::Vector { auto_embed, .. } = field_def.field_type() else {
+            continue;
+        };
+        let field_name = field_def.name();
+        let declared = match auto_embed {
+            Some(cfg) => match cfg.modality {
+                AutoEmbedModality::Text => Modality::Text,
+                AutoEmbedModality::Image => Modality::Image,
+                AutoEmbedModality::Video => Modality::Video,
+                AutoEmbedModality::Audio => Modality::Audio,
+            },
+            None => {
+                let lower = field_name.to_lowercase();
+                if lower.contains("image") && !lower.contains("text") {
+                    Modality::Image
+                } else {
+                    Modality::Text
+                }
+            }
+        };
+        let model = registry
+            .find_by_modality(declared)
+            .first()
+            .copied()
+            .cloned();
+        targets.push(DenseVectorTarget {
+            field: field_name.to_owned(),
+            supports_text: model
+                .as_ref()
+                .is_some_and(|m| m.supported_modalities.contains(&Modality::Text)),
+            supports_image: model
+                .as_ref()
+                .is_some_and(|m| m.supported_modalities.contains(&Modality::Image)),
+            declared_media: declared != Modality::Text,
+            client: model.map(EmbeddingClient::new),
+        });
+    }
+    targets
+}
+
+/// The columns a record of `modality` cannot fill — every one of which would
+/// make the insert fail, because dense columns are mandatory.
+pub fn unfillable_columns(targets: &[DenseVectorTarget], modality: Modality) -> Vec<&str> {
+    targets
+        .iter()
+        .filter(|t| !match modality {
+            Modality::Image => t.supports_image,
+            _ => t.supports_text,
+        })
+        .map(|t| t.field.as_str())
+        .collect()
+}
+
+/// The 409 message for a schema no ingest can satisfy. Named fields, named
+/// fix — the same contract as `/ingest-media`'s `INCOMPATIBLE_SCHEMA` guard,
+/// which exists for this identical invariant.
+pub fn incompatible_schema_message(
+    collection_name: &str,
+    columns: &[&str],
+    modality: Modality,
+) -> String {
+    let (record_kind, input) = match modality {
+        Modality::Image => ("an extracted image record", "images"),
+        _ => ("a text chunk", "text"),
+    };
+    format!(
+        "collection '{}' declares dense vector field(s) [{}] that {record_kind} cannot fill: \
+         no registered embedding model can embed {input} into them, and every record must carry \
+         a value for every dense vector field. Back the collection's vector field with a unified \
+         multimodal model so text chunks and images share one vector space, or use one collection \
+         per modality.",
+        crate::tenant::display_name(collection_name),
+        columns.join(", ")
+    )
+}
+
 /// Chunk `markdown`, auto-embed each chunk, and insert one record per
 /// chunk into `collection_name`. Seals growing segments and rebuilds the
 /// collection's query executors before returning.
@@ -97,52 +228,25 @@ pub async fn ingest_markdown(
     // a no-op for any real ingested document (found via live E2E testing).
     let has_parent_doc_id_field = schema.get_field("parent_doc_id").is_some();
 
-    // Discover text vector fields and SPLADE sparse-text targets, mirroring
-    // the document path. Image fields are not handled here — the OCR caller
-    // does its own image insertion.
-    let registry = state.inner.embedding_registry.read().await;
-    let multimodal_models = registry.find_by_modality(Modality::Image);
-    let text_only_models = registry.find_by_modality(Modality::Text);
+    // Every dense vector column, resolved once — a chunk record must fill
+    // ALL of them, not just the ones this loop used to claim as "text"
+    // fields, because storage rejects a record that omits any of them. The
+    // OCR image loop resolves the same set the same way, so both record types
+    // land in the same columns.
+    let dense_targets = resolve_dense_targets(state, schema).await;
+    let unfillable = unfillable_columns(&dense_targets, Modality::Text);
+    if !unfillable.is_empty() {
+        // Reject before writing anything: the storage-level "record missing
+        // required vector field" an unsatisfiable schema would otherwise
+        // produce names no fix, and by then half the document is inserted.
+        return Err((
+            StatusCode::CONFLICT,
+            incompatible_schema_message(collection_name, &unfillable, Modality::Text),
+        ));
+    }
 
-    let mut text_embed_targets: Vec<(String, EmbeddingClient)> = Vec::new();
     let mut sparse_text_targets: Vec<(String, String)> = Vec::new(); // (target_field, source_field)
-
     for field_def in schema.fields() {
-        if let FieldType::Vector { auto_embed, .. } = field_def.field_type() {
-            let field_name = field_def.name();
-
-            if let Some(cfg) = auto_embed {
-                use veda_core::types::AutoEmbedModality;
-                // Only text vector fields are fed here; image/video/audio
-                // fields have no text source on the markdown path.
-                if matches!(cfg.modality, AutoEmbedModality::Text) {
-                    let models = registry.find_by_modality(Modality::Text);
-                    if !models.is_empty() {
-                        text_embed_targets.push((
-                            field_name.to_owned(),
-                            EmbeddingClient::new(models[0].clone()),
-                        ));
-                    }
-                }
-                continue;
-            }
-
-            let lower = field_name.to_lowercase();
-            let is_image_field = lower.contains("image") && !lower.contains("text");
-            if !is_image_field {
-                let models = if text_only_models.is_empty() {
-                    &multimodal_models
-                } else {
-                    &text_only_models
-                };
-                if !models.is_empty() {
-                    text_embed_targets.push((
-                        field_name.to_owned(),
-                        EmbeddingClient::new(models[0].clone()),
-                    ));
-                }
-            }
-        }
         if let FieldType::SparseVector {
             auto_embed: Some(cfg),
             ..
@@ -154,14 +258,13 @@ pub async fn ingest_markdown(
             }
         }
     }
-    drop(registry);
 
-    // Screening uses the TEXT-modality embedding. Collections with only
-    // image/audio vector fields yield no candidate, so their chunks are
-    // skipped rather than compared against text-phrased patterns.
-    let primary_text_vector_field: String = text_embed_targets
+    // Screening uses the TEXT-modality embedding. A collection with no dense
+    // vector column yields no candidate, so its chunks are skipped rather
+    // than compared against text-phrased patterns.
+    let primary_text_vector_field: String = dense_targets
         .first()
-        .map(|(f, _)| f.clone())
+        .map(|t| t.field.clone())
         .unwrap_or_default();
 
     let mut chunks_out: Vec<(String, String)> = Vec::new();
@@ -204,13 +307,16 @@ pub async fn ingest_markdown(
                 record.set(EXPIRES_AT_FIELD, FieldValue::Int64(exp));
             }
 
-            for (target_field, client) in &text_embed_targets {
+            for target in &dense_targets {
+                let Some(client) = target.client.as_ref() else {
+                    continue;
+                };
                 match client.embed_text(&chunk.text).await {
                     Ok(vector) => {
-                        record.set(target_field, FieldValue::Vector(DenseVector::new(vector)));
+                        record.set(&target.field, FieldValue::Vector(DenseVector::new(vector)));
                     }
                     Err(e) => {
-                        tracing::warn!(field = %target_field, error = %e, "text embedding failed, skipping vector field");
+                        tracing::warn!(field = %target.field, error = %e, "text embedding failed, skipping vector field");
                     }
                 }
             }

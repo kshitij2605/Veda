@@ -93,7 +93,7 @@ SLO `kind` and synthetic-probe `kind` use.
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/v1/collections/{name}/process-document` | OCR → chunk → embed → insert one file (multipart `file`) |
+| `POST` | `/v1/collections/{name}/process-document` | OCR → chunk → embed → insert one file (multipart `file`). Text chunks and extracted images fill the **same** dense vector fields, so a collection that ingests images needs a multimodal model; a schema whose vector field no image can fill is rejected with `409 INCOMPATIBLE_SCHEMA` before anything is written — see [Document pipeline](/docs/document-pipeline) |
 | `POST` | `/v1/collections/{name}/process-documents` | Batch variant (multipart `files`) |
 | `POST` | `/v1/collections/{name}/ingest-url` | Crawl a URL → clean markdown → chunk → embed → insert (`{ url\|urls, deep_crawl?, max_pages?, chunker?, ttl_secs? }`); see [Web Connectors](/docs/web-connectors); `503` if crawl4ai unconfigured |
 | `POST` | `/v1/chunk/preview` | Preview how text would be chunked under a strategy |

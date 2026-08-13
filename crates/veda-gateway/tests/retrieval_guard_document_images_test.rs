@@ -109,14 +109,11 @@ async fn process_document_image_records_are_stamped_skipped_not_unscreened() {
     // `image_blob` is what makes the pipeline insert image records at all
     // (`should_insert_images`).
     //
-    // No dense vector field on purpose. A dense vector column must be filled
-    // by EVERY record (`growing_segment.rs`: "record missing required vector
-    // field"), but the document pipeline feeds text chunks and image records
-    // from different discovery loops — `ingest_common` skips `*image*`-named
-    // vector fields, `document.rs` only accepts them — so no single dense
-    // field is filled by both. That is a pre-existing constraint of the OCR
-    // path, unrelated to this fix; a vector-less collection exercises the
-    // stamping without inheriting it.
+    // No dense vector field on purpose: this test is about the stamping, and
+    // the registered embedder is text-only, so a vector column would need the
+    // multimodal setup `document_multimodal_test.rs` covers (both ingest
+    // loops fill the same mandatory dense column, which needs a model that
+    // accepts text AND images).
     let resp = client()
         .post(format!("{base}/v1/collections"))
         .json(&json!({
