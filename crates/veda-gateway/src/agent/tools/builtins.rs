@@ -18,6 +18,7 @@ use veda_query::filter::record_eval::evaluate_record;
 use veda_query::search::VectorSearchRequest;
 
 use crate::agent::catalog::{ToolContext, ToolOutcome, ToolSpec};
+use crate::agent::retrieval_guard::enforcement_enabled;
 use crate::rest::aggregate::{AggErrorKind, AggregateQuery, aggregate_core};
 use crate::rest::records::{field_value_to_json, parse_record_public, record_passes_rls_owner};
 
@@ -742,7 +743,7 @@ fn guarded_record_outcome(rec: &Record) -> ToolOutcome {
     use crate::agent::retrieval_guard::enforce_retrieved;
 
     let hit = record_json(rec);
-    let (mut kept, report) = enforce_retrieved(vec![hit], true);
+    let (mut kept, report) = enforce_retrieved(vec![hit], enforcement_enabled());
     match kept.pop() {
         Some(hit) => ToolOutcome::ok(hit),
         None => ToolOutcome::ok(serde_json::json!({
@@ -786,14 +787,28 @@ pub async fn aggregate(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOu
         group_by: args["group_by"].as_str().map(str::to_owned),
         filter: args["filter"].as_str().map(str::to_owned),
     };
-    match aggregate_core(ctx.state, scoped.as_str(), &query).await {
+    // `true` = withhold hostile-flagged records from the aggregation. This
+    // tool is model-reachable on every LLM transport, and `group_by` on a
+    // text field emits each group's key VERBATIM — so without this,
+    // `group_by=content&filter=_guardrail_flagged = true` returns the full
+    // text of every chunk the rest of the feature withholds, and
+    // `dropped_chunks[].id` tells a model exactly what to ask for. The raw
+    // REST `/aggregate` keeps its annotate-don't-drop behaviour (it passes
+    // `false`) — see `aggregate_core`.
+    match aggregate_core(ctx.state, scoped.as_str(), &query, enforcement_enabled()).await {
         Ok(resp) => {
             let groups: Vec<serde_json::Value> = resp
                 .groups
                 .into_iter()
                 .map(|g| serde_json::json!({ "key": g.key, "value": g.value }))
                 .collect();
-            ToolOutcome::ok(serde_json::json!({ "groups": groups }))
+            // Report the skip rather than silently returning short counts —
+            // the same "a drop is never silent" rule the hit-shaped guard
+            // follows.
+            ToolOutcome::ok(serde_json::json!({
+                "groups": groups,
+                "retrieval_guard": { "withheld_records": resp.withheld.unwrap_or(0) },
+            }))
         }
         Err(e) => match e.kind {
             AggErrorKind::NotFound => ToolOutcome::not_found(e.message),

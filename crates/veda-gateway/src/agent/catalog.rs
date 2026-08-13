@@ -328,8 +328,15 @@ async fn resolve_vector_field(ctx: &ToolContext<'_>, collection: Option<&str>) -
 /// because both are content-returning, LLM-facing arrays of retrieved
 /// chunks; the kept array is written back under the same key it was found
 /// under so each tool's existing response shape is preserved.
+///
+/// Dropping is on by default and is **not** gated on the agent's `guardrails`
+/// flag — a per-agent opt-in would ship the default agent unprotected. The
+/// one override is the operator kill switch `VEDA_RETRIEVAL_GUARD=off`
+/// ([`crate::agent::retrieval_guard::enforcement_enabled`]), which degrades this to
+/// annotate-only: hits are still classified and still reported, none are
+/// removed.
 fn apply_retrieval_guard(mut outcome: ToolOutcome, vector_field: Option<&str>) -> ToolOutcome {
-    use crate::agent::retrieval_guard::{enforce_retrieved, temporal_check};
+    use crate::agent::retrieval_guard::{enforce_retrieved, enforcement_enabled, temporal_check};
 
     let Some(obj) = outcome.content.as_object_mut() else {
         return outcome;
@@ -346,7 +353,7 @@ fn apply_retrieval_guard(mut outcome: ToolOutcome, vector_field: Option<&str>) -
     };
 
     let taken = std::mem::take(hits);
-    let (kept, mut report) = enforce_retrieved(taken, true);
+    let (kept, mut report) = enforce_retrieved(taken, enforcement_enabled());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
