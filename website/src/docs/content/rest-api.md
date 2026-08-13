@@ -202,8 +202,21 @@ Write skew is allowed (snapshot isolation); lost updates are prevented; read-onl
 | `GET/POST` | `/v1/admin/replica/safe_ts` | Replica read watermark |
 | `POST` | `/v1/admin/cluster/join` · `DELETE /v1/admin/cluster/nodes/{id}` | Raft membership changes |
 | `POST` | `/v1/admin/collections/{name}/mvcc_checkpoint` | Atomic MVCC snapshot + WAL truncate |
+| `POST` | `/v1/admin/collections/{name}/rescan-guardrails` | Re-screen every record and persist the retrieval-guardrail verdict (`_guardrail_flagged`/`_guardrail_score`/`_guardrail_category`/`_indexed_at`); rebuilds through `/reindex` and atomically swaps the alias; returns `{ scanned, flagged, skipped }` |
 
 Endpoints marked Raft-only return `503` in single-node mode — see [Cluster modes](/docs/installation#cluster-modes).
+
+### Retrieval guardrails
+
+Ingest screens each chunk's text embedding and stamps the four reserved fields above. On every
+LLM-facing path (`/converse`, `/converse/stream`, MCP `tools/call`, `/agent-tools/{id}/execute`,
+`/a2a/{agent_id}`), the response carries a `retrieval_guard` report — `{ kept, dropped,
+unscreened, skipped, dropped_chunks: [{ id, category, score }] }` — and any flagged chunk is
+dropped before the LLM sees it. `POST /v1/collections/{name}/search` instead annotates each hit
+with `_guardrail_class` and never drops.
+
+**Known limitation:** chunks indexed before this feature carry no verdict, are reported as
+`unscreened`, and are passed through; run the re-scan to close that gap.
 
 ## Ops Advisor (Insights)
 

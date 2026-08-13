@@ -114,6 +114,18 @@ during implementation by measuring the flag rate on the real Japanese corpus (wh
 known attacks, so it establishes the false-positive floor) and is documented inline with that
 measurement, exactly as `DEFAULT_THRESHOLD`'s 0.80 → 0.65 recalibration was.
 
+**Measured (2026-08-13):** 10 real Japanese business PDFs (149 chunks, jina-omni embedder, no
+planted attacks) ingested via `process-document` into a calibration collection, then
+`aggregate?field=_guardrail_flagged&group_by=_guardrail_flagged`. 3/149 (2.01%) flagged — all
+three were the PII regex layer (score `1.0`, resolved before the cosine comparison runs) hitting
+a genuine email address and a genuine phone number in vendor contact/screenshot content, not a
+semantic near-miss. The semantic `IndirectInjection` layer flagged 0/149, with the highest
+observed similarity on any non-PII chunk at `0.354` — comfortably below the threshold. Because
+`RETRIEVED_THRESHOLD` only gates the semantic layer, it has no mechanism to move this
+PII-driven rate, so it stays at its provisional **0.60**: the data shows that value already has
+a wide margin (`0.246`) over this corpus's semantic ceiling. Final value: `RETRIEVED_THRESHOLD =
+0.60`.
+
 ### 4.4 Reserved fields
 
 Following `veda_core::record::EXPIRES_AT_FIELD` (`crates/veda-core/src/record.rs:15`):
