@@ -728,6 +728,20 @@ pub async fn mvcc_checkpoint(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Result<Json<MvccCheckpointResponse>, (StatusCode, Json<ClusterMembershipError>)> {
     let scoped = crate::tenant::scope(&tenant, &name);
+    {
+        let schemas = state.inner.schemas.read().await;
+        let schema = schemas.get(&scoped).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ClusterMembershipError {
+                    error: format!("collection '{name}' not found"),
+                }),
+            )
+        })?;
+        if let Err((status, Json(e))) = super::collections::reject_if_external(schema, &name) {
+            return Err((status, Json(ClusterMembershipError { error: e.error })));
+        }
+    }
     let mut guard = state.inner.segment_managers.write().await;
     let shard_map = guard.get_mut(&scoped).ok_or_else(|| {
         (

@@ -51,6 +51,24 @@ pub async fn start_campaign(
     Json(req): Json<StartCampaignRequest>,
 ) -> Result<Json<TuningCampaign>, GatewayError> {
     let scoped_collection = tenant::scope(&tenant, &collection);
+    // A campaign materializes reindexed sibling collections to benchmark
+    // trials against (see `materialize_bases`) — a write, and one that
+    // `resolve_search_fields`/`materialize_bases` below would otherwise only
+    // reject after losing the status code through a bare `String` error,
+    // surfacing as an opaque 500 instead of a clear 405. Check up front
+    // instead, the way every other collection-addressed handler does.
+    {
+        let schemas = state.inner.schemas.read().await;
+        let schema = schemas.get(&scoped_collection).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("collection '{collection}' not found"),
+                }),
+            )
+        })?;
+        crate::rest::collections::reject_if_external(schema, &collection)?;
+    }
     // Eval sets are always stored under a tenant-scoped key (every real
     // creation path — `create_eval_set`/`generate_eval_set` — scopes via
     // `save_and_return_set`, mirroring `collection` just above). Without

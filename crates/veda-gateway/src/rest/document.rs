@@ -12,6 +12,7 @@ use veda_core::vector::DenseVector;
 
 use veda_storage::blob_store::{ArcBlobStore, BlobStore};
 
+use super::collections;
 use super::records::rebuild_executors;
 use super::state::AppState;
 use crate::tenant::{self, Tenant};
@@ -58,6 +59,28 @@ pub struct OcrError {
     pub suggestion: String,
 }
 
+/// Adapt [`collections::reject_if_external`]'s error into this module's
+/// `OcrErrorResponse` shape.
+fn reject_external_ocr(
+    schema: &veda_core::schema::CollectionSchema,
+    name: &str,
+) -> Result<(), (StatusCode, Json<OcrErrorResponse>)> {
+    collections::reject_if_external(schema, name).map_err(|(status, Json(e))| {
+        (
+            status,
+            Json(OcrErrorResponse {
+                error: OcrError {
+                    code: "EXTERNAL_READ_ONLY".to_owned(),
+                    message: e.error,
+                    suggestion: "external collections are read-only; DELETE the collection \
+                        to remove Veda's registration instead."
+                        .to_owned(),
+                },
+            }),
+        )
+    })
+}
+
 // ── Handler ─────────────────────────────────────────────────────────────
 
 #[instrument(name = "process_document", skip(state, multipart), fields(collection = %name))]
@@ -83,6 +106,7 @@ pub async fn process_document(
             )
         })?
     };
+    reject_external_ocr(&schema, &name)?;
 
     // Resolve FlashParse endpoint.
     let endpoint = match &state.inner.flashparse_endpoint {
@@ -209,6 +233,7 @@ pub async fn process_documents_batch(
             )
         })?
     };
+    reject_external_ocr(&schema, &name)?;
 
     let endpoint = match &state.inner.flashparse_endpoint {
         Some(ep) => ep.clone(),

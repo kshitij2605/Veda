@@ -106,6 +106,7 @@ pub async fn ingest_logs(
             )
         })?
     };
+    super::collections::reject_if_external(&schema, tenant::display_name(&scoped))?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

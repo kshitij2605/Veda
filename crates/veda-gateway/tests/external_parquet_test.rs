@@ -799,3 +799,319 @@ async fn an_external_collection_reports_itself_as_external() {
         "body: {body}"
     );
 }
+
+// ── Read-only enforcement (Task 8) ──────────────────────────────────────
+//
+// External collections read a customer's Parquet file in place. Veda must
+// never write records, derived data or an index for one — that state would
+// go stale the moment the source changes and there is no local source of
+// truth for it. Every route below is asserted 405 METHOD_NOT_ALLOWED with a
+// body that names the collection and explains it is external/read-only.
+// Registration-only routes (dropping the collection, repointing its alias)
+// are asserted to keep working — an enforcement pass that accidentally
+// bricks deregistration would be worse than no enforcement.
+
+/// Register a throwaway external collection and return its name plus the
+/// backing tempdir (kept alive so the Parquet file isn't deleted mid-test).
+async fn setup_external(base: &str, name: &str) -> tempfile::TempDir {
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+    let r = register_external(base, name, &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+    data_dir
+}
+
+/// Common assertion for every REJECT route: 405, and a body that names the
+/// collection and explains why. Always prints the body on failure so a
+/// wrong-for-an-unrelated-reason failure is diagnosable, not just "not 405".
+async fn assert_rejected_as_external(resp: reqwest::Response, route: &str, name: &str) {
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert_eq!(
+        status, 405,
+        "{route}: expected 405 METHOD_NOT_ALLOWED, got {status}. body: {body}"
+    );
+    assert!(
+        body.contains(name),
+        "{route}: collection name absent from body: {body}"
+    );
+    assert!(
+        body.to_lowercase().contains("external") && body.to_lowercase().contains("read-only"),
+        "{route}: body does not explain external/read-only: {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_reindex_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_reindex";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/reindex"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /reindex", name).await;
+}
+
+#[tokio::test]
+async fn external_tuning_campaign_start_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_tuning";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/tuning-campaigns"))
+        .json(&json!({ "eval_set_id": "does-not-matter" }))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /tuning-campaigns", name).await;
+}
+
+#[tokio::test]
+async fn external_seal_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_seal";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/seal"))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /seal", name).await;
+}
+
+#[tokio::test]
+async fn external_optimize_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_optimize";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/optimize"))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /optimize", name).await;
+}
+
+#[tokio::test]
+async fn external_insert_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_insert";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/insert"))
+        .json(&json!({ "records": [{ "id": "would-be-fabricated" }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /insert", name).await;
+}
+
+#[tokio::test]
+async fn external_embed_insert_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_embed_insert";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/embed-insert"))
+        .json(&json!({ "records": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /embed-insert", name).await;
+}
+
+#[tokio::test]
+async fn external_ingest_logs_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_ingest_logs";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/ingest-logs"))
+        .json(&json!({ "lines": ["hello world"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /ingest-logs", name).await;
+}
+
+#[tokio::test]
+async fn external_delete_records_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_delete_records";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .delete(format!("{base}/v1/collections/{name}/records"))
+        .json(&json!({ "ids": ["00000000-0000-0000-0000-000000000000"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "DELETE /records", name).await;
+}
+
+#[tokio::test]
+async fn external_process_document_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_process_document";
+    let _data = setup_external(&base, name).await;
+
+    let form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(b"%PDF-1.4 fake".to_vec())
+            .file_name("doc.pdf")
+            .mime_str("application/pdf")
+            .unwrap(),
+    );
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/process-document"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /process-document", name).await;
+}
+
+#[tokio::test]
+async fn external_process_documents_batch_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_process_documents";
+    let _data = setup_external(&base, name).await;
+
+    let form = reqwest::multipart::Form::new().part(
+        "files",
+        reqwest::multipart::Part::bytes(b"%PDF-1.4 fake".to_vec())
+            .file_name("doc.pdf")
+            .mime_str("application/pdf")
+            .unwrap(),
+    );
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/process-documents"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /process-documents", name).await;
+}
+
+#[tokio::test]
+async fn external_ingest_url_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_ingest_url";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/ingest-url"))
+        .json(&json!({ "url": "http://example.com" }))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /ingest-url", name).await;
+}
+
+#[tokio::test]
+async fn external_ingest_media_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_ingest_media";
+    let _data = setup_external(&base, name).await;
+
+    let form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(b"fake image bytes".to_vec())
+            .file_name("pic.png")
+            .mime_str("image/png")
+            .unwrap(),
+    );
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/ingest-media"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /ingest-media", name).await;
+}
+
+#[tokio::test]
+async fn external_mvcc_checkpoint_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_mvcc_checkpoint";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!(
+            "{base}/v1/admin/collections/{name}/mvcc_checkpoint"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /mvcc_checkpoint", name).await;
+}
+
+#[tokio::test]
+async fn external_rescan_guardrails_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_rescan_guardrails";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!(
+            "{base}/v1/admin/collections/{name}/rescan-guardrails"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /rescan-guardrails", name).await;
+}
+
+// ── Registration-only routes stay allowed ───────────────────────────────
+
+#[tokio::test]
+async fn dropping_an_external_collection_still_succeeds() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_drop_allowed";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .delete(format!("{base}/v1/collections/{name}"))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 200, "drop should succeed: {body}");
+
+    // And it's really gone: describe now 404s.
+    let r = client()
+        .get(format!("{base}/v1/collections/{name}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404, "collection should be gone after drop");
+}
+
+#[tokio::test]
+async fn setting_the_alias_of_an_external_collection_still_succeeds() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_alias_allowed";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .put(format!("{base}/v1/admin/collections/{name}/alias"))
+        .json(&json!({ "target": name }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 200, "set_alias should succeed: {body}");
+}
