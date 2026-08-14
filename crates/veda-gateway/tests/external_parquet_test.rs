@@ -234,6 +234,38 @@ async fn registering_with_a_bucket_in_the_uri_is_rejected() {
 }
 
 #[tokio::test]
+async fn registering_an_external_collection_with_fields_is_rejected() {
+    let (base, _tmp) = start_server().await;
+
+    // A valid-shaped external block, but paired with a declared field —
+    // an external collection infers its schema from the source, so a
+    // caller-declared field can never be backed by real data and must be
+    // rejected rather than silently dropped.
+    let r = client()
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "ext_with_fields",
+            "fields": [
+                { "name": "embedding", "type": "vector", "dimension": 768 }
+            ],
+            "external": {
+                "format": "parquet",
+                "uri": "file:///tmp/does-not-need-to-exist/",
+                "id_field": "id",
+                "vector_field": "embedding",
+                "metric": "Cosine"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(body.contains("fields"), "'fields' absent from body: {body}");
+}
+
+#[tokio::test]
 async fn an_external_collection_reports_itself_as_external() {
     let (base, _tmp) = start_server().await;
     let data_dir = tempfile::tempdir().unwrap();
