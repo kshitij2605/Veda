@@ -339,27 +339,6 @@ pub async fn search(
         })?
     };
 
-    // External collections are read in place: no segments, no index.
-    // Checked after tenant scoping and alias resolution so the cache is
-    // keyed by the same resolved name every other handler uses — keying it
-    // earlier would give two aliases of one collection independent caches
-    // with independent staleness.
-    if let Some(src) = schema.external() {
-        return execute_external(&state, &name, src, &req)
-            .await
-            .map(|results| {
-                let count = results.len();
-                let took_ms = start.elapsed().as_millis() as u64;
-                Json(SearchResponse {
-                    results,
-                    count,
-                    took_ms,
-                    explain: None,
-                    hybrid_explain: None,
-                })
-            });
-    }
-
     // Resolve the backing index type of the queried vector field
     // (best-effort; lexical-only queries have no vector field).
     if let Some(field_name) = query_field.as_deref()
@@ -392,6 +371,35 @@ pub async fn search(
     }
     // RLS may have injected a filter where none existed — reflect that.
     meta.has_filter = req.filter.is_some() || req.filter_expr.is_some();
+
+    // External collections are read in place: no segments, no index.
+    // Checked after tenant scoping, alias resolution, AND row-level-
+    // security injection — in that order, deliberately:
+    //   - after scoping/resolution, so the freshness cache below is keyed
+    //     by the same resolved name every other handler uses (keying it
+    //     earlier would give two aliases of one collection independent
+    //     caches with independent staleness);
+    //   - after RLS injection, so a non-admin caller's owner predicate is
+    //     already sitting in `req.filter_expr` before `execute_external`
+    //     builds its predicate from `effective_filter(req)` (which reads
+    //     `filter_expr` first). Checking `schema.external()` any earlier
+    //     would return before RLS ever ran, silently serving every row of
+    //     an RLS-configured external collection to every caller.
+    if let Some(src) = schema.external() {
+        return execute_external(&state, &name, src, &req)
+            .await
+            .map(|results| {
+                let count = results.len();
+                let took_ms = start.elapsed().as_millis() as u64;
+                Json(SearchResponse {
+                    results,
+                    count,
+                    took_ms,
+                    explain: None,
+                    hybrid_explain: None,
+                })
+            });
+    }
 
     // APM Phase 5.1: record the always-known retrieval / db.* span
     // attributes from the Phase-1 `QueryMeta` (reusing the values already
