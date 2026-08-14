@@ -4,6 +4,7 @@
 //! schema itself, so `fields` is empty and an `external` block describes
 //! the source instead.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc as StdArc;
@@ -16,8 +17,9 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
+use veda_gateway::auth::Role;
 use veda_gateway::rest::build_router;
-use veda_gateway::rest::state::AppState;
+use veda_gateway::rest::state::{AppState, UserRecord};
 
 // ── Harness ──────────────────────────────────────────────────────────────
 
@@ -74,6 +76,67 @@ fn write_parquet(path: &Path, ids: &[&str], dim: Option<usize>) {
 
 fn file_uri(path: &Path) -> String {
     format!("file://{}", path.display())
+}
+
+/// Write a Parquet file with a string `id` column, a `FixedSizeList<Float32>`
+/// `embedding` column of width `dim`, and a string `owner` column — for the
+/// RLS test, which needs a scalar column `rls::inject_owner_filter`'s
+/// predicate can match against. `rows` is `(id, owner)` per row; the vector
+/// formula matches `write_parquet`'s (`(i * dim + d) / 10.0` for row `i`).
+fn write_parquet_with_owner(path: &Path, rows: &[(&str, &str)], dim: usize) {
+    let ids: Vec<&str> = rows.iter().map(|(id, _)| *id).collect();
+    let owners: Vec<&str> = rows.iter().map(|(_, owner)| *owner).collect();
+    let n = ids.len();
+    let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+    for i in 0..n {
+        for d in 0..dim {
+            flat.push((i * dim + d) as f32 / 10.0);
+        }
+    }
+    let values = Float32Array::from(flat);
+    let item_field = StdArc::new(Field::new("item", DataType::Float32, false));
+    let vectors =
+        FixedSizeListArray::try_new(item_field.clone(), dim as i32, StdArc::new(values), None)
+            .unwrap();
+    let schema = StdArc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new(
+            "embedding",
+            DataType::FixedSizeList(item_field, dim as i32),
+            false,
+        ),
+        Field::new("owner", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            StdArc::new(StringArray::from(ids)) as ArrayRef,
+            StdArc::new(vectors) as ArrayRef,
+            StdArc::new(StringArray::from(owners)) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let file = std::fs::File::create(path).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// Log in against a server started with `AppState::with_auth_and_users`,
+/// returning the bearer token. Mirrors `rls_test.rs`'s `login_user` — do not
+/// invent a different auth shape.
+async fn login_user(base: &str, user: &str, pass: &str) -> String {
+    let resp = client()
+        .post(format!("{base}/v1/auth/login"))
+        .json(&json!({ "username": user, "password": pass }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "login {user} failed");
+    resp.json::<Value>().await.unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -600,6 +663,98 @@ async fn external_search_through_an_alias_resolves() {
         direct_body["results"], alias_body["results"],
         "search through the alias should return exactly the hits direct search does: \
          direct={direct_body}, alias={alias_body}"
+    );
+}
+
+/// Security regression: an external collection registered with
+/// `rls_owner_field` must apply the same owner-equality filter non-admin
+/// searches get on internal collections — the external dispatch branch sits
+/// after RLS injection precisely so this holds. Before that fix, the branch
+/// returned before RLS ever ran, silently serving every row to every caller.
+#[tokio::test]
+async fn external_search_applies_row_level_security() {
+    let mut users = HashMap::new();
+    users.insert(
+        "admin".to_owned(),
+        UserRecord {
+            password: "admin".into(),
+            role: Role::Admin,
+        },
+    );
+    users.insert(
+        "alice".to_owned(),
+        UserRecord {
+            password: "alice".into(),
+            role: Role::Editor,
+        },
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = AppState::with_auth_and_users(tmp.path(), "ext-rls-test-secret", users);
+    let router = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let admin = login_user(&base, "admin", "admin").await;
+    let alice = login_user(&base, "alice", "alice").await;
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    // Row 0 and row 1 belong to alice, row 2 to bob (who never logs in —
+    // his row must still never reach alice's results).
+    write_parquet_with_owner(
+        &file_path,
+        &[("a1", "alice"), ("a2", "alice"), ("b1", "bob")],
+        3,
+    );
+
+    let r = client()
+        .post(format!("{base}/v1/collections"))
+        .header("Authorization", format!("Bearer {admin}"))
+        .json(&json!({
+            "name": "ext_rls",
+            "fields": [],
+            "rls_owner_field": "owner",
+            "external": {
+                "format": "parquet",
+                "uri": file_uri(&file_path),
+                "id_field": "id",
+                "vector_field": "embedding",
+                "metric": "Cosine"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    // Query built from row 1's vector (id "a2", owner "alice") so an
+    // unfiltered search would surface rows across owners, not just
+    // alice's — a passing result here is not a coincidence of geometry.
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_rls/search"))
+        .header("Authorization", format!("Bearer {alice}"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": [0.3, 0.4, 0.5] } },
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(status, 200, "alice search: {body}");
+    let results = body["results"].as_array().expect("results array");
+    assert!(!results.is_empty(), "alice should see her own rows: {body}");
+    assert!(
+        results.iter().all(|h| h["fields"]["owner"] == "alice"),
+        "RLS bypass: alice saw a row she does not own: {body}"
+    );
+    assert!(
+        results.iter().all(|h| h["id"] != "b1"),
+        "RLS bypass: alice saw bob's row 'b1': {body}"
     );
 }
 
