@@ -275,13 +275,33 @@ pub fn load(store: &dyn BlobStore, source: &ExternalSource) -> Result<ExternalDa
     }
     let keys = resolve_keys(store, &source.uri)?;
 
-    // Stamped before any object is read: a stamp taken first describes
-    // bytes at least as old as what `load` goes on to read, so a source
-    // changed concurrently with this load is still caught on the next
-    // query. A stamp taken after reading could describe bytes newer than
-    // what was actually loaded, making that staleness permanently
+    // Stamped from the same `keys` just resolved above — not by calling
+    // `stamp(store, source)`, which would re-list the prefix independently.
+    // A second, independent listing could observe a file added in the gap
+    // between the two `list()` calls: that file would land in the stamp but
+    // not in the data the loop below reads, and a later re-stamp (also a
+    // fresh listing) would match this one exactly, so the reload that
+    // should happen never fires and the dataset stays silently short some
+    // rows forever. Stamping the keys that were actually read closes that
+    // gap; `stamp()` itself still re-resolves on every call, which is
+    // correct there since it exists to notice added/removed files at query
+    // time.
+    //
+    // Also: stamped before any object is read. A stamp taken first
+    // describes bytes at least as old as what `load` goes on to read, so a
+    // source changed concurrently with this load is still caught on the
+    // next query. A stamp taken after reading could describe bytes newer
+    // than what was actually loaded, making that staleness permanently
     // invisible.
-    let source_stamp = stamp(store, source)?;
+    let mut stamp_entries = Vec::with_capacity(keys.len());
+    for key in &keys {
+        let st = store.stat(key)?;
+        stamp_entries.push((key.clone(), st));
+    }
+    stamp_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let source_stamp = SourceStamp {
+        entries: stamp_entries,
+    };
 
     let mut dim: Option<u32> = None;
     let mut id_type: Option<(arrow::datatypes::DataType, String)> = None;
@@ -1429,10 +1449,14 @@ mod tests {
     }
 
     #[test]
-    fn stamping_is_independent_of_listing_order() {
-        // `list` gives no ordering guarantee, so two stamps of the same
-        // unchanged prefix must compare equal regardless of the order the
-        // backend returned the keys in.
+    fn stamping_an_unchanged_prefix_twice_is_stable() {
+        // `stamp`'s internal sort by key is defensive: every `BlobStore`
+        // that exists today (`LocalBlobStore`, `ObjectBlobStore`) already
+        // returns `list()` results in sorted order, so no test built
+        // against a real backend can force `stamp` to see keys out of
+        // order and exercise the sort. This test only confirms that
+        // stamping the same unchanged prefix twice produces equal stamps —
+        // it does not, and cannot, cover the sort itself.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("part")).unwrap();
         let a_ids: Vec<String> = (0..5).map(|i| format!("a{i}")).collect();
