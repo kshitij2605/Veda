@@ -547,7 +547,20 @@ mod tests {
         let lists = vec![common, rare];
         let (_, exact) = block_max_wand(cursors_for(&lists), 10, 1.0);
         let (approx_hits, approx) = block_max_wand(cursors_for(&lists), 10, 4.0);
-        assert!(approx.docs_evaluated <= exact.docs_evaluated);
+        // STRICTLY fewer, not "no more". A `<=` here is satisfied by
+        // equality, so it would still pass if `theta` were made a no-op,
+        // leaving the entire approximate-search knob unguarded — exactly
+        // the "green but inert" failure this project keeps hitting.
+        // On this fixture theta = 4.0 pushes the bound to ~200 while the
+        // cumulative `list_max` is only 50.01, so pivot selection fails and
+        // the traversal stops as soon as the heap fills — strictly earlier
+        // than the exact run, which walks all 40 `rare` postings.
+        assert!(
+            approx.docs_evaluated < exact.docs_evaluated,
+            "theta > 1.0 did not prune more: approx {} vs exact {}",
+            approx.docs_evaluated,
+            exact.docs_evaluated
+        );
         assert!(approx_hits.len() <= 10);
     }
 

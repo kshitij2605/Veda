@@ -215,7 +215,17 @@ Held in a `HashMap<String, BlockIndex>` on `Bm25Index`, marked `#[serde(skip)]`.
   existing brute-force path unchanged.
 - **Sealed segments** are read-only. Blocks are built once, in a new
   `Bm25Index::build_blocks(&mut self)`, called from `Bm25Index::load` after
-  deserialization and from the sealed writer after its final `insert`.
+  deserialization.
+
+  *As built:* `load` is the **only** call site. The sealed writer needs none —
+  `SegmentWriter::seal` consumes the writer by value and returns only
+  `SegmentMetadata`, so its in-memory indexes are dropped, and every consumer
+  (`SegmentManager::seal_growing`, compaction) re-opens the directory through
+  `SegmentReader::open`, which goes through `load`. This rests on an invariant worth
+  stating: **a sealed `Bm25Index` is only ever obtained via `SegmentReader::open`.** A
+  future path that served a `SegmentWriter`'s in-memory index directly would silently
+  degrade to exhaustive scoring, because `has_blocks() == false` is indistinguishable
+  from the growing-segment case.
 
 `search` therefore dispatches on whether the block index is populated: present → BMW,
 absent → the existing accumulator. **This is deliberate and load-bearing for testing** —
@@ -318,6 +328,19 @@ work; "should be faster" is not a result.
    skipped; assert blocks skipped is greater than zero on a corpus large enough to contain
    multiple blocks. Without this the feature can be inert while every correctness test
    passes — a failure mode this project has hit four separate times.
+
+   *As built:* `PruneStats` carries `docs_evaluated` and `blocks_skipped`, not a
+   postings-scored counter, and the exhaustive path returns `PruneStats::default()` —
+   i.e. zeros — so no exhaustive denominator exists and the benchmark reports absolute
+   BMW-side counts rather than a reduction ratio. The quantitative evidence of pruning is
+   therefore the latency ratio plus the raw skip count. Two of the review rounds on this
+   feature were spent on precisely this class of weakness, so the tests that guard it are
+   each verified to FAIL when the thing they guard is disabled:
+   `block_max_check_skips_low_scoring_blocks` (fails when the block-max branch is
+   short-circuited), the non-dyadic determinism test (fails when the cursor tie-break is
+   removed), and `theta_above_one_prunes_at_least_as_much` (fails when `theta` is
+   neutered — it asserts *strictly* fewer evaluations, because a `<=` would be satisfied
+   by equality and would leave the whole approximate knob unguarded).
 3. **Upper bounds hold.** Property test: for every block, `max_impact` is `>=` the impact
    of every posting in that block; `list_max` is `>=` every `block_max`.
 4. **`prune_theta`.** `theta = 1.0` equals brute force. `theta > 1.0` never returns more
@@ -390,6 +413,23 @@ Worth recording separately, as a pre-existing cost this work did not introduce a
 not address: opening a 100k-document BM25 index spends ~13 seconds in `read` + `parse`
 alone, because postings are persisted as JSON. That dwarfs everything this feature adds
 and is the obvious target if segment-open latency ever becomes a problem.
+
+### Known costs, not measured here
+
+Two consequences of building blocks at open are not quantified by any benchmark in this
+branch and should be understood before this runs on a large deployment:
+
+- **Resident memory.** `block_indexes` is a second term-keyed `HashMap` held for the
+  segment's lifetime — a cloned `String` per distinct term plus a `Vec` per term. Under
+  the default `CjkBigram` tokenizer a Japanese corpus emits unigrams *and* overlapping
+  bigrams, so a 100k-document segment can carry millions of distinct terms; at roughly
+  80–100 bytes per entry that is on the order of hundreds of MB per sealed segment. The
+  "why nothing is persisted" argument above weighs build *time* only, not this.
+- **Where the build time lands.** `build_blocks` is paid inside `seal_growing`, which is
+  called synchronously from async handlers while the `segment_managers` write lock is
+  held, with no `spawn_blocking`. The measured 3.2 s at 100k docs therefore lands on the
+  request path. This is an amplification of an existing stall rather than a new one — the
+  JSON parse at the same site already costs ~13 s — but it makes that stall 24–31% worse.
 
 **Exhaustive path vs. the original baseline.** The `exhaustive=` figures in this run —
 2605.2us (10k), 29397.6us (100k, k=10), 29497.2us (100k, k=100) — are well above the three
