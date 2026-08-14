@@ -359,10 +359,27 @@ pub async fn search(
                 .as_ref()
                 .map(|axum::Extension(c)| c.sub.clone())
                 .unwrap_or_default();
-            let user_filter = req
-                .filter
-                .as_deref()
-                .and_then(|s| veda_query::filter::parser::FilterParser::parse(s).ok());
+            // A malformed `req.filter` must be a 400, unconditionally —
+            // not silently dropped via `.ok()`. RLS always sets
+            // `filter_expr` for a non-admin caller here, and every
+            // downstream consumer (`effective_filter`,
+            // `effective_filter_or_reject`) prefers `filter_expr` over
+            // re-parsing the raw string, so a dropped parse error here
+            // would surface as a silent full-scan-of-your-own-rows instead
+            // of the 400 the same filter gets without RLS.
+            let user_filter = match req.filter.as_deref() {
+                None => None,
+                Some(raw) => Some(
+                    veda_query::filter::parser::FilterParser::parse(raw).map_err(|e| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse {
+                                error: format!("invalid filter: {e}"),
+                            }),
+                        )
+                    })?,
+                ),
+            };
             // Inject the trusted owner predicate at the AST level.
             // Never re-serialize to a string: a quote in the username would
             // break out of the string literal and bypass RLS.
@@ -371,6 +388,70 @@ pub async fn search(
     }
     // RLS may have injected a filter where none existed — reflect that.
     meta.has_filter = req.filter.is_some() || req.filter_expr.is_some();
+
+    // External collections are read in place: no segments, no index.
+    // Checked after tenant scoping, alias resolution, AND row-level-
+    // security injection — in that order, deliberately:
+    //   - after scoping/resolution, so the freshness cache below is keyed
+    //     by the same resolved name every other handler uses (keying it
+    //     earlier would give two aliases of one collection independent
+    //     caches with independent staleness);
+    //   - after RLS injection, so a non-admin caller's owner predicate is
+    //     already sitting in `req.filter_expr` before `execute_external`
+    //     builds its predicate from `effective_filter_or_reject(req)`
+    //     (which reads `filter_expr` first). Checking `schema.external()`
+    //     any earlier would return before RLS ever ran, silently serving
+    //     every row of an RLS-configured external collection to every
+    //     caller.
+    if let Some(src) = schema.external() {
+        // This branch returns before the span-attribute block and
+        // `run_search`'s success/error match below, so without recording
+        // these here external searches are invisible to per-collection
+        // observability: no `veda_search_duration{collection=...}`
+        // samples even though the HTTP panel shows traffic, no `db.*` /
+        // `retrieval.*` span attributes for trace queries filtering on
+        // `db.collection`, and no query-log row at all — the log
+        // correlations/RCA/the advisor read from, so an external
+        // collection would read as idle rather than unsupported.
+        let span = tracing::Span::current();
+        span.record(rsc::DB_SYSTEM, rsc::DB_SYSTEM_VEDA);
+        span.record(rsc::DB_COLLECTION, display.as_str());
+        span.record(rsc::RETRIEVAL_QUERY_TYPE, meta.query_type.as_str());
+        span.record(rsc::RETRIEVAL_TOP_K, meta.top_k);
+        span.record(rsc::RETRIEVAL_RERANKED, meta.reranked);
+        span.record(rsc::RETRIEVAL_HAS_FILTER, meta.has_filter);
+
+        return match execute_external(&state, &name, src, &req).await {
+            Ok(results) => {
+                let count = results.len();
+                let took_ms = start.elapsed().as_millis() as u64;
+                span.record(rsc::RETRIEVAL_RESULT_COUNT, count);
+                let doc_ids: Vec<String> = results.iter().map(|h| h.id.clone()).collect();
+                super::query_log::record_success(&state, &name, &display, &meta, doc_ids, took_ms);
+                metrics::histogram!(m::SEARCH_DURATION, "collection" => display.clone())
+                    .record(start.elapsed().as_secs_f64());
+                Ok(Json(SearchResponse {
+                    results,
+                    count,
+                    took_ms,
+                    explain: None,
+                    hybrid_explain: None,
+                }))
+            }
+            Err((status, body)) => {
+                let took_ms = start.elapsed().as_millis() as u64;
+                super::query_log::record_error(
+                    &state,
+                    &name,
+                    &display,
+                    &meta,
+                    error_kind_for_status(status),
+                    took_ms,
+                );
+                Err((status, body))
+            }
+        };
+    }
 
     // APM Phase 5.1: record the always-known retrieval / db.* span
     // attributes from the Phase-1 `QueryMeta` (reusing the values already
@@ -957,6 +1038,281 @@ const RESERVED_GUARD_FIELDS: [&str; 5] = [
     veda_core::record::INDEXED_AT_FIELD,
 ];
 
+/// Per-collection single-flight lock for external dataset (re)loads, keyed
+/// by the same resolved collection name the freshness cache uses. Only the
+/// cache-miss path in `execute_external` touches this — a fresh cache hit
+/// never does — so N concurrent queries against a source that just got
+/// rewritten materialise it once, not N times.
+static EXTERNAL_LOAD_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn external_load_lock(name: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let mut locks = EXTERNAL_LOAD_LOCKS.lock().unwrap();
+    locks
+        .entry(name.to_owned())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Remove `name`'s single-flight reload lock, if one exists. Called
+/// alongside the `external_datasets` cache eviction on every drop path
+/// (`drop_collection_impl` and the raft-reconcile drop branch) so a dropped
+/// external collection's lock entry does not outlive it — `EXTERNAL_LOAD_LOCKS`
+/// is a process-lifetime static and would otherwise leak one entry per
+/// distinct collection name ever registered.
+pub(crate) fn remove_external_load_lock(name: &str) {
+    EXTERNAL_LOAD_LOCKS.lock().unwrap().remove(name);
+}
+
+/// Test-only: whether `name` currently has a single-flight reload lock
+/// entry. Used to assert the drop paths prune `EXTERNAL_LOAD_LOCKS`
+/// alongside `external_datasets`.
+#[cfg(test)]
+pub(crate) fn external_load_lock_exists(name: &str) -> bool {
+    EXTERNAL_LOAD_LOCKS.lock().unwrap().contains_key(name)
+}
+
+/// Search an external (read-in-place Parquet) collection. Called by
+/// `search` after tenant scoping, alias resolution, AND row-level-security
+/// injection — never before RLS, so a non-admin caller's owner predicate is
+/// already sitting in `req.filter_expr` by the time the predicate below is
+/// built from it. Checking `schema.external()` any earlier once let this
+/// branch return before RLS ever ran, silently serving every row of an
+/// RLS-configured external collection to every caller — see the call-site
+/// comment in `search` for that incident. The freshness cache below is
+/// still keyed by the same resolved name every other handler uses, for the
+/// same alias-independence reason as before.
+async fn execute_external(
+    state: &AppState,
+    name: &str,
+    src: &veda_core::schema::ExternalSource,
+    req: &SearchRequest,
+) -> Result<Vec<SearchHit>, (StatusCode, Json<ErrorResponse>)> {
+    let bad_request = |error: String| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error }));
+    let unavailable = |error: String| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse { error }),
+        )
+    };
+
+    // Reject query types that need an index Parquet does not carry. Each
+    // gets a distinct, accurate reason rather than one generic message.
+    if req.query.bm25.is_some() {
+        return Err(bad_request(format!(
+            "bm25 search is not available on external collection '{name}': it requires \
+             the inverted index Veda builds at ingest, and external data is read in place."
+        )));
+    }
+    if req.query.match_phrase.is_some() {
+        return Err(bad_request(format!(
+            "match_phrase search is not available on external collection '{name}': it \
+             requires the inverted index Veda builds at ingest, and external data is read \
+             in place."
+        )));
+    }
+    if req.query.sparse_vector.is_some() {
+        return Err(bad_request(format!(
+            "sparse search is not available on external collection '{name}': it requires \
+             stored sparse vectors, and external data carries only the dense vector and \
+             scalar columns read from the source Parquet file."
+        )));
+    }
+    if req.query.hybrid.is_some() {
+        return Err(bad_request(format!(
+            "hybrid search is not available on external collection '{name}': it composes \
+             a dense leg with a bm25 leg, and the bm25 leg requires the inverted index \
+             Veda builds at ingest, which external data does not have."
+        )));
+    }
+    // Rerank resolves each candidate's text via `lookup_record_at` against
+    // internal segment storage (see `apply_rerank`), which external
+    // collections do not have. Rejecting it here also avoids a worse trap:
+    // the rerank-oversampling in `search` already multiplied `req.limit` by
+    // 4 before this branch ever runs, so silently ignoring `rerank` here
+    // would return that oversampled, untruncated, unreranked candidate set
+    // instead of the caller's requested `limit`.
+    if req.rerank.is_some() {
+        return Err(bad_request(format!(
+            "rerank is not available on external collection '{name}': it resolves each \
+             candidate's text via internal record storage lookups, which external \
+             collections do not have locally."
+        )));
+    }
+
+    let Some(ref vec_query) = req.query.vector else {
+        return Err(bad_request(format!(
+            "external collection '{name}' supports dense vector search and scalar \
+             filters only"
+        )));
+    };
+
+    // Freshness, then cache. This runs before every query — the dataset
+    // lives entirely in memory, so an undetected source change would serve
+    // deleted or superseded rows as current forever.
+    //
+    // `stamp` is a directory walk or a blocking LIST + N HEADs; run it on
+    // the blocking pool like the reload below, so it cannot stall a tokio
+    // worker (and, with it, this process's other in-flight requests and
+    // health checks) on every single query.
+    let store = state.inner.blob_store.read().await.clone();
+    let store_for_stamp = store.clone();
+    let src_for_stamp = src.clone();
+    let fresh_stamp = tokio::task::spawn_blocking(move || {
+        veda_storage::external_parquet::stamp(store_for_stamp.as_ref(), &src_for_stamp)
+    })
+    .await
+    .map_err(|join_err| {
+        unavailable(format!(
+            "external source '{}' for collection '{name}' failed to stamp: {join_err}",
+            src.uri
+        ))
+    })?
+    .map_err(|e| {
+        unavailable(format!(
+            "external source '{}' for collection '{name}' is unavailable: {e}",
+            src.uri
+        ))
+    })?;
+
+    let cached = state
+        .inner
+        .external_datasets
+        .read()
+        .await
+        .get(name)
+        .cloned();
+    let dataset = match cached {
+        Some(ds) if ds.source_stamp() == &fresh_stamp => ds,
+        _ => {
+            // Single-flight the (re)load: without this, every query in
+            // flight when a source is rewritten observes the same stamp
+            // mismatch and each materialises its own full copy of the
+            // dataset before one wins the cache insert — for a large
+            // source that is N times the memory and N tokio workers
+            // blocked in I/O, not one.
+            let lock = external_load_lock(name);
+            let _guard = lock.lock().await;
+
+            // Re-check: another request may have already loaded a fresh
+            // copy while this one waited for the lock above.
+            let cached_again = state
+                .inner
+                .external_datasets
+                .read()
+                .await
+                .get(name)
+                .cloned();
+            match cached_again {
+                Some(ds) if ds.source_stamp() == &fresh_stamp => ds,
+                _ => {
+                    // `load` fully materialises the source and is
+                    // synchronous; run it on the blocking pool so a
+                    // multi-second read doesn't occupy a tokio worker
+                    // thread (and, with it, this process's other
+                    // in-flight requests and health checks).
+                    let store_for_load = store.clone();
+                    let src_for_load = src.clone();
+                    let load_result = tokio::task::spawn_blocking(move || {
+                        veda_storage::external_parquet::load(store_for_load.as_ref(), &src_for_load)
+                    })
+                    .await;
+                    match load_result {
+                        Ok(Ok(loaded)) => {
+                            let loaded = std::sync::Arc::new(loaded);
+                            state
+                                .inner
+                                .external_datasets
+                                .write()
+                                .await
+                                .insert(name.to_owned(), loaded.clone());
+                            loaded
+                        }
+                        Ok(Err(e)) => {
+                            // A failed reload must not leave a stale entry
+                            // behind: the next query has to retry the
+                            // load, not silently keep serving the
+                            // last-good snapshot forever.
+                            state.inner.external_datasets.write().await.remove(name);
+                            return Err(unavailable(format!(
+                                "external source '{}' for collection '{name}' is unavailable: {e}",
+                                src.uri
+                            )));
+                        }
+                        Err(join_err) => {
+                            return Err(unavailable(format!(
+                                "external source '{}' for collection '{name}' failed to load: {join_err}",
+                                src.uri
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let eff = effective_filter_or_reject(req)
+        .map_err(|msg| bad_request(format!("collection '{name}': {msg}")))?;
+
+    // Exact top-k is a linear scan over the whole dataset — the branch's
+    // own benchmark measures 1.69s at 100k rows — so, like the reload
+    // above, this runs on the blocking pool rather than a tokio worker.
+    let dataset_for_search = dataset.clone();
+    let query_vec = vec_query.values.clone();
+    let limit = req.limit;
+    let metric = src.metric;
+    let hits = tokio::task::spawn_blocking(move || {
+        let pred = eff.as_ref().map(|expr| {
+            move |rec: &veda_core::record::Record| {
+                veda_query::filter::record_eval::evaluate_record(expr, rec)
+            }
+        });
+        dataset_for_search.search(
+            &query_vec,
+            limit,
+            metric,
+            pred.as_ref()
+                .map(|p| p as &dyn Fn(&veda_core::record::Record) -> bool),
+        )
+    })
+    .await
+    .map_err(|join_err| unavailable(format!("external search on '{name}' failed: {join_err}")))?
+    .map_err(|e| bad_request(e.to_string()))?;
+
+    // `search` returns ids, not row indices, so build a lookup once per
+    // query rather than scanning `ids()` per hit.
+    let id_to_row: std::collections::HashMap<&str, usize> = dataset
+        .ids()
+        .iter()
+        .enumerate()
+        .map(|(row, id)| (id.as_str(), row))
+        .collect();
+
+    let results = hits
+        .into_iter()
+        .map(|(id, distance)| {
+            let mut fields = serde_json::Map::new();
+            if let Some(&row) = id_to_row.get(id.as_str()) {
+                let record = dataset.record_at(row);
+                for (field_name, value) in record.fields() {
+                    fields.insert(
+                        field_name.clone(),
+                        super::records::field_value_to_json(value),
+                    );
+                }
+            }
+            SearchHit {
+                id,
+                distance,
+                fields,
+            }
+        })
+        .collect();
+
+    Ok(results)
+}
+
 fn execute_single_vector(
     executor: &DistributedQueryExecutor,
     vec_query: &SingleVectorQuery,
@@ -1015,6 +1371,24 @@ fn effective_filter(req: &SearchRequest) -> Option<FilterExpr> {
     req.filter
         .as_deref()
         .and_then(|s| veda_query::filter::parser::FilterParser::parse(s).ok())
+}
+
+/// Like `effective_filter`, but for external collections: a malformed
+/// `req.filter` string is surfaced as an error rather than silently dropped
+/// via `.ok()`. Dropping it would make `execute_external` search every row
+/// with no filter applied and still answer `200` — over-disclosure, the
+/// mirror image of the empty-200 silence that the missing-index rejections
+/// in `execute_external` exist to remove.
+fn effective_filter_or_reject(req: &SearchRequest) -> Result<Option<FilterExpr>, String> {
+    if let Some(ref fe) = req.filter_expr {
+        return Ok(Some(fe.clone()));
+    }
+    match req.filter.as_deref() {
+        None => Ok(None),
+        Some(raw) => veda_query::filter::parser::FilterParser::parse(raw)
+            .map(Some)
+            .map_err(|e| format!("invalid filter: {e}")),
+    }
 }
 
 /// How many candidate docs each posting-list scan should request when a
@@ -1639,6 +2013,7 @@ mod tests {
         let resp = create_collection(
             State(state.clone()),
             crate::tenant::Tenant(crate::tenant::TenantId::default_tenant()),
+            None,
             Json(req),
         )
         .await;
@@ -1692,5 +2067,166 @@ mod tests {
             !results.results.is_empty(),
             "search on the aliased name must hit mycol@v2's data, not the empty original"
         );
+    }
+
+    // ── Single-flight reload coverage ───────────────────────────────────
+    //
+    // `execute_external`'s single-flight lock has zero coverage on this
+    // branch — deleting `let _guard = lock.lock().await;` fails no test.
+    // The lock's only observable effect is *how many times* the source is
+    // actually read, not query latency or correctness (two independent,
+    // fully concurrent loads of an unchanged file produce byte-identical
+    // results in about the same wall-clock time as one, since both would
+    // run in parallel on the blocking pool either way) — so a timing-based
+    // assertion cannot distinguish "loaded once" from "loaded twice" and
+    // was rejected as the kind of test that looks reassuring without being
+    // able to fail. What the lock actually guarantees — `store.get()` is
+    // called once per key across N concurrent queries, not N times — is
+    // observable from outside `execute_external` via a counting `BlobStore`
+    // test double, with no change to production code.
+    use std::sync::Arc as StdArc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use veda_storage::blob_store::{BlobStat, BlobStore, LocalBlobStore};
+
+    struct CountingBlobStore {
+        inner: LocalBlobStore,
+        get_calls: StdArc<AtomicUsize>,
+    }
+
+    impl BlobStore for CountingBlobStore {
+        fn put(&self, key: &str, data: &[u8]) -> veda_core::error::Result<()> {
+            self.inner.put(key, data)
+        }
+        fn get(&self, key: &str) -> veda_core::error::Result<Vec<u8>> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.get(key)
+        }
+        fn delete(&self, key: &str) -> veda_core::error::Result<()> {
+            self.inner.delete(key)
+        }
+        fn exists(&self, key: &str) -> veda_core::error::Result<bool> {
+            self.inner.exists(key)
+        }
+        fn list(&self, prefix: &str) -> veda_core::error::Result<Vec<String>> {
+            self.inner.list(prefix)
+        }
+        fn stat(&self, key: &str) -> veda_core::error::Result<BlobStat> {
+            self.inner.stat(key)
+        }
+    }
+
+    /// Write a single-row-per-id Parquet file with a string `id` column and
+    /// a `FixedSizeList<Float32>` `embedding` column of width `dim` at
+    /// `path`, mirroring `external_parquet.rs`'s own test fixtures.
+    fn write_ext_parquet(path: &std::path::Path, ids: &[&str], dim: usize) {
+        use arrow::array::{ArrayRef, FixedSizeListArray, Float32Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+
+        let n = ids.len();
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let item_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let vectors =
+            FixedSizeListArray::try_new(item_field.clone(), dim as i32, StdArc::new(values), None)
+                .unwrap();
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(item_field, dim as i32),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(StringArray::from(ids.to_vec())) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_reload_single_flights_two_concurrent_queries() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let key = "data.parquet";
+        write_ext_parquet(&data_dir.path().join(key), &["a", "b"], 2);
+
+        let get_calls = StdArc::new(AtomicUsize::new(0));
+        let counting: StdArc<dyn BlobStore> = StdArc::new(CountingBlobStore {
+            inner: LocalBlobStore::new(data_dir.path()).unwrap(),
+            get_calls: get_calls.clone(),
+        });
+
+        let state = test_state();
+        *state.inner.blob_store.write().await = counting;
+
+        let tenant = crate::tenant::TenantId::default_tenant();
+        let scoped = crate::tenant::scope(&tenant, "ext_single_flight");
+        let source = veda_core::schema::ExternalSource {
+            format: "parquet".to_owned(),
+            uri: key.to_owned(),
+            id_field: "id".to_owned(),
+            vector_field: "embedding".to_owned(),
+            metric: DistanceMetric::Cosine,
+        };
+        let schema = veda_core::schema::CollectionSchema::builder(scoped.clone())
+            .external(source.clone())
+            .shard_count(1)
+            .replication_factor(1)
+            .build()
+            .expect("external test schema should build");
+        state
+            .inner
+            .schemas
+            .write()
+            .await
+            .insert(scoped.clone(), schema);
+
+        let req = fixture_ext_search_request(2);
+
+        // Warm the cache with one load, then rewrite the source so its
+        // stamp changes — mirroring finding 6's "two concurrent queries
+        // against a source that changed".
+        execute_external(&state, &scoped, &source, &req)
+            .await
+            .expect("initial load should succeed");
+        write_ext_parquet(&data_dir.path().join(key), &["a", "b", "c"], 2);
+        get_calls.store(0, Ordering::SeqCst);
+
+        let (r1, r2) = tokio::join!(
+            execute_external(&state, &scoped, &source, &req),
+            execute_external(&state, &scoped, &source, &req),
+        );
+        r1.expect("first concurrent search should succeed");
+        r2.expect("second concurrent search should succeed");
+
+        assert_eq!(
+            get_calls.load(Ordering::SeqCst),
+            1,
+            "two concurrent queries against a changed source must materialise it once via the \
+             single-flight lock, not once per query; this fails if `execute_external`'s \
+             `let _guard = lock.lock().await;` is removed"
+        );
+    }
+
+    fn fixture_ext_search_request(dim: usize) -> SearchRequest {
+        serde_json::from_value(serde_json::json!({
+            "query": { "vector": { "field": "embedding", "values": vec![0.0f32; dim] } },
+            "limit": 10,
+        }))
+        .expect("fixture external search request should deserialize")
     }
 }

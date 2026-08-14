@@ -310,6 +310,10 @@ pub async fn run_connector(
             )
         })?
     };
+    // Crawls the connector's configured URLs and inserts the resulting
+    // chunks into `cfg.collection` via the shared ingest path — the same
+    // write shape as `/ingest-url`.
+    super::collections::reject_if_external(&schema, &cfg.collection)?;
 
     let strategy =
         parse_chunking_strategy(cfg.chunker.as_deref(), cfg.chunk_size, cfg.chunk_overlap);

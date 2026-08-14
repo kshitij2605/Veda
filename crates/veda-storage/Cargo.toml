@@ -36,6 +36,8 @@ futures = "0.3"
 lindera = { version = "0.32", optional = true, default-features = false, features = ["ipadic"] }
 rust-stemmers = "1"
 zstd = "0.13"
+parquet = { workspace = true }
+arrow = { workspace = true }
 
 [features]
 default = []

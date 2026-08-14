@@ -105,6 +105,10 @@ components:
         fields:
           type: array
           items: { $ref: '#/components/schemas/FieldDef' }
+          description: |
+            Must be `[]` when `external` is set — an external collection
+            infers its schema from the Parquet file(s) at registration;
+            declaring a field alongside `external` is rejected with `400`.
         shard_count: { type: integer, default: 1 }
         replication_factor: { type: integer, default: 1 }
         rls_owner_field:
@@ -115,6 +119,116 @@ components:
             holds the owner. The gateway then AND-injects
             `<rls_owner_field> == <jwt-subject>` into every read filter
             and enforces owner-on-write at the AST level. Admin bypasses.
+        external:
+          $ref: '#/components/schemas/ExternalSource'
+          nullable: true
+          description: |
+            Registers a **read-in-place Parquet collection**: Veda reads
+            the customer's existing Parquet file(s) directly, in place —
+            nothing is ingested or copied, and no index is built. See
+            `documentation/2026-08-14-external-parquet-collections-design.md`
+            for the full design and the measured costs below.
+
+            **Known limitations of an external collection, all enforced,
+            none silent:**
+              - **Exact search is linear** in row count — no index exists,
+                so latency scales with row count and recall is 1.0 by
+                construction.
+              - **The vector column is memory-resident.** Floor is
+                `row_count * dim * 4` bytes — measured at ~2.86 GiB (~3.07
+                GB decimal) for 1M rows at 768 dimensions. ids and scalar
+                columns add further, unmeasured heap overhead on top. A
+                dataset whose vector column alone exceeds available memory
+                fails on load rather than degrading.
+              - **Object reads are whole-object.** `BlobStore::get` reads
+                the entire file, so Parquet's range-request advantage over
+                S3/MinIO is lost; column pruning still saves decode CPU,
+                not I/O.
+              - **A same-size local-file rewrite completing within one
+                filesystem clock tick can go undetected** and serve stale
+                data; genuine content changes and any size change are
+                detected reliably. Object storage backends that return an
+                ETag (MinIO, S3) do not share this limitation.
+              - **`uri` is a key prefix within the server's configured
+                object store, never a bucket.** A URI naming a bucket
+                (e.g. `s3://bucket/prefix`) is rejected at registration —
+                configure the bucket in server configuration instead.
+              - **The collection is read-only.** 18 mutating endpoints
+                (insert, embed-insert, delete, reindex,
+                rescan-guardrails, seal, optimize, process-document,
+                process-documents batch, ingest-url, ingest-media,
+                ingest-logs, mvcc-checkpoint, tuning-campaign start and
+                apply-trial, connector run, eval-set generation, and
+                auto-optimization) return `405`. Dropping the collection
+                and alias management still work.
+              - **Five read endpoints require locally stored records.**
+                `GET /records`, `/aggregate`, `/histogram`,
+                `/field-stats` and `/evaluate` return `400` (not `405` —
+                these are reads) on an external collection, naming that
+                the operation needs locally stored records.
+              - **Registering an external collection requires Admin.**
+                `POST /v1/collections` with `external` set returns `403`
+                for a non-Admin caller — registration can read any
+                Parquet the server process can reach. A `..` path
+                component anywhere in the URI's key is rejected with
+                `400` regardless of caller role.
+              - **Auto-tuning campaigns are rejected with a clean `405`**
+                before they start. **The agent/MCP retrieval tool has no
+                explicit guard**, but fails closed anyway: an external
+                collection always registers with `fields: []`, so the
+                tool finds no vector fields and returns a `400`-class
+                tool error ("collection '...' has no vector fields")
+                before ever reaching the query executor — which, unlike
+                an earlier version of this document claimed, IS
+                registered for external collections same as any other.
+              - **`bm25`, `match_phrase`, `sparse`, `hybrid` and `rerank`
+                queries all return `400`** — see the `/search` path below.
+              - `truncate_to` and `explain: true` on a search request are
+                silently **ignored**, not rejected: the response's
+                `explain` is always `null`, and MRL truncation never
+                applies. The query's `field` is not validated against the
+                collection's `vector_field`.
+              - **Observability is partial.** Search duration, the
+                query log, and most tracing span attributes are recorded;
+                the `explain` per-phase timing breakdown is not, because
+                it is never computed.
+              - A hit's row id appears **twice**: once as `SearchHit.id`,
+                once again as a column inside `SearchHit.fields`. External
+                hits carry no `_guardrail_class` annotation.
+    ExternalSource:
+      type: object
+      required: [format, uri, id_field, vector_field, metric]
+      properties:
+        format:
+          type: string
+          description: "Only `\"parquet\"` is supported today."
+        uri:
+          type: string
+          description: |
+            A key or key prefix **within the server's configured object
+            store**, or `file:///abs/path` for a local file. Anything not
+            ending in `.parquet` is a prefix and selects every
+            `*.parquet` object beneath it (anchored on `/`, so
+            `embeddings/` never matches a sibling like
+            `embeddings-v1/...`). A URI naming a bucket is rejected — see
+            the `external` description above.
+        id_field:
+          type: string
+          description: "Column holding the record id. Utf8, LargeUtf8, Int32 or Int64; stringified into Veda's record id. Nulls are rejected."
+        vector_field:
+          type: string
+          description: "Column holding the dense vector. Must be FixedSizeList<Float32>."
+        metric:
+          type: string
+          enum: [Cosine, DotProduct, Euclidean]
+          description: |
+            Not inferable from Parquet, so required. Note the casing:
+            `ExternalSource.metric` deserializes the `DistanceMetric` enum
+            directly (`"Cosine"`, `"DotProduct"`, `"Euclidean"`) — unlike
+            an ordinary vector field's `metric` in `FieldDef` (see above),
+            which accepts lowercase (`"cosine"`, `"dot_product"`,
+            `"euclidean"`). The two are parsed by different code paths;
+            using the `FieldDef` casing here is rejected.
     InsertRequest:
       type: object
       required: [records]
@@ -138,6 +252,12 @@ components:
         fields:
           type: object
           additionalProperties: true
+          description: |
+            On an external (read-in-place Parquet) collection, the id
+            column appears here a second time under its own column name,
+            in addition to the top-level `id` above — nothing strips it
+            back out. An external hit also never carries a
+            `_guardrail_class` annotation, unlike an internal hit.
     SearchRequest:
       type: object
       required: [query, limit]
@@ -147,15 +267,32 @@ components:
           description: |
             One of `vector`, `bm25`, `sparse_vector`, `hybrid`,
             `colpali`, `multi_vector` — see the Rust types in
-            `crates/veda-gateway/src/rest/search.rs`.
+            `crates/veda-gateway/src/rest/search.rs`. An external
+            collection supports `vector` only; `bm25`, `match_phrase`,
+            `sparse_vector` and `hybrid` all return `400` naming the
+            missing index (Parquet carries no inverted or sparse index).
+            A `vector` query's `field` is not validated against the
+            collection's registered `vector_field` on an external
+            collection — an internal collection does validate this.
         filter:
           type: string
           description: |
             SQL-like filter DSL. Supports dotted paths into nested JSON
             fields, e.g. `meta.user.tier = "gold"`.
         limit: { type: integer }
-        explain: { type: boolean }
-        truncate_to: { type: integer, nullable: true }
+        explain:
+          type: boolean
+          description: |
+            On an external collection this is silently **ignored**: the
+            response's `explain` is always `null` and no per-phase timing
+            is computed. An internal collection honours it.
+        truncate_to:
+          type: integer
+          nullable: true
+          description: |
+            MRL (Matryoshka) query-vector truncation. On an external
+            collection this is silently **ignored** — the full vector is
+            always scored. An internal collection honours it.
         rerank:
           type: object
           nullable: true
@@ -164,6 +301,11 @@ components:
             query: { type: string }
             top_k: { type: integer }
             model: { type: string, nullable: true }
+          description: |
+            Unavailable on an external collection — returns `400`.
+            Rerank resolves each candidate's text via internal
+            record-storage lookups that an external collection does not
+            hold locally.
     SearchResponse:
       type: object
       properties:
@@ -1455,6 +1597,13 @@ paths:
         In Raft mode, this submits a `CreateCollection`
         command through the consensus log; the response only
         returns after the entry commits + applies on this node.
+
+        Set `external` instead of `fields` to register a **read-in-place
+        Parquet collection** — see `CreateCollectionRequest.external` for
+        the full set of known limitations. `GET` on such a collection
+        additionally returns `external_dimension`, `external_row_count`,
+        and `external_skipped_columns` (scalar columns dropped at
+        registration because their Arrow type has no mapping).
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -1464,6 +1613,7 @@ paths:
       responses:
         '201': { description: created }
         '307': { description: "follower; resubmit at Location header" }
+        '400': { description: "invalid request, including external-registration validation failures (missing/wrong-typed column, dimension disagreement across files, unreadable or bucket-naming URI)" }
         '409': { description: already exists }
 
   /v1/collections/{name}:
@@ -1501,6 +1651,15 @@ paths:
         Inserts records into the collection. Per-shard routing
         via ShardRouter. The response `ids` array contains the
         assigned UUID for each record.
+
+        `405` on an external (read-in-place Parquet) collection — it is
+        read-only, along with 17 other mutating endpoints (embed-insert,
+        delete, reindex, rescan-guardrails, seal, optimize,
+        process-document, process-documents batch, ingest-url,
+        ingest-media, ingest-logs, mvcc-checkpoint, the tuning-campaign
+        start/apply-trial routes, connector run, eval-set generation, and
+        auto-optimization). Dropping the collection and alias management
+        are unaffected.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -1520,6 +1679,7 @@ paths:
               schema: { $ref: '#/components/schemas/InsertResponse' }
         '307': { description: "follower; resubmit at Location header" }
         '404': { description: collection not found }
+        '405': { description: "collection is external and read-only" }
 
   /v1/collections/{name}/records/{id}:
     get:
@@ -1620,7 +1780,23 @@ paths:
   /v1/collections/{name}/search:
     post:
       summary: Search a collection.
-      description: "Dense, sparse, BM25, match_phrase, hybrid, colpali, multi_vector. The scalar `filter` (and row-level security) applies to ALL paths including the lexical (BM25/match_phrase/hybrid) ones."
+      description: |
+        Dense, sparse, BM25, match_phrase, hybrid, colpali, multi_vector.
+        The scalar `filter` (and row-level security) applies to ALL
+        paths including the lexical (BM25/match_phrase/hybrid) ones.
+
+        **External (read-in-place Parquet) collections support `vector`
+        search and scalar `filter` only.** `bm25`, `match_phrase`,
+        `sparse_vector`, `hybrid` and `rerank` all return `400` naming
+        the missing index/data. `explain` and `truncate_to` are silently
+        ignored rather than rejected (see `SearchRequest`), and a hit's
+        row id appears both as `SearchHit.id` and again inside
+        `SearchHit.fields` (see `SearchHit`). Two other entry points do
+        not support external collections at all: auto-tuning campaigns
+        reject them cleanly with `405`, and the agent/MCP retrieval tool
+        fails with a generic internal error rather than an explained
+        rejection. Full detail:
+        `documentation/2026-08-14-external-parquet-collections-design.md`.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -1647,6 +1823,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SearchResponse' }
+        '400': { description: "on an external collection: an unsupported query type (bm25/match_phrase/sparse_vector/hybrid/rerank), naming the missing index or data" }
+        '503': { description: "external collection's source is unreadable or has disappeared since registration" }
 
   /v1/collections/{name}/coverage:
     get:
