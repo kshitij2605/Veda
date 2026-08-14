@@ -221,6 +221,27 @@ impl FieldDefinition {
     }
 }
 
+/// Registration of a collection whose data Veda does not own and never
+/// writes to. `None` for every ordinary collection.
+///
+/// The referenced files are queried in place: no ingestion, no copy, and
+/// no index is built over them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalSource {
+    /// Only `"parquet"` is supported today. Present so a second reader
+    /// can be added without changing the request shape.
+    pub format: String,
+    /// `file:///abs/path`, a bare local path, or `s3://bucket/prefix`.
+    /// A prefix selects every `*.parquet` object beneath it.
+    pub uri: String,
+    /// Column holding the record identifier.
+    pub id_field: String,
+    /// Column holding the dense vector. Must be `FixedSizeList<Float32>`.
+    pub vector_field: String,
+    /// Distance metric. Not inferable from Parquet, so required.
+    pub metric: DistanceMetric,
+}
+
 /// Schema describing the structure of a collection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectionSchema {
@@ -259,6 +280,11 @@ pub struct CollectionSchema {
     /// to  (backward-compatible).
     #[serde(default)]
     rls_owner_field: Option<String>,
+    /// Set when this collection reads data Veda does not own. Absent for
+    /// ordinary collections, so schemas written before this feature load
+    /// unchanged.
+    #[serde(default)]
+    external: Option<ExternalSource>,
 }
 
 impl CollectionSchema {
@@ -273,6 +299,7 @@ impl CollectionSchema {
             use_log_primary: None,
             use_mvcc: None,
             rls_owner_field: None,
+            external: None,
         }
     }
 
@@ -385,6 +412,18 @@ impl CollectionSchema {
     pub fn rls_owner_field(&self) -> Option<&str> {
         self.rls_owner_field.as_deref()
     }
+
+    /// The external source, if this collection reads data Veda does not own.
+    pub fn external(&self) -> Option<&ExternalSource> {
+        self.external.as_ref()
+    }
+
+    /// Whether this collection reads data Veda does not own. External
+    /// collections are read-only and support only dense search and
+    /// scalar filters.
+    pub fn is_external(&self) -> bool {
+        self.external.is_some()
+    }
 }
 
 /// Builder for constructing a [`CollectionSchema`] with validation.
@@ -397,6 +436,7 @@ pub struct CollectionSchemaBuilder {
     use_log_primary: Option<bool>,
     use_mvcc: Option<bool>,
     rls_owner_field: Option<String>,
+    external: Option<ExternalSource>,
 }
 
 impl CollectionSchemaBuilder {
@@ -445,6 +485,12 @@ impl CollectionSchemaBuilder {
     /// Enable Row-Level Security for this collection.
     pub fn rls_owner_field(mut self, field: Option<String>) -> Self {
         self.rls_owner_field = field;
+        self
+    }
+
+    /// Register this collection as reading an external dataset in place.
+    pub fn external(mut self, src: ExternalSource) -> Self {
+        self.external = Some(src);
         self
     }
 
@@ -502,6 +548,49 @@ impl CollectionSchemaBuilder {
             use_log_primary: self.use_log_primary,
             use_mvcc: self.use_mvcc,
             rls_owner_field: self.rls_owner_field,
+            external: self.external,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_source_round_trips_through_serde() {
+        let src = ExternalSource {
+            format: "parquet".into(),
+            uri: "s3://lake/embeddings/".into(),
+            id_field: "doc_id".into(),
+            vector_field: "embedding".into(),
+            metric: DistanceMetric::Cosine,
+        };
+        let schema = CollectionSchema::builder("lake_docs")
+            .external(src.clone())
+            .build()
+            .unwrap();
+        let json = serde_json::to_string(&schema).unwrap();
+        let back: CollectionSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.external(), Some(&src));
+        assert!(back.is_external());
+    }
+
+    #[test]
+    fn an_ordinary_collection_is_not_external() {
+        let schema = CollectionSchema::builder("ordinary").build().unwrap();
+        assert_eq!(schema.external(), None);
+        assert!(!schema.is_external());
+    }
+
+    #[test]
+    fn a_schema_saved_before_this_feature_still_loads() {
+        // Older persisted schemas have no `external` key at all. `#[serde(default)]`
+        // must let them load unchanged, so existing collections need no migration.
+        let json = r#"{"id":"00000000-0000-0000-0000-000000000001","name":"legacy",
+            "fields":[],"shard_count":1,"replication_factor":1}"#;
+        let schema: CollectionSchema = serde_json::from_str(json).unwrap();
+        assert!(!schema.is_external());
+        assert_eq!(schema.name(), "legacy");
     }
 }
