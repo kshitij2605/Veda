@@ -41,6 +41,8 @@ opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", features = ["tonic", "metrics", "logs", "trace"] }
 tracing-opentelemetry = "0.28"
 opentelemetry-appender-tracing = "0.27"
+parquet = "59.2.0"
+arrow = "59.2.0"
 
 # Internal crates
 veda-core = { path = "crates/veda-core" }
