@@ -283,6 +283,34 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Reject a mutating request against a collection Veda does not own.
+///
+/// Enforced per handler rather than by convention: an unenforced read-only
+/// contract is the same class of mistake as an unenforced sortedness
+/// contract, and this codebase has twice shipped a guard applied at only
+/// some of several entry points.
+///
+/// This rejects anything that would write records, derived data or indexes.
+/// Managing Veda's own registration — dropping the collection, aliasing it —
+/// stays allowed, because it touches nothing of the customer's.
+pub(crate) fn reject_if_external(
+    schema: &CollectionSchema,
+    collection: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if schema.is_external() {
+        return Err((
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(ErrorResponse {
+                error: format!(
+                    "collection '{collection}' is external and read-only: \
+                     it reads data Veda does not own, in place"
+                ),
+            }),
+        ));
+    }
+    Ok(())
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────────
 
 pub async fn create_collection(
@@ -986,14 +1014,15 @@ pub async fn seal_collection(
     // Confirm the collection exists before touching segment managers.
     {
         let schemas = state.inner.schemas.read().await;
-        if !schemas.contains_key(&scoped) {
-            return Err((
+        let schema = schemas.get(&scoped).ok_or_else(|| {
+            (
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     error: format!("collection '{name}' not found"),
                 }),
-            ));
-        }
+            )
+        })?;
+        reject_if_external(schema, &name)?;
     }
 
     let mut per_shard: Vec<ShardSealResult> = Vec::new();
@@ -1069,14 +1098,15 @@ pub async fn optimize_collection(
 
     {
         let schemas = state.inner.schemas.read().await;
-        if !schemas.contains_key(&scoped) {
-            return Err((
+        let schema = schemas.get(&scoped).ok_or_else(|| {
+            (
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     error: format!("collection '{name}' not found"),
                 }),
-            ));
-        }
+            )
+        })?;
+        reject_if_external(schema, &name)?;
     }
 
     // Single-flight against the background compactor: take the same
@@ -1220,30 +1250,33 @@ async fn reindex_collection_internal_ex(
 ) -> Result<ReindexResponse, (StatusCode, Json<ErrorResponse>)> {
     // 1. Look up the current schema — from `read_from`, the actual
     //    current data, not `base_name`.
-    let schema_json = {
+    let schema = {
         let schemas = state.inner.schemas.read().await;
-        match schemas.get(read_from) {
-            Some(s) => serde_json::to_string(s).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("serialize schema: {e}"),
-                    }),
-                )
-            })?,
-            None => {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: format!(
-                            "collection '{}' not found",
-                            tenant::display_name(read_from)
-                        ),
-                    }),
-                ));
-            }
-        }
+        schemas.get(read_from).cloned().ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("collection '{}' not found", tenant::display_name(read_from)),
+                }),
+            )
+        })?
     };
+    // Reindex builds a new sibling index and copies records into it — a
+    // write against derived state Veda has no business owning for an
+    // external (read-in-place Parquet) collection. Covers `/reindex`
+    // directly, `/rescan-guardrails` (via `rescan_guardrails_impl`), and
+    // a tuning campaign's sibling materialization (via `materialize_bases`)
+    // — every caller of this function funnels through this one schema
+    // lookup.
+    reject_if_external(&schema, tenant::display_name(read_from))?;
+    let schema_json = serde_json::to_string(&schema).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("serialize schema: {e}"),
+            }),
+        )
+    })?;
 
     // 2. Pick the next sibling version. Today we just append
     //    `@v2`; a v2 of v2 would be `@v3`. Keep it simple. This operates

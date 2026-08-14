@@ -16,6 +16,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
+use super::collections;
 use super::crawl4ai::Crawl4aiClient;
 use super::document::parse_chunking_strategy;
 use super::ingest_common::{SourceMeta, ingest_markdown};
@@ -263,6 +264,11 @@ pub async fn ingest_url(
             )
         })?
     };
+    if let Err((status, Json(e))) =
+        collections::reject_if_external(&schema, tenant::display_name(&name))
+    {
+        return Err(err(status, "EXTERNAL_READ_ONLY", e.error));
+    }
 
     // Collect the seed URLs.
     let mut urls: Vec<String> = Vec::new();

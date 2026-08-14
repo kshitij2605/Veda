@@ -158,6 +158,7 @@ pub(crate) async fn insert_impl(
             )
         })?
     };
+    super::collections::reject_if_external(&schema, &name)?;
 
     let display = crate::tenant::display_name(&name).to_owned();
 
@@ -745,14 +746,15 @@ pub async fn delete_records(
     let name = state.inner.aliases.resolve(&name).await;
     {
         let schemas = state.inner.schemas.read().await;
-        if !schemas.contains_key(&name) {
-            return Err((
+        let schema = schemas.get(&name).ok_or_else(|| {
+            (
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     error: format!("collection '{name}' not found"),
                 }),
-            ));
-        }
+            )
+        })?;
+        super::collections::reject_if_external(schema, &name)?;
     }
 
     let mut deleted = 0usize;

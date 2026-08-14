@@ -332,6 +332,11 @@ pub async fn ingest_media_route(
             )
         })?
     };
+    if let Err((status, Json(e))) =
+        super::collections::reject_if_external(&schema, tenant::display_name(&name))
+    {
+        return Err(err(status, "EXTERNAL_READ_ONLY", e.error));
+    }
 
     // Extract the file and optional metadata fields from the multipart upload.
     let mut file_data: Option<Vec<u8>> = None;
