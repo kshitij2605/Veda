@@ -274,6 +274,14 @@ with a message naming the reason rather than failing obscurely or returning empt
 | `bm25`, `match_phrase` | needs the inverted index Veda builds at ingest |
 | `sparse` | needs stored `SparseVec` columns and their index |
 | `hybrid` | composes a dense leg with a bm25 leg; the bm25 leg is unavailable |
+| `rerank` | resolves each candidate's text via internal record-storage lookups; external
+collections hold only the dense vector and scalar columns read from the source Parquet
+file, with no local record text to resolve |
+
+`rerank` is checked before the dense search even runs, because `search`'s rerank-oversampling
+already multiplies `req.limit` by 4 upstream of this dispatch — silently ignoring `rerank`
+here would return that oversampled, untruncated, unreranked candidate set instead of the
+caller's requested `limit`, which is a worse failure than a clear `400`.
 
 ### Writes
 
@@ -291,8 +299,15 @@ These belong in the API documentation, not only in this file:
   Recall is 1.0 by construction. This is a deliberate trade: an ANN index over external
   data would be a derived copy of the vectors and would introduce staleness against a
   lake that can change underneath it.
-- **The vector column is resident.** ~3 GB for 1M × 768-dim `f32`. Registering a dataset
-  larger than available memory will fail on load rather than degrade.
+- **The vector column is resident.** `row_count * dim * 4` bytes is the floor for the
+  vector buffer alone — **~2.86 GiB (~3.07 GB decimal) for 1M × 768-dim `f32`**, confirmed
+  by measurement (see "Measured result" below); the original "~3 GB" estimate held.
+  Actual process memory is somewhat higher: ids (one heap-allocated `String` per row) and
+  every scalar column (one `Vec<FieldValue>` per column, one heap allocation per string
+  value) are additional, unmeasured overhead on top of this floor. Registering a dataset
+  whose vector column alone exceeds available memory will fail on load rather than
+  degrade; a dataset with many wide scalar columns can also exhaust memory well before
+  the vector-column floor is reached, since that overhead is not bounded here.
 - **Object reads are whole-object.** `BlobStore::get` returns the entire object, so
   Parquet's range-request advantage is lost over S3/MinIO. Column pruning still saves
   decode CPU and memory, but not I/O. Fixing this means either extending `BlobStore` with
@@ -320,7 +335,119 @@ These belong in the API documentation, not only in this file:
   MinIO and S3 both do. A backend supplying neither ETag nor Last-Modified nor
   Content-Length would have the same blind spot.
 
-## Error handling
+- **A URI naming a bucket is rejected.** External URIs are key prefixes within the
+  server's single configured object store, never a bucket in their own right — see
+  "Which bucket, and why a bucket cannot be named in the URI" under Component 1. Pointing
+  Veda at a customer's lake means configuring its object store against that bucket, then
+  registering a bare key prefix.
+
+- **Unsupported query types return `400` with a reason.** `bm25`, `match_phrase`,
+  `sparse` and `hybrid` each need an index a Parquet file does not carry; `rerank` needs
+  record text external collections do not hold locally. See "Rejected query types" above.
+
+- **The collection is read-only: 18 mutating endpoints return `405`.** `insert`,
+  `embed-insert`, `delete`, `reindex`, `rescan-guardrails`, `seal`, `optimize`,
+  `process-document`, `process-documents` (batch), `ingest-url`, `ingest-media`,
+  `ingest-logs`, `mvcc-checkpoint`, the tuning-campaign `start` and `apply-trial` routes,
+  the web-connector run route, eval-set generation, and `set_auto_optimization` all reject
+  an external collection with `405` and a message naming it external and read-only.
+  Dropping the collection (`DELETE /v1/collections/{name}`) and alias management
+  (`PUT /v1/admin/collections/{name}/alias`) still succeed, because both touch only
+  Veda's own registration metadata, never the source data.
+
+- **Two other search entry points do not support external collections.** Both reach a
+  `DistributedQueryExecutor` directly rather than going through the dispatch branch in
+  `rest/search.rs` that checks `schema.external()`:
+  - **Auto-tuning campaigns** (`POST .../tuning/campaigns` and the trial-apply route) are
+    rejected cleanly with `405` before a campaign ever starts — `start_campaign` and
+    `apply_trial` both call `reject_if_external` up front. Auto-tuning simply does not run
+    against an external collection; there is no silent partial behaviour.
+  - **The agent retrieval tool** (`agent/tools/builtins.rs`) has no such guard. It looks
+    up the collection's `DistributedQueryExecutor` in `AppState::query_executors`, which
+    is never populated for an external collection (there is no segment manager, no
+    executor, to register), and fails with a generic `"no query executor"` internal
+    error rather than an explained rejection. An agent (or the MCP tool surface) calling
+    retrieval against an external collection gets an unhelpful 500-class failure, not a
+    `405` naming the reason.
+
+- **Observability parity is partial.** A search against an external collection records:
+  the `db.system` / `db.collection` / `retrieval.query_type` / `retrieval.top_k` /
+  `retrieval.reranked` / `retrieval.has_filter` / `retrieval.result_count` span
+  attributes, a query-log entry (`record_success`/`record_error`, exactly one per
+  request, with the returned doc ids), and the `veda_search_duration{collection=...}`
+  histogram. It does **not** record `retrieval.index_type` (correctly — no index exists)
+  or the per-phase timing breakdown (`retrieval.filter_ms` / `.ann_search_ms` /
+  `.scoring_ms` / `.fusion_ms` / `.total_ms`), because that breakdown is only computed
+  when `explain: true` is honoured, and it is not — see the next bullet. Before Task 7's
+  fix round, external searches recorded none of this at all and were invisible to
+  per-collection observability, the query log, and any advisor/RCA tooling that reads
+  from it; that gap is closed for everything except the `explain` timing breakdown.
+
+- **Three request parameters are silently ignored rather than rejected**, where an
+  internal collection validates all three:
+  - `truncate_to` (Matryoshka/MRL dimensionality reduction) is dropped; the query always
+    scores the full vector.
+  - `explain: true` has no effect; the response's `explain` field is always `null`, and
+    no per-phase timing is computed.
+  - A dense query's `field` is never checked against the collection's registered
+    `vector_field`. `validate_dense_query`, which performs this check for internal
+    collections, sits downstream of the point where the external branch already
+    returned.
+
+- **Two hit-shape divergences from internal search results.** A row's id appears twice
+  in an external hit: once as the top-level `SearchHit.id`, and again as the id column
+  inside `fields` (`record_at` includes the id field alongside every other scalar column,
+  and nothing strips it back out before the hit is built). And an external hit carries no
+  `_guardrail_class` annotation — that annotation is only ever inserted on the internal
+  search path.
+
+## Measured result
+
+Figures below are from `crates/veda-storage/tests/external_parquet_bench.rs`, run with
+`PROTOC=/home/mac/bin/protoc timeout 3600 /home/mac/.cargo/bin/cargo test -p veda-storage --test external_parquet_bench -- --ignored --nocapture`
+on the build host, local-disk `LocalBlobStore`, 768 dimensions throughout.
+
+| rows | load | stamp | vector-column floor | parquet file size | floor / file size |
+|---|---|---|---|---|---|
+| 10,000 | 3.455837059s | 502.626µs | 30,720,000 B (29.297 MB) | 9,798,818 B (9.345 MB) | 3.135x |
+| 100,000 | 20.748620277s | 535.033µs | 307,200,000 B (292.969 MB) | 98,044,409 B (93.502 MB) | 3.133x |
+
+Filtered vs. unfiltered search, 100,000 rows, k=10, a ~50%-selective predicate on one
+scalar column:
+
+| | time | hits |
+|---|---|---|
+| unfiltered | 1.689646697s | 10 |
+| filtered | 1.19760238s | 10 |
+
+**Did the ~3 GB / 1M × 768-dim estimate hold? Yes.** `row_count * dim * 4` is exactly
+linear by construction — 10k→100k rows scaled the floor 10.02x (29.297 MB → 292.969 MB) —
+so it extrapolates cleanly to **2,929.69 MB (2.861 GiB, 3.072 GB decimal) at 1M rows**,
+matching "~3 GB" closely. The "Stated limits" section above has been reworded to state
+this precisely as a **floor for the vector column alone**, not total resident memory: ids
+and scalar columns add further heap allocations this benchmark does not measure (no RSS
+sampling is wired up here — see the caveat in the benchmark's own doc comment). The
+original estimate was directionally correct and is not corrected further, only clarified.
+
+**`stamp` cost.** ~500µs regardless of row count (502.626µs at 10k rows, 535.033µs at
+100k), because `stamp` only calls `BlobStore::stat` per file behind the URI — filesystem
+metadata, never the file's content. This is a per-query tax on every search against an
+external collection (see Component 3), and at this cost it is negligible relative to the
+linear scan `search` itself performs. This number is local-disk only: an S3/MinIO `stat`
+is a network HEAD request, and its latency was not measured here — the "Risks" table's
+"revisit only if measurement says otherwise" for the per-query `stat` round-trip remains
+open for the object-storage case.
+
+**Filtering cost.** Filtered search was **faster** than unfiltered in this benchmark
+(1.198s vs. 1.690s, 0.709x), not slower. The review's concern — that `record_at`
+materialises a full `Record` (a `HashMap` plus a `String` clone per column) for every row
+scanned, ahead of the predicate's own selectivity — is real and does add work per row,
+but at one scalar column it is cheaper than the 768-dimension cosine-distance computation
+it lets a ~50%-selective predicate skip for excluded rows. This benchmark used a single
+scalar column; it does not stress-test the case the review actually flagged, which is
+column *count*, not filter selectivity — a source with many wide scalar columns would
+make `record_at`'s per-row allocation cost scale with column count regardless of how
+selective the predicate is, and that case is not measured here.
 
 - Registration failures are `400` with the specific cause (missing column, wrong Arrow
   type, dimension disagreement across files, unreadable URI).
