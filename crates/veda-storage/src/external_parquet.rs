@@ -18,7 +18,32 @@ use veda_core::schema::ExternalSource;
 use veda_core::simd::{cosine_distance, dot_product, euclidean_distance};
 use veda_core::types::DistanceMetric;
 
-use crate::blob_store::BlobStore;
+use crate::blob_store::{BlobStat, BlobStore};
+
+/// Identity of a source at a point in time. Compared for equality, never
+/// interpreted.
+///
+/// See `BlobStat` for the one case this cannot detect: a rewrite that keeps
+/// a file's exact byte length and completes within a single filesystem
+/// clock tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceStamp {
+    /// One entry per object behind the URI, sorted by key so the comparison
+    /// does not depend on the order the backend listed them in.
+    entries: Vec<(String, BlobStat)>,
+}
+
+/// Cheap identity of `source` without transferring any data.
+pub fn stamp(store: &dyn BlobStore, source: &ExternalSource) -> Result<SourceStamp> {
+    let keys = resolve_keys(store, &source.uri)?;
+    let mut entries = Vec::with_capacity(keys.len());
+    for key in keys {
+        let st = store.stat(&key)?;
+        entries.push((key, st));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(SourceStamp { entries })
+}
 
 /// A Parquet dataset registered as a read-only collection.
 #[derive(Debug)]
@@ -41,6 +66,10 @@ pub struct ExternalDataset {
     /// see silent zero hits with no diagnostic anywhere; Task 6 surfaces
     /// this list in the registration response.
     skipped: Vec<(String, String)>,
+    /// Identity of `source` taken before `load` read any of its data, so a
+    /// concurrent change during load is caught on the next query. See
+    /// `stamp`.
+    stamp: SourceStamp,
 }
 
 impl ExternalDataset {
@@ -60,6 +89,12 @@ impl ExternalDataset {
     /// `FieldValue` mapping: `(column name, Arrow type)`.
     pub fn skipped_columns(&self) -> &[(String, String)] {
         &self.skipped
+    }
+
+    /// Identity of this dataset's source as of when `load` read it. Compare
+    /// against a fresh `stamp` to detect that the source changed.
+    pub fn source_stamp(&self) -> &SourceStamp {
+        &self.stamp
     }
 
     /// The vector for row `row`.
@@ -240,6 +275,14 @@ pub fn load(store: &dyn BlobStore, source: &ExternalSource) -> Result<ExternalDa
     }
     let keys = resolve_keys(store, &source.uri)?;
 
+    // Stamped before any object is read: a stamp taken first describes
+    // bytes at least as old as what `load` goes on to read, so a source
+    // changed concurrently with this load is still caught on the next
+    // query. A stamp taken after reading could describe bytes newer than
+    // what was actually loaded, making that staleness permanently
+    // invisible.
+    let source_stamp = stamp(store, source)?;
+
     let mut dim: Option<u32> = None;
     let mut id_type: Option<(arrow::datatypes::DataType, String)> = None;
     let mut scalar_types: HashMap<String, (arrow::datatypes::DataType, FieldValueKind, String)> =
@@ -405,6 +448,7 @@ pub fn load(store: &dyn BlobStore, source: &ExternalSource) -> Result<ExternalDa
         id_field: source.id_field.clone(),
         scalars,
         skipped,
+        stamp: source_stamp,
     })
 }
 
@@ -1342,6 +1386,76 @@ mod tests {
             vector_field: "embedding".into(),
             metric: DistanceMetric::Cosine,
         }
+    }
+
+    #[test]
+    fn a_rewritten_file_produces_a_different_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 10, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let before = stamp(&store, &source("a.parquet")).unwrap();
+
+        // A different row count means different bytes and a different length,
+        // which is the change class `stat` detects reliably.
+        write_parquet(&dir.path().join("a.parquet"), 20, 4);
+        let after = stamp(&store, &source("a.parquet")).unwrap();
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn an_unchanged_file_produces_an_equal_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 10, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let a = stamp(&store, &source("a.parquet")).unwrap();
+        let b = stamp(&store, &source("a.parquet")).unwrap();
+        assert_eq!(a, b, "stamping must be stable when nothing changed");
+    }
+
+    #[test]
+    fn a_new_file_behind_a_prefix_changes_the_stamp() {
+        // Adding a partition to a lake prefix must invalidate the cache even
+        // though every pre-existing file is untouched.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("part")).unwrap();
+        let a_ids: Vec<String> = (0..5).map(|i| format!("a{i}")).collect();
+        write_parquet_with_ids(&dir.path().join("part/a.parquet"), &a_ids, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let before = stamp(&store, &source("part/")).unwrap();
+        let b_ids: Vec<String> = (0..5).map(|i| format!("b{i}")).collect();
+        write_parquet_with_ids(&dir.path().join("part/b.parquet"), &b_ids, 4);
+        let after = stamp(&store, &source("part/")).unwrap();
+        assert_ne!(before, after, "an added file must invalidate the cache");
+    }
+
+    #[test]
+    fn stamping_is_independent_of_listing_order() {
+        // `list` gives no ordering guarantee, so two stamps of the same
+        // unchanged prefix must compare equal regardless of the order the
+        // backend returned the keys in.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("part")).unwrap();
+        let a_ids: Vec<String> = (0..5).map(|i| format!("a{i}")).collect();
+        let b_ids: Vec<String> = (0..5).map(|i| format!("b{i}")).collect();
+        write_parquet_with_ids(&dir.path().join("part/a.parquet"), &a_ids, 4);
+        write_parquet_with_ids(&dir.path().join("part/b.parquet"), &b_ids, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        assert_eq!(
+            stamp(&store, &source("part/")).unwrap(),
+            stamp(&store, &source("part/")).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_loaded_dataset_carries_the_stamp_of_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 6, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+        assert_eq!(
+            *ds.source_stamp(),
+            stamp(&store, &source("a.parquet")).unwrap()
+        );
     }
 
     #[test]
