@@ -231,8 +231,16 @@ pub struct ExternalSource {
     /// Only `"parquet"` is supported today. Present so a second reader
     /// can be added without changing the request shape.
     pub format: String,
-    /// `file:///abs/path`, a bare local path, or `s3://bucket/prefix`.
-    /// A prefix selects every `*.parquet` object beneath it.
+    /// A key or key prefix **within the server's configured object store**,
+    /// or `file:///abs/path` for a local file. Anything not ending in
+    /// `.parquet` is treated as a prefix and selects every `*.parquet`
+    /// object beneath it.
+    ///
+    /// A URI naming a bucket (for example `s3://bucket/prefix`) is
+    /// rejected: Veda holds one object store against one configured
+    /// bucket, so an authority here would be silently discarded and the
+    /// read would go to the wrong bucket. Configure the bucket on the
+    /// server instead.
     pub uri: String,
     /// Column holding the record identifier.
     pub id_field: String,
@@ -561,7 +569,7 @@ mod tests {
     fn external_source_round_trips_through_serde() {
         let src = ExternalSource {
             format: "parquet".into(),
-            uri: "s3://lake/embeddings/".into(),
+            uri: "embeddings/".into(),
             id_field: "doc_id".into(),
             vector_field: "embedding".into(),
             metric: DistanceMetric::Cosine,

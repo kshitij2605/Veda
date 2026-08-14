@@ -93,7 +93,7 @@ per-collection opt-ins on `CollectionSchema` (`stored_format`, `use_log_primary`
   "name": "lake_docs",
   "external": {
     "format": "parquet",
-    "uri": "s3://customer-lake/embeddings/",
+    "uri": "embeddings/",
     "id_field": "doc_id",
     "vector_field": "embedding",
     "metric": "cosine"
@@ -110,8 +110,12 @@ pub struct ExternalSource {
     /// Only `"parquet"` today. Present so a second reader can be added
     /// without changing the request shape.
     pub format: String,
-    /// `file:///abs/path`, a bare local path, or `s3://bucket/prefix`.
-    /// A prefix selects every `*.parquet` object beneath it.
+    /// A key or key prefix **within the server's configured object store**,
+    /// or `file:///abs/path` for a local file. A prefix — anything not
+    /// ending in `.parquet` — selects every `*.parquet` object beneath it.
+    ///
+    /// A URI naming a bucket (`s3://bucket/prefix`) is **rejected**: see
+    /// "Which bucket" below.
     pub uri: String,
     /// Column holding the record identifier. Any Arrow primitive or
     /// string type; stringified into Veda's record id.
@@ -122,6 +126,26 @@ pub struct ExternalSource {
     pub metric: DistanceMetric,
 }
 ```
+
+**Which bucket, and why a bucket cannot be named in the URI.** Veda holds exactly one
+`ObjectBlobStore`, constructed against a single bucket from server configuration. An
+authority in the URI would therefore be discarded, and `s3://customer-lake/embeddings/`
+would silently read key `embeddings/` from **whatever bucket the server was configured
+with** — succeeding against unrelated data if such a prefix happened to exist there.
+
+That is the same silent-wrong-data failure this design works hard to avoid elsewhere, so
+a URI with a non-empty authority is **rejected at registration** with a message saying the
+bucket belongs in server configuration. External URIs are key prefixes within the store
+Veda already has. Pointing Veda at a customer's lake means configuring its object store
+against that bucket.
+
+Two related rules that exist for the same reason:
+
+- **A prefix is listed with a trailing `/`.** `ObjectBlobStore::list` is a bare
+  `ListObjectsV2` with no delimiter, i.e. `starts_with` semantics, so listing
+  `embeddings` without the slash would also match `embeddings-v1/…` and silently merge a
+  stale snapshot into the dataset.
+- **An empty prefix is an error**, not a whole-bucket sweep.
 
 **Inferred vs required.** Column names, Arrow types and the vector dimension are read
 from the Parquet footer at registration. `vector_field` and `metric` are required,
