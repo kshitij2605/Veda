@@ -6,6 +6,18 @@ use std::time::Instant;
 use tracing::instrument;
 use veda_core::error::{Result, VedaError};
 
+/// Cheap identity of a stored object, used to detect that a source changed
+/// without transferring it.
+///
+/// `version` is opaque: only equality is meaningful. Local stores put a
+/// modification time in it; object stores put an ETag, or Last-Modified
+/// when the backend supplies no ETag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobStat {
+    pub size: u64,
+    pub version: String,
+}
+
 /// Trait for blob storage backends.
 pub trait BlobStore: Send + Sync {
     /// Store a blob at the given key.
@@ -22,6 +34,9 @@ pub trait BlobStore: Send + Sync {
 
     /// List blobs with a given prefix.
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
+
+    /// Metadata for a key without transferring the object.
+    fn stat(&self, key: &str) -> Result<BlobStat>;
 }
 
 /// Wrapper to use an `Arc<dyn BlobStore>` as a `Box<dyn BlobStore>`.
@@ -42,6 +57,9 @@ impl BlobStore for ArcBlobStore {
     }
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.0.list(prefix)
+    }
+    fn stat(&self, key: &str) -> Result<BlobStat> {
+        self.0.stat(key)
     }
 }
 
@@ -91,6 +109,21 @@ impl BlobStore for LocalBlobStore {
 
     fn exists(&self, key: &str) -> Result<bool> {
         Ok(self.key_path(key).exists())
+    }
+
+    fn stat(&self, key: &str) -> Result<BlobStat> {
+        let path = self.key_path(key);
+        let metadata = fs::metadata(&path)
+            .map_err(|_| VedaError::Storage(format!("Blob not found: {key}")))?;
+        let modified_ms = metadata
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| VedaError::Storage(format!("invalid modified time: {e}")))?
+            .as_millis();
+        Ok(BlobStat {
+            size: metadata.len(),
+            version: modified_ms.to_string(),
+        })
     }
 
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
@@ -260,6 +293,19 @@ impl BlobStore for ObjectBlobStore {
         }
     }
 
+    fn stat(&self, key: &str) -> Result<BlobStat> {
+        let (head, code) = self
+            .bucket
+            .head_object(key)
+            .map_err(|e| VedaError::Storage(format!("object store head failed: {e}")))?;
+        if code != 200 {
+            return Err(VedaError::Storage(format!("Blob not found: {key}")));
+        }
+        let size = head.content_length.unwrap_or(0).max(0) as u64;
+        let version = head.e_tag.or(head.last_modified).unwrap_or_default();
+        Ok(BlobStat { size, version })
+    }
+
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let results = self
             .bucket
@@ -273,5 +319,42 @@ impl BlobStore for ObjectBlobStore {
         }
         keys.sort();
         Ok(keys)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_stat_reports_size_and_changes_with_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        store.put("a.bin", b"hello").unwrap();
+        let first = store.stat("a.bin").unwrap();
+        assert_eq!(first.size, 5);
+
+        // A different payload of a different length must produce a different
+        // stat, or cache invalidation cannot work at all.
+        store.put("a.bin", b"hello world").unwrap();
+        let second = store.stat("a.bin").unwrap();
+        assert_eq!(second.size, 11);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn local_stat_on_a_missing_key_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        assert!(store.stat("nope.bin").is_err());
+    }
+
+    #[test]
+    fn arc_blob_store_forwards_stat() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = std::sync::Arc::new(LocalBlobStore::new(dir.path()).unwrap());
+        inner.put("a.bin", b"xyz").unwrap();
+        let wrapped = ArcBlobStore(inner.clone());
+        assert_eq!(wrapped.stat("a.bin").unwrap(), inner.stat("a.bin").unwrap());
     }
 }
