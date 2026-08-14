@@ -1888,9 +1888,14 @@ mod tests {
         let err = load(&store, &source("../../etc/secret.parquet"))
             .unwrap_err()
             .to_string();
+        // Assert on the REJECTION's own wording, not on "..". An error
+        // containing ".." proves nothing: with the traversal check removed
+        // the key still reaches the store and returns `Blob not found:
+        // ../../etc/...`, which also contains "..", so the weaker
+        // assertion passed with the security fix deleted.
         assert!(
-            err.contains(".."),
-            "error must name the offending path component, got: {err}"
+            err.contains("path component"),
+            "error must be the traversal rejection, got: {err}"
         );
     }
 
@@ -1905,9 +1910,14 @@ mod tests {
         let err = load(&store, &source("file:///srv/data/../../etc/secret.parquet"))
             .unwrap_err()
             .to_string();
+        // Assert on the REJECTION's own wording, not on "..". An error
+        // containing ".." proves nothing: with the traversal check removed
+        // the key still reaches the store and returns `Blob not found:
+        // ../../etc/...`, which also contains "..", so the weaker
+        // assertion passed with the security fix deleted.
         assert!(
-            err.contains(".."),
-            "error must name the offending path component, got: {err}"
+            err.contains("path component"),
+            "error must be the traversal rejection, got: {err}"
         );
     }
 
