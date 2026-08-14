@@ -352,3 +352,66 @@ likewise be derived in memory at open rather than persisted, Cycle B may need no
 format change either — which would remove its migration story entirely. Cycle B's spec
 should test that assumption against real sparse-vector sizes before assuming a new
 storage format is required.
+
+## Measured result
+
+Measured on gpu-host-a with `cargo test -p veda-storage --test bm25_bench -- --ignored
+--nocapture` on branch `feat/block-max-wand`. The three `compare:` lines, verbatim:
+
+```
+compare: docs=10000 k=10 exhaustive=2605.2us bmw=1297.9us speedup=2.01x build_blocks=864.7ms blocks_skipped=7719 docs_evaluated=43520
+compare: docs=100000 k=10 exhaustive=29397.6us bmw=11603.2us speedup=2.53x build_blocks=8380.8ms blocks_skipped=74082 docs_evaluated=102693
+compare: docs=100000 k=100 exhaustive=29497.2us bmw=12236.1us speedup=2.41x build_blocks=8299.6ms blocks_skipped=102593 docs_evaluated=443168
+```
+
+**`build_blocks` cost, and the decision not to persist.** The comparison run above reports
+`build_blocks` at ~865ms (10k docs) and ~8.3s (100k docs), but on its own that number
+cannot settle anything: what matters is its size *relative to the JSON parse that
+`Bm25Index::load` already performs*, since the derivation is now paid on every segment
+open. `bm25_open_cost_10k` / `bm25_open_cost_100k` measure the three costs separately:
+
+```
+openbench: docs=10000 file=15.6MB read=152.7ms parse=1290.6ms build_blocks=453.6ms build_over_read_parse=0.31x
+openbench: docs=100000 file=167.2MB read=2034.5ms parse=10914.7ms build_blocks=3163.2ms build_over_read_parse=0.24x
+```
+
+Deriving block metadata adds **24–31%** to the cost of opening a sealed BM25 index — it
+does not multiply it. The claim in `load`'s doc comment is therefore substantiated, and
+the design's decision not to persist block metadata stands: paying ~24% more on open
+buys a 2.0–2.5x per-query speedup, with no format version, no migration for existing
+sealed segments, and no back-compat surface.
+
+(The `build_blocks` figures differ between the two benchmarks — 8.3s in the comparison
+run versus 3.2s here for the same 100k corpus. The comparison run was taken under heavy
+host contention; see the next paragraph. The ratio is the meaningful quantity because
+both of its terms were measured in the same run under the same conditions.)
+
+Worth recording separately, as a pre-existing cost this work did not introduce and does
+not address: opening a 100k-document BM25 index spends ~13 seconds in `read` + `parse`
+alone, because postings are persisted as JSON. That dwarfs everything this feature adds
+and is the obvious target if segment-open latency ever becomes a problem.
+
+**Exhaustive path vs. the original baseline.** The `exhaustive=` figures in this run —
+2605.2us (10k), 29397.6us (100k, k=10), 29497.2us (100k, k=100) — are well above the three
+baselines recorded before any pruning code existed (1802.0us, 16770.2us, 17239.7us): +45%,
++75%, +71% respectively. A rerun of just `bm25_baseline_10k` alone (not part of the six
+official lines above) gave 2310.3us, i.e. still +28% over baseline and different from the
+2605.2us seen in the six-line run, so the gap is not a fixed, reproducible number — it
+varies run to run. Investigation: `search_exhaustive`'s algorithm and the `postings`
+representation are unchanged since before the baseline was recorded (the positional
+`Vec<(u32, u32, Vec<u32>)>` postings and the exhaustive accumulate-then-sort loop both
+predate this branch); the only change from the plan's Task 2 refactor is extracting
+`bm25_idf`/`bm25_impact` into `#[inline]` functions with identical formulas and adding a
+`doc_id` tie-break to the sort comparator, neither of which is algorithmically heavier.
+`ps aux` at benchmark time showed this host running multiple unrelated processes at
+100-160% CPU each (gitea, an OCR server, several `airflow db check` invocations,
+clickhouse-server) with `uptime` load average 12-16 on a 72-core box. The most likely
+explanation is host contention at measurement time rather than a code regression, but this
+was not measured on an otherwise-idle host, so that explanation is not proven — only the
+absence of an algorithmic cause is established.
+
+**Does it deliver?** Yes, at these corpus sizes: block-max WAND gives 2.01x–2.53x
+per-query speedup over exhaustive scoring on the same host in the same run, comfortably
+above the 1.2x bar, with `blocks_skipped` confirming pruning is actually happening
+(7,719–102,593 blocks skipped per benchmark) rather than the pruning path silently
+degenerating to exhaustive.
