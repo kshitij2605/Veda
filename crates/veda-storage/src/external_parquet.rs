@@ -834,9 +834,9 @@ mod tests {
 
     use arrow::array::{
         ArrayRef, Date32Array, FixedSizeListArray, Float32Array, Int8Array, Int32Array, Int64Array,
-        StringArray, TimestampMillisecondArray,
+        ListArray, StringArray, TimestampMillisecondArray,
     };
-    use arrow::buffer::NullBuffer;
+    use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
@@ -1230,6 +1230,110 @@ mod tests {
         writer.close().unwrap();
     }
 
+    /// `ids`-row dataset with an extra `tags` column of type
+    /// `List<Field{name: inner_field_name}>` — one element per row — for
+    /// the cross-writer `List` inner-field-name test. Both Spark
+    /// (`"element"`) and pyarrow (`"item"`) name this field differently for
+    /// what is structurally the same, entirely unmapped column.
+    fn write_parquet_with_list_column(
+        path: &std::path::Path,
+        ids: &[String],
+        dim: usize,
+        inner_field_name: &str,
+    ) {
+        let n = ids.len();
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let vec_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let vectors =
+            FixedSizeListArray::try_new(vec_field.clone(), dim as i32, StdArc::new(values), None)
+                .unwrap();
+
+        let inner_field = StdArc::new(Field::new(inner_field_name, DataType::Int32, true));
+        let list_values = Int32Array::from((0..n as i32).collect::<Vec<i32>>());
+        let offsets = OffsetBuffer::new(ScalarBuffer::from((0..=n as i32).collect::<Vec<i32>>()));
+        let tags = ListArray::try_new(inner_field.clone(), offsets, StdArc::new(list_values), None)
+            .unwrap();
+
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("doc_id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(vec_field, dim as i32),
+                false,
+            ),
+            Field::new("tags", DataType::List(inner_field), false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(StringArray::from(ids.to_vec())) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+                StdArc::new(tags) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// `ids`-row dataset with a `created_at` `Timestamp(Millisecond, tz)`
+    /// column, `tz` as given, for the cross-writer timezone test.
+    fn write_parquet_with_timestamp_tz(
+        path: &std::path::Path,
+        ids: &[String],
+        dim: usize,
+        millis: &[i64],
+        tz: Option<&str>,
+    ) {
+        let n = ids.len();
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let vec_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let vectors =
+            FixedSizeListArray::try_new(vec_field.clone(), dim as i32, StdArc::new(values), None)
+                .unwrap();
+
+        let ts_array = TimestampMillisecondArray::from(millis.to_vec())
+            .with_timezone_opt(tz.map(|s| s.to_owned()));
+        let ts_type = DataType::Timestamp(TimeUnit::Millisecond, tz.map(StdArc::from));
+
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("doc_id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(vec_field, dim as i32),
+                false,
+            ),
+            Field::new("created_at", ts_type, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(StringArray::from(ids.to_vec())) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+                StdArc::new(ts_array) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
     fn source(uri: &str) -> ExternalSource {
         ExternalSource {
             format: "parquet".into(),
@@ -1428,6 +1532,80 @@ mod tests {
         assert!(
             err.contains("region") && err.contains("Utf8") && err.contains("Int32"),
             "error must name the column and both types, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_mismatched_list_inner_field_names_across_files() {
+        // The real Spark-vs-pyarrow difference: both writers emit a
+        // structurally-unmapped List column, but Spark names the inner
+        // field "element" and pyarrow names it "item". Kind-based
+        // agreement (both Unsupported) must accept this and drop the
+        // column, not hard-fail registration over a column that was never
+        // going to be read either way.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("part")).unwrap();
+        let a_ids: Vec<String> = (0..3).map(|i| format!("a{i}")).collect();
+        let b_ids: Vec<String> = (0..2).map(|i| format!("b{i}")).collect();
+        write_parquet_with_list_column(&dir.path().join("part/a.parquet"), &a_ids, 4, "element");
+        write_parquet_with_list_column(&dir.path().join("part/b.parquet"), &b_ids, 4, "item");
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("part/")).expect(
+            "List<Field{name: differs}> across files must agree at the mapped-kind level \
+             (both Unsupported) and must not hard-fail registration",
+        );
+        assert_eq!(ds.row_count(), 5, "both files must be read as one dataset");
+        assert!(
+            ds.skipped_columns().iter().any(|(name, _)| name == "tags"),
+            "the List column must be dropped (surfaced in skipped_columns), got: {:?}",
+            ds.skipped_columns()
+        );
+    }
+
+    #[test]
+    fn accepts_mismatched_timestamp_timezone_across_files_and_keeps_values() {
+        // Timestamp(Millisecond, None) in one file and
+        // Timestamp(Millisecond, Some("UTC")) in the other map through the
+        // identical arm in read_batches to the identical FieldValue
+        // variant, so they must agree at the mapped-kind level — and,
+        // unlike the List case, the values must actually survive into
+        // record_at rather than being dropped.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("part")).unwrap();
+        let a_ids: Vec<String> = (0..2).map(|i| format!("a{i}")).collect();
+        let b_ids: Vec<String> = (0..2).map(|i| format!("b{i}")).collect();
+        write_parquet_with_timestamp_tz(
+            &dir.path().join("part/a.parquet"),
+            &a_ids,
+            4,
+            &[1_700_000_000_000, 1_700_000_100_000],
+            None,
+        );
+        write_parquet_with_timestamp_tz(
+            &dir.path().join("part/b.parquet"),
+            &b_ids,
+            4,
+            &[1_800_000_000_000, 1_800_000_100_000],
+            Some("UTC"),
+        );
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("part/")).expect(
+            "Timestamp(Millisecond, None) and Timestamp(Millisecond, Some(\"UTC\")) map through \
+             the same arm and must agree at the mapped-kind level",
+        );
+        assert_eq!(ds.row_count(), 4);
+
+        let row_a0 = ds.ids().iter().position(|id| id == "a0").unwrap();
+        let row_b0 = ds.ids().iter().position(|id| id == "b0").unwrap();
+        assert_eq!(
+            ds.record_at(row_a0).get("created_at"),
+            Some(&FieldValue::Timestamp(1_700_000_000_000)),
+            "value from the tz-less file must survive, not be dropped"
+        );
+        assert_eq!(
+            ds.record_at(row_b0).get("created_at"),
+            Some(&FieldValue::Timestamp(1_800_000_000_000)),
+            "value from the UTC-tagged file must survive, not be dropped"
         );
     }
 
