@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use veda_core::metrics as m;
-use veda_core::schema::{CollectionSchema, FieldDefinition};
+use veda_core::schema::{CollectionSchema, ExternalSource, FieldDefinition};
 use veda_core::types::{DistanceMetric, FieldType};
 use veda_query::distributed::DistributedQueryExecutor;
 use veda_query::local_shard::LocalShardSearcher;
@@ -80,6 +80,14 @@ pub struct CreateCollectionRequest {
     /// (the JWT `sub` claim). Admin users bypass the filter entirely.
     #[serde(default)]
     pub rls_owner_field: Option<String>,
+    /// Register this collection as reading an external dataset in place
+    /// rather than storing its own. External collections are read-only and
+    /// support only dense vector search and scalar filters.
+    ///
+    /// When set, `fields` is ignored: column names, types and the vector
+    /// dimension are inferred from the source's schema.
+    #[serde(default)]
+    pub external: Option<ExternalSource>,
 }
 
 /// Default growing-segment seal threshold: 512 MiB. Vector ANN indexes
@@ -169,6 +177,18 @@ pub struct CreateCollectionResponse {
     /// the create. Absent / null when no seeds were requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seeded: Option<usize>,
+    /// Vector dimension inferred from the external source's schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_dimension: Option<u32>,
+    /// Rows found in the external source at registration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_row_count: Option<u64>,
+    /// Source columns Veda cannot map to a filterable field, and their
+    /// Arrow types. These are readable in the source but not available to
+    /// filters — surfaced here so a filter that silently matches nothing
+    /// is diagnosable at registration rather than at query time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_skipped_columns: Option<Vec<(String, String)>>,
 }
 
 /// Per-shard outcome of a force-seal: how many segments that shard
@@ -220,6 +240,10 @@ pub struct DescribeCollectionResponse {
     pub fields: Vec<FieldInfo>,
     pub shard_count: u32,
     pub replication_factor: u32,
+    /// Present when this collection reads an external dataset in place
+    /// rather than storing its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external: Option<ExternalSource>,
 }
 
 #[derive(Debug, Serialize)]
@@ -318,6 +342,42 @@ async fn create_collection_impl(
         }
     }
 
+    // External collections declare no Veda fields: column names, types and
+    // the vector dimension are inferred from the source's Parquet schema.
+    // Registration's job is to fail fast on a bad source, and the only
+    // honest way to know a Parquet dataset is usable is to read it — so
+    // `load` runs here purely to validate. The loaded dataset is
+    // deliberately discarded rather than written into
+    // `state.inner.external_datasets`: that cache and its freshness check
+    // (comparing against the source's stamp) belong to the search path,
+    // and a cache entry written here would bypass that comparison.
+    let mut external_dimension = None;
+    let mut external_row_count = None;
+    let mut external_skipped_columns = None;
+    if let Some(src) = &req.external {
+        let store = state.inner.blob_store.read().await.clone();
+        match veda_storage::external_parquet::load(store.as_ref(), src) {
+            Ok(ds) => {
+                external_dimension = Some(ds.dim());
+                external_row_count = Some(ds.row_count() as u64);
+                external_skipped_columns = Some(ds.skipped_columns().to_vec());
+                // `ds` is dropped here, on purpose — see comment above.
+            }
+            Err(e) => {
+                // `load`'s errors already name the offending column, the
+                // file, the columns that do exist, and both dimensions on
+                // a mismatch — pass the message through verbatim rather
+                // than paraphrasing it away.
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                ));
+            }
+        }
+    }
+
     // Build schema under the scoped name. schema.name() will return
     // the scoped name; responses strip it back to user_name.
     let mut builder = CollectionSchema::builder(&scoped_name)
@@ -326,6 +386,9 @@ async fn create_collection_impl(
         .use_log_primary(req.use_log_primary)
         .use_mvcc(req.use_mvcc)
         .rls_owner_field(req.rls_owner_field.clone());
+    if let Some(src) = &req.external {
+        builder = builder.external(src.clone());
+    }
     if let Some(fmt) = req.stored_format.as_deref() {
         match fmt.to_lowercase().as_str() {
             "jsonl" | "columnar" => builder = builder.stored_format(fmt.to_lowercase()),
@@ -463,6 +526,9 @@ async fn create_collection_impl(
             name: user_name.to_owned(),
             status: "created".into(),
             seeded: seeded_count,
+            external_dimension,
+            external_row_count,
+            external_skipped_columns,
         }),
     ))
 }
@@ -666,6 +732,7 @@ pub async fn describe_collection(
         fields,
         shard_count: schema.shard_count(),
         replication_factor: schema.replication_factor(),
+        external: schema.external().cloned(),
     }))
 }
 
