@@ -617,6 +617,75 @@ async fn external_match_phrase_is_rejected() {
 }
 
 #[tokio::test]
+async fn external_rerank_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = register_external(&base, "ext_rerank", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    // limit=3 with rerank: on an internal collection this oversamples to
+    // limit*4=20 candidates internally and truncates back to 3 reranked
+    // hits. External must reject outright rather than leak the oversampled,
+    // untruncated, unreranked 20-hit candidate set.
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_rerank/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": row0_query(3) } },
+            "limit": 3,
+            "rerank": { "query": "irrelevant", "field": "content" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.contains("ext_rerank"),
+        "collection name absent from body: {body}"
+    );
+    assert!(
+        body.contains("rerank"),
+        "rerank explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_malformed_filter_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = register_external(&base, "ext_bad_filter", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    // Unterminated quote. The old `effective_filter`'s `.ok()` swallowed
+    // the parse error and ran an unfiltered search instead, returning
+    // every row with a 200 — over-disclosure, not a diagnostic.
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_bad_filter/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": row0_query(3) } },
+            "filter": "id = 'a",
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.contains("filter"),
+        "parse-failure explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
 async fn external_search_through_an_alias_resolves() {
     let (base, _tmp) = start_server().await;
     let data_dir = tempfile::tempdir().unwrap();
