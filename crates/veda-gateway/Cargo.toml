@@ -59,3 +59,9 @@ libc = "0.2"
 jsonwebtoken = "9"
 tempfile = "3"
 reqwest = { version = "0.12", features = ["json"] }
+# Test-fixture-only: writing a Parquet file to exercise the external
+# collections registration path. `arrow`/`parquet` must stay confined to
+# veda-storage as normal dependencies; these are dev-only and do not leak
+# into the non-test dependency graph.
+arrow = { workspace = true }
+parquet = { workspace = true }
