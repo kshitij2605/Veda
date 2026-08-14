@@ -31,6 +31,12 @@ pub struct ExternalDataset {
     /// values on a hit. Read by `record_at`, added in the next task.
     #[allow(dead_code)]
     scalars: HashMap<String, Vec<FieldValue>>,
+    /// Scalar columns dropped at load because their Arrow type has no
+    /// `FieldValue` mapping: `(column name, Arrow type rendered with
+    /// `{:?}`)`. A customer filtering on a dropped column would otherwise
+    /// see silent zero hits with no diagnostic anywhere; Task 6 surfaces
+    /// this list in the registration response.
+    skipped: Vec<(String, String)>,
 }
 
 impl ExternalDataset {
@@ -45,18 +51,57 @@ impl ExternalDataset {
     pub fn ids(&self) -> &[String] {
         &self.ids
     }
+
+    /// Scalar columns dropped at load because their Arrow type has no
+    /// `FieldValue` mapping: `(column name, Arrow type)`.
+    pub fn skipped_columns(&self) -> &[(String, String)] {
+        &self.skipped
+    }
+}
+
+/// Strip a leading `<scheme>://<authority>/` from `uri`, leaving the object
+/// key or key prefix passed to `BlobStore`.
+///
+/// `file://` URIs carry no authority — `file:///abs/path` is the scheme
+/// followed directly by the absolute filesystem path `/abs/path` — so only
+/// the literal `file://` prefix is stripped and the leading `/` is kept,
+/// letting `LocalBlobStore` treat it as absolute and bypass its base
+/// directory.
+///
+/// Any other scheme (`s3://`, ...) carries a bucket/authority next. The
+/// underlying `BlobStore` already knows which bucket to talk to from server
+/// configuration, so a bucket named in the URI is informational only and is
+/// discarded here, leaving a bucket-relative key.
+fn strip_scheme(uri: &str) -> String {
+    if let Some(rest) = uri.strip_prefix("file://") {
+        return rest.to_owned();
+    }
+    match uri.find("://") {
+        Some(idx) => {
+            let after_scheme = &uri[idx + 3..];
+            match after_scheme.find('/') {
+                Some(slash) => after_scheme[slash + 1..].to_owned(),
+                None => String::new(),
+            }
+        }
+        None => uri.to_owned(),
+    }
 }
 
 /// Resolve `source.uri` to the object keys to read, in sorted order so a
 /// dataset is assembled deterministically.
 ///
-/// A URI ending in `/` is a prefix and selects every `*.parquet` beneath it.
-/// Anything else is a single object key.
+/// A resolved path ending in `.parquet` is a single object key; anything
+/// else is a prefix and selects every `*.parquet` object beneath it. This
+/// makes `s3://bucket/prefix` (no trailing slash) behave the same as
+/// `s3://bucket/prefix/`, matching the documented URI form.
 fn resolve_keys(store: &dyn BlobStore, uri: &str) -> Result<Vec<String>> {
-    let cleaned = uri.strip_prefix("file://").unwrap_or(uri);
-    if cleaned.ends_with('/') {
+    let cleaned = strip_scheme(uri);
+    if cleaned.ends_with(".parquet") {
+        Ok(vec![cleaned])
+    } else {
         let mut keys: Vec<String> = store
-            .list(cleaned)?
+            .list(&cleaned)?
             .into_iter()
             .filter(|k| k.ends_with(".parquet"))
             .collect();
@@ -67,8 +112,6 @@ fn resolve_keys(store: &dyn BlobStore, uri: &str) -> Result<Vec<String>> {
             )));
         }
         Ok(keys)
-    } else {
-        Ok(vec![cleaned.to_owned()])
     }
 }
 
@@ -83,9 +126,12 @@ pub fn load(store: &dyn BlobStore, source: &ExternalSource) -> Result<ExternalDa
     let keys = resolve_keys(store, &source.uri)?;
 
     let mut dim: Option<u32> = None;
+    let mut id_type: Option<(arrow::datatypes::DataType, String)> = None;
+    let mut scalar_types: HashMap<String, (arrow::datatypes::DataType, String)> = HashMap::new();
     let mut vectors: Vec<f32> = Vec::new();
     let mut ids: Vec<String> = Vec::new();
     let mut scalars: HashMap<String, Vec<FieldValue>> = HashMap::new();
+    let mut skipped: Vec<(String, String)> = Vec::new();
 
     for key in &keys {
         let raw = store.get(key)?;
@@ -109,6 +155,45 @@ pub fn load(store: &dyn BlobStore, source: &ExternalSource) -> Result<ExternalDa
             )));
         }
 
+        // The id column's Arrow type must agree across every file behind a
+        // prefix — otherwise e.g. an Int64 1 in one file and a Utf8 "1" in
+        // another stringify to distinct ids for what may be the same row,
+        // or distinct rows collide under a shared textual form.
+        let this_id_type = id_arrow_type(&schema, &source.id_field, key)?;
+        match &id_type {
+            None => id_type = Some((this_id_type, key.clone())),
+            Some((t, first_key)) if t != &this_id_type => {
+                return Err(VedaError::Storage(format!(
+                    "id_field '{}' type disagreement: '{first_key}' has {t:?}, '{key}' has {this_id_type:?}",
+                    source.id_field
+                )));
+            }
+            Some(_) => {}
+        }
+
+        // A scalar column's Arrow type must also agree across files: two
+        // files disagreeing on a column's type is a schema disagreement
+        // that should fail registration, not silently discard whichever
+        // file's rows were already read for that column.
+        for field in schema.fields() {
+            let name = field.name().as_str();
+            if name == source.id_field || name == source.vector_field {
+                continue;
+            }
+            let ty = field.data_type().clone();
+            match scalar_types.get(name) {
+                None => {
+                    scalar_types.insert(name.to_owned(), (ty, key.clone()));
+                }
+                Some((prev_ty, prev_key)) if prev_ty != &ty => {
+                    return Err(VedaError::Storage(format!(
+                        "scalar column '{name}' type disagreement: '{prev_key}' has {prev_ty:?}, '{key}' has {ty:?}"
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+
         let file_dim = fixed_size_list_dim(&schema, &source.vector_field, key)?;
         match dim {
             None => dim = Some(file_dim),
@@ -120,15 +205,74 @@ pub fn load(store: &dyn BlobStore, source: &ExternalSource) -> Result<ExternalDa
             Some(_) => {}
         }
 
-        read_batches(builder, source, &mut ids, &mut vectors, &mut scalars)?;
+        read_batches(
+            builder,
+            source,
+            &mut ids,
+            &mut vectors,
+            &mut scalars,
+            &mut skipped,
+        )?;
+    }
+
+    // An empty result set is indistinguishable from a correct answer, so a
+    // URI whose files exist but contain zero rows (a correctly-schema'd but
+    // empty shard, an empty `_SUCCESS`-style file) must fail loudly rather
+    // than register as a valid, permanently-empty collection.
+    if ids.is_empty() {
+        return Err(VedaError::Storage(format!(
+            "no rows found behind '{}' ({} file(s) read)",
+            source.uri,
+            keys.len()
+        )));
+    }
+
+    // Ambiguous ids make SearchHit.id meaningless, so duplicates — within
+    // one file or across files behind a prefix — fail registration rather
+    // than silently collapsing distinct rows under a shared id.
+    {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for id in &ids {
+            if !seen.insert(id.as_str()) {
+                return Err(VedaError::Storage(format!(
+                    "duplicate id '{id}' behind '{}': id_field '{}' does not uniquely identify rows — register a different id_field",
+                    source.uri, source.id_field
+                )));
+            }
+        }
     }
 
     let dim = dim.ok_or_else(|| VedaError::Storage(format!("no data behind '{}'", source.uri)))?;
+
+    // Defensive: `read_batches` maintains `vectors`/`scalars` row-alignment
+    // by construction (verified by induction over the padding logic below),
+    // but a future change to that logic breaching it should fail loudly at
+    // load time rather than surface as a wrong vector or a panic when
+    // `vector_at`/`record_at` index into these buffers by row.
+    if vectors.len() != ids.len() * dim as usize {
+        return Err(VedaError::Storage(format!(
+            "internal error: vector buffer has {} floats, expected {} ({} rows * dim {dim})",
+            vectors.len(),
+            ids.len() * dim as usize,
+            ids.len()
+        )));
+    }
+    for (name, vals) in &scalars {
+        if vals.len() != ids.len() {
+            return Err(VedaError::Storage(format!(
+                "internal error: scalar column '{name}' has {} entries, expected {} (row_count)",
+                vals.len(),
+                ids.len()
+            )));
+        }
+    }
+
     Ok(ExternalDataset {
         dim,
         vectors,
         ids,
         scalars,
+        skipped,
     })
 }
 
@@ -157,21 +301,46 @@ fn fixed_size_list_dim(
     }
 }
 
+/// Look up `field_name` in `schema` and confirm its Arrow type is one of
+/// the four supported id column types, returning it. Any other Arrow type
+/// is an error naming the column, the file, and the actual type found.
+fn id_arrow_type(
+    schema: &arrow::datatypes::Schema,
+    field_name: &str,
+    key: &str,
+) -> Result<arrow::datatypes::DataType> {
+    let field = schema.field_with_name(field_name).map_err(|e| {
+        VedaError::Storage(format!("id_field '{field_name}' not found in '{key}': {e}"))
+    })?;
+    match field.data_type() {
+        arrow::datatypes::DataType::Utf8
+        | arrow::datatypes::DataType::LargeUtf8
+        | arrow::datatypes::DataType::Int32
+        | arrow::datatypes::DataType::Int64 => Ok(field.data_type().clone()),
+        other => Err(VedaError::Storage(format!(
+            "id_field '{field_name}' in '{key}' has unsupported Arrow type {other:?}: must be Utf8, LargeUtf8, Int32 or Int64"
+        ))),
+    }
+}
+
 /// Append one file's batches to the accumulating dataset: ids, flattened
 /// vectors, and every remaining scalar column of a supported type. Columns
-/// of an unsupported Arrow type are skipped rather than failing the load.
+/// of an unsupported Arrow type are skipped (recorded in `skipped` and
+/// logged) rather than failing the load.
 fn read_batches(
     builder: ParquetRecordBatchReaderBuilder<Bytes>,
     source: &ExternalSource,
     ids: &mut Vec<String>,
     vectors: &mut Vec<f32>,
     scalars: &mut HashMap<String, Vec<FieldValue>>,
+    skipped: &mut Vec<(String, String)>,
 ) -> Result<()> {
     use arrow::array::{
-        Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeStringArray,
-        StringArray,
+        Array, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, Int32Array,
+        Int64Array, LargeStringArray, StringArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
     };
-    use arrow::datatypes::DataType;
+    use arrow::datatypes::{DataType, TimeUnit};
 
     let schema = builder.schema().clone();
     let reader = builder
@@ -183,31 +352,61 @@ fn read_batches(
 
         // ids: Utf8, LargeUtf8, Int32 and Int64 are accepted and stringified,
         // since external ids are commonly integers and SearchHit.id is a
-        // String, so no synthetic identifier is needed.
+        // String, so no synthetic identifier is needed. A null id would
+        // otherwise stringify to "" (Utf8) or "0" (Int64) and silently
+        // collide with other rows, so nulls are rejected outright.
         let id_col = batch
             .column_by_name(&source.id_field)
             .expect("id_field presence checked before read_batches is called");
         match id_col.data_type() {
             DataType::Utf8 => {
                 let arr = id_col.as_any().downcast_ref::<StringArray>().unwrap();
+                if arr.null_count() > 0 {
+                    return Err(VedaError::Storage(format!(
+                        "id_field '{}' has {} null row(s); ids must be non-null",
+                        source.id_field,
+                        arr.null_count()
+                    )));
+                }
                 for i in 0..arr.len() {
                     ids.push(arr.value(i).to_owned());
                 }
             }
             DataType::LargeUtf8 => {
                 let arr = id_col.as_any().downcast_ref::<LargeStringArray>().unwrap();
+                if arr.null_count() > 0 {
+                    return Err(VedaError::Storage(format!(
+                        "id_field '{}' has {} null row(s); ids must be non-null",
+                        source.id_field,
+                        arr.null_count()
+                    )));
+                }
                 for i in 0..arr.len() {
                     ids.push(arr.value(i).to_owned());
                 }
             }
             DataType::Int32 => {
                 let arr = id_col.as_any().downcast_ref::<Int32Array>().unwrap();
+                if arr.null_count() > 0 {
+                    return Err(VedaError::Storage(format!(
+                        "id_field '{}' has {} null row(s); ids must be non-null",
+                        source.id_field,
+                        arr.null_count()
+                    )));
+                }
                 for i in 0..arr.len() {
                     ids.push(arr.value(i).to_string());
                 }
             }
             DataType::Int64 => {
                 let arr = id_col.as_any().downcast_ref::<Int64Array>().unwrap();
+                if arr.null_count() > 0 {
+                    return Err(VedaError::Storage(format!(
+                        "id_field '{}' has {} null row(s); ids must be non-null",
+                        source.id_field,
+                        arr.null_count()
+                    )));
+                }
                 for i in 0..arr.len() {
                     ids.push(arr.value(i).to_string());
                 }
@@ -220,7 +419,9 @@ fn read_batches(
             }
         }
 
-        // vectors: flatten the FixedSizeList<Float32> column.
+        // vectors: flatten the FixedSizeList<Float32> column. A null row
+        // would otherwise silently flatten to `dim` zeros and become a
+        // first-class search candidate with a degenerate 0-norm vector.
         let vec_col = batch
             .column_by_name(&source.vector_field)
             .expect("vector_field presence checked before read_batches is called");
@@ -233,6 +434,13 @@ fn read_batches(
                     source.vector_field
                 ))
             })?;
+        if list.null_count() > 0 {
+            return Err(VedaError::Storage(format!(
+                "vector_field '{}' has {} null row(s); vectors must be non-null",
+                source.vector_field,
+                list.null_count()
+            )));
+        }
         let values = list
             .values()
             .as_any()
@@ -255,7 +463,10 @@ fn read_batches(
         // present that this batch's file does not have at all must be
         // padded forward by `batch.num_rows()` — otherwise a column present
         // in only some files would end up shorter than `row_count()` and
-        // silently misaligned with `ids`.
+        // silently misaligned with `ids`. Cross-file *type* disagreement
+        // for the same column name is rejected in `load` before this
+        // function is ever called for the disagreeing file, so a column
+        // keeps one Arrow type for its whole life in `scalars`.
         let rows_before_batch = ids.len() - batch.num_rows();
         let mut touched: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for field in schema.fields() {
@@ -341,13 +552,94 @@ fn read_batches(
                         });
                     }
                 }
-                _ => {
+                DataType::Date32 => {
+                    let arr = col.as_any().downcast_ref::<Date32Array>().unwrap();
+                    for i in 0..arr.len() {
+                        out.push(if arr.is_null(i) {
+                            FieldValue::Null
+                        } else {
+                            // Date32 is days since the Unix epoch.
+                            FieldValue::Timestamp(arr.value(i) as i64 * 86_400_000)
+                        });
+                    }
+                }
+                DataType::Date64 => {
+                    let arr = col.as_any().downcast_ref::<Date64Array>().unwrap();
+                    for i in 0..arr.len() {
+                        out.push(if arr.is_null(i) {
+                            FieldValue::Null
+                        } else {
+                            // Date64 is already milliseconds since the Unix epoch.
+                            FieldValue::Timestamp(arr.value(i))
+                        });
+                    }
+                }
+                DataType::Timestamp(TimeUnit::Second, _) => {
+                    let arr = col.as_any().downcast_ref::<TimestampSecondArray>().unwrap();
+                    for i in 0..arr.len() {
+                        out.push(if arr.is_null(i) {
+                            FieldValue::Null
+                        } else {
+                            FieldValue::Timestamp(arr.value(i) * 1_000)
+                        });
+                    }
+                }
+                DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap();
+                    for i in 0..arr.len() {
+                        out.push(if arr.is_null(i) {
+                            FieldValue::Null
+                        } else {
+                            FieldValue::Timestamp(arr.value(i))
+                        });
+                    }
+                }
+                DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .unwrap();
+                    for i in 0..arr.len() {
+                        out.push(if arr.is_null(i) {
+                            FieldValue::Null
+                        } else {
+                            FieldValue::Timestamp(arr.value(i) / 1_000)
+                        });
+                    }
+                }
+                DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<TimestampNanosecondArray>()
+                        .unwrap();
+                    for i in 0..arr.len() {
+                        out.push(if arr.is_null(i) {
+                            FieldValue::Null
+                        } else {
+                            FieldValue::Timestamp(arr.value(i) / 1_000_000)
+                        });
+                    }
+                }
+                other => {
                     // Unsupported Arrow type: drop this column entirely
-                    // rather than fail the whole load. Remove the entry we
-                    // just created (or a same-named column supported in an
-                    // earlier file) so `scalars` never holds a partially
-                    // filled, misaligned column.
+                    // rather than fail the whole load, so one unusual
+                    // column elsewhere in a customer's file can't make an
+                    // otherwise-valid dataset unusable. Surfaced via
+                    // `skipped` (Task 6 returns it in the registration
+                    // response) and a warning, so the drop isn't silent.
                     scalars.remove(name);
+                    if !skipped.iter().any(|(n, _)| n == name) {
+                        let type_desc = format!("{other:?}");
+                        tracing::warn!(
+                            column = name,
+                            arrow_type = %type_desc,
+                            "external parquet: dropping scalar column of unsupported Arrow type"
+                        );
+                        skipped.push((name.to_owned(), type_desc));
+                    }
                 }
             }
         }
@@ -371,18 +663,22 @@ mod tests {
     use super::*;
     use std::sync::Arc as StdArc;
 
-    use arrow::array::{ArrayRef, FixedSizeListArray, Float32Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::array::{
+        ArrayRef, Date32Array, FixedSizeListArray, Float32Array, Int8Array, Int32Array, Int64Array,
+        StringArray, TimestampMillisecondArray,
+    };
+    use arrow::buffer::NullBuffer;
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
 
     use crate::blob_store::LocalBlobStore;
     use veda_core::types::DistanceMetric;
 
-    /// Build a Parquet file with `n` rows: a string id column and a
-    /// fixed-size-list vector column of dimension `dim`.
-    fn write_parquet(path: &std::path::Path, n: usize, dim: usize) {
-        let ids: Vec<String> = (0..n).map(|i| format!("doc{i}")).collect();
+    /// Build a Parquet file with the given `ids` (row count comes from
+    /// `ids.len()`) and a fixed-size-list vector column of dimension `dim`.
+    fn write_parquet_with_ids(path: &std::path::Path, ids: &[String], dim: usize) {
+        let n = ids.len();
         let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
         for i in 0..n {
             for d in 0..dim {
@@ -405,8 +701,314 @@ mod tests {
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
+                StdArc::new(StringArray::from(ids.to_vec())) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Build a Parquet file with `n` rows: a string id column `doc0..docN-1`
+    /// and a fixed-size-list vector column of dimension `dim`.
+    fn write_parquet(path: &std::path::Path, n: usize, dim: usize) {
+        let ids: Vec<String> = (0..n).map(|i| format!("doc{i}")).collect();
+        write_parquet_with_ids(path, &ids, dim);
+    }
+
+    /// Like `write_parquet` but with an `Int64` id column instead of `Utf8`,
+    /// for cross-file id-type-disagreement tests.
+    fn write_parquet_int_ids(path: &std::path::Path, n: usize, dim: usize) {
+        let ids: Vec<i64> = (0..n as i64).collect();
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let vec_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let vectors =
+            FixedSizeListArray::try_new(vec_field.clone(), dim as i32, StdArc::new(values), None)
+                .unwrap();
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("doc_id", DataType::Int64, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(vec_field, dim as i32),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(Int64Array::from(ids)) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Three rows, dimension `dim`, with the middle row's id null.
+    fn write_parquet_with_null_id(path: &std::path::Path, dim: usize) {
+        let n = 3;
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let vec_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let vectors =
+            FixedSizeListArray::try_new(vec_field.clone(), dim as i32, StdArc::new(values), None)
+                .unwrap();
+        let ids = StringArray::from(vec![Some("doc0"), None, Some("doc2")]);
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("doc_id", DataType::Utf8, true),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(vec_field, dim as i32),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(ids) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Two rows, dimension `dim`, with the second row's vector null.
+    fn write_parquet_with_null_vector(path: &std::path::Path, dim: usize) {
+        let n = 2;
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let vec_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let nulls = NullBuffer::from(vec![true, false]);
+        let vectors = FixedSizeListArray::try_new(
+            vec_field.clone(),
+            dim as i32,
+            StdArc::new(values),
+            Some(nulls),
+        )
+        .unwrap();
+        let ids: Vec<String> = (0..n).map(|i| format!("doc{i}")).collect();
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("doc_id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(vec_field, dim as i32),
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
                 StdArc::new(StringArray::from(ids)) as ArrayRef,
                 StdArc::new(vectors) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// `ids`-row dataset with an extra `region` column of the given Arrow
+    /// type, for scalar-column tests.
+    enum RegionColumn<'a> {
+        Utf8(&'a [&'a str]),
+        Int32(&'a [i32]),
+    }
+
+    fn write_parquet_with_region(
+        path: &std::path::Path,
+        ids: &[String],
+        dim: usize,
+        region: RegionColumn,
+    ) {
+        let n = ids.len();
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let vec_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let vectors =
+            FixedSizeListArray::try_new(vec_field.clone(), dim as i32, StdArc::new(values), None)
+                .unwrap();
+        let (region_type, region_array): (DataType, ArrayRef) = match region {
+            RegionColumn::Utf8(vals) => (
+                DataType::Utf8,
+                StdArc::new(StringArray::from(vals.to_vec())) as ArrayRef,
+            ),
+            RegionColumn::Int32(vals) => (
+                DataType::Int32,
+                StdArc::new(Int32Array::from(vals.to_vec())) as ArrayRef,
+            ),
+        };
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("doc_id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(vec_field, dim as i32),
+                false,
+            ),
+            Field::new("region", region_type, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(StringArray::from(ids.to_vec())) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+                region_array,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Two rows, dimension `dim`, plus a `created_at`
+    /// `Timestamp(Millisecond)` column with the given values.
+    fn write_parquet_with_timestamp_millis(path: &std::path::Path, dim: usize, millis: &[i64]) {
+        let n = millis.len();
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let vec_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let vectors =
+            FixedSizeListArray::try_new(vec_field.clone(), dim as i32, StdArc::new(values), None)
+                .unwrap();
+        let ids: Vec<String> = (0..n).map(|i| format!("doc{i}")).collect();
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("doc_id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(vec_field, dim as i32),
+                false,
+            ),
+            Field::new(
+                "created_at",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(StringArray::from(ids)) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+                StdArc::new(TimestampMillisecondArray::from(millis.to_vec())) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Rows, dimension `dim`, plus a `created_on` `Date32` column (days
+    /// since the Unix epoch) with the given values.
+    fn write_parquet_with_date32(path: &std::path::Path, dim: usize, days: &[i32]) {
+        let n = days.len();
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let vec_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let vectors =
+            FixedSizeListArray::try_new(vec_field.clone(), dim as i32, StdArc::new(values), None)
+                .unwrap();
+        let ids: Vec<String> = (0..n).map(|i| format!("doc{i}")).collect();
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("doc_id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(vec_field, dim as i32),
+                false,
+            ),
+            Field::new("created_on", DataType::Date32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(StringArray::from(ids)) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+                StdArc::new(Date32Array::from(days.to_vec())) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Rows, dimension `dim`, plus a `weird` `Int8` column — an Arrow type
+    /// this module does not map to a `FieldValue`.
+    fn write_parquet_with_unsupported_column(path: &std::path::Path, dim: usize, vals: &[i8]) {
+        let n = vals.len();
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let vec_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let vectors =
+            FixedSizeListArray::try_new(vec_field.clone(), dim as i32, StdArc::new(values), None)
+                .unwrap();
+        let ids: Vec<String> = (0..n).map(|i| format!("doc{i}")).collect();
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("doc_id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(vec_field, dim as i32),
+                false,
+            ),
+            Field::new("weird", DataType::Int8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(StringArray::from(ids)) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+                StdArc::new(Int8Array::from(vals.to_vec())) as ArrayRef,
             ],
         )
         .unwrap();
@@ -492,8 +1094,12 @@ mod tests {
     fn reads_every_parquet_file_behind_a_prefix() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("part")).unwrap();
-        write_parquet(&dir.path().join("part/a.parquet"), 5, 4);
-        write_parquet(&dir.path().join("part/b.parquet"), 7, 4);
+        // Disjoint id ranges: two files behind a prefix sharing ids would
+        // now be rejected as duplicates (see `rejects_duplicate_ids_across_files`).
+        let a_ids: Vec<String> = (0..5).map(|i| format!("a{i}")).collect();
+        let b_ids: Vec<String> = (0..7).map(|i| format!("b{i}")).collect();
+        write_parquet_with_ids(&dir.path().join("part/a.parquet"), &a_ids, 4);
+        write_parquet_with_ids(&dir.path().join("part/b.parquet"), &b_ids, 4);
         let store = LocalBlobStore::new(dir.path()).unwrap();
         let ds = load(&store, &source("part/")).unwrap();
         assert_eq!(ds.row_count(), 12, "both files must be read as one dataset");
@@ -521,5 +1127,207 @@ mod tests {
         // An empty result set is indistinguishable from a correct answer,
         // so a URI with no Parquet behind it must fail loudly.
         assert!(load(&store, &source("part/")).is_err());
+    }
+
+    #[test]
+    fn a_zero_row_parquet_is_an_error_not_an_empty_dataset() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 0, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let err = load(&store, &source("a.parquet")).unwrap_err().to_string();
+        assert!(
+            err.contains("a.parquet"),
+            "error must name the URI with no rows behind it, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_null_id() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet_with_null_id(&dir.path().join("a.parquet"), 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let err = load(&store, &source("a.parquet")).unwrap_err().to_string();
+        assert!(
+            err.contains("doc_id") && err.contains('1'),
+            "error must name the id column and the null count, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_null_vector_row() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet_with_null_vector(&dir.path().join("a.parquet"), 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let err = load(&store, &source("a.parquet")).unwrap_err().to_string();
+        assert!(
+            err.contains("embedding") && err.contains('1'),
+            "error must name the vector column and the null count, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_ids_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("part")).unwrap();
+        write_parquet(&dir.path().join("part/a.parquet"), 5, 4); // doc0..doc4
+        write_parquet(&dir.path().join("part/b.parquet"), 3, 4); // doc0..doc2, overlaps
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let err = load(&store, &source("part/")).unwrap_err().to_string();
+        assert!(
+            err.contains("doc0"),
+            "error must name the offending id, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_id_type_disagreement_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("part")).unwrap();
+        write_parquet(&dir.path().join("part/a.parquet"), 3, 4); // Utf8 ids
+        write_parquet_int_ids(&dir.path().join("part/b.parquet"), 3, 4); // Int64 ids
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let err = load(&store, &source("part/")).unwrap_err().to_string();
+        assert!(
+            err.contains("doc_id") && err.contains("Utf8") && err.contains("Int64"),
+            "error must name the column and both types, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_scalar_column_type_disagreement_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("part")).unwrap();
+        let a_ids: Vec<String> = (0..3).map(|i| format!("a{i}")).collect();
+        let b_ids: Vec<String> = (0..3).map(|i| format!("b{i}")).collect();
+        write_parquet_with_region(
+            &dir.path().join("part/a.parquet"),
+            &a_ids,
+            4,
+            RegionColumn::Utf8(&["eu", "us", "eu"]),
+        );
+        write_parquet_with_region(
+            &dir.path().join("part/b.parquet"),
+            &b_ids,
+            4,
+            RegionColumn::Int32(&[1, 2, 1]),
+        );
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let err = load(&store, &source("part/")).unwrap_err().to_string();
+        assert!(
+            err.contains("region") && err.contains("Utf8") && err.contains("Int32"),
+            "error must name the column and both types, got: {err}"
+        );
+    }
+
+    #[test]
+    fn maps_timestamp_millisecond_column_to_field_value_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet_with_timestamp_millis(
+            &dir.path().join("a.parquet"),
+            4,
+            &[1_700_000_000_000, 1_700_000_100_000],
+        );
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+        let col = ds
+            .scalars
+            .get("created_at")
+            .expect("created_at should be mapped, not skipped");
+        assert_eq!(col[0], FieldValue::Timestamp(1_700_000_000_000));
+        assert_eq!(col[1], FieldValue::Timestamp(1_700_000_100_000));
+        assert!(
+            ds.skipped_columns().is_empty(),
+            "a temporal column must not be reported as skipped"
+        );
+    }
+
+    #[test]
+    fn maps_date32_column_to_field_value_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        // 19000 days since epoch.
+        write_parquet_with_date32(&dir.path().join("a.parquet"), 4, &[19000, 19001]);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+        let col = ds
+            .scalars
+            .get("created_on")
+            .expect("created_on should be mapped, not skipped");
+        assert_eq!(col[0], FieldValue::Timestamp(19000i64 * 86_400_000));
+        assert_eq!(col[1], FieldValue::Timestamp(19001i64 * 86_400_000));
+    }
+
+    #[test]
+    fn skips_and_records_an_unsupported_scalar_column() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet_with_unsupported_column(&dir.path().join("a.parquet"), 4, &[1, 2, 3]);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+        assert!(
+            !ds.scalars.contains_key("weird"),
+            "unsupported column must not appear in scalars"
+        );
+        let skipped = ds.skipped_columns();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].0, "weird");
+        assert!(
+            skipped[0].1.contains("Int8"),
+            "skipped entry must name the Arrow type, got: {:?}",
+            skipped[0]
+        );
+    }
+
+    #[test]
+    fn resolves_an_s3_prefix_without_a_trailing_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("prefix")).unwrap();
+        let a_ids: Vec<String> = (0..3).map(|i| format!("a{i}")).collect();
+        let b_ids: Vec<String> = (0..2).map(|i| format!("b{i}")).collect();
+        write_parquet_with_ids(&dir.path().join("prefix/a.parquet"), &a_ids, 4);
+        write_parquet_with_ids(&dir.path().join("prefix/b.parquet"), &b_ids, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        // The bucket name is informational only; LocalBlobStore has no
+        // concept of a bucket, so the important thing is that "bucket" is
+        // discarded and "prefix" is used as the key prefix.
+        let ds = load(&store, &source("s3://bucket/prefix")).unwrap();
+        assert_eq!(ds.row_count(), 5);
+    }
+
+    #[test]
+    fn resolves_an_s3_prefix_with_a_trailing_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("prefix")).unwrap();
+        let a_ids: Vec<String> = (0..3).map(|i| format!("a{i}")).collect();
+        let b_ids: Vec<String> = (0..2).map(|i| format!("b{i}")).collect();
+        write_parquet_with_ids(&dir.path().join("prefix/a.parquet"), &a_ids, 4);
+        write_parquet_with_ids(&dir.path().join("prefix/b.parquet"), &b_ids, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("s3://bucket/prefix/")).unwrap();
+        assert_eq!(ds.row_count(), 5);
+    }
+
+    #[test]
+    fn resolves_a_file_scheme_absolute_path() {
+        // The file being read lives outside the store's own base directory
+        // entirely, to prove the `file://` form bypasses it.
+        let target_dir = tempfile::tempdir().unwrap();
+        let abs_path = target_dir.path().join("a.parquet");
+        write_parquet(&abs_path, 4, 4);
+
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = LocalBlobStore::new(store_dir.path()).unwrap();
+
+        let uri = format!("file://{}", abs_path.display());
+        let ds = load(&store, &source(&uri)).unwrap();
+        assert_eq!(ds.row_count(), 4);
+    }
+
+    #[test]
+    fn resolves_a_bare_relative_key() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        write_parquet(&dir.path().join("sub/a.parquet"), 6, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("sub/a.parquet")).unwrap();
+        assert_eq!(ds.row_count(), 6);
     }
 }
