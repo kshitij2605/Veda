@@ -273,6 +273,28 @@ These belong in the API documentation, not only in this file:
   Parquet's range-request advantage is lost over S3/MinIO. Column pruning still saves
   decode CPU and memory, but not I/O. Fixing this means either extending `BlobStore` with
   ranged reads or adopting `object_store`; neither is in scope here.
+- **Change detection has a narrow blind spot on local files.** `BlobStore::stat` reports
+  size plus a version derived from the filesystem mtime. On Linux, inode mtime is stamped
+  from a *coarse* clock (`ktime_get_coarse_real_ts64`) that advances once per timer tick,
+  so the nanosecond field is full-width but not full-resolution. A rewrite that keeps the
+  file's **exact byte length** and completes **within a single tick** is therefore
+  indistinguishable from no change, and a cached dataset would be served stale.
+
+  This was measured, not assumed: raising the version from millisecond to nanosecond
+  precision did not help, and a test writing two same-size payloads back to back failed
+  ~87% of runs. It is pinned by a characterization test in `blob_store.rs` and documented
+  on `BlobStat` itself.
+
+  Accepted deliberately. Realistic external datasets are megabytes to gigabytes, so their
+  writes span many ticks and the mtime does move; and Parquet is compressed, so a genuine
+  content change producing a byte-identical file size is rare. Closing the gap properly
+  means hashing the object's contents, which requires reading it in full on every query —
+  destroying the entire point of a cheap `stat`. Size changes, and content changes
+  separated by more than a tick, are detected reliably.
+
+  Object storage does not share this limitation where the backend returns an ETag, which
+  MinIO and S3 both do. A backend supplying neither ETag nor Last-Modified nor
+  Content-Length would have the same blind spot.
 
 ## Error handling
 
