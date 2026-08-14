@@ -1214,9 +1214,14 @@ async fn registering_with_a_path_traversal_key_is_rejected() {
     let status = r.status();
     let body = r.text().await.unwrap();
     assert_eq!(status, 400, "body: {body}");
+    // Assert on the REJECTION's own wording, not on "..". A body containing
+    // ".." proves nothing: with the traversal check removed the URI still
+    // reaches the store and comes back as `Blob not found: ../../etc/...`,
+    // which is also a 400 and also contains "..", so the weaker assertion
+    // passed with the security fix deleted.
     assert!(
-        body.contains(".."),
-        "path-traversal explanation absent from body: {body}"
+        body.contains("path component"),
+        "traversal rejection absent from body: {body}"
     );
 }
 
@@ -1246,9 +1251,14 @@ async fn registering_with_a_path_traversal_in_a_file_uri_is_rejected() {
     let status = r.status();
     let body = r.text().await.unwrap();
     assert_eq!(status, 400, "body: {body}");
+    // Assert on the REJECTION's own wording, not on "..". A body containing
+    // ".." proves nothing: with the traversal check removed the URI still
+    // reaches the store and comes back as `Blob not found: ../../etc/...`,
+    // which is also a 400 and also contains "..", so the weaker assertion
+    // passed with the security fix deleted.
     assert!(
-        body.contains(".."),
-        "path-traversal explanation absent from body: {body}"
+        body.contains("path component"),
+        "traversal rejection absent from body: {body}"
     );
 }
 
