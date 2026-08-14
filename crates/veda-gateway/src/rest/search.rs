@@ -339,6 +339,27 @@ pub async fn search(
         })?
     };
 
+    // External collections are read in place: no segments, no index.
+    // Checked after tenant scoping and alias resolution so the cache is
+    // keyed by the same resolved name every other handler uses — keying it
+    // earlier would give two aliases of one collection independent caches
+    // with independent staleness.
+    if let Some(src) = schema.external() {
+        return execute_external(&state, &name, src, &req)
+            .await
+            .map(|results| {
+                let count = results.len();
+                let took_ms = start.elapsed().as_millis() as u64;
+                Json(SearchResponse {
+                    results,
+                    count,
+                    took_ms,
+                    explain: None,
+                    hybrid_explain: None,
+                })
+            });
+    }
+
     // Resolve the backing index type of the queried vector field
     // (best-effort; lexical-only queries have no vector field).
     if let Some(field_name) = query_field.as_deref()
@@ -956,6 +977,161 @@ const RESERVED_GUARD_FIELDS: [&str; 5] = [
     veda_core::record::GUARDRAIL_CATEGORY_FIELD,
     veda_core::record::INDEXED_AT_FIELD,
 ];
+
+/// Search an external (read-in-place Parquet) collection. Called by
+/// `search` right after tenant scoping, alias resolution and the schema
+/// fetch — never before, so the freshness cache below is keyed by the same
+/// resolved name every other handler uses. Keying it on the unresolved
+/// name would give two aliases of one collection independent caches with
+/// independent staleness: one could serve stale data indefinitely while
+/// the other stayed fresh, with nothing reporting it.
+async fn execute_external(
+    state: &AppState,
+    name: &str,
+    src: &veda_core::schema::ExternalSource,
+    req: &SearchRequest,
+) -> Result<Vec<SearchHit>, (StatusCode, Json<ErrorResponse>)> {
+    let bad_request = |error: String| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error }));
+
+    // Reject query types that need an index Parquet does not carry. Each
+    // gets a distinct, accurate reason rather than one generic message.
+    if req.query.bm25.is_some() {
+        return Err(bad_request(format!(
+            "bm25 search is not available on external collection '{name}': it requires \
+             the inverted index Veda builds at ingest, and external data is read in place."
+        )));
+    }
+    if req.query.match_phrase.is_some() {
+        return Err(bad_request(format!(
+            "match_phrase search is not available on external collection '{name}': it \
+             requires the inverted index Veda builds at ingest, and external data is read \
+             in place."
+        )));
+    }
+    if req.query.sparse_vector.is_some() {
+        return Err(bad_request(format!(
+            "sparse search is not available on external collection '{name}': it requires \
+             stored sparse vectors, and external data carries only the dense vector and \
+             scalar columns read from the source Parquet file."
+        )));
+    }
+    if req.query.hybrid.is_some() {
+        return Err(bad_request(format!(
+            "hybrid search is not available on external collection '{name}': it composes \
+             a dense leg with a bm25 leg, and the bm25 leg requires the inverted index \
+             Veda builds at ingest, which external data does not have."
+        )));
+    }
+
+    let Some(ref vec_query) = req.query.vector else {
+        return Err(bad_request(format!(
+            "external collection '{name}' supports dense vector search and scalar \
+             filters only"
+        )));
+    };
+
+    // Freshness, then cache. This runs before every query — the dataset
+    // lives entirely in memory, so an undetected source change would serve
+    // deleted or superseded rows as current forever.
+    let store = state.inner.blob_store.read().await.clone();
+    let fresh_stamp = veda_storage::external_parquet::stamp(store.as_ref(), src).map_err(|e| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: format!(
+                    "external source '{}' for collection '{name}' is unavailable: {e}",
+                    src.uri
+                ),
+            }),
+        )
+    })?;
+
+    let cached = state
+        .inner
+        .external_datasets
+        .read()
+        .await
+        .get(name)
+        .cloned();
+    let dataset = match cached {
+        Some(ds) if ds.source_stamp() == &fresh_stamp => ds,
+        _ => match veda_storage::external_parquet::load(store.as_ref(), src) {
+            Ok(loaded) => {
+                let loaded = std::sync::Arc::new(loaded);
+                state
+                    .inner
+                    .external_datasets
+                    .write()
+                    .await
+                    .insert(name.to_owned(), loaded.clone());
+                loaded
+            }
+            Err(e) => {
+                // A failed reload must not leave a stale entry behind: the
+                // next query has to retry the load, not silently keep
+                // serving the last-good snapshot forever.
+                state.inner.external_datasets.write().await.remove(name);
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "external source '{}' for collection '{name}' is unavailable: {e}",
+                            src.uri
+                        ),
+                    }),
+                ));
+            }
+        },
+    };
+
+    let eff = effective_filter(req);
+    let pred = eff.as_ref().map(|expr| {
+        move |rec: &veda_core::record::Record| {
+            veda_query::filter::record_eval::evaluate_record(expr, rec)
+        }
+    });
+    let hits = dataset
+        .search(
+            &vec_query.values,
+            req.limit,
+            src.metric,
+            pred.as_ref()
+                .map(|p| p as &dyn Fn(&veda_core::record::Record) -> bool),
+        )
+        .map_err(|e| bad_request(e.to_string()))?;
+
+    // `search` returns ids, not row indices, so build a lookup once per
+    // query rather than scanning `ids()` per hit.
+    let id_to_row: std::collections::HashMap<&str, usize> = dataset
+        .ids()
+        .iter()
+        .enumerate()
+        .map(|(row, id)| (id.as_str(), row))
+        .collect();
+
+    let results = hits
+        .into_iter()
+        .map(|(id, distance)| {
+            let mut fields = serde_json::Map::new();
+            if let Some(&row) = id_to_row.get(id.as_str()) {
+                let record = dataset.record_at(row);
+                for (field_name, value) in record.fields() {
+                    fields.insert(
+                        field_name.clone(),
+                        super::records::field_value_to_json(value),
+                    );
+                }
+            }
+            SearchHit {
+                id,
+                distance,
+                fields,
+            }
+        })
+        .collect();
+
+    Ok(results)
+}
 
 fn execute_single_vector(
     executor: &DistributedQueryExecutor,

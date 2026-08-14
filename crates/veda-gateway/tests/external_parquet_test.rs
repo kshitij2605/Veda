@@ -265,6 +265,344 @@ async fn registering_an_external_collection_with_fields_is_rejected() {
     assert!(body.contains("fields"), "'fields' absent from body: {body}");
 }
 
+// ── Search dispatch tests (Task 7) ──────────────────────────────────────
+
+/// `write_parquet`'s vector formula is `(i * dim + d) / 10.0` for row `i`,
+/// component `d`. Row 0's vector is always `[0.0, 0.1, ..., (dim-1)/10.0]`,
+/// so a query built the same way is an exact match (distance 0) for
+/// whichever id occupies row 0.
+fn row0_query(dim: usize) -> Vec<f32> {
+    (0..dim).map(|d| d as f32 / 10.0).collect()
+}
+
+async fn register_external(base: &str, name: &str, uri: &str) -> reqwest::Response {
+    client()
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": name,
+            "fields": [],
+            "external": {
+                "format": "parquet",
+                "uri": uri,
+                "id_field": "id",
+                "vector_field": "embedding",
+                "metric": "Cosine"
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn external_dense_search_returns_expected_ids() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = register_external(&base, "ext_search", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_search/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": row0_query(3) } },
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(status, 200, "search: {body}");
+    let results = body["results"].as_array().expect("results array");
+    assert!(!results.is_empty(), "expected non-empty results: {body}");
+    assert_eq!(
+        results[0]["id"], "a",
+        "nearest id should be 'a' (row 0 is an exact match for the query): {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_search_honours_a_filter() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = register_external(&base, "ext_filter", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    // Sanity: unfiltered search returns "a" first (row 0 is an exact match).
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_filter/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": row0_query(3) } },
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["results"][0]["id"], "a", "sanity check: {body}");
+
+    // Filtered: exclude "a" via the id column (present on every hit's
+    // record because `record_at` always sets the id_field).
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_filter/search"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": row0_query(3) } },
+            "filter": "id != 'a'",
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(status, 200, "filtered search: {body}");
+    let results = body["results"].as_array().expect("results array");
+    assert!(
+        !results.is_empty(),
+        "filter should not exclude everything: {body}"
+    );
+    assert!(
+        results.iter().all(|h| h["id"] != "a"),
+        "'a' should have been excluded by the filter: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_rewritten_source_is_visible_to_the_next_query() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = register_external(&base, "ext_stale", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    let query = json!({
+        "query": { "vector": { "field": "embedding", "values": row0_query(3) } },
+        "limit": 10
+    });
+
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_stale/search"))
+        .json(&query)
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(status, 200, "first search: {body}");
+    assert_eq!(body["results"][0]["id"], "a", "before rewrite: {body}");
+
+    // Rewrite the same path: row 0's id changes from "a" to "q", and a 4th
+    // row is added so the file's byte size changes too (mtime granularity
+    // alone can't be trusted to distinguish a same-tick rewrite).
+    write_parquet(&file_path, &["q", "a", "c", "extra"], Some(3));
+
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_stale/search"))
+        .json(&query)
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(status, 200, "second search: {body}");
+    assert_eq!(
+        body["results"][0]["id"], "q",
+        "after rewrite, row 0 (an exact match for the query) is 'q', not 'a' — a stale \
+         cache would still return 'a': {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_bm25_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = register_external(&base, "ext_bm25", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_bm25/search"))
+        .json(&json!({
+            "query": { "bm25": { "field": "content", "query": "hello" } },
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.contains("ext_bm25"),
+        "collection name absent from body: {body}"
+    );
+    assert!(
+        body.contains("inverted index"),
+        "missing-index explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_sparse_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = register_external(&base, "ext_sparse", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_sparse/search"))
+        .json(&json!({
+            "query": { "sparse_vector": { "field": "splade", "indices": [1, 2], "values": [0.5, 0.5] } },
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.contains("ext_sparse"),
+        "collection name absent from body: {body}"
+    );
+    assert!(
+        body.contains("sparse vectors") || body.contains("stored sparse"),
+        "missing-index explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_hybrid_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = register_external(&base, "ext_hybrid", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_hybrid/search"))
+        .json(&json!({
+            "query": {
+                "hybrid": {
+                    "dense": { "field": "embedding", "values": row0_query(3) },
+                    "bm25": { "field": "content", "query": "hello" }
+                }
+            },
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.contains("ext_hybrid"),
+        "collection name absent from body: {body}"
+    );
+    assert!(
+        body.contains("bm25"),
+        "missing-index explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_match_phrase_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = register_external(&base, "ext_match_phrase", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_match_phrase/search"))
+        .json(&json!({
+            "query": { "match_phrase": { "field": "content", "query": "hello world" } },
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.contains("ext_match_phrase"),
+        "collection name absent from body: {body}"
+    );
+    assert!(
+        body.contains("inverted index"),
+        "missing-index explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_search_through_an_alias_resolves() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = register_external(&base, "ext_alias_target", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    let r = client()
+        .put(format!("{base}/v1/admin/collections/ext_alias_name/alias"))
+        .json(&json!({ "target": "ext_alias_target" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "set_alias: {}", r.text().await.unwrap());
+
+    let query = json!({
+        "query": { "vector": { "field": "embedding", "values": row0_query(3) } },
+        "limit": 10
+    });
+
+    let direct = client()
+        .post(format!("{base}/v1/collections/ext_alias_target/search"))
+        .json(&query)
+        .send()
+        .await
+        .unwrap();
+    let direct_status = direct.status();
+    let direct_body: Value = direct.json().await.unwrap();
+    assert_eq!(direct_status, 200, "direct search: {direct_body}");
+
+    let via_alias = client()
+        .post(format!("{base}/v1/collections/ext_alias_name/search"))
+        .json(&query)
+        .send()
+        .await
+        .unwrap();
+    let alias_status = via_alias.status();
+    let alias_body: Value = via_alias.json().await.unwrap();
+    assert_eq!(alias_status, 200, "alias search: {alias_body}");
+
+    assert_eq!(
+        direct_body["results"], alias_body["results"],
+        "search through the alias should return exactly the hits direct search does: \
+         direct={direct_body}, alias={alias_body}"
+    );
+}
+
 #[tokio::test]
 async fn an_external_collection_reports_itself_as_external() {
     let (base, _tmp) = start_server().await;
