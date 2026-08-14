@@ -199,27 +199,40 @@ impl ExternalDataset {
 /// unrelated data with no diagnostic. That is rejected outright here
 /// rather than discarded as "informational".
 fn strip_scheme(uri: &str) -> Result<String> {
-    if let Some(rest) = uri.strip_prefix("file://") {
-        return Ok(rest.to_owned());
-    }
-    let Some(idx) = uri.find("://") else {
-        return Ok(uri.to_owned());
+    let cleaned = if let Some(rest) = uri.strip_prefix("file://") {
+        rest.to_owned()
+    } else if let Some(idx) = uri.find("://") {
+        let scheme = &uri[..idx];
+        let after_scheme = &uri[idx + 3..];
+        let (authority, rest) = match after_scheme.find('/') {
+            Some(slash) => (&after_scheme[..slash], &after_scheme[slash + 1..]),
+            None => (after_scheme, ""),
+        };
+        if !authority.is_empty() {
+            return Err(VedaError::Storage(format!(
+                "external URI '{uri}' names a bucket ('{authority}') in its '{scheme}://' scheme; \
+                 external URIs are key prefixes within the server's configured object store — \
+                 Veda cannot read from a bucket it was not configured for. Set the bucket in \
+                 server configuration and register this URI as a bare key prefix instead."
+            )));
+        }
+        rest.to_owned()
+    } else {
+        uri.to_owned()
     };
-    let scheme = &uri[..idx];
-    let after_scheme = &uri[idx + 3..];
-    let (authority, rest) = match after_scheme.find('/') {
-        Some(slash) => (&after_scheme[..slash], &after_scheme[slash + 1..]),
-        None => (after_scheme, ""),
-    };
-    if !authority.is_empty() {
+    // A `..` path component escapes whatever root the key is resolved
+    // against — `base_dir.join(key)` does not canonicalise it away, so a
+    // key like `../../etc/passwd` (or an absolute `file://` URI containing
+    // one) reads outside the intended location. Nothing in the design ever
+    // intended that, so it is rejected outright rather than passed through
+    // to `BlobStore`.
+    if let Some(bad) = cleaned.split('/').find(|c| *c == "..") {
         return Err(VedaError::Storage(format!(
-            "external URI '{uri}' names a bucket ('{authority}') in its '{scheme}://' scheme; \
-             external URIs are key prefixes within the server's configured object store — \
-             Veda cannot read from a bucket it was not configured for. Set the bucket in \
-             server configuration and register this URI as a bare key prefix instead."
+            "external URI '{uri}' contains a '{bad}' path component, which is rejected to \
+             prevent escaping the configured blob root"
         )));
     }
-    Ok(rest.to_owned())
+    Ok(cleaned)
 }
 
 /// Resolve `source.uri` to the object keys to read, in sorted order so a
@@ -1861,6 +1874,40 @@ mod tests {
         assert!(
             err.contains("bucket") && err.contains("server configuration"),
             "error must name the offending bucket and point at server configuration, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_path_traversal_component_in_a_bare_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        // A bare key with a `..` component: `PathBuf::join` does not
+        // canonicalise it away, so this would otherwise escape the
+        // configured blob root. No file needs to exist — the check runs
+        // before any store I/O.
+        let err = load(&store, &source("../../etc/secret.parquet"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(".."),
+            "error must name the offending path component, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_path_traversal_component_in_a_file_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        // An absolute `file://` URI is a legitimate operator capability
+        // (bypassing the configured blob root on purpose), but a `..`
+        // component inside one is still rejected — nothing in the design
+        // ever intended it.
+        let err = load(&store, &source("file:///srv/data/../../etc/secret.parquet"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(".."),
+            "error must name the offending path component, got: {err}"
         );
     }
 

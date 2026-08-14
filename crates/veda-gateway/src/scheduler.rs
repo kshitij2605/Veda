@@ -674,6 +674,7 @@ mod tests {
         let resp = crate::rest::collections::create_collection(
             axum::extract::State(state.clone()),
             crate::tenant::Tenant(crate::tenant::TenantId::default_tenant()),
+            None,
             axum::Json(req),
         )
         .await;

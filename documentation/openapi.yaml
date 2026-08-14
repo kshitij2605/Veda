@@ -161,11 +161,26 @@ components:
                 apply-trial, connector run, eval-set generation, and
                 auto-optimization) return `405`. Dropping the collection
                 and alias management still work.
+              - **Five read endpoints require locally stored records.**
+                `GET /records`, `/aggregate`, `/histogram`,
+                `/field-stats` and `/evaluate` return `400` (not `405` —
+                these are reads) on an external collection, naming that
+                the operation needs locally stored records.
+              - **Registering an external collection requires Admin.**
+                `POST /v1/collections` with `external` set returns `403`
+                for a non-Admin caller — registration can read any
+                Parquet the server process can reach. A `..` path
+                component anywhere in the URI's key is rejected with
+                `400` regardless of caller role.
               - **Auto-tuning campaigns are rejected with a clean `405`**
-                before they start. **The agent/MCP retrieval tool is not
-                guarded** and fails with a generic internal error rather
-                than an explained rejection — do not point agent
-                retrieval at an external collection.
+                before they start. **The agent/MCP retrieval tool has no
+                explicit guard**, but fails closed anyway: an external
+                collection always registers with `fields: []`, so the
+                tool finds no vector fields and returns a `400`-class
+                tool error ("collection '...' has no vector fields")
+                before ever reaching the query executor — which, unlike
+                an earlier version of this document claimed, IS
+                registered for external collections same as any other.
               - **`bm25`, `match_phrase`, `sparse`, `hybrid` and `rerank`
                 queries all return `400`** — see the `/search` path below.
               - `truncate_to` and `explain: true` on a search request are

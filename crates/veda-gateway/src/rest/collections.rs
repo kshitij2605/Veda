@@ -12,6 +12,8 @@ use veda_query::local_shard::LocalShardSearcher;
 use veda_storage::segment_manager::SegmentManager;
 
 use super::state::AppState;
+use crate::auth::Claims;
+use crate::rls;
 use crate::tenant::{self, Tenant};
 
 /// 307 Temporary Redirect pointing at `{leader_base}{path}`.
@@ -245,6 +247,17 @@ pub struct DescribeCollectionResponse {
     /// rather than storing its own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external: Option<ExternalSource>,
+    /// Vector dimension inferred from the external source's schema, for an
+    /// external collection whose dataset is currently cached. `describe`
+    /// never itself triggers a load, so this is `None` until a create or a
+    /// query has warmed `external_datasets` for this name — see the design
+    /// doc's known divergences.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_dimension: Option<u32>,
+    /// Rows in the external source, same caching caveat as
+    /// `external_dimension`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_row_count: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -311,26 +324,55 @@ pub(crate) fn reject_if_external(
     Ok(())
 }
 
+/// Reject a *read* request against a collection that has no locally stored
+/// records — i.e. is external. Same intent as [`reject_if_external`], but
+/// for read endpoints (`/records`, `/aggregate`, `/histogram`,
+/// `/field-stats`, `/evaluate`): `materialize_collection_locally` gives
+/// every collection, external ones included, an (empty) segment manager, so
+/// without this guard these reads find that empty manager and answer `200`
+/// with zero rows on a fully populated external dataset — indistinguishable
+/// from a correct empty-collection answer. `400` here, not `405`: these are
+/// reads, not mutations.
+pub(crate) fn reject_if_external_for_read(
+    schema: &CollectionSchema,
+    collection: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if schema.is_external() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "collection '{collection}' is external: this operation needs locally \
+                     stored records, which an external collection does not have"
+                ),
+            }),
+        ));
+    }
+    Ok(())
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────────
 
 pub async fn create_collection(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
+    claims: Option<axum::Extension<Claims>>,
     Json(req): Json<CreateCollectionRequest>,
 ) -> axum::response::Response {
     if let Some(leader_url) = state.leader_rest_address().await {
         return raft_redirect(&leader_url, "/v1/collections");
     }
-    create_collection_inner(state, tenant, req).await
+    create_collection_inner(state, tenant, claims, req).await
 }
 
 async fn create_collection_inner(
     state: AppState,
     tenant: tenant::TenantId,
+    claims: Option<axum::Extension<Claims>>,
     req: CreateCollectionRequest,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    match create_collection_impl(state, tenant, req).await {
+    match create_collection_impl(state, tenant, claims, req).await {
         Ok((status, body)) => (status, body).into_response(),
         Err((status, body)) => (status, body).into_response(),
     }
@@ -339,6 +381,7 @@ async fn create_collection_inner(
 async fn create_collection_impl(
     state: AppState,
     tenant: tenant::TenantId,
+    claims: Option<axum::Extension<Claims>>,
     req: CreateCollectionRequest,
 ) -> Result<(StatusCode, Json<CreateCollectionResponse>), (StatusCode, Json<ErrorResponse>)> {
     // Validate user-facing name first.
@@ -384,6 +427,26 @@ async fn create_collection_impl(
     let mut external_row_count = None;
     let mut external_skipped_columns = None;
     if let Some(src) = &req.external {
+        // Registering an external collection can read any Parquet file the
+        // server process can reach — including an absolute `file://` path,
+        // which deliberately bypasses the configured blob root (see
+        // `external_parquet::strip_scheme`) — so this is an administrative
+        // act, not one a Viewer or Editor should be able to trigger.
+        let is_admin = claims
+            .as_ref()
+            .map(|axum::Extension(c)| rls::is_admin(c))
+            .unwrap_or(true); // auth disabled -> no restriction
+        if !is_admin {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "registering an external collection can read any Parquet the \
+                            server can reach and so requires admin"
+                        .into(),
+                }),
+            ));
+        }
+
         // A declared field can never be backed by real data on an external
         // collection — the schema comes from the source, not the request —
         // so a caller who sent `fields` believed those fields meant
@@ -404,14 +467,25 @@ async fn create_collection_impl(
             ));
         }
         let store = state.inner.blob_store.read().await.clone();
-        match veda_storage::external_parquet::load(store.as_ref(), src) {
-            Ok(ds) => {
+        // `load` fully materialises the source and is synchronous; run it
+        // on the blocking pool, matching the query path's reload — a
+        // multi-second (or, on the branch's own benchmark, ~20s at 100k
+        // rows) read must not occupy a tokio worker thread and stall this
+        // process's other in-flight requests and health checks.
+        let store_for_load = store.clone();
+        let src_for_load = src.clone();
+        let load_result = tokio::task::spawn_blocking(move || {
+            veda_storage::external_parquet::load(store_for_load.as_ref(), &src_for_load)
+        })
+        .await;
+        match load_result {
+            Ok(Ok(ds)) => {
                 external_dimension = Some(ds.dim());
                 external_row_count = Some(ds.row_count() as u64);
                 external_skipped_columns = Some(ds.skipped_columns().to_vec());
                 // `ds` is dropped here, on purpose — see comment above.
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 // `load`'s errors already name the offending column, the
                 // file, the columns that do exist, and both dimensions on
                 // a mismatch — pass the message through verbatim rather
@@ -420,6 +494,14 @@ async fn create_collection_impl(
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: e.to_string(),
+                    }),
+                ));
+            }
+            Err(join_err) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("external load failed: {join_err}"),
                     }),
                 ));
             }
@@ -716,6 +798,8 @@ pub async fn reconcile_collections_from_raft(state: &AppState) -> Result<(), Str
         let _ = state.inner.schemas.write().await.remove(name);
         let _ = state.inner.segment_managers.write().await.remove(name);
         let _ = state.inner.query_executors.write().await.remove(name);
+        state.inner.external_datasets.write().await.remove(name);
+        super::search::remove_external_load_lock(name);
         let _ = state
             .inner
             .raft_materialized_records
@@ -774,13 +858,30 @@ pub async fn describe_collection(
     })?;
 
     let fields = schema.fields().iter().map(field_to_info).collect();
+    let external = schema.external().cloned();
+
+    // The cheap, honest option: report the dimension/row-count only when
+    // the dataset is already cached (a create or a query has warmed it).
+    // Fetching them by loading here would make `describe` — a read that
+    // looks free everywhere else — pay `load`'s multi-second cost, so that
+    // is deliberately not done; see the design doc's known divergences.
+    let (external_dimension, external_row_count) = if external.is_some() {
+        match state.inner.external_datasets.read().await.get(&scoped) {
+            Some(ds) => (Some(ds.dim()), Some(ds.row_count() as u64)),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
 
     Ok(Json(DescribeCollectionResponse {
         name,
         fields,
         shard_count: schema.shard_count(),
         replication_factor: schema.replication_factor(),
-        external: schema.external().cloned(),
+        external,
+        external_dimension,
+        external_row_count,
     }))
 }
 
@@ -2160,6 +2261,13 @@ async fn drop_collection_impl(
         tracing::warn!(collection = %scoped, error = %e, "failed to purge shard-log dir on drop");
     }
 
+    // An external collection's cached dataset (potentially gigabytes, see
+    // the design doc's measured floor) and its single-flight reload lock
+    // must not outlive the collection — otherwise the memory stays for the
+    // process lifetime with zero collections registered.
+    state.inner.external_datasets.write().await.remove(&scoped);
+    super::search::remove_external_load_lock(&scoped);
+
     let collection_dir = state.inner.data_dir.join(&scoped);
     if collection_dir.exists() {
         let _ = std::fs::remove_dir_all(&collection_dir);
@@ -2513,6 +2621,149 @@ mod tests {
         assert_eq!(
             alias.target, resp.target,
             "alias must now point at the new sibling"
+        );
+    }
+
+    /// Write a minimal valid external-Parquet fixture: a string `id`
+    /// column and a `FixedSizeList<Float32>` `embedding` column of width
+    /// `dim`, mirroring `external_parquet.rs`'s own test fixtures.
+    fn write_test_parquet(path: &std::path::Path, ids: &[&str], dim: usize) {
+        use arrow::array::{ArrayRef, FixedSizeListArray, Float32Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc as StdArc;
+
+        let n = ids.len();
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let item_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let vectors =
+            FixedSizeListArray::try_new(item_field.clone(), dim as i32, StdArc::new(values), None)
+                .unwrap();
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(item_field, dim as i32),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(StringArray::from(ids.to_vec())) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Finding 4 (whole-branch review): `drop_collection_impl` used to clear
+    /// `schemas`/`segment_managers`/`query_executors`/`shard_logs` and the
+    /// data dir but never touch `external_datasets` or
+    /// `EXTERNAL_LOAD_LOCKS` — so a dropped external collection's cached
+    /// dataset (potentially gigabytes) and its single-flight lock stayed
+    /// for the process lifetime with zero collections registered. This
+    /// fails if either eviction is removed from `drop_collection_impl`.
+    #[tokio::test]
+    async fn dropping_an_external_collection_evicts_its_cached_dataset_and_lock() {
+        let state = test_state();
+        let tenant = crate::tenant::TenantId::default_tenant();
+        let name = "ext_drop_evicts";
+        let scoped = crate::tenant::scope(&tenant, name);
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let file_path = data_dir.path().join("data.parquet");
+        write_test_parquet(&file_path, &["a", "b"], 2);
+
+        let req: CreateCollectionRequest = serde_json::from_value(serde_json::json!({
+            "name": name,
+            "fields": [],
+            "external": {
+                "format": "parquet",
+                "uri": format!("file://{}", file_path.display()),
+                "id_field": "id",
+                "vector_field": "embedding",
+                "metric": "Cosine"
+            }
+        }))
+        .expect("fixture create-collection request should deserialize");
+        let create_resp = create_collection(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            None,
+            Json(req),
+        )
+        .await;
+        use axum::response::IntoResponse;
+        assert!(
+            create_resp.into_response().status().is_success(),
+            "fixture external collection create should succeed"
+        );
+
+        // Warm the cache the same way a real client would: search once, so
+        // `execute_external` populates `external_datasets` and takes the
+        // single-flight lock for this (scoped) name.
+        let search_req: crate::rest::search::SearchRequest =
+            serde_json::from_value(serde_json::json!({
+                "query": { "vector": { "field": "embedding", "values": [0.0, 0.1] } },
+                "limit": 10
+            }))
+            .expect("fixture search request should deserialize");
+        let search_resp = crate::rest::search::search(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            Path(name.to_owned()),
+            None,
+            Json(search_req),
+        )
+        .await;
+        assert!(
+            search_resp.is_ok(),
+            "warm-up search should succeed: {:?}",
+            search_resp.err()
+        );
+
+        assert!(
+            state
+                .inner
+                .external_datasets
+                .read()
+                .await
+                .contains_key(&scoped),
+            "precondition: cache should be warm before drop"
+        );
+        assert!(
+            crate::rest::search::external_load_lock_exists(&scoped),
+            "precondition: single-flight lock should exist before drop"
+        );
+
+        let _ = drop_collection_impl(state.clone(), tenant.clone(), name.to_owned())
+            .await
+            .expect("drop should succeed");
+
+        assert!(
+            !state
+                .inner
+                .external_datasets
+                .read()
+                .await
+                .contains_key(&scoped),
+            "dropping an external collection must evict its cached dataset"
+        );
+        assert!(
+            !crate::rest::search::external_load_lock_exists(&scoped),
+            "dropping an external collection must prune its single-flight reload lock"
         );
     }
 }
