@@ -2285,6 +2285,7 @@ mod generate_endpoint_tests {
         let resp = create_collection(
             State(state.clone()),
             Tenant(TenantId::default_tenant()),
+            None,
             Json(req),
         )
         .await;
@@ -2358,7 +2359,13 @@ mod generate_endpoint_tests {
             ],
         }))
         .expect("fixture create-collection request should deserialize");
-        let resp = create_collection(State(state.clone()), Tenant(tenant.clone()), Json(req)).await;
+        let resp = create_collection(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            None,
+            Json(req),
+        )
+        .await;
         use axum::response::IntoResponse;
         let status = resp.into_response().status();
         assert!(

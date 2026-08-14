@@ -1284,6 +1284,7 @@ mod tests {
         let create_resp = crate::rest::collections::create_collection(
             State(state.clone()),
             Tenant(tenant.clone()),
+            None,
             Json(create_req),
         )
         .await;
@@ -1395,6 +1396,7 @@ mod tests {
         let create_resp = crate::rest::collections::create_collection(
             State(state.clone()),
             Tenant(tenant.clone()),
+            None,
             Json(create_req),
         )
         .await;

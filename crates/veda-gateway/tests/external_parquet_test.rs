@@ -1184,3 +1184,440 @@ async fn setting_the_alias_of_an_external_collection_still_succeeds() {
     let body = r.text().await.unwrap();
     assert_eq!(status, 200, "set_alias should succeed: {body}");
 }
+
+// ── Security: path traversal + admin-only registration (whole-branch
+// review finding 1) ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn registering_with_a_path_traversal_key_is_rejected() {
+    let (base, _tmp) = start_server().await;
+
+    // A bare key with a `..` component: `PathBuf::join` does not
+    // canonicalise it away, so this would otherwise escape the configured
+    // blob root.
+    let r = client()
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "ext_traversal",
+            "fields": [],
+            "external": {
+                "format": "parquet",
+                "uri": "../../etc/secret.parquet",
+                "id_field": "id",
+                "vector_field": "embedding",
+                "metric": "Cosine"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.contains(".."),
+        "path-traversal explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn registering_with_a_path_traversal_in_a_file_uri_is_rejected() {
+    let (base, _tmp) = start_server().await;
+
+    // An absolute `file://` URI is a legitimate operator capability (see
+    // the admin-gate tests below), but a `..` component inside one is
+    // still rejected — nothing in the design ever intended it.
+    let r = client()
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "ext_traversal_file",
+            "fields": [],
+            "external": {
+                "format": "parquet",
+                "uri": "file:///srv/data/../../etc/secret.parquet",
+                "id_field": "id",
+                "vector_field": "embedding",
+                "metric": "Cosine"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.contains(".."),
+        "path-traversal explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn registering_an_external_collection_as_non_admin_is_rejected() {
+    let mut users = HashMap::new();
+    users.insert(
+        "admin".to_owned(),
+        UserRecord {
+            password: "admin".into(),
+            role: Role::Admin,
+        },
+    );
+    users.insert(
+        "viewer".to_owned(),
+        UserRecord {
+            password: "viewer".into(),
+            role: Role::Viewer,
+        },
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = AppState::with_auth_and_users(tmp.path(), "ext-admin-gate-secret", users);
+    let router = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let viewer = login_user(&base, "viewer", "viewer").await;
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = client()
+        .post(format!("{base}/v1/collections"))
+        .header("Authorization", format!("Bearer {viewer}"))
+        .json(&json!({
+            "name": "ext_viewer_denied",
+            "fields": [],
+            "external": {
+                "format": "parquet",
+                "uri": file_uri(&file_path),
+                "id_field": "id",
+                "vector_field": "embedding",
+                "metric": "Cosine"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 403, "body: {body}");
+    assert!(
+        body.to_lowercase().contains("admin"),
+        "admin explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn registering_an_external_collection_as_admin_succeeds() {
+    let mut users = HashMap::new();
+    users.insert(
+        "admin".to_owned(),
+        UserRecord {
+            password: "admin".into(),
+            role: Role::Admin,
+        },
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = AppState::with_auth_and_users(tmp.path(), "ext-admin-gate-ok-secret", users);
+    let router = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let admin = login_user(&base, "admin", "admin").await;
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+
+    let r = client()
+        .post(format!("{base}/v1/collections"))
+        .header("Authorization", format!("Bearer {admin}"))
+        .json(&json!({
+            "name": "ext_admin_allowed",
+            "fields": [],
+            "external": {
+                "format": "parquet",
+                "uri": file_uri(&file_path),
+                "id_field": "id",
+                "vector_field": "embedding",
+                "metric": "Cosine"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 201, "body: {body}");
+}
+
+// ── Read endpoints require locally stored records (whole-branch review
+// finding 2) ──────────────────────────────────────────────────────────────
+//
+// `materialize_collection_locally` runs unconditionally, so an external
+// collection gets an (empty) segment manager just like an internal one.
+// Without a guard, these five read endpoints find that empty manager and
+// answer 200 with zero rows/results on a fully populated external dataset —
+// indistinguishable from a correct empty-collection answer. Each is
+// asserted 400 (not 405: these are reads, not mutations) with a body
+// naming the reason.
+
+#[tokio::test]
+async fn external_records_endpoint_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_records_read";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .get(format!("{base}/v1/collections/{name}/records"))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.to_lowercase().contains("locally stored"),
+        "explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_aggregate_endpoint_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_aggregate_read";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .get(format!(
+            "{base}/v1/collections/{name}/aggregate?field=id&metric=count"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.to_lowercase().contains("locally stored"),
+        "explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_histogram_endpoint_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_histogram_read";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .get(format!("{base}/v1/collections/{name}/histogram?field=id"))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.to_lowercase().contains("locally stored"),
+        "explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_field_stats_endpoint_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_field_stats_read";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .get(format!("{base}/v1/collections/{name}/field-stats?field=id"))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.to_lowercase().contains("locally stored"),
+        "explanation absent from body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn external_evaluate_endpoint_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_evaluate_read";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .get(format!("{base}/v1/collections/{name}/evaluate"))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.to_lowercase().contains("locally stored"),
+        "explanation absent from body: {body}"
+    );
+}
+
+// ── RLS + malformed filter (whole-branch review finding 5) ────────────────
+
+/// Before the fix, `effective_filter_or_reject`'s malformed-filter rejection
+/// was inert whenever RLS was enabled: the RLS-injection block parsed
+/// `req.filter` with `.ok()`, silently discarding a parse error and always
+/// setting `req.filter_expr` to (at least) the owner predicate, so
+/// `effective_filter_or_reject`'s `filter_expr`-first check never re-parsed
+/// the raw string and never saw the error — the malformed filter was
+/// dropped instead of rejected, and a non-admin caller got every one of
+/// their own rows back with a `200` instead of the `400` the same filter
+/// gets without RLS.
+#[tokio::test]
+async fn external_rls_malformed_filter_is_rejected() {
+    let mut users = HashMap::new();
+    users.insert(
+        "admin".to_owned(),
+        UserRecord {
+            password: "admin".into(),
+            role: Role::Admin,
+        },
+    );
+    users.insert(
+        "alice".to_owned(),
+        UserRecord {
+            password: "alice".into(),
+            role: Role::Editor,
+        },
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = AppState::with_auth_and_users(tmp.path(), "ext-rls-filter-test-secret", users);
+    let router = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let admin = login_user(&base, "admin", "admin").await;
+    let alice = login_user(&base, "alice", "alice").await;
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet_with_owner(&file_path, &[("a1", "alice"), ("b1", "bob")], 3);
+
+    let r = client()
+        .post(format!("{base}/v1/collections"))
+        .header("Authorization", format!("Bearer {admin}"))
+        .json(&json!({
+            "name": "ext_rls_bad_filter",
+            "fields": [],
+            "rls_owner_field": "owner",
+            "external": {
+                "format": "parquet",
+                "uri": file_uri(&file_path),
+                "id_field": "id",
+                "vector_field": "embedding",
+                "metric": "Cosine"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    // Unterminated quote, same malformed filter `external_malformed_filter_is_rejected`
+    // uses on a non-RLS collection — must be rejected identically here.
+    let r = client()
+        .post(format!("{base}/v1/collections/ext_rls_bad_filter/search"))
+        .header("Authorization", format!("Bearer {alice}"))
+        .json(&json!({
+            "query": { "vector": { "field": "embedding", "values": row0_query(3) } },
+            "filter": "id = 'a",
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body = r.text().await.unwrap();
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body.contains("filter"),
+        "parse-failure explanation absent from body: {body}"
+    );
+}
+
+// ── Coverage gaps (whole-branch review finding 6): 405 on the three
+// mutating endpoints missing it ─────────────────────────────────────────
+
+#[tokio::test]
+async fn external_connector_run_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_connector_run";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!("{base}/v1/admin/connectors"))
+        .json(&json!({
+            "kind": "web",
+            "name": "test connector",
+            "config": { "urls": ["http://example.com"], "collection": name }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        201,
+        "create connector: {}",
+        r.text().await.unwrap()
+    );
+    let created: Value = r.json().await.unwrap();
+    let id = created["id"].as_str().expect("connector id");
+
+    let r = client()
+        .post(format!("{base}/v1/admin/connectors/{id}/run"))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /connectors/{id}/run", name).await;
+}
+
+#[tokio::test]
+async fn external_eval_set_generation_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_eval_set_gen";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .post(format!("{base}/v1/collections/{name}/eval-sets/generate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "POST /eval-sets/generate", name).await;
+}
+
+#[tokio::test]
+async fn external_set_auto_optimization_is_rejected() {
+    let (base, _tmp) = start_server().await;
+    let name = "ext_auto_optimization";
+    let _data = setup_external(&base, name).await;
+
+    let r = client()
+        .put(format!("{base}/v1/collections/{name}/auto-optimization"))
+        .json(&json!({ "enabled": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_rejected_as_external(r, "PUT /auto-optimization", name).await;
+}

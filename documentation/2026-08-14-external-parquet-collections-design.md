@@ -254,11 +254,22 @@ resolved collection name, mirroring how `segment_managers` is held.
 
 ### Component 4 — query dispatch
 
-`AppState` holds `schemas` and `segment_managers` (`rest/state.rs:200-203`). An external
-collection has a schema and no segment manager, so the search handler branches on the
-schema **after** `tenant::scope` and `state.inner.aliases.resolve` — the ordering that
-has produced three separate silent-data-loss incidents in this project and is therefore
-called out explicitly here rather than left to the implementer.
+`AppState` holds `schemas` and `segment_managers` (`rest/state.rs:200-203`).
+`materialize_collection_locally` runs unconditionally for every collection, external ones
+included, so an external collection actually gets an (empty) segment manager, a registered
+query executor, shard directories and a log-applier task per shard — none of it ever
+populated, since nothing is ever inserted into an external collection. An earlier version of
+this document claimed external collections get no segment manager at all; that was wrong,
+and mattered: several read endpoints (`/records`, `/aggregate`, `/histogram`,
+`/field-stats`, `/evaluate`) find that empty-but-present segment manager and, without an
+explicit guard, answer `200` with zero rows on a fully populated external dataset. They are
+now guarded the same way the write endpoints are (see "Writes" below), just with `400`
+instead of `405` since they are reads.
+
+The search handler does not rely on the segment manager's absence; it branches on the
+schema itself, **after** `tenant::scope` and `state.inner.aliases.resolve` — the ordering
+that has produced three separate silent-data-loss incidents in this project and is
+therefore called out explicitly here rather than left to the implementer.
 
 - **Dense vector search** and **scalar filters** are served from `ExternalDataset`.
 - **`limit`**, field projection and the ordinary response shape are unchanged, so an
@@ -355,6 +366,20 @@ These belong in the API documentation, not only in this file:
   (`PUT /v1/admin/collections/{name}/alias`) still succeed, because both touch only
   Veda's own registration metadata, never the source data.
 
+- **Five read endpoints require locally stored records.** `GET /records`, `/aggregate`,
+  `/histogram`, `/field-stats` and `/evaluate` return `400` (not `405` — these are reads,
+  not mutations) on an external collection, naming that the operation needs locally stored
+  records, which an external collection does not have. Enforced in each handler, the same
+  as the write guards above.
+
+- **Registering an external collection requires Admin.** `POST /v1/collections` with an
+  `external` block returns `403` for a non-Admin caller. Registration can point Veda at any
+  Parquet file the server process can read — including an absolute `file://` path, which
+  deliberately bypasses the configured blob root — so it is an administrative act. A `..`
+  path component anywhere in the URI's key portion (absolute or not) is rejected with `400`
+  regardless of caller role: nothing in the design ever intended a key to escape the
+  configured blob root.
+
 - **Two other search entry points do not support external collections.** Both reach a
   `DistributedQueryExecutor` directly rather than going through the dispatch branch in
   `rest/search.rs` that checks `schema.external()`:
@@ -362,13 +387,18 @@ These belong in the API documentation, not only in this file:
     rejected cleanly with `405` before a campaign ever starts — `start_campaign` and
     `apply_trial` both call `reject_if_external` up front. Auto-tuning simply does not run
     against an external collection; there is no silent partial behaviour.
-  - **The agent retrieval tool** (`agent/tools/builtins.rs`) has no such guard. It looks
-    up the collection's `DistributedQueryExecutor` in `AppState::query_executors`, which
-    is never populated for an external collection (there is no segment manager, no
-    executor, to register), and fails with a generic `"no query executor"` internal
-    error rather than an explained rejection. An agent (or the MCP tool surface) calling
-    retrieval against an external collection gets an unhelpful 500-class failure, not a
-    `405` naming the reason.
+  - **The agent retrieval tool** (`agent/tools/builtins.rs`) has no explicit
+    `reject_if_external` guard, but fails closed anyway, for a different reason than an
+    earlier version of this document stated. `AppState::query_executors` IS populated for
+    an external collection — see the corrected Component 4 above, `materialize_collection_locally`
+    registers one for every collection. The actual failure: an external collection always
+    registers with `fields: []` (its schema comes from the Parquet source, not from any
+    declared field), so `schema.vector_fields()` is always empty, and the handler returns
+    `ToolOutcome::invalid_args("collection '{collection}' has no vector fields")`
+    (`agent/tools/builtins.rs:459`) before ever reaching the query-executor lookup. The
+    failure is still closed and still self-explains — just not for the "no query executor"
+    reason previously documented here, and not a 500-class failure either
+    (`invalid_args` is a 400-class tool error).
 
 - **Observability parity is partial.** A search against an external collection records:
   the `db.system` / `db.collection` / `retrieval.query_type` / `retrieval.top_k` /
