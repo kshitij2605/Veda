@@ -84,8 +84,9 @@ pub struct CreateCollectionRequest {
     /// rather than storing its own. External collections are read-only and
     /// support only dense vector search and scalar filters.
     ///
-    /// When set, `fields` is ignored: column names, types and the vector
-    /// dimension are inferred from the source's schema.
+    /// When set, `fields` must be empty: column names, types and the vector
+    /// dimension are inferred from the source's schema. A non-empty
+    /// `fields` alongside `external` is rejected rather than ignored.
     #[serde(default)]
     pub external: Option<ExternalSource>,
 }
@@ -355,6 +356,25 @@ async fn create_collection_impl(
     let mut external_row_count = None;
     let mut external_skipped_columns = None;
     if let Some(src) = &req.external {
+        // A declared field can never be backed by real data on an external
+        // collection — the schema comes from the source, not the request —
+        // so a caller who sent `fields` believed those fields meant
+        // something and must be told immediately, rather than have them
+        // silently discarded only to discover it later when a query
+        // behaves oddly (e.g. a phantom vector field whose declared
+        // dimension disagrees with the source's actual column).
+        if !req.fields.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "external collections infer their schema from the source; \
+                         'fields' must be empty, but {} were supplied",
+                        req.fields.len()
+                    ),
+                }),
+            ));
+        }
         let store = state.inner.blob_store.read().await.clone();
         match veda_storage::external_parquet::load(store.as_ref(), src) {
             Ok(ds) => {
