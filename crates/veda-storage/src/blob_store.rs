@@ -115,14 +115,14 @@ impl BlobStore for LocalBlobStore {
         let path = self.key_path(key);
         let metadata = fs::metadata(&path)
             .map_err(|_| VedaError::Storage(format!("Blob not found: {key}")))?;
-        let modified_ms = metadata
+        let modified_ns = metadata
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| VedaError::Storage(format!("invalid modified time: {e}")))?
-            .as_millis();
+            .as_nanos();
         Ok(BlobStat {
             size: metadata.len(),
-            version: modified_ms.to_string(),
+            version: modified_ns.to_string(),
         })
     }
 
@@ -340,6 +340,25 @@ mod tests {
         let second = store.stat("a.bin").unwrap();
         assert_eq!(second.size, 11);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn local_stat_detects_a_same_size_rewrite() {
+        // The case that matters: a customer overwrites a file in place with a
+        // replacement of identical length. If `stat` cannot tell these apart,
+        // a cached dataset is stale forever. Size alone cannot detect this —
+        // only `version` can.
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        store.put("a.bin", b"aaaaa").unwrap();
+        let first = store.stat("a.bin").unwrap();
+        store.put("a.bin", b"bbbbb").unwrap();
+        let second = store.stat("a.bin").unwrap();
+        assert_eq!(first.size, second.size, "precondition: sizes must match");
+        assert_ne!(
+            first, second,
+            "same-size rewrite was not detected; a stale cache would be served forever"
+        );
     }
 
     #[test]
