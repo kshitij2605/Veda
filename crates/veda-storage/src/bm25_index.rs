@@ -18,10 +18,34 @@ use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use veda_core::error::{Result, VedaError};
 
+use crate::block_max::{BLOCK_SIZE, PostingCursor, PruneStats, block_max_wand};
+
 /// Lucene-default BM25 parameter k1.
 pub const BM25_K1: f32 = 1.2;
 /// Lucene-default BM25 parameter b.
 pub const BM25_B: f32 = 0.75;
+
+/// BM25 inverse document frequency, Lucene practical form with the `+1`
+/// floor. `n` = document count, `df` = documents containing the term.
+///
+/// This is the single definition of IDF. `search`, block-max construction
+/// and the posting cursor all call it, so an upper bound computed for
+/// pruning can never drift from the score it is bounding.
+#[inline]
+pub(crate) fn bm25_idf(n: f32, df: f32) -> f32 {
+    ((n - df + 0.5) / (df + 0.5) + 1.0).ln()
+}
+
+/// Score contribution of one posting: `idf` for the term, `tf` within the
+/// document, `dl` document length, `avg_dl` mean document length.
+///
+/// This is the single definition of the BM25 term score. See `bm25_idf`.
+#[inline]
+pub(crate) fn bm25_impact(idf: f32, tf: u32, dl: u32, avg_dl: f32) -> f32 {
+    let tf_f = tf as f32;
+    let denom = tf_f + BM25_K1 * (1.0 - BM25_B + BM25_B * dl as f32 / avg_dl.max(1.0));
+    idf * tf_f * (BM25_K1 + 1.0) / denom.max(1e-6)
+}
 
 /// Identifier for a tokenizer choice. Persisted with each index so a
 /// query at read time uses the same tokenizer that built the postings.
@@ -114,11 +138,80 @@ static ENGLISH_STOPWORDS: &[&str] = &[
     "my", "we", "our", "you", "your", "he", "she", "it", "they", "them", "their",
 ];
 
+/// Per-term block metadata: `(last_doc_id_in_block, max_impact_in_block)`,
+/// one entry per `BLOCK_SIZE` postings, in the same order as the postings
+/// themselves, plus the maximum across the whole list.
+///
+/// Derived data — never serialized. See `build_blocks`.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct BlockIndex {
+    blocks: Vec<(u32, f32)>,
+    list_max: f32,
+}
+
+/// A `PostingCursor` over one term's BM25 postings.
+///
+/// Borrows the index's posting vector and block metadata; holds no copies.
+///
+/// Satisfies the trait's `block_last_doc() >= doc()` invariant by
+/// construction: postings are sorted ascending by doc_id (enforced in
+/// `build_blocks`) and `blocks[i]` records the last doc of the same chunk
+/// that contains position `i * BLOCK_SIZE`, so the block containing `pos`
+/// always ends at or after the doc at `pos`.
+struct Bm25Cursor<'a> {
+    postings: &'a [(u32, u32, Vec<u32>)],
+    blocks: &'a [(u32, f32)],
+    list_max: f32,
+    doc_lengths: &'a [u32],
+    idf: f32,
+    avg_dl: f32,
+    pos: usize,
+}
+
+impl PostingCursor for Bm25Cursor<'_> {
+    fn doc(&self) -> Option<u32> {
+        self.postings.get(self.pos).map(|p| p.0)
+    }
+
+    fn advance_to(&mut self, target: u32) {
+        // Postings are doc-sorted, so the first index at or past `target`
+        // is a partition point over the remaining slice.
+        let from = self.pos.min(self.postings.len());
+        self.pos = from + self.postings[from..].partition_point(|p| p.0 < target);
+    }
+
+    fn next(&mut self) {
+        self.pos += 1;
+    }
+
+    fn block_max(&self) -> f32 {
+        self.blocks
+            .get(self.pos / BLOCK_SIZE)
+            .map_or(f32::MIN, |b| b.1)
+    }
+
+    fn block_last_doc(&self) -> Option<u32> {
+        self.blocks.get(self.pos / BLOCK_SIZE).map(|b| b.0)
+    }
+
+    fn list_max(&self) -> f32 {
+        self.list_max
+    }
+
+    fn score(&self) -> f32 {
+        let (doc_id, tf, _) = self.postings[self.pos];
+        let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0);
+        bm25_impact(self.idf, tf, dl, self.avg_dl)
+    }
+}
+
 /// Per-segment BM25 inverted index.
 ///
-/// `postings` is `term → Vec<(doc_id, term_freq, positions)>` sorted by
-/// doc_id at save time so queries can short-circuit AND-style scoring
-/// later. Positions are sorted ascending and record the raw tokenizer
+/// `postings` is `term → Vec<(doc_id, term_freq, positions)>`. Insertion
+/// order is only sorted by doc_id if callers honour `insert`'s "increasing
+/// doc_id order" contract — nothing here enforces it. `build_blocks` is the
+/// one place that sorts unconditionally, because block-max bounds require
+/// it. Positions are sorted ascending and record the raw tokenizer
 /// output position (before stopword removal) so that phrase queries
 /// correctly account for gaps left by removed stopwords — mirroring
 /// Lucene's `positionIncrement` semantics.
@@ -140,6 +233,16 @@ pub struct Bm25Index {
     /// older persisted indexes that lack this field load cleanly.
     #[serde(default)]
     analyzer: AnalyzerConfig,
+    /// Block-max metadata, keyed by term. Empty until `build_blocks` runs.
+    /// `insert` clears it, so a segment that keeps growing after a build
+    /// falls back to the exhaustive search path until `build_blocks` runs
+    /// again — a term added since the last build would otherwise exist in
+    /// `postings` but have no cursor, and be silently dropped from every
+    /// query that matches only it.
+    ///
+    /// Never serialized: derived cheaply at load from data already in memory.
+    #[serde(skip)]
+    block_indexes: HashMap<String, BlockIndex>,
 }
 
 impl Bm25Index {
@@ -172,6 +275,12 @@ impl Bm25Index {
     /// Add `text` for `doc_id`. Caller is responsible for inserting in
     /// increasing doc_id order (the segment writer does this).
     pub fn insert(&mut self, doc_id: u32, text: &str) {
+        // Any block-max metadata from a prior `build_blocks` is now stale —
+        // a new term may exist in `postings` without a matching cursor, and
+        // existing block maxima no longer bound their (possibly grown)
+        // blocks. Clearing forces the next search back onto the exhaustive
+        // path rather than silently skipping terms.
+        self.block_indexes.clear();
         let positional_tokens = run_analyzer_positional(self.tokenizer, &self.analyzer, text);
         // doc_length = number of raw tokenizer positions (including removed
         // stopwords), so BM25 length normalization stays consistent with the
@@ -212,46 +321,217 @@ impl Bm25Index {
         }
     }
 
-    /// Rank docs by BM25 score against `query`. Returns `(doc_id, score)`
-    /// pairs sorted by score desc, truncated to `k`. Docs with zero
-    /// overlap on tokenized terms are omitted.
-    pub fn search(&self, query: &str, k: usize) -> Vec<(u32, f32)> {
+    /// Whether block-max metadata is available, i.e. whether the pruning
+    /// path can run.
+    pub fn has_blocks(&self) -> bool {
+        !self.block_indexes.is_empty()
+    }
+
+    /// Sort every posting list by doc_id, then derive per-term block-max
+    /// metadata from it.
+    ///
+    /// Call once, after the index is complete and will not be inserted into
+    /// again. Idempotent. Cheap relative to the JSON parse that produced the
+    /// postings, which is why none of this is persisted.
+    ///
+    /// The sort is not incidental. `insert` appends and never orders, so a
+    /// caller that ignores its "increasing doc_id order" contract leaves the
+    /// list unsorted — and a maximum taken over an out-of-order block is not
+    /// a bound for that block's doc range, while the posting cursor binary
+    /// searches these lists. Sorting here turns an assumed invariant into an
+    /// enforced one.
+    ///
+    /// Bounds use the same `bm25_idf` / `bm25_impact` helpers that scoring
+    /// uses, so a bound can never drift from the score it bounds.
+    pub fn build_blocks(&mut self) {
+        self.block_indexes.clear();
         let n = self.doc_count() as f32;
-        if n == 0.0 || k == 0 {
-            return Vec::new();
+        if n == 0.0 {
+            return;
         }
         let avg_dl = self.avg_doc_length();
-        let q_tokens = run_analyzer(self.tokenizer, &self.analyzer, query);
 
-        // Dedup query terms — repeated tokens don't add new evidence in
-        // standard BM25 (we already sum across all matching docs).
-        let mut seen: std::collections::HashSet<&String> =
-            std::collections::HashSet::with_capacity(q_tokens.len());
-        let mut unique_q_tokens: Vec<&String> = Vec::with_capacity(q_tokens.len());
-        for t in &q_tokens {
-            if seen.insert(t) {
-                unique_q_tokens.push(t);
+        for postings in self.postings.values_mut() {
+            if postings.windows(2).any(|w| w[0].0 > w[1].0) {
+                postings.sort_by_key(|p| p.0);
             }
         }
 
-        let mut scores: HashMap<u32, f32> = HashMap::new();
-        for term in unique_q_tokens {
+        let mut built: HashMap<String, BlockIndex> = HashMap::with_capacity(self.postings.len());
+        for (term, postings) in &self.postings {
+            if postings.is_empty() {
+                continue;
+            }
+            let idf = bm25_idf(n, postings.len() as f32);
+            let mut blocks = Vec::with_capacity(postings.len().div_ceil(BLOCK_SIZE));
+            let mut list_max = f32::MIN;
+            for chunk in postings.chunks(BLOCK_SIZE) {
+                let mut block_max = f32::MIN;
+                for &(doc_id, tf, _) in chunk {
+                    let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0);
+                    let impact = bm25_impact(idf, tf, dl, avg_dl);
+                    if impact > block_max {
+                        block_max = impact;
+                    }
+                }
+                if block_max > list_max {
+                    list_max = block_max;
+                }
+                // `chunks` never yields an empty chunk.
+                blocks.push((chunk[chunk.len() - 1].0, block_max));
+            }
+            built.insert(term.clone(), BlockIndex { blocks, list_max });
+        }
+        self.block_indexes = built;
+    }
+
+    /// Rank docs by BM25 score against `query`. Returns `(doc_id, score)`
+    /// sorted by score descending, ties broken by doc_id ascending,
+    /// truncated to `k`. Docs with zero overlap on tokenized terms are
+    /// omitted.
+    pub fn search(&self, query: &str, k: usize) -> Vec<(u32, f32)> {
+        self.search_with_theta(query, k, 1.0)
+    }
+
+    /// `search` with explicit pruning aggressiveness.
+    ///
+    /// `theta` of `1.0` (the default) is rank-safe: the result is identical
+    /// to exhaustive scoring. Higher values prune harder and may omit true
+    /// top-k results. Values below `1.0` and non-finite values are clamped
+    /// to `1.0` by the core.
+    pub fn search_with_theta(&self, query: &str, k: usize, theta: f32) -> Vec<(u32, f32)> {
+        self.search_with_stats(query, k, theta).0
+    }
+
+    /// `search_with_theta` plus traversal statistics. Exists so tests can
+    /// assert that pruning is actually happening rather than merely that
+    /// results stay correct — a pruning path that silently never prunes
+    /// passes every correctness test.
+    pub fn search_with_stats(
+        &self,
+        query: &str,
+        k: usize,
+        theta: f32,
+    ) -> (Vec<(u32, f32)>, PruneStats) {
+        let n = self.doc_count() as f32;
+        if n == 0.0 || k == 0 {
+            return (Vec::new(), PruneStats::default());
+        }
+        let terms = self.unique_query_terms(query);
+        if self.block_indexes.is_empty() {
+            return (self.search_exhaustive(&terms, k), PruneStats::default());
+        }
+
+        let avg_dl = self.avg_doc_length();
+        let mut cursors = Vec::with_capacity(terms.len());
+        for term in &terms {
+            let (Some(postings), Some(bi)) =
+                (self.postings.get(*term), self.block_indexes.get(*term))
+            else {
+                continue;
+            };
+            if postings.is_empty() {
+                continue;
+            }
+            cursors.push(Bm25Cursor {
+                postings,
+                blocks: &bi.blocks,
+                list_max: bi.list_max,
+                doc_lengths: &self.doc_lengths,
+                idf: bm25_idf(n, postings.len() as f32),
+                avg_dl,
+                pos: 0,
+            });
+        }
+        block_max_wand(cursors, k, theta)
+    }
+
+    /// BM25 bag-of-words score for each doc in `doc_ids`, in the same
+    /// order. Docs that match none of the analyzed query terms score `0.0`,
+    /// as do doc_ids not present in the index.
+    ///
+    /// Exists so `search_phrase` can score only the docs that already
+    /// passed positional matching, instead of scoring the entire corpus and
+    /// discarding almost all of it. Accumulates term-by-term in the same
+    /// order as `search_exhaustive`, so the scores it produces are
+    /// bit-identical to that path's.
+    fn score_docs(&self, query: &str, doc_ids: &[u32]) -> Vec<f32> {
+        let n = self.doc_count() as f32;
+        if n == 0.0 || doc_ids.is_empty() {
+            return vec![0.0; doc_ids.len()];
+        }
+        let avg_dl = self.avg_doc_length();
+        let wanted: std::collections::HashSet<u32> = doc_ids.iter().copied().collect();
+        let mut acc: HashMap<u32, f32> = HashMap::with_capacity(wanted.len());
+        for term in self.unique_query_terms(query) {
             let Some(postings) = self.postings.get(term) else {
                 continue;
             };
-            let df = postings.len() as f32;
-            // BM25 IDF with the +1 floor (Lucene practical form).
-            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+            let idf = bm25_idf(n, postings.len() as f32);
             for &(doc_id, tf, _) in postings {
-                let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0) as f32;
-                let tf_f = tf as f32;
-                let denom = tf_f + BM25_K1 * (1.0 - BM25_B + BM25_B * dl / avg_dl.max(1.0));
-                let s = idf * tf_f * (BM25_K1 + 1.0) / denom.max(1e-6);
-                *scores.entry(doc_id).or_insert(0.0) += s;
+                if !wanted.contains(&doc_id) {
+                    continue;
+                }
+                let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0);
+                *acc.entry(doc_id).or_insert(0.0) += bm25_impact(idf, tf, dl, avg_dl);
+            }
+        }
+        doc_ids
+            .iter()
+            .map(|d| *acc.get(d).unwrap_or(&0.0))
+            .collect()
+    }
+
+    /// Analyzed query terms with duplicates removed — repeated tokens add
+    /// no new evidence in standard BM25.
+    ///
+    /// Returns the owned `String` keys stored in `postings`, so the
+    /// references borrow from `self` rather than from a temporary token
+    /// vector. A token absent from the index yields no term, which matches
+    /// the exhaustive path's behaviour of skipping unknown terms.
+    fn unique_query_terms(&self, query: &str) -> Vec<&String> {
+        let q_tokens = run_analyzer(self.tokenizer, &self.analyzer, query);
+        let mut seen: std::collections::HashSet<&String> =
+            std::collections::HashSet::with_capacity(q_tokens.len());
+        let mut unique = Vec::with_capacity(q_tokens.len());
+        for t in &q_tokens {
+            if let Some((key, _)) = self.postings.get_key_value(t)
+                && seen.insert(key)
+            {
+                unique.push(key);
+            }
+        }
+        unique
+    }
+
+    /// Exhaustive scoring: every posting of every query term accumulated
+    /// into a map, then sorted. Used by growing segments, which mutate too
+    /// often for block metadata to stay valid, and as the oracle the
+    /// pruning path is tested against.
+    fn search_exhaustive(&self, terms: &[&String], k: usize) -> Vec<(u32, f32)> {
+        let n = self.doc_count() as f32;
+        let avg_dl = self.avg_doc_length();
+        let mut scores: HashMap<u32, f32> = HashMap::new();
+        for term in terms {
+            let Some(postings) = self.postings.get(*term) else {
+                continue;
+            };
+            let idf = bm25_idf(n, postings.len() as f32);
+            for &(doc_id, tf, _) in postings {
+                let dl = *self.doc_lengths.get(doc_id as usize).unwrap_or(&0);
+                *scores.entry(doc_id).or_insert(0.0) += bm25_impact(idf, tf, dl, avg_dl);
             }
         }
         let mut result: Vec<(u32, f32)> = scores.into_iter().collect();
-        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Score descending, then doc_id ascending. The doc_id tie-break is
+        // what makes the result a total order: without it, equal-scoring
+        // docs come back in HashMap iteration order, which is neither
+        // stable across runs nor comparable against a second implementation.
+        result.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
         result.truncate(k);
         result
     }
@@ -356,15 +636,20 @@ impl Bm25Index {
             return Vec::new();
         }
 
-        // Score matched docs with the standard BM25 bag-of-words score.
-        let bm25_hits = self.search(phrase, usize::MAX);
-        let score_map: HashMap<u32, f32> = bm25_hits.into_iter().collect();
-
-        let mut result: Vec<(u32, f32)> = matched
-            .into_iter()
-            .map(|id| (id, *score_map.get(&id).unwrap_or(&0.0)))
-            .collect();
-        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Score only the docs that passed positional matching. Scoring the
+        // whole corpus here was unbounded work for a result set that is
+        // usually tiny — and once block metadata exists, a k of usize::MAX
+        // would route this straight into the pruning path, where it
+        // overflows the heap capacity and disables pruning entirely.
+        let scores = self.score_docs(phrase, &matched);
+        let mut result: Vec<(u32, f32)> = matched.into_iter().zip(scores).collect();
+        // Score descending, then doc_id ascending — see the identical
+        // comparator in `search` for why the tie-break matters.
+        result.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
         result.truncate(k);
         result
     }
@@ -378,8 +663,13 @@ impl Bm25Index {
 
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)?;
-        let idx: Self = serde_json::from_slice(&bytes)
+        let mut idx: Self = serde_json::from_slice(&bytes)
             .map_err(|e| VedaError::Storage(format!("bm25 load parse: {e}")))?;
+        // A loaded index is read-only by construction, so block metadata
+        // stays valid for its lifetime. Deriving it here — rather than
+        // persisting it — keeps the on-disk format unchanged, so indexes
+        // written before this feature load with no migration.
+        idx.build_blocks();
         Ok(idx)
     }
 }
@@ -996,6 +1286,554 @@ mod tests {
         assert!(
             !ids.contains(&0),
             "removed stopword must leave a position gap (Lucene positionIncrement): {ids:?}"
+        );
+    }
+
+    #[test]
+    fn score_docs_matches_full_search_scores() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..500u32 {
+            let a = (doc_id % 4) as usize + 1;
+            let mut text = "alpha ".repeat(a);
+            text.push_str("beta gamma");
+            idx.insert(doc_id, &text);
+        }
+        let full: HashMap<u32, f32> = idx.search("alpha beta", usize::MAX).into_iter().collect();
+        let picked: Vec<u32> = vec![3, 17, 200, 499];
+        let scores = idx.score_docs("alpha beta", &picked);
+        assert_eq!(scores.len(), picked.len());
+        for (doc_id, got) in picked.iter().zip(scores) {
+            assert_eq!(got, full[doc_id], "doc {doc_id}");
+        }
+    }
+
+    #[test]
+    fn score_docs_returns_zero_for_a_non_matching_doc() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        idx.insert(0, "alpha");
+        idx.insert(1, "zzz");
+        let scores = idx.score_docs("alpha", &[1]);
+        assert_eq!(scores, vec![0.0]);
+    }
+
+    #[test]
+    fn score_docs_handles_duplicate_and_unknown_doc_ids() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..10u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        // A doc_id repeated must score the same both times; a doc_id past the
+        // end of the index must score 0.0 rather than panicking.
+        let scores = idx.score_docs("alpha", &[3, 3, 9999]);
+        assert_eq!(scores.len(), 3);
+        assert_eq!(scores[0], scores[1]);
+        assert!(scores[0] > 0.0);
+        assert_eq!(scores[2], 0.0);
+    }
+
+    #[test]
+    fn phrase_scores_are_unchanged_by_the_rewrite() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..200u32 {
+            idx.insert(doc_id, "the quick brown fox jumps");
+        }
+        let hits = idx.search_phrase("quick brown", 0, 10);
+        assert_eq!(hits.len(), 10);
+        let bag: HashMap<u32, f32> = idx.search("quick brown", usize::MAX).into_iter().collect();
+        for (doc_id, score) in &hits {
+            assert_eq!(
+                *score, bag[doc_id],
+                "phrase score must stay the bag-of-words score"
+            );
+        }
+    }
+
+    #[test]
+    fn phrase_search_works_on_an_index_with_blocks() {
+        // Guards the task-ordering hazard: once block metadata exists,
+        // search_phrase must not route a k = usize::MAX request into the
+        // pruning path. Overflow-checks are on in test builds, so a regression
+        // here panics rather than failing quietly.
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..1000u32 {
+            idx.insert(doc_id, "the quick brown fox jumps");
+        }
+        idx.build_blocks();
+        assert!(idx.has_blocks());
+        let hits = idx.search_phrase("quick brown", 0, 5);
+        assert_eq!(hits.len(), 5);
+        for (_, score) in &hits {
+            assert!(*score > 0.0);
+        }
+    }
+
+    #[test]
+    fn equal_scores_are_ordered_by_doc_id() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        // Identical documents inserted out of any helpful order produce
+        // identical BM25 scores, so only the tie-break decides the order.
+        for doc_id in [4u32, 0, 3, 1, 2] {
+            idx.insert(doc_id, "alpha beta");
+        }
+        let hits = idx.search("alpha", 5);
+        let ids: Vec<u32> = hits.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![0, 1, 2, 3, 4],
+            "ties must break by doc_id ascending"
+        );
+    }
+
+    #[test]
+    fn search_is_deterministic_across_repeated_calls() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..50u32 {
+            idx.insert(doc_id, "alpha beta gamma");
+        }
+        let first = idx.search("alpha beta", 10);
+        for _ in 0..20 {
+            assert_eq!(idx.search("alpha beta", 10), first);
+        }
+    }
+
+    #[test]
+    fn impact_helper_matches_inline_formula() {
+        // Guards against the helper drifting from the expression it replaced.
+        let idf = bm25_idf(100.0, 10.0);
+        let got = bm25_impact(idf, 3, 120, 100.0);
+        let tf_f = 3.0f32;
+        let denom = tf_f + BM25_K1 * (1.0 - BM25_B + BM25_B * 120.0 / 100.0f32.max(1.0));
+        let want = idf * tf_f * (BM25_K1 + 1.0) / denom.max(1e-6);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn build_blocks_populates_and_reports() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        assert!(!idx.has_blocks(), "empty index has no blocks");
+        for doc_id in 0..300u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        assert!(!idx.has_blocks(), "blocks are not built implicitly");
+        idx.build_blocks();
+        assert!(idx.has_blocks());
+    }
+
+    #[test]
+    fn build_blocks_on_empty_index_is_a_noop() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        idx.build_blocks();
+        assert!(!idx.has_blocks());
+        assert!(idx.search("anything", 5).is_empty());
+    }
+
+    #[test]
+    fn build_blocks_sorts_out_of_order_postings() {
+        // insert() appends, so inserting descending leaves the posting list
+        // descending. A block maximum computed over an unsorted list is not a
+        // bound for that block's doc range, and the cursor in the next task
+        // binary-searches these postings. build_blocks must enforce order.
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in (0..500u32).rev() {
+            idx.insert(doc_id, "alpha");
+        }
+        assert!(
+            idx.postings["alpha"].windows(2).any(|w| w[0].0 > w[1].0),
+            "fixture precondition: postings really are out of order before build"
+        );
+        idx.build_blocks();
+        assert!(
+            idx.postings["alpha"].windows(2).all(|w| w[0].0 < w[1].0),
+            "build_blocks must leave postings sorted ascending by doc_id"
+        );
+        // And the block boundaries must agree with the sorted order.
+        let bi = &idx.block_indexes["alpha"];
+        for (b, chunk) in idx.postings["alpha"]
+            .chunks(crate::block_max::BLOCK_SIZE)
+            .enumerate()
+        {
+            assert_eq!(bi.blocks[b].0, chunk.last().unwrap().0);
+        }
+    }
+
+    #[test]
+    fn block_max_bounds_every_member_posting() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        // Varied lengths and term frequencies so impacts differ within blocks.
+        for doc_id in 0..1000u32 {
+            let repeats = (doc_id % 7) as usize + 1;
+            let filler = (doc_id % 13) as usize;
+            let mut text = "alpha ".repeat(repeats);
+            text.push_str(&"filler ".repeat(filler));
+            text.push_str("beta gamma");
+            idx.insert(doc_id, &text);
+        }
+        idx.build_blocks();
+
+        let n = idx.doc_count() as f32;
+        let avg_dl = idx.avg_doc_length();
+        for (term, postings) in &idx.postings {
+            let bi = idx
+                .block_indexes
+                .get(term)
+                .unwrap_or_else(|| panic!("no block index for {term}"));
+            let idf = bm25_idf(n, postings.len() as f32);
+            for (i, &(doc_id, tf, _)) in postings.iter().enumerate() {
+                let dl = idx.doc_lengths[doc_id as usize];
+                let impact = bm25_impact(idf, tf, dl, avg_dl);
+                let (_, block_max) = bi.blocks[i / crate::block_max::BLOCK_SIZE];
+                assert!(
+                    block_max >= impact,
+                    "term {term} posting {i}: block_max {block_max} < impact {impact}"
+                );
+                assert!(
+                    bi.list_max >= block_max,
+                    "term {term}: list_max {} < block_max {block_max}",
+                    bi.list_max
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn block_last_doc_is_the_final_doc_in_each_block() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..500u32 {
+            idx.insert(doc_id, "alpha");
+        }
+        idx.build_blocks();
+        let postings = &idx.postings["alpha"];
+        let bi = &idx.block_indexes["alpha"];
+        for (b, chunk) in postings.chunks(crate::block_max::BLOCK_SIZE).enumerate() {
+            assert_eq!(bi.blocks[b].0, chunk.last().unwrap().0);
+        }
+    }
+
+    #[test]
+    fn blocks_survive_a_second_build() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..200u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        idx.build_blocks();
+        let first = idx.block_indexes["alpha"].blocks.clone();
+        idx.build_blocks();
+        assert_eq!(
+            idx.block_indexes["alpha"].blocks, first,
+            "rebuild must be idempotent"
+        );
+    }
+
+    /// Build one corpus twice: with blocks (pruning path) and without
+    /// (exhaustive path). Same data, same struct — the only difference is
+    /// which traversal runs.
+    fn paired_indexes(docs: u32) -> (Bm25Index, Bm25Index) {
+        let build = || {
+            let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+            for doc_id in 0..docs {
+                let a = (doc_id % 5) as usize + 1;
+                let b = (doc_id % 11) as usize;
+                let c = (doc_id % 3) as usize;
+                let mut text = "alpha ".repeat(a);
+                text.push_str(&"beta ".repeat(b));
+                text.push_str(&"gamma ".repeat(c));
+                text.push_str("delta");
+                idx.insert(doc_id, &text);
+            }
+            idx
+        };
+        let plain = build();
+        let mut blocked = build();
+        blocked.build_blocks();
+        (plain, blocked)
+    }
+
+    #[test]
+    fn pruned_search_matches_exhaustive_search() {
+        let (plain, blocked) = paired_indexes(3000);
+        assert!(!plain.has_blocks());
+        assert!(blocked.has_blocks());
+        for query in [
+            "alpha",
+            "beta",
+            "alpha beta",
+            "alpha beta gamma delta",
+            "alpha alpha beta",
+            "delta zzz_absent",
+            "zzz_absent",
+        ] {
+            for k in [1usize, 5, 10, 100, 5000] {
+                assert_eq!(
+                    blocked.search_with_theta(query, k, 1.0),
+                    plain.search(query, k),
+                    "query {query:?} k {k}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pruned_search_matches_on_a_corpus_smaller_than_one_block() {
+        let (plain, blocked) = paired_indexes(7);
+        for k in [1usize, 3, 100] {
+            assert_eq!(
+                blocked.search_with_theta("alpha beta", k, 1.0),
+                plain.search("alpha beta", k)
+            );
+        }
+    }
+
+    #[test]
+    fn pruning_actually_skips_blocks() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        // "common" is in every doc and scores low; "rare" is in a handful and
+        // scores high. Once the heap fills from "rare", most of "common"'s
+        // blocks cannot reach the threshold.
+        for doc_id in 0..20_000u32 {
+            if doc_id % 500 == 0 {
+                idx.insert(doc_id, "common rare rare rare rare rare");
+            } else {
+                idx.insert(doc_id, "common");
+            }
+        }
+        idx.build_blocks();
+        let (_, stats) = idx.search_with_stats("common rare", 10, 1.0);
+        assert!(
+            stats.blocks_skipped > 0,
+            "no blocks skipped — pruning is inert on a corpus built to force it"
+        );
+    }
+
+    #[test]
+    fn search_without_blocks_uses_the_exhaustive_path() {
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..1000u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        // No build_blocks call — this is the growing-segment shape.
+        let (hits, stats) = idx.search_with_stats("alpha", 10, 1.0);
+        assert_eq!(hits, idx.search("alpha", 10));
+        assert_eq!(stats, crate::block_max::PruneStats::default());
+    }
+
+    #[test]
+    fn theta_above_one_stays_within_k_and_returns_real_hits() {
+        let (plain, blocked) = paired_indexes(3000);
+        // Every genuine match, scored exhaustively, as the reference set.
+        let all_matches: HashMap<u32, f32> = plain
+            .search("alpha beta gamma", usize::MAX)
+            .into_iter()
+            .collect();
+
+        let approx = blocked.search_with_theta("alpha beta gamma", 10, 8.0);
+        assert!(approx.len() <= 10);
+        assert!(
+            !approx.is_empty(),
+            "aggressive pruning must not empty the result"
+        );
+        for (doc_id, score) in &approx {
+            // Approximate mode may omit true top-k members. It must never
+            // invent a doc that is not a match, nor report a wrong score.
+            let expected = all_matches
+                .get(doc_id)
+                .unwrap_or_else(|| panic!("doc {doc_id} is not a match at all"));
+            assert_eq!(score, expected, "doc {doc_id} scored wrongly");
+        }
+    }
+
+    #[test]
+    fn search_delegates_to_theta_one() {
+        let (_, blocked) = paired_indexes(500);
+        assert_eq!(
+            blocked.search("alpha beta", 20),
+            blocked.search_with_theta("alpha beta", 20, 1.0)
+        );
+    }
+
+    #[test]
+    fn cursor_block_last_doc_is_never_behind_current_doc() {
+        // The core relies on block_last_doc() >= doc() for forward progress.
+        // A violation is silent truncation in release builds, so drive a
+        // real Bm25Cursor through the corpus with the same advance_to/next
+        // operations the traversal uses, and pin the invariant at every
+        // step. Re-deriving `bi.blocks[pos / BLOCK_SIZE].0` inline (as an
+        // earlier version of this test did) duplicates the very index
+        // arithmetic under test: change Bm25Cursor's own block indexing and
+        // that version keeps passing while the silent-truncation scenario
+        // it exists to catch goes live.
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..1000u32 {
+            idx.insert(doc_id, "alpha");
+        }
+        idx.build_blocks();
+        let postings = &idx.postings["alpha"];
+        let bi = &idx.block_indexes["alpha"];
+        let mut cursor = Bm25Cursor {
+            postings,
+            blocks: &bi.blocks,
+            list_max: bi.list_max,
+            doc_lengths: &idx.doc_lengths,
+            idf: bm25_idf(idx.doc_count() as f32, postings.len() as f32),
+            avg_dl: idx.avg_doc_length(),
+            pos: 0,
+        };
+        let mut steps = 0;
+        while let Some(doc) = cursor.doc() {
+            assert!(
+                cursor.block_last_doc().is_some_and(|last| last >= doc),
+                "doc {doc}: block_last_doc {:?} is behind doc",
+                cursor.block_last_doc()
+            );
+            // Alternate next()/advance_to() so both of the cursor's forward-
+            // progress operations are exercised, not just one.
+            if doc % 3 == 0 {
+                cursor.advance_to(doc + 7);
+            } else {
+                cursor.next();
+            }
+            steps += 1;
+        }
+        assert!(steps > 0, "cursor never advanced — test would be vacuous");
+    }
+
+    /// Same corpus and query as `pruned_search_matches_exhaustive_search`,
+    /// but with the query terms permuted. Term order feeds directly into
+    /// both the exhaustive path's summation order and the order cursors are
+    /// constructed in for the pruning path, so this guards against a fix
+    /// that only happens to work for one particular term ordering.
+    ///
+    /// Deliberately NOT asserted: that the two permutations equal each
+    /// other. Summation order is tied to term order for both paths, so nothing
+    /// guarantees identical results across permutations — only that each
+    /// permutation's pruned result matches ITS OWN exhaustive oracle.
+    #[test]
+    fn pruned_search_matches_exhaustive_search_under_term_permutation() {
+        let (plain, blocked) = paired_indexes(3000);
+        for query in ["alpha beta gamma delta", "delta gamma beta alpha"] {
+            for k in [1usize, 5, 10, 100, 5000] {
+                assert_eq!(
+                    blocked.search_with_theta(query, k, 1.0),
+                    plain.search(query, k),
+                    "query {query:?} k {k}"
+                );
+            }
+        }
+    }
+
+    // ── Task 6: build blocks at segment open ────────────────────────────
+
+    #[test]
+    fn load_builds_blocks_and_preserves_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.bm25");
+
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..2000u32 {
+            let a = (doc_id % 5) as usize + 1;
+            let mut text = "alpha ".repeat(a);
+            text.push_str("beta gamma");
+            idx.insert(doc_id, &text);
+        }
+        let before = idx.search("alpha beta", 25);
+        idx.save(&path).unwrap();
+
+        let loaded = Bm25Index::load(&path).unwrap();
+        assert!(
+            loaded.has_blocks(),
+            "load must leave the index ready to prune"
+        );
+        assert_eq!(
+            loaded.search("alpha beta", 25),
+            before,
+            "turning pruning on must not change results"
+        );
+    }
+
+    #[test]
+    fn saved_file_contains_no_block_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.bm25");
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..200u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        idx.build_blocks();
+        idx.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("block_indexes") && !raw.contains("list_max"),
+            "block metadata is derived and must never be persisted"
+        );
+    }
+
+    #[test]
+    fn an_index_saved_before_this_feature_still_loads() {
+        // A file written by the previous version has no block fields at all.
+        // #[serde(skip)] means it must load unchanged and then build blocks,
+        // so existing sealed segments need no migration.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.bm25");
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..300u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        idx.save(&path).unwrap();
+
+        let loaded = Bm25Index::load(&path).unwrap();
+        assert_eq!(loaded.doc_count(), 300);
+        assert!(loaded.has_blocks());
+    }
+
+    #[test]
+    fn a_loaded_index_actually_prunes() {
+        // The point of the task: after load, real queries must take the
+        // pruning path, not merely be capable of it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.bm25");
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..20_000u32 {
+            if doc_id % 500 == 0 {
+                idx.insert(doc_id, "common rare rare rare rare rare");
+            } else {
+                idx.insert(doc_id, "common");
+            }
+        }
+        idx.save(&path).unwrap();
+
+        let loaded = Bm25Index::load(&path).unwrap();
+        let (_, stats) = loaded.search_with_stats("common rare", 10, 1.0);
+        assert!(
+            stats.blocks_skipped > 0,
+            "a loaded index did not prune — the feature is wired up but inert"
+        );
+    }
+
+    #[test]
+    fn inserting_after_load_falls_back_to_exhaustive() {
+        // insert() clears block metadata, so a growing index cannot consult
+        // stale bounds. Results must stay correct across that transition.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.bm25");
+        let mut idx = Bm25Index::with_tokenizer(TokenizerKind::Whitespace);
+        for doc_id in 0..300u32 {
+            idx.insert(doc_id, "alpha beta");
+        }
+        idx.save(&path).unwrap();
+
+        let mut loaded = Bm25Index::load(&path).unwrap();
+        assert!(loaded.has_blocks());
+        loaded.insert(300, "alpha gamma");
+        assert!(
+            !loaded.has_blocks(),
+            "insert must invalidate block metadata"
+        );
+
+        // The newly inserted doc must be findable — this is the bug that
+        // clearing block_indexes prevents.
+        let hits = loaded.search("gamma", 5);
+        assert!(
+            hits.iter().any(|(id, _)| *id == 300),
+            "a doc matching only a term added after the build was not returned"
         );
     }
 }

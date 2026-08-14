@@ -140,6 +140,13 @@ pub struct Bm25Query {
     pub field: String,
     /// Raw user-facing query text.
     pub query: String,
+    /// Pruning aggressiveness for the block-max traversal. Absent or `1.0`
+    /// is rank-safe: results are identical to exhaustive scoring. Values
+    /// above `1.0` prune harder and may omit true top-k results. Values
+    /// below `1.0` are rejected — they would only slow the query down
+    /// without changing the answer.
+    #[serde(default)]
+    pub prune_theta: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -661,6 +668,7 @@ pub(crate) async fn run_search(
         // Built-in BM25 full-text search against a string field with
         // `bm25 = true` in the schema. Runs the same tokenizer at ingest
         // and query time; no Lucene/Tantivy bundling required.
+        validate_bm25_query(bm25_query)?;
         let eff_filter = effective_filter(req);
         execute_bm25(
             state,
@@ -689,6 +697,7 @@ pub(crate) async fn run_search(
         // scored independently; RRF folds the rankings into one set.
         // dense_weight in [0, 1] biases the RRF weighting.
         validate_dense_query(schema, &hybrid_query.dense, req.truncate_to)?;
+        validate_bm25_query(&hybrid_query.bm25)?;
         let metric = resolve_metric(schema, &hybrid_query.dense.field);
         let eff_filter = effective_filter(req);
         let (hits, legs) = execute_hybrid_dense_bm25(
@@ -1050,6 +1059,9 @@ async fn execute_bm25(
     };
 
     let fetch_k = bm25_fetch_k(k, filter_expr.is_some());
+    // Absent means exact. Storage clamps defensively too, but the request
+    // boundary is where an out-of-range value becomes a 400.
+    let theta = query.prune_theta.unwrap_or(1.0);
 
     // (record_uuid, bm25_score) merged across shards / growing+sealed
     // segments. Growing segments maintain an in-memory Bm25Index updated
@@ -1062,7 +1074,7 @@ async fn execute_bm25(
         let gs = sm.growing_segment();
         if let Some(idx) = gs.bm25_index(&query.field) {
             let visible = read_ts.and_then(|ts| gs.visible_doc_ids_at(ts));
-            let scored = idx.search(&query.query, fetch_k);
+            let scored = idx.search_with_theta(&query.query, fetch_k, theta);
             for (doc_id, score) in scored {
                 if gs.is_deleted(doc_id) {
                     continue;
@@ -1086,7 +1098,7 @@ async fn execute_bm25(
                 continue;
             };
             let visible = read_ts.and_then(|ts| handle.reader.visible_doc_ids_at(ts));
-            let scored = idx.search(&query.query, fetch_k);
+            let scored = idx.search_with_theta(&query.query, fetch_k, theta);
             for (doc_id, score) in scored {
                 if handle.reader.delete_bitmap().is_deleted(doc_id) {
                     continue;
@@ -1515,6 +1527,27 @@ fn resolve_sparse_metric(
             _ => None,
         })
         .unwrap_or(DistanceMetric::Cosine)
+}
+
+/// Validate the BM25 leg's `prune_theta` before dispatching to `execute_bm25`.
+/// Values below `1.0` would only slow the query down without changing the
+/// answer (see `Bm25Index::search_with_theta`), so reject them at the
+/// request boundary rather than silently clamping.
+fn validate_bm25_query(q: &Bm25Query) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if let Some(theta) = q.prune_theta
+        && (!theta.is_finite() || theta < 1.0)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "prune_theta must be a finite value >= 1.0 (got {theta}); \
+                     1.0 is exact, higher values prune more aggressively"
+                ),
+            }),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve the distance metric for a field from the schema, defaulting to Cosine.

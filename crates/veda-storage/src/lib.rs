@@ -3,6 +3,7 @@
 pub mod bitmap_index;
 pub mod blob_manager;
 pub mod blob_store;
+pub mod block_max;
 pub mod bm25_index;
 pub mod cold_storage;
 pub mod columnar_stored_fields;
