@@ -51,6 +51,24 @@ pub async fn start_campaign(
     Json(req): Json<StartCampaignRequest>,
 ) -> Result<Json<TuningCampaign>, GatewayError> {
     let scoped_collection = tenant::scope(&tenant, &collection);
+    // A campaign materializes reindexed sibling collections to benchmark
+    // trials against (see `materialize_bases`) — a write, and one that
+    // `resolve_search_fields`/`materialize_bases` below would otherwise only
+    // reject after losing the status code through a bare `String` error,
+    // surfacing as an opaque 500 instead of a clear 405. Check up front
+    // instead, the way every other collection-addressed handler does.
+    {
+        let schemas = state.inner.schemas.read().await;
+        let schema = schemas.get(&scoped_collection).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("collection '{collection}' not found"),
+                }),
+            )
+        })?;
+        crate::rest::collections::reject_if_external(schema, &collection)?;
+    }
     // Eval sets are always stored under a tenant-scoped key (every real
     // creation path — `create_eval_set`/`generate_eval_set` — scopes via
     // `save_and_return_set`, mirroring `collection` just above). Without
@@ -762,6 +780,30 @@ pub async fn apply_trial(
     // "collection 'default__rag_test' not found" (the outer "default__"
     // stripped by `display_name`, leaving the inner one visible).
     let scoped_collection = campaign.collection.clone();
+    // Deliberate handler-level guard: the tier2/3 branch below reaches
+    // `reindex_collection_internal`, whose own schema lookup in
+    // `reindex_collection_internal_ex` already rejects an external
+    // collection — but relying on that alone makes this route's
+    // protection incidental to an unrelated call chain staying shaped the
+    // way it is today. Check explicitly, unconditionally, for both tiers.
+    {
+        let schemas = state.inner.schemas.read().await;
+        let schema = schemas.get(&scoped_collection).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!(
+                        "collection '{}' not found",
+                        crate::tenant::display_name(&scoped_collection)
+                    ),
+                }),
+            )
+        })?;
+        crate::rest::collections::reject_if_external(
+            schema,
+            crate::tenant::display_name(&scoped_collection),
+        )?;
+    }
     let live_config = PipelineConfig::default(); // v1: compares against the fixed default; a "read the collection's current live config" lookup is a natural follow-up
 
     if live_config.same_tier2_and_3_base(&trial.config) {
@@ -957,6 +999,31 @@ mod tests {
         }
     }
 
+    /// Same as `seed_test_collection`, but registered as an external
+    /// (read-in-place Parquet) collection — for the `apply_trial`
+    /// rejection test, which can't reach this state through the public
+    /// HTTP API since `/tuning-campaigns` itself now rejects starting a
+    /// campaign against an external collection.
+    async fn seed_external_test_collection(state: &AppState, name: &str) {
+        let scoped = crate::tenant::scope(&crate::tenant::TenantId::default_tenant(), name);
+        let schema = veda_core::schema::CollectionSchema::builder(scoped.clone())
+            .external(veda_core::schema::ExternalSource {
+                format: "parquet".to_owned(),
+                uri: "file:///does-not-matter-for-this-test.parquet".to_owned(),
+                id_field: "id".to_owned(),
+                vector_field: "embedding".to_owned(),
+                metric: veda_core::types::DistanceMetric::Cosine,
+            })
+            .shard_count(1)
+            .replication_factor(1)
+            .build()
+            .expect("external test schema should build");
+        {
+            let mut schemas = state.inner.schemas.write().await;
+            schemas.insert(scoped.clone(), schema);
+        }
+    }
+
     /// Build a minimal valid `TuningCampaign` with exactly one `Trial`
     /// using the given `trial_config`, so `campaign.trials[0].id`/`.config`
     /// are meaningful for a test to reference. Field values the tests
@@ -1029,6 +1096,62 @@ mod tests {
                 .await,
             None
         );
+    }
+
+    /// `/tuning-campaigns` itself now rejects starting a campaign against
+    /// an external collection, so a real HTTP round-trip can never produce
+    /// a campaign whose `collection` is external — this seeds the campaign
+    /// fixture directly (as the other `apply_trial` tests in this module
+    /// already do) to exercise the guard in isolation. Checked BEFORE the
+    /// tier1/tier2 branch, so both a tier1-only diff (normally a
+    /// free/no-op apply) and a tier2/3 diff (normally a real reindex) are
+    /// rejected the same way — the guard does not depend on which branch
+    /// would have run.
+    #[tokio::test]
+    async fn apply_trial_is_rejected_for_an_external_collection() {
+        let state = test_state();
+        let tenant = crate::tenant::TenantId::default_tenant();
+        seed_external_test_collection(&state, "ext_mycol").await;
+
+        for (case, mut trial_config) in [
+            (
+                "tier1-only",
+                crate::tuning::config::PipelineConfig::default(),
+            ),
+            ("tier2/3", crate::tuning::config::PipelineConfig::default()),
+        ] {
+            if case == "tier2/3" {
+                trial_config.tier2.index_type = crate::tuning::config::IndexTypeChoice::Flat;
+            }
+            let campaign =
+                fixture_campaign_with_trial(&tenant::scope(&tenant, "ext_mycol"), trial_config);
+            crate::tuning::campaign::save_campaign(&state.inner.saved_objects, &campaign).await;
+
+            let result = apply_trial(
+                State(state.clone()),
+                Tenant(tenant.clone()),
+                Path((campaign.id.clone(), campaign.trials[0].id.clone())),
+            )
+            .await;
+            let err = match result {
+                Err(e) => e,
+                Ok(_) => panic!("{case} apply against an external collection must be rejected"),
+            };
+            assert_eq!(
+                err.0,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{case}: expected 405, got {:?}: {:?}",
+                err.0,
+                err.1.0.error
+            );
+            assert!(
+                err.1.0.error.contains("ext_mycol")
+                    && err.1.0.error.to_lowercase().contains("external")
+                    && err.1.0.error.to_lowercase().contains("read-only"),
+                "{case}: body does not explain external/read-only: {}",
+                err.1.0.error
+            );
+        }
     }
 
     #[tokio::test]
@@ -1161,6 +1284,7 @@ mod tests {
         let create_resp = crate::rest::collections::create_collection(
             State(state.clone()),
             Tenant(tenant.clone()),
+            None,
             Json(create_req),
         )
         .await;
@@ -1272,6 +1396,7 @@ mod tests {
         let create_resp = crate::rest::collections::create_collection(
             State(state.clone()),
             Tenant(tenant.clone()),
+            None,
             Json(create_req),
         )
         .await;

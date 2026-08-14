@@ -158,6 +158,7 @@ pub(crate) async fn insert_impl(
             )
         })?
     };
+    super::collections::reject_if_external(&schema, &name)?;
 
     let display = crate::tenant::display_name(&name).to_owned();
 
@@ -406,17 +407,16 @@ pub async fn list_records(
     let name = state.inner.aliases.resolve(&name).await;
     let rls_field = {
         let schemas = state.inner.schemas.read().await;
-        if !schemas.contains_key(&name) {
-            return Err((
+        let schema = schemas.get(&name).ok_or_else(|| {
+            (
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     error: format!("collection '{name}' not found"),
                 }),
-            ));
-        }
-        schemas
-            .get(&name)
-            .and_then(|s| s.rls_owner_field().map(str::to_owned))
+            )
+        })?;
+        super::collections::reject_if_external_for_read(schema, &name)?;
+        schema.rls_owner_field().map(str::to_owned)
     };
     // For RLS: compute the owner value to filter by (None = admin/no-rls = no filter)
     let rls_owner: Option<String> = rls_field.as_deref().and_then(|_| {
@@ -745,14 +745,15 @@ pub async fn delete_records(
     let name = state.inner.aliases.resolve(&name).await;
     {
         let schemas = state.inner.schemas.read().await;
-        if !schemas.contains_key(&name) {
-            return Err((
+        let schema = schemas.get(&name).ok_or_else(|| {
+            (
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     error: format!("collection '{name}' not found"),
                 }),
-            ));
-        }
+            )
+        })?;
+        super::collections::reject_if_external(schema, &name)?;
     }
 
     let mut deleted = 0usize;
@@ -1410,6 +1411,7 @@ mod tests {
         let resp = create_collection(
             State(state.clone()),
             crate::tenant::Tenant(crate::tenant::TenantId::default_tenant()),
+            None,
             Json(req),
         )
         .await;

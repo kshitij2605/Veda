@@ -47,7 +47,7 @@ use crate::rest::saved_objects::{SavedObject, SavedObjectStore};
 use crate::tenant::{self, Tenant, TenantId};
 
 use super::agents::{self, AgentTurnError};
-use super::collections::ErrorResponse;
+use super::collections::{ErrorResponse, reject_if_external};
 use super::state::AppState;
 
 type GatewayError = (StatusCode, Json<ErrorResponse>);
@@ -1352,6 +1352,26 @@ pub async fn generate_eval_set_for_collection(
     req: GenerateEvalSetRequest,
     preferred_id: Option<String>,
 ) -> Result<EvalSet, GatewayError> {
+    let scoped = tenant::scope(tenant, collection);
+    // Resolve the alias before sampling. After a tuning trial is applied the
+    // alias points at the re-chunked sibling; generating from the abandoned
+    // base would build the test set out of the OLD chunking, so the campaign
+    // that follows would be scored against stale ground truth.
+    let scoped = state.inner.aliases.resolve(&scoped).await;
+    {
+        let schemas = state.inner.schemas.read().await;
+        let schema = schemas
+            .get(&scoped)
+            .ok_or_else(|| not_found(format!("collection '{collection}' not found")))?;
+        // An eval set is Veda-side derived data ABOUT content Veda does not
+        // own: the moment the customer rewrites the source it describes
+        // rows that may no longer exist, with no local source of truth to
+        // reconcile against. Checked before the LLM-config short-circuit
+        // below so this is unconditional, not incidentally masked by
+        // ANSWER_GEN_BASE_URL being unset.
+        reject_if_external(schema, collection)?;
+    }
+
     let llm_config = state.inner.answer_gen_config.read().await.clone();
     if llm_config.is_none() {
         return Err(service_unavailable(
@@ -1360,12 +1380,6 @@ pub async fn generate_eval_set_for_collection(
     }
     let semaphore = state.inner.answer_gen_semaphore.clone();
 
-    let scoped = tenant::scope(tenant, collection);
-    // Resolve the alias before sampling. After a tuning trial is applied the
-    // alias points at the re-chunked sibling; generating from the abandoned
-    // base would build the test set out of the OLD chunking, so the campaign
-    // that follows would be scored against stale ground truth.
-    let scoped = state.inner.aliases.resolve(&scoped).await;
     let chunks = load_source_chunks(state, &scoped).await?;
     if chunks.is_empty() {
         return Err(bad_request(format!(
@@ -2271,6 +2285,7 @@ mod generate_endpoint_tests {
         let resp = create_collection(
             State(state.clone()),
             Tenant(TenantId::default_tenant()),
+            None,
             Json(req),
         )
         .await;
@@ -2328,6 +2343,36 @@ mod generate_endpoint_tests {
     async fn generate_eval_set_503_without_llm() {
         let state = test_state(); // no LLM configured, no records needed for this check
         let tenant = TenantId::default_tenant();
+
+        // The collection must actually exist. `generate_eval_set` now
+        // resolves and inspects the schema — to reject external
+        // collections, whose eval sets would describe rows Veda does not
+        // own — before it looks at the LLM config, so a missing collection
+        // is a 404 and would never reach the 503 this test is about.
+        // Previously this test passed on a collection that never existed,
+        // which made its assertion incidental rather than deliberate.
+        let req = serde_json::from_value(serde_json::json!({
+            "name": "mycol",
+            "shard_count": 1,
+            "fields": [
+                { "name": "v", "type": "vector", "dimension": 2, "metric": "cosine" }
+            ],
+        }))
+        .expect("fixture create-collection request should deserialize");
+        let resp = create_collection(
+            State(state.clone()),
+            Tenant(tenant.clone()),
+            None,
+            Json(req),
+        )
+        .await;
+        use axum::response::IntoResponse;
+        let status = resp.into_response().status();
+        assert!(
+            status.is_success(),
+            "seed collection should create, got {status}"
+        );
+
         let err = generate_eval_set(
             State(state),
             Tenant(tenant),

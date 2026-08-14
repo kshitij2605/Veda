@@ -87,6 +87,7 @@ pub async fn embed_insert(
             )
         })?
     };
+    super::collections::reject_if_external(&schema, &name)?;
 
     let registry = state.inner.embedding_registry.read().await;
 

@@ -9,6 +9,7 @@ pub mod cold_storage;
 pub mod columnar_stored_fields;
 pub mod compaction;
 pub mod delete_bitmap;
+pub mod external_parquet;
 pub mod growing_segment;
 pub mod inverted_index;
 pub mod log_applier;

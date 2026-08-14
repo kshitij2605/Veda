@@ -131,6 +131,18 @@ pub async fn set_auto_optimization(
     Json(req): Json<SetAutoOptimizationRequest>,
 ) -> Result<Json<AutoOptimizationConfig>, (StatusCode, Json<ErrorResponse>)> {
     let scoped = resolve_config_key(&state, &tenant, &collection).await?;
+    {
+        let schemas = state.inner.schemas.read().await;
+        // `resolve_config_key` already confirmed the collection exists;
+        // re-fetch here (not folded into that helper) because `GET` shares
+        // it and must keep reading an external collection's (always
+        // disabled) config. Auto-optimization can never run against a
+        // collection with no local segments to reindex, so storing the
+        // setting would be a knob that provably never applies.
+        if let Some(schema) = schemas.get(&scoped) {
+            super::collections::reject_if_external(schema, &collection)?;
+        }
+    }
     let cfg = AutoOptimizationConfig {
         collection: scoped.clone(),
         enabled: req.enabled,

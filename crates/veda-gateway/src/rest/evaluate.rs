@@ -88,6 +88,7 @@ pub async fn evaluate(
             )
         })?
     };
+    super::collections::reject_if_external_for_read(&schema, &name)?;
 
     // Collect a sample of records from all shards.
     let managers = state.inner.segment_managers.read().await;

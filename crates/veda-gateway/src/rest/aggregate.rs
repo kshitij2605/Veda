@@ -215,13 +215,22 @@ pub async fn aggregate_core(
     q: &AggregateQuery,
     drop_hostile: bool,
 ) -> Result<AggregateResponse, AggError> {
-    // Validate collection exists.
+    // Validate collection exists and has locally stored records.
     {
         let schemas = state.inner.schemas.read().await;
-        if !schemas.contains_key(name) {
-            return Err(AggError::new(
+        let schema = schemas.get(name).ok_or_else(|| {
+            AggError::new(
                 AggErrorKind::NotFound,
                 format!("collection '{name}' not found"),
+            )
+        })?;
+        if schema.is_external() {
+            return Err(AggError::new(
+                AggErrorKind::BadRequest,
+                format!(
+                    "collection '{name}' is external: this operation needs locally stored \
+                     records, which an external collection does not have"
+                ),
             ));
         }
     }
@@ -468,8 +477,14 @@ pub async fn histogram(
 
     {
         let schemas = state.inner.schemas.read().await;
-        if !schemas.contains_key(&name) {
-            return Err(not_found(format!("collection '{name}' not found")));
+        let schema = schemas
+            .get(&name)
+            .ok_or_else(|| not_found(format!("collection '{name}' not found")))?;
+        if schema.is_external() {
+            return Err(bad_request(format!(
+                "collection '{name}' is external: this operation needs locally stored \
+                 records, which an external collection does not have"
+            )));
         }
     }
 
@@ -614,8 +629,14 @@ pub async fn field_stats(
 
     {
         let schemas = state.inner.schemas.read().await;
-        if !schemas.contains_key(&name) {
-            return Err(not_found(format!("collection '{name}' not found")));
+        let schema = schemas
+            .get(&name)
+            .ok_or_else(|| not_found(format!("collection '{name}' not found")))?;
+        if schema.is_external() {
+            return Err(bad_request(format!(
+                "collection '{name}' is external: this operation needs locally stored \
+                 records, which an external collection does not have"
+            )));
         }
     }
 
