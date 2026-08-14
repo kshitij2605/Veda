@@ -11,6 +11,7 @@ use veda_core::schema::CollectionSchema;
 use veda_core::splade_client::{SpladeClient, SpladeClientConfig};
 use veda_query::distributed::DistributedQueryExecutor;
 use veda_storage::blob_store::{BlobStore, LocalBlobStore, ObjectBlobStore, ObjectStoreConfig};
+use veda_storage::external_parquet::ExternalDataset;
 use veda_storage::segment_manager::SegmentManager;
 
 use crate::auth::Role;
@@ -201,6 +202,10 @@ pub struct AppStateInner {
     pub schemas: RwLock<HashMap<String, CollectionSchema>>,
     /// Segment managers per collection, keyed by (collection_name, shard_id).
     pub segment_managers: RwLock<HashMap<String, HashMap<u32, SegmentManager>>>,
+    /// Materialized external datasets, keyed by resolved collection name.
+    /// Dropped and reloaded when the source's stamp changes, so a changed
+    /// lake file is never served as though it were current.
+    pub external_datasets: RwLock<HashMap<String, Arc<ExternalDataset>>>,
     /// Per-collection guard preventing concurrent background compactions.
     pub compaction_locks: RwLock<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// Query executors per collection.
@@ -391,6 +396,7 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 schemas: RwLock::new(HashMap::new()),
                 segment_managers: RwLock::new(HashMap::new()),
+                external_datasets: RwLock::new(HashMap::new()),
                 compaction_locks: RwLock::new(HashMap::new()),
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
@@ -467,6 +473,7 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 schemas: RwLock::new(HashMap::new()),
                 segment_managers: RwLock::new(HashMap::new()),
+                external_datasets: RwLock::new(HashMap::new()),
                 compaction_locks: RwLock::new(HashMap::new()),
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
@@ -524,6 +531,7 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 schemas: RwLock::new(HashMap::new()),
                 segment_managers: RwLock::new(HashMap::new()),
+                external_datasets: RwLock::new(HashMap::new()),
                 compaction_locks: RwLock::new(HashMap::new()),
                 query_executors: RwLock::new(HashMap::new()),
                 embedding_registry: RwLock::new(EmbeddingModelRegistry::new()),
