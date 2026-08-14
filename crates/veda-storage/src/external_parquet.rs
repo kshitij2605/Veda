@@ -147,8 +147,8 @@ impl ExternalDataset {
     }
 }
 
-/// Strip a leading `<scheme>://<authority>/` from `uri`, leaving the object
-/// key or key prefix passed to `BlobStore`.
+/// Strip a leading `<scheme>://` from `uri`, leaving the object key or key
+/// prefix passed to `BlobStore`.
 ///
 /// `file://` URIs carry no authority — `file:///abs/path` is the scheme
 /// followed directly by the absolute filesystem path `/abs/path` — so only
@@ -156,51 +156,78 @@ impl ExternalDataset {
 /// letting `LocalBlobStore` treat it as absolute and bypass its base
 /// directory.
 ///
-/// Any other scheme (`s3://`, ...) carries a bucket/authority next. The
-/// underlying `BlobStore` already knows which bucket to talk to from server
-/// configuration, so a bucket named in the URI is informational only and is
-/// discarded here, leaving a bucket-relative key.
-fn strip_scheme(uri: &str) -> String {
+/// Any other scheme (`s3://`, ...) must not carry a bucket/authority: the
+/// underlying `BlobStore` (e.g. `ObjectBlobStore`) is built against exactly
+/// one bucket from server configuration, so a URI naming a different
+/// bucket would silently read from whatever bucket the server happens to
+/// be configured with — registration could succeed against entirely
+/// unrelated data with no diagnostic. That is rejected outright here
+/// rather than discarded as "informational".
+fn strip_scheme(uri: &str) -> Result<String> {
     if let Some(rest) = uri.strip_prefix("file://") {
-        return rest.to_owned();
+        return Ok(rest.to_owned());
     }
-    match uri.find("://") {
-        Some(idx) => {
-            let after_scheme = &uri[idx + 3..];
-            match after_scheme.find('/') {
-                Some(slash) => after_scheme[slash + 1..].to_owned(),
-                None => String::new(),
-            }
-        }
-        None => uri.to_owned(),
+    let Some(idx) = uri.find("://") else {
+        return Ok(uri.to_owned());
+    };
+    let scheme = &uri[..idx];
+    let after_scheme = &uri[idx + 3..];
+    let (authority, rest) = match after_scheme.find('/') {
+        Some(slash) => (&after_scheme[..slash], &after_scheme[slash + 1..]),
+        None => (after_scheme, ""),
+    };
+    if !authority.is_empty() {
+        return Err(VedaError::Storage(format!(
+            "external URI '{uri}' names a bucket ('{authority}') in its '{scheme}://' scheme; \
+             external URIs are key prefixes within the server's configured object store — \
+             Veda cannot read from a bucket it was not configured for. Set the bucket in \
+             server configuration and register this URI as a bare key prefix instead."
+        )));
     }
+    Ok(rest.to_owned())
 }
 
 /// Resolve `source.uri` to the object keys to read, in sorted order so a
 /// dataset is assembled deterministically.
 ///
 /// A resolved path ending in `.parquet` is a single object key; anything
-/// else is a prefix and selects every `*.parquet` object beneath it. This
-/// makes `s3://bucket/prefix` (no trailing slash) behave the same as
-/// `s3://bucket/prefix/`, matching the documented URI form.
+/// else is a prefix and selects every `*.parquet` object beneath it.
+///
+/// The prefix is always normalised to end in `/` before listing (unless
+/// already empty, which is rejected below). `BlobStore::list` is a plain
+/// `starts_with` match with no path-delimiter semantics — an un-normalised
+/// prefix like `"embeddings"` would also match a sibling key like
+/// `"embeddings-v1/part-0.parquet"`, silently merging unrelated data into
+/// the dataset with no error at all. Anchoring on `/` makes the match
+/// respect the key's directory boundary.
 fn resolve_keys(store: &dyn BlobStore, uri: &str) -> Result<Vec<String>> {
-    let cleaned = strip_scheme(uri);
+    let cleaned = strip_scheme(uri)?;
     if cleaned.ends_with(".parquet") {
-        Ok(vec![cleaned])
-    } else {
-        let mut keys: Vec<String> = store
-            .list(&cleaned)?
-            .into_iter()
-            .filter(|k| k.ends_with(".parquet"))
-            .collect();
-        keys.sort();
-        if keys.is_empty() {
-            return Err(VedaError::Storage(format!(
-                "no .parquet objects found under '{uri}'"
-            )));
-        }
-        Ok(keys)
+        return Ok(vec![cleaned]);
     }
+    if cleaned.is_empty() {
+        return Err(VedaError::Storage(format!(
+            "'{uri}' resolves to an empty key prefix, which would list every object in the \
+             configured store; register a URI with a specific key prefix"
+        )));
+    }
+    let prefix = if cleaned.ends_with('/') {
+        cleaned
+    } else {
+        format!("{cleaned}/")
+    };
+    let mut keys: Vec<String> = store
+        .list(&prefix)?
+        .into_iter()
+        .filter(|k| k.ends_with(".parquet"))
+        .collect();
+    keys.sort();
+    if keys.is_empty() {
+        return Err(VedaError::Storage(format!(
+            "no .parquet objects found under '{uri}'"
+        )));
+    }
+    Ok(keys)
 }
 
 /// Read and materialize the dataset described by `source`.
@@ -215,7 +242,8 @@ pub fn load(store: &dyn BlobStore, source: &ExternalSource) -> Result<ExternalDa
 
     let mut dim: Option<u32> = None;
     let mut id_type: Option<(arrow::datatypes::DataType, String)> = None;
-    let mut scalar_types: HashMap<String, (arrow::datatypes::DataType, String)> = HashMap::new();
+    let mut scalar_types: HashMap<String, (arrow::datatypes::DataType, FieldValueKind, String)> =
+        HashMap::new();
     let mut vectors: Vec<f32> = Vec::new();
     let mut ids: Vec<String> = Vec::new();
     let mut scalars: HashMap<String, Vec<FieldValue>> = HashMap::new();
@@ -259,21 +287,28 @@ pub fn load(store: &dyn BlobStore, source: &ExternalSource) -> Result<ExternalDa
             Some(_) => {}
         }
 
-        // A scalar column's Arrow type must also agree across files: two
-        // files disagreeing on a column's type is a schema disagreement
-        // that should fail registration, not silently discard whichever
-        // file's rows were already read for that column.
+        // A scalar column's *mapped* type must agree across files — not its
+        // raw Arrow type, which can differ structurally between writers
+        // (Spark's `List<Field{name:"element"}>` vs pyarrow's
+        // `List<Field{name:"item"}>`) or in details that don't affect the
+        // value produced (`Timestamp(Millisecond, None)` vs
+        // `Timestamp(Millisecond, Some("UTC"))`) while still mapping
+        // through the same arm in `read_batches` to the same `FieldValue`
+        // variant. Two columns that both map to nothing (`Unsupported`)
+        // agree trivially and are dropped as before; only a genuine
+        // disagreement in what the column *becomes* fails registration.
         for field in schema.fields() {
             let name = field.name().as_str();
             if name == source.id_field || name == source.vector_field {
                 continue;
             }
             let ty = field.data_type().clone();
+            let kind = field_value_kind(&ty);
             match scalar_types.get(name) {
                 None => {
-                    scalar_types.insert(name.to_owned(), (ty, key.clone()));
+                    scalar_types.insert(name.to_owned(), (ty, kind, key.clone()));
                 }
-                Some((prev_ty, prev_key)) if prev_ty != &ty => {
+                Some((prev_ty, prev_kind, prev_key)) if *prev_kind != kind => {
                     return Err(VedaError::Storage(format!(
                         "scalar column '{name}' type disagreement: '{prev_key}' has {prev_ty:?}, '{key}' has {ty:?}"
                     )));
@@ -332,23 +367,31 @@ pub fn load(store: &dyn BlobStore, source: &ExternalSource) -> Result<ExternalDa
 
     let dim = dim.ok_or_else(|| VedaError::Storage(format!("no data behind '{}'", source.uri)))?;
 
-    // Defensive: `read_batches` maintains `vectors`/`scalars` row-alignment
-    // by construction (verified by induction over the padding logic below),
-    // but a future change to that logic breaching it should fail loudly at
-    // load time rather than surface as a wrong vector or a panic when
-    // `vector_at`/`record_at` index into these buffers by row.
+    // `read_batches` maintains `vectors`/`scalars` row-alignment by
+    // construction for a well-formed file, but Arrow does not enforce
+    // column-name uniqueness: a Parquet file with two columns sharing a
+    // name (e.g. two "region" columns) double-pushes into the one entry
+    // `scalars` keeps for that name, breaching alignment for real, not
+    // just hypothetically. These checks catch that — and any other
+    // alignment breach — at load time rather than as a wrong vector
+    // returned or a panic once `vector_at`/`record_at` index into these
+    // buffers by row. The wording points at the source file, not at Veda,
+    // since that is almost always where the fault actually is.
     if vectors.len() != ids.len() * dim as usize {
         return Err(VedaError::Storage(format!(
-            "internal error: vector buffer has {} floats, expected {} ({} rows * dim {dim})",
+            "vector buffer has {} floats, expected {} ({} rows * dim {dim}); the source \
+             Parquet file is malformed — check for a duplicate '{}' column",
             vectors.len(),
             ids.len() * dim as usize,
-            ids.len()
+            ids.len(),
+            source.vector_field
         )));
     }
     for (name, vals) in &scalars {
         if vals.len() != ids.len() {
             return Err(VedaError::Storage(format!(
-                "internal error: scalar column '{name}' has {} entries, expected {} (row_count)",
+                "scalar column '{name}' has {} entries, expected {} (row_count); the source \
+                 Parquet file is malformed — check for a duplicate '{name}' column",
                 vals.len(),
                 ids.len()
             )));
@@ -409,6 +452,41 @@ fn id_arrow_type(
         other => Err(VedaError::Storage(format!(
             "id_field '{field_name}' in '{key}' has unsupported Arrow type {other:?}: must be Utf8, LargeUtf8, Int32 or Int64"
         ))),
+    }
+}
+
+/// The `FieldValue` kind an Arrow scalar column type maps to in
+/// `read_batches`, or `Unsupported` if the column would be dropped. Used to
+/// check cross-file scalar column agreement against what the column
+/// actually *becomes*, rather than its raw structural Arrow type — see the
+/// comment at the call site in `load`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldValueKind {
+    String,
+    Int32,
+    Int64,
+    Float32,
+    Float64,
+    Bool,
+    Timestamp,
+    Unsupported,
+}
+
+fn field_value_kind(ty: &arrow::datatypes::DataType) -> FieldValueKind {
+    use arrow::datatypes::{DataType, TimeUnit};
+    match ty {
+        DataType::Utf8 | DataType::LargeUtf8 => FieldValueKind::String,
+        DataType::Int32 => FieldValueKind::Int32,
+        DataType::Int64 => FieldValueKind::Int64,
+        DataType::Float32 => FieldValueKind::Float32,
+        DataType::Float64 => FieldValueKind::Float64,
+        DataType::Boolean => FieldValueKind::Bool,
+        DataType::Date32 | DataType::Date64 => FieldValueKind::Timestamp,
+        DataType::Timestamp(
+            TimeUnit::Second | TimeUnit::Millisecond | TimeUnit::Microsecond | TimeUnit::Nanosecond,
+            _,
+        ) => FieldValueKind::Timestamp,
+        _ => FieldValueKind::Unsupported,
     }
 }
 
@@ -669,7 +747,9 @@ fn read_batches(
                         out.push(if arr.is_null(i) {
                             FieldValue::Null
                         } else {
-                            FieldValue::Timestamp(arr.value(i) * 1_000)
+                            // Customer-controlled i64; an ordinary `*` can
+                            // overflow (panics in debug, wraps in release).
+                            FieldValue::Timestamp(arr.value(i).saturating_mul(1_000))
                         });
                     }
                 }
@@ -1107,6 +1187,49 @@ mod tests {
         writer.close().unwrap();
     }
 
+    /// Three rows, dimension `dim`, with two columns both named "region" —
+    /// Arrow does not enforce column-name uniqueness, so this is a
+    /// malformed-but-constructible file for the alignment-assertion test.
+    fn write_parquet_with_duplicate_column_name(path: &std::path::Path, dim: usize) {
+        let n = 3;
+        let mut flat: Vec<f32> = Vec::with_capacity(n * dim);
+        for i in 0..n {
+            for d in 0..dim {
+                flat.push((i * dim + d) as f32 / 10.0);
+            }
+        }
+        let values = Float32Array::from(flat);
+        let vec_field = StdArc::new(Field::new("item", DataType::Float32, false));
+        let vectors =
+            FixedSizeListArray::try_new(vec_field.clone(), dim as i32, StdArc::new(values), None)
+                .unwrap();
+        let ids: Vec<String> = (0..n).map(|i| format!("doc{i}")).collect();
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("doc_id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(vec_field, dim as i32),
+                false,
+            ),
+            Field::new("region", DataType::Utf8, false),
+            Field::new("region", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                StdArc::new(StringArray::from(ids)) as ArrayRef,
+                StdArc::new(vectors) as ArrayRef,
+                StdArc::new(StringArray::from(vec!["eu", "us", "eu"])) as ArrayRef,
+                StdArc::new(StringArray::from(vec!["eu", "us", "eu"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
     fn source(uri: &str) -> ExternalSource {
         ExternalSource {
             format: "parquet".into(),
@@ -1366,7 +1489,19 @@ mod tests {
     }
 
     #[test]
-    fn resolves_an_s3_prefix_without_a_trailing_slash() {
+    fn rejects_a_malformed_file_with_a_duplicate_column_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet_with_duplicate_column_name(&dir.path().join("a.parquet"), 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let err = load(&store, &source("a.parquet")).unwrap_err().to_string();
+        assert!(
+            err.contains("malformed") && err.contains("region"),
+            "error must say the source file is malformed and name the offending column, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolves_a_key_prefix_without_a_trailing_slash() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("prefix")).unwrap();
         let a_ids: Vec<String> = (0..3).map(|i| format!("a{i}")).collect();
@@ -1374,15 +1509,15 @@ mod tests {
         write_parquet_with_ids(&dir.path().join("prefix/a.parquet"), &a_ids, 4);
         write_parquet_with_ids(&dir.path().join("prefix/b.parquet"), &b_ids, 4);
         let store = LocalBlobStore::new(dir.path()).unwrap();
-        // The bucket name is informational only; LocalBlobStore has no
-        // concept of a bucket, so the important thing is that "bucket" is
-        // discarded and "prefix" is used as the key prefix.
-        let ds = load(&store, &source("s3://bucket/prefix")).unwrap();
+        // No scheme, no trailing slash: server-side bucket configuration is
+        // out of scope for an object store keyed by bare prefixes, so a
+        // registered URI is just the key prefix itself.
+        let ds = load(&store, &source("prefix")).unwrap();
         assert_eq!(ds.row_count(), 5);
     }
 
     #[test]
-    fn resolves_an_s3_prefix_with_a_trailing_slash() {
+    fn resolves_a_key_prefix_with_a_trailing_slash() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("prefix")).unwrap();
         let a_ids: Vec<String> = (0..3).map(|i| format!("a{i}")).collect();
@@ -1390,8 +1525,45 @@ mod tests {
         write_parquet_with_ids(&dir.path().join("prefix/a.parquet"), &a_ids, 4);
         write_parquet_with_ids(&dir.path().join("prefix/b.parquet"), &b_ids, 4);
         let store = LocalBlobStore::new(dir.path()).unwrap();
-        let ds = load(&store, &source("s3://bucket/prefix/")).unwrap();
+        let ds = load(&store, &source("prefix/")).unwrap();
         assert_eq!(ds.row_count(), 5);
+    }
+
+    #[test]
+    fn rejects_a_bucket_named_in_the_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("prefix")).unwrap();
+        write_parquet(&dir.path().join("prefix/a.parquet"), 3, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        // ObjectBlobStore is built against exactly one bucket from server
+        // configuration; a bucket named in the URI must be rejected rather
+        // than silently discarded, or registration could succeed against
+        // an entirely unrelated bucket with no diagnostic.
+        let err = load(&store, &source("s3://bucket/prefix/"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("bucket") && err.contains("server configuration"),
+            "error must name the offending bucket and point at server configuration, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_prefix_does_not_sweep_a_sibling_key_with_a_shared_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        // "embeddings" itself is never created as a directory — only the
+        // sibling "embeddings-v1" exists. Without anchoring the list
+        // prefix on a "/" boundary, a raw `starts_with("embeddings")`
+        // match (exactly what S3's ListObjectsV2 does with no delimiter)
+        // would incorrectly sweep this sibling's rows in.
+        std::fs::create_dir_all(dir.path().join("embeddings-v1")).unwrap();
+        write_parquet(&dir.path().join("embeddings-v1/old.parquet"), 9, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let err = load(&store, &source("embeddings")).unwrap_err().to_string();
+        assert!(
+            err.contains("embeddings"),
+            "must fail loudly rather than silently merge in the sibling's rows, got: {err}"
+        );
     }
 
     #[test]
