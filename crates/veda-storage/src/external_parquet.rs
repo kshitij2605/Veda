@@ -13,8 +13,10 @@ use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use veda_core::error::{Result, VedaError};
-use veda_core::record::FieldValue;
+use veda_core::record::{FieldValue, Record};
 use veda_core::schema::ExternalSource;
+use veda_core::simd::{cosine_distance, dot_product, euclidean_distance};
+use veda_core::types::DistanceMetric;
 
 use crate::blob_store::BlobStore;
 
@@ -23,13 +25,15 @@ use crate::blob_store::BlobStore;
 pub struct ExternalDataset {
     dim: u32,
     /// Flattened vector column, `dim` floats per row, row-aligned with `ids`.
-    /// Read by `vector_at`/`search`, added in the next task.
-    #[allow(dead_code)]
+    /// Read by `vector_at`/`search`.
     vectors: Vec<f32>,
     ids: Vec<String>,
+    /// Name of the id column, so `record_at` can expose it alongside the
+    /// other scalars — `read_batches` excludes it from `scalars` because it
+    /// is already carried, row-aligned, in `ids`.
+    id_field: String,
     /// Scalar columns, row-aligned, for predicates and for returning field
-    /// values on a hit. Read by `record_at`, added in the next task.
-    #[allow(dead_code)]
+    /// values on a hit. Read by `record_at`.
     scalars: HashMap<String, Vec<FieldValue>>,
     /// Scalar columns dropped at load because their Arrow type has no
     /// `FieldValue` mapping: `(column name, Arrow type rendered with
@@ -56,6 +60,90 @@ impl ExternalDataset {
     /// `FieldValue` mapping: `(column name, Arrow type)`.
     pub fn skipped_columns(&self) -> &[(String, String)] {
         &self.skipped
+    }
+
+    /// The vector for row `row`.
+    ///
+    /// `load` asserts `vectors.len() == ids.len() * dim`, so this slice is
+    /// always in range for `row < row_count()`.
+    pub fn vector_at(&self, row: usize) -> &[f32] {
+        let d = self.dim as usize;
+        &self.vectors[row * d..(row + 1) * d]
+    }
+
+    /// A `Record` view of row `row`.
+    ///
+    /// Exists so predicates can reuse the same evaluator the internal
+    /// segment path uses, rather than a second filter implementation that
+    /// could drift from it.
+    pub fn record_at(&self, row: usize) -> Record {
+        let mut rec = Record::new();
+        rec.set(&self.id_field, FieldValue::String(self.ids[row].clone()));
+        for (name, column) in &self.scalars {
+            if let Some(v) = column.get(row) {
+                rec.set(name, v.clone());
+            }
+        }
+        rec
+    }
+
+    /// Exact top-k. Returns `(id, distance)` sorted ascending by distance,
+    /// ties broken by id, truncated to `k`.
+    ///
+    /// Linear in `row_count()` by design: no index exists over external
+    /// data, so recall is 1.0 and latency scales with dataset size.
+    ///
+    /// `allow` is an optional row predicate. It is a closure rather than a
+    /// `FilterExpr` because `veda-query` depends on this crate, so naming
+    /// its types here would be a dependency cycle. The gateway supplies
+    /// `evaluate_record`, which is how external and internal filtering stay
+    /// semantically identical.
+    pub fn search(
+        &self,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        allow: Option<&dyn Fn(&Record) -> bool>,
+    ) -> Result<Vec<(String, f32)>> {
+        if query.len() != self.dim as usize {
+            return Err(VedaError::Storage(format!(
+                "query dimension {} does not match dataset dimension {}",
+                query.len(),
+                self.dim
+            )));
+        }
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let mut scored: Vec<(String, f32)> = Vec::new();
+        for row in 0..self.row_count() {
+            if let Some(pred) = allow
+                && !pred(&self.record_at(row))
+            {
+                continue;
+            }
+            let v = self.vector_at(row);
+            let d = match metric {
+                DistanceMetric::Cosine => cosine_distance(query, v),
+                DistanceMetric::DotProduct => -dot_product(query, v),
+                DistanceMetric::Euclidean => euclidean_distance(query, v),
+                other => {
+                    return Err(VedaError::Storage(format!(
+                        "metric {other:?} is not supported for external collections: \
+                         the vector column is float, so only Cosine, DotProduct and \
+                         Euclidean apply"
+                    )));
+                }
+            };
+            scored.push((self.ids[row].clone(), d));
+        }
+        scored.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        scored.truncate(k);
+        Ok(scored)
     }
 }
 
@@ -271,6 +359,7 @@ pub fn load(store: &dyn BlobStore, source: &ExternalSource) -> Result<ExternalDa
         dim,
         vectors,
         ids,
+        id_field: source.id_field.clone(),
         scalars,
         skipped,
     })
@@ -1329,5 +1418,137 @@ mod tests {
         let store = LocalBlobStore::new(dir.path()).unwrap();
         let ds = load(&store, &source("sub/a.parquet")).unwrap();
         assert_eq!(ds.row_count(), 6);
+    }
+
+    #[test]
+    fn search_is_exact_and_matches_direct_scoring() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 200, 8);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+
+        let query: Vec<f32> = (0..8).map(|d| d as f32 / 3.0).collect();
+        let got = ds.search(&query, 10, DistanceMetric::Cosine, None).unwrap();
+
+        // Oracle: score every row directly with the same kernel the
+        // implementation uses, sort, truncate. If these disagree, the external
+        // path is not exact, which is the single property this feature sells.
+        let mut want: Vec<(String, f32)> = (0..ds.row_count())
+            .map(|r| {
+                (
+                    ds.ids()[r].clone(),
+                    veda_core::simd::cosine_distance(&query, ds.vector_at(r)),
+                )
+            })
+            .collect();
+        want.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        want.truncate(10);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn search_honours_a_predicate() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 50, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let unfiltered = ds.search(&query, 5, DistanceMetric::Cosine, None).unwrap();
+        let excluded = unfiltered[0].0.clone();
+
+        // Exclude whatever the unfiltered search ranked FIRST, so the predicate
+        // cannot be silently ignored — a filter that does nothing would still
+        // return this id.
+        let deny = |rec: &Record| rec.get("doc_id") != Some(&FieldValue::String(excluded.clone()));
+        let filtered = ds
+            .search(&query, 5, DistanceMetric::Cosine, Some(&deny))
+            .unwrap();
+        assert!(
+            !filtered.iter().any(|(id, _)| *id == excluded),
+            "predicate was ignored: {excluded} is still present"
+        );
+        assert_eq!(filtered.len(), 5);
+    }
+
+    #[test]
+    fn search_with_k_larger_than_the_dataset_returns_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 7, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+        let hits = ds
+            .search(&[1.0, 0.0, 0.0, 0.0], 100, DistanceMetric::Cosine, None)
+            .unwrap();
+        assert_eq!(hits.len(), 7);
+    }
+
+    #[test]
+    fn search_with_k_zero_returns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 7, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+        let hits = ds
+            .search(&[1.0, 0.0, 0.0, 0.0], 0, DistanceMetric::Cosine, None)
+            .unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_rejects_a_query_of_the_wrong_dimension() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 4, 8);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+        let err = ds
+            .search(&[1.0, 0.0], 3, DistanceMetric::Cosine, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains('8') && err.contains('2'),
+            "error must name both the dataset and query dimensions, got: {err}"
+        );
+    }
+
+    #[test]
+    fn search_rejects_an_unsupported_metric() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 4, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+        // Hamming/Jaccard have no meaning for a float vector column.
+        let err = ds
+            .search(&[1.0, 0.0, 0.0, 0.0], 3, DistanceMetric::Hamming, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Hamming"), "got: {err}");
+    }
+
+    #[test]
+    fn record_at_exposes_scalar_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 3, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+        let rec = ds.record_at(1);
+        assert_eq!(rec.get("doc_id"), Some(&FieldValue::String("doc1".into())));
+    }
+
+    #[test]
+    fn vector_at_returns_the_row_aligned_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        write_parquet(&dir.path().join("a.parquet"), 5, 4);
+        let store = LocalBlobStore::new(dir.path()).unwrap();
+        let ds = load(&store, &source("a.parquet")).unwrap();
+        for r in 0..ds.row_count() {
+            assert_eq!(ds.vector_at(r).len(), 4);
+        }
+        // write_parquet fills row i, dim d with (i*dim + d) / 10.0
+        assert_eq!(ds.vector_at(2)[0], 8.0 / 10.0);
     }
 }
