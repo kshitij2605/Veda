@@ -70,7 +70,12 @@ By default it is **rank-safe**: results are byte-for-byte identical to exhaustiv
 A `bm25` query accepts an optional `prune_theta` to trade rank-safety for more latency reduction:
 
 ```json
-{ "query": { "bm25": { "field": "content", "text": "vector index recall" }, "prune_theta": 1.2 }, "limit": 10 }
+{
+  "query": {
+    "bm25": { "field": "content", "query": "vector index recall", "prune_theta": 1.2 }
+  },
+  "limit": 10
+}
 ```
 
 | `prune_theta` | Behaviour |

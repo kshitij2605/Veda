@@ -4,6 +4,8 @@ Most guardrails screen what the user typed and what the model said back. Retriev
 
 The attack text doesn't arrive in the prompt. It sits inside your corpus — a PDF someone uploaded, a page you crawled, a vendor deck — and rides into the context window through retrieval. By the time it gets there it looks like legitimate retrieved content, which is exactly why [input/output guardrails](/docs/llm-observability) cannot see it. This is the OWASP indirect prompt-injection vector.
 
+![A live run: a handbook collection containing a planted instruction. Raw search returns it flagged, then an ordinary question to the agent comes back answered with the hostile chunk dropped — category indirect_injection, score 0.63.](/videos/retrieval-guardrails.mp4)
+
 ## What gets screened, and when
 
 Every chunk is screened **at ingest**, against the embedding Veda has already computed for it. There is no extra model call on the ingest path — the screening reuses work that was happening anyway.
@@ -61,6 +63,7 @@ These are the edges worth knowing before you rely on it.
 - **Not every record is screened.** Plain `POST /v1/collections/{name}/insert` takes client-supplied vectors, so there is no Veda-computed embedding to screen against; those records are stamped `skipped`. **This includes the Python SDK's normal client-side-embedding flow.** Screening happens on `process-document`, `ingest-url` and `embed-insert`.
 - **Existing data is not covered automatically.** Chunks indexed before this feature carry no verdict, report as `unscreened`, and pass through. Enforcement fails open there by design — treating unstamped chunks as hostile would empty every existing collection on upgrade. Close the gap with `POST /v1/admin/collections/{name}/rescan-guardrails`.
 - **The re-scan is a manual admin action, not schedulable.** Each run materialises a full copy of the collection, and superseded copies are not reclaimed, so repeated re-scans grow storage.
+- **Detection is similarity-based against a threshold**, so it is not a proof. An injection phrased far enough from the known patterns can score below the threshold and pass. The score is stamped on every chunk as `_guardrail_score` even when it is not flagged, so near-misses stay auditable — treat the guardrail as one layer, not the only one.
 - **Temporal conflict detection** is active on `filter_query` and inert on `search`.
 - This targets *retrieved-document* injection. Injection in the user's own message is the separate input/output guardrail layer.
 

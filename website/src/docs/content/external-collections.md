@@ -4,6 +4,8 @@ Point Veda at Parquet files you already have and query them **where they are** �
 
 This is a deliberate trade: you give up writes and the index-backed query types, and you get exactness, zero ingestion, and one less copy of your data to keep in sync.
 
+![A live run: one call registers a collection over a Parquet file — dimension and row count read from the footer — then a write returns 405 and a BM25 query returns 400 with the reason.](/videos/external-collections.mp4)
+
 ## Register a collection over your files
 
 ```bash
@@ -70,3 +72,4 @@ Published rather than discovered later:
 - A dense query's `field` is not validated against the registered `vector_field` (an internal collection does validate it).
 - A hit's row id appears both as `SearchHit.id` and again as a column inside `fields`.
 - External hits carry no `_guardrail_class` annotation, so [retrieval guardrails](/docs/retrieval-guardrails) do not annotate them.
+- **The Niriksha Search page cannot query an external collection.** It builds its vector-field picker from the collection's `fields`, which is empty by design here — the schema lives under `external`. Query external collections through the API for now.
