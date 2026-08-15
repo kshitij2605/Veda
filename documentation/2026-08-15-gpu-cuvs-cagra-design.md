@@ -102,6 +102,29 @@ blocks it.
 
 ### Component 2 — persistence via the C API
 
+> **Revision, 2026-08-15, after attempting the approach below.** The design as first
+> written is **impossible**. `cuvs::cagra::Index` is `pub struct Index(ffi::cuvsCagraIndex_t)`
+> — the field is private, there is no accessor, and `cuvs` does not re-export its `ffi`
+> module (`lib.rs` exports only `ManagedTensor`, `Error`, `Result`, `Resources`). So the
+> raw `cuvsCagraIndex_t` cannot be obtained from a safe-wrapper index, and
+> `cuvsCagraSerialize` cannot be called on one. `cuvs::Resources` *is*
+> `Resources(pub ffi::cuvsResources_t)`, so the resources handle is reachable — but that
+> alone is not enough.
+>
+> **Consequence:** it is all-or-nothing. Either use the safe wrapper and have no
+> persistence, or own the index handle ourselves. This module now owns the handle for its
+> whole lifecycle via `cuvs-sys` — `cuvsCagraIndexCreate`, `cuvsCagraBuild`,
+> `cuvsCagraSearch`, `cuvsCagraSerialize`, `cuvsCagraDeserialize`,
+> `cuvsCagraIndexDestroy` — and `cuvs-sys` becomes a direct dependency of `veda-index`
+> alongside `cuvs` (which still supplies `Resources` and `ManagedTensor`).
+>
+> This is more unsafe surface than originally scoped. It is taken because the alternative
+> abandons persistence entirely, which would leave `IndexType::Cagra` unusable for any
+> segment that must survive a restart — i.e. essentially all of them. The containment
+> requirement is unchanged and now matters more: every FFI call lives in one private
+> submodule behind a safe type, and no `unsafe` escapes it.
+
+
 `cuvs 26.4`'s Rust wrapper has no CAGRA serialization, but the C API does and `cuvs-sys`
 already generates bindings:
 
