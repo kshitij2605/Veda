@@ -171,7 +171,10 @@ jobs:
           export Thrust_DIR="$V/libraft/lib64/rapids/cmake/thrust"
           export CUB_DIR="$V/libraft/lib64/rapids/cmake/cub"
           export libcudacxx_DIR="$V/libraft/lib64/rapids/cmake/libcudacxx"
-          export RUSTFLAGS="-L native=$V/libcuvs/lib64"
+          # Keep the workflow-level -Dwarnings: setting RUSTFLAGS here
+          # replaces it wholesale, and clippy does not build this feature,
+          # so dropping it would leave gpu_cuvs with no lint coverage.
+          export RUSTFLAGS="-Dwarnings -L native=$V/libcuvs/lib64"
           export LD_LIBRARY_PATH="$V/libcuvs/lib64:$V/libraft/lib64:$V/librmm/lib64:$V/rapids_logger/lib64:${LD_LIBRARY_PATH:-}"
           cargo build -p veda-index --features gpu_cuvs --tests
 
