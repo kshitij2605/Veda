@@ -274,6 +274,21 @@ components:
             A `vector` query's `field` is not validated against the
             collection's registered `vector_field` on an external
             collection — an internal collection does validate this.
+
+            A `bm25` query additionally accepts an optional
+            `prune_theta` (number). Sealed segments prune posting blocks
+            that cannot contain a top-k result using per-term block-max
+            impact bounds (Block-Max WAND). Omitted, or `1.0`, is
+            **rank-safe**: results are identical to exhaustive scoring.
+            Values **above** `1.0` prune more aggressively and are
+            **not** rank-safe — a document that belongs in the top-k may
+            be skipped, in exchange for lower latency. Values below
+            `1.0` (and non-finite values) return `400`: they would only
+            prune less and slow the query down without changing the
+            answer, so they are rejected at the request boundary rather
+            than silently clamped. Growing (unsealed) segments carry no
+            block metadata and always score exhaustively, so
+            `prune_theta` has no effect on them.
         filter:
           type: string
           description: |
@@ -520,6 +535,76 @@ components:
         grounding: { $ref: '#/components/schemas/Grounding' }
         cache_hit: { type: boolean, description: "true when a near-duplicate prompt was served from the semantic response cache (opt-in Agent.cache; the LLM was not called and steps is 0)" }
         guardrails: { $ref: '#/components/schemas/GuardrailReport' }
+        retrieval_guard: { $ref: '#/components/schemas/RetrievalGuardReport' }
+    RetrievalGuardReport:
+      type: object
+      description: |
+        Retrieval-side screening, rolled up across every retrieving tool
+        call in the turn (counts summed, arrays concatenated). Distinct
+        from `guardrails`, which screens the user input and the model
+        output; this screens the *retrieved documents*, defending against
+        instructions carried inside a corpus rather than in the prompt.
+
+        **Omitted entirely when the turn made no retrieving tool call** —
+        "did not retrieve" and "retrieved, all clean" are different facts
+        and are not collapsed into an all-zero report.
+
+        Chunks flagged hostile (`PromptInjection`, `Jailbreak`, `Unsafe`,
+        `IndirectInjection`) are dropped before the LLM sees them. `Pii`
+        is reported but passed through. A flagged chunk with an
+        unrecognised or missing category fails closed and is dropped.
+        Raw `POST /search` never drops — it only annotates hits with
+        `_guardrail_class`, so recall stays measurable.
+      properties:
+        kept: { type: integer, description: "chunks that reached the LLM" }
+        dropped: { type: integer, description: "chunks withheld from the LLM" }
+        skipped:
+          type: integer
+          description: |
+            Chunks deliberately not screened — media/placeholder records
+            with no text embedding to screen against. Always serialized
+            even at zero, so an operator can distinguish it from
+            `unscreened`.
+        dropped_chunks:
+          type: array
+          description: |
+            Per-chunk detail for the `dropped` count. Omitted when empty.
+          items:
+            type: object
+            required: [id, score]
+            properties:
+              id: { type: string }
+              category: { type: string, nullable: true }
+              score: { type: number, format: double }
+        flagged_not_dropped:
+          type: integer
+          description: |
+            Flagged but passed through — `Pii` findings, and everything
+            when `VEDA_RETRIEVAL_GUARD` is set to `off` (which degrades
+            every LLM-facing path to annotate-only; the switch can only
+            weaken enforcement, never enable it by accident).
+        unscreened:
+          type: integer
+          description: |
+            Chunks carrying no verdict, passed through. Records indexed
+            before this feature, and every record written by plain
+            `/insert` (which takes client-supplied vectors, so there is
+            no Veda-computed embedding to screen). Enforcement fails
+            open here by design — treating unstamped chunks as hostile
+            would empty every existing collection on upgrade. Close the
+            historical gap with
+            `POST /v1/admin/collections/{name}/rescan-guardrails`.
+            Always serialized even at zero.
+        withheld_records:
+          type: integer
+          description: |
+            Hostile records skipped inside an `aggregate` tool call,
+            counted after the filter is applied — i.e. records this
+            query would otherwise have counted.
+        temporal:
+          type: array
+          description: "staleness / expiry / conflict signals on retrieved hits"
+          items: { type: object }
     GuardrailReport:
       type: object
       description: Embedding-based safety screening of the input and output (present only when the agent has guardrails enabled).
