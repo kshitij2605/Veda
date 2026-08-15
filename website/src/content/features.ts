@@ -17,6 +17,8 @@ import {
   DatabaseZap,
   Lock,
   SlidersHorizontal,
+  ShieldAlert,
+  Database,
 } from 'lucide-react'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
@@ -47,9 +49,9 @@ export const FEATURES: Feature[] = [
   {
     icon: Layers,
     accent: 'var(--color-node-3)',
-    title: 'Nine index algorithms',
+    title: '10 vector index types',
     blurb:
-      'HNSW, DiskANN, IVF-PQ, Flat, RaBitQ, Sq4 + Sq8 scalar quantization, a suffix array, and scalar filter indexes — pick the right recall/latency/memory tradeoff per collection.',
+      'HNSW, DiskANN, IVF-PQ, Flat, three RaBitQ variants, Sq4 + Sq8 scalar quantization — every one validated end-to-end with recall@10 measured against exact search. Plus a suffix array and scalar filter indexes alongside them.',
   },
   {
     icon: GitMerge,
@@ -134,6 +136,20 @@ export const FEATURES: Feature[] = [
     title: 'Semantic LLM cache & guardrails',
     blurb:
       'Veda turns its vector engine into the LLM layer: a near-duplicate prompt is served from a semantic cache with no LLM call, an unsafe prompt is blocked by embedding-similarity guardrails, and every run lands in a trace store you search and cluster by meaning — observe, optimize, and secure in one engine.',
+  },
+  {
+    icon: ShieldAlert,
+    accent: 'var(--color-node-2)',
+    title: 'Guardrails on what you retrieve',
+    blurb:
+      'The dangerous instruction is not always in the prompt — it can be sitting in a PDF someone uploaded. Veda screens retrieved chunks for hostile content at ingest, reusing the embedding it already computed, and drops them at the tool-dispatch choke point so every agent surface is covered at once. Raw search annotates instead of dropping, so recall stays measurable.',
+  },
+  {
+    icon: Database,
+    accent: 'var(--color-node-6)',
+    title: 'Query your Parquet where it lives',
+    blurb:
+      'Register a collection over existing Parquet files and search them in place — no ingestion, no second copy, no duplicate storage. Schema and vector dimension are read from the footer and validated up front, filters use the same evaluator as internal collections, and search is an exact scan at recall 1.0.',
   },
   {
     icon: Lock,
