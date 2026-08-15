@@ -1,20 +1,34 @@
 # Indexes
 
-Veda ships nine index algorithms in one engine, so you can pick the right recall/latency/memory tradeoff per collection instead of working around a single index type.
+Veda ships **10 CPU vector index types** in one engine, so you can pick the right recall/latency/memory tradeoff per collection instead of working around a single index type. Scalar indexes for metadata filtering and the suffix array for exact text patterns are separate structures, covered further down.
 
-## The nine indexes
+## The 10 vector indexes
 
-| Index | Best for | Unique advantage |
-|---|---|---|
-| **HNSW** | General-purpose, low-latency search | Industry standard; tunable `M` / `ef` parameters |
-| **DiskANN** | Billion-scale datasets that exceed RAM | Vamana graph on SSD, minimal memory footprint |
-| **IVF-PQ** | Memory-constrained, high-throughput | Product quantization compresses vectors 8–32× |
-| **Flat** | Small collections, 100% recall guarantee | Brute-force baseline, no build time |
-| **RaBitQ** | Ultra-fast approximate screening | 1-bit binary quantization with Hamming distance, ~32× smaller |
-| **Sq4** | Memory-tight collections that still need strong recall | 4-bit-per-dim scalar quantization — two dims per byte, 4× smaller than f32 |
-| **Sq8** | Highest-recall quantized storage | 8-bit-per-dim scalar quantization — near-exact recall at half the memory |
-| **Suffix array** | Exact text pattern matching | Substring + fuzzy matching; enables hybrid text + vector queries |
-| **Scalar** (range / inverted / bitmap) | Metadata filtering | Pre-filter before ANN search |
+Recall@10 is measured against exact search on the same data, single node.
+
+| Index | API value | Recall@10 | Best for |
+|---|---|---|---|
+| **Flat** | `flat` | 1.00 | Small collections; brute-force baseline, no build time |
+| **HNSW** | `hnsw` | 1.00 | General-purpose, low-latency search; tunable `M` / `ef` |
+| **DiskANN** | `diskann` | 1.00 | Datasets that exceed RAM; Vamana graph on SSD |
+| **Sq8** | `sq8` | 1.00 | Highest-recall quantized storage — near-exact at half the memory |
+| **RaBitQ + rerank** | `rabitq_rerank` | 1.00 | 1-bit screening, then re-scoring against precise vectors |
+| **Sq4** | `sq4` | 0.99 | Memory-tight collections that still need strong recall |
+| **IVF-PQ** | `ivfpq` | 0.97 | Memory-constrained, high-throughput; PQ compresses 8–32× |
+| **RaBitQ** | `rabitq` | 0.90 | Ultra-fast approximate screening, ~32× smaller than f32 |
+| **HNSW + RaBitQ** | `hnsw_rabitq` | 0.90 | Graph traversal over 1-bit codes |
+| **RaBitQ ext rerank** | `rabitq_ext_rerank` | 0.90 | External rerank pass over quantized candidates |
+
+All 10 were validated end-to-end through the API in the v0.5.1 campaign, with recall@10 measured against exact search.
+
+> A GPU CAGRA index exists as an index-type value but requires a cuVS build. On a standard build, creating a collection with `cagra` is rejected with a `400` rather than failing later at index-build time.
+
+### Not vector indexes
+
+| Structure | Purpose |
+|---|---|
+| **Suffix array** | Exact substring and fuzzy text matching; enables hybrid text + vector queries |
+| **Scalar** (inverted / range / bitmap / hash) | Metadata filtering — pre-filter before ANN search |
 
 ## Choosing an index
 
@@ -32,7 +46,7 @@ curl -X POST http://localhost:6340/v1/collections \
   }'
 ```
 
-Accepted values include `hnsw`, `diskann`, `ivf_pq`, `flat`, `rabitq`, `sq4`, and `sq8`.
+Accepted values: `hnsw`, `diskann`, `ivfpq` (or `ivf_pq`), `flat`, `rabitq`, `rabitq_rerank`, `hnsw_rabitq`, `rabitq_ext_rerank`, `sq4`, and `sq8`.
 
 ## Scalar quantization (Sq4 / Sq8)
 

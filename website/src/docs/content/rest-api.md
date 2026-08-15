@@ -6,7 +6,8 @@ All endpoints are served under `http://<host>:6340/v1`. Authenticated requests p
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/v1/collections` | Create a collection (supports `seed_records` for atomic create-and-load, `use_log_primary` for on-disk records, `rls_owner_field` for [row-level security](/docs/collections#row-level-security); vector fields take `index`: `hnsw` · `diskann` · `ivf_pq` · `flat` · `rabitq` · `sq4` · `sq8`) |
+| `POST` | `/v1/collections` | Create a collection (supports `seed_records` for atomic create-and-load, `use_log_primary` for on-disk records, `rls_owner_field` for [row-level security](/docs/collections#row-level-security); vector fields take `index`: `hnsw` · `diskann` · `ivfpq` · `flat` · `rabitq` · `rabitq_rerank` · `hnsw_rabitq` · `rabitq_ext_rerank` · `sq4` · `sq8`) |
+| `POST` | `/v1/collections` with `external` | Register a read-in-place [external Parquet collection](/docs/external-collections). `fields` must be `[]`; schema and vector dimension are inferred from the Parquet footer and validated at registration. Requires Admin (`403` otherwise); read-only thereafter — 18 mutating endpoints return `405` |
 | `GET` | `/v1/collections` | List collections |
 | `GET` | `/v1/collections/{name}` | Get a collection's schema and stats |
 | `DELETE` | `/v1/collections/{name}` | Drop a collection |
@@ -213,6 +214,8 @@ Write skew is allowed (snapshot isolation); lost updates are prevented; read-onl
 Endpoints marked Raft-only return `503` in single-node mode — see [Cluster modes](/docs/installation#cluster-modes).
 
 ### Retrieval guardrails
+
+> The threat model, the calibration numbers and the coverage gaps are covered in [Retrieval guardrails](/docs/retrieval-guardrails).
 
 Ingest screens each chunk's text embedding and stamps the four reserved fields above. On every
 LLM-facing path (`/converse`, `/converse/stream`, MCP `tools/call`, `/agent-tools/{id}/execute`,

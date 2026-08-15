@@ -59,6 +59,28 @@ The `query` object accepts other retrieval modes over appropriately-typed fields
 
 The lexical paths (`bm25`, match-phrase, and the BM25 leg of `hybrid`) apply the request `filter` and row-level security just like the dense path — so `{ "query": { "bm25": … }, "filter": "level = 'ERROR'" }` returns only matching records, and RLS-scoped users see only their own rows on lexical and hybrid queries.
 
+### Block-Max WAND pruning
+
+On **sealed** segments, BM25 skips blocks of the posting list that provably cannot contain a top-k result, instead of scoring every document containing any query term. Per-term block-max impact bounds are computed when a segment opens, so there is **no index format change and no migration**.
+
+Measured **2.01×–2.53× faster** per-query BM25 than exhaustive scoring, on synthetic corpora of **10,000 and 100,000 documents**. That is BM25 keyword search specifically — not vector search, and not hybrid end-to-end.
+
+By default it is **rank-safe**: results are byte-for-byte identical to exhaustive scoring, verified by comparison rather than asserted. Tie-breaking is deterministic — equal scores order by document id, so repeated identical queries return identical orderings.
+
+A `bm25` query accepts an optional `prune_theta` to trade rank-safety for more latency reduction:
+
+```json
+{ "query": { "bm25": { "field": "content", "text": "vector index recall" }, "prune_theta": 1.2 }, "limit": 10 }
+```
+
+| `prune_theta` | Behaviour |
+|---|---|
+| omitted or `1.0` | Exact. Rank-safe, identical to exhaustive scoring. |
+| above `1.0` | Prunes harder, lower latency, **not** rank-safe — a document that belongs in the top-k may be skipped. |
+| below `1.0`, or non-finite | Rejected with `400`. Such values would only prune *less* and slow the query without changing the answer, so they are refused at the request boundary rather than silently clamped. |
+
+Growing (unsealed) segments carry no block metadata and always score exhaustively, so freshly ingested data below the seal threshold sees no speedup and `prune_theta` has no effect on it.
+
 ## Multi-vector fusion
 
 Search several embedding spaces at once — text, image, and more — and fuse the ranked lists server-side:

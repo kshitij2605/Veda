@@ -8,6 +8,8 @@ import multimodal from './content/multimodal.md?raw'
 import documentPipeline from './content/document-pipeline.md?raw'
 import agentsMcp from './content/agents-mcp.md?raw'
 import webConnectors from './content/web-connectors.md?raw'
+import externalCollections from './content/external-collections.md?raw'
+import retrievalGuardrails from './content/retrieval-guardrails.md?raw'
 import restApi from './content/rest-api.md?raw'
 import pythonSdk from './content/python-sdk.md?raw'
 import observability from './content/observability.md?raw'
@@ -48,6 +50,7 @@ export const DOCS: DocGroup[] = [
     label: 'Core concepts',
     items: [
       { slug: 'collections', title: 'Collections & fields', md: collections },
+      { slug: 'external-collections', title: 'External collections', md: externalCollections },
       { slug: 'indexes', title: 'Indexes', md: indexes },
       { slug: 'search', title: 'Search & fusion', md: search },
       { slug: 'multimodal', title: 'Multimodal & cross-modal', md: multimodal },
@@ -64,6 +67,7 @@ export const DOCS: DocGroup[] = [
       { slug: 'observability', title: 'Observability', md: observability },
       { slug: 'apm-observability', title: 'APM & Performance', md: apmObservability },
       { slug: 'llm-observability', title: 'LLM Observability', md: llmObservability },
+      { slug: 'retrieval-guardrails', title: 'Retrieval guardrails', md: retrievalGuardrails },
       { slug: 'aiops', title: 'AIOps', md: aiops },
       { slug: 'ops-advisor', title: 'Ops Advisor', md: opsAdvisor },
       { slug: 'log-insights', title: 'Log Insights', md: logInsights },
