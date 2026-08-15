@@ -86,6 +86,95 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --features veda-storage/lindera_tokenizer
 
+  # In-binary CAGRA GPU index compile.
+  #
+  # This job exists because its absence let `gpu_cuvs` rot: the feature
+  # went unbuilt by anyone for months and accumulated six compile errors,
+  # including calls to cuvs APIs that do not exist. `check-features` above
+  # cannot cover it — gpu_cuvs needs a CUDA toolchain, a prebuilt libcuvs,
+  # and nine `<Package>_DIR` variables (cmake-rs blanks CMAKE_PREFIX_PATH,
+  # rust-lang/cmake-rs#111).
+  #
+  # No GPU is required: this compiles and LINKS, which is exactly what
+  # broke. It deliberately runs `cargo build --tests` rather than
+  # `cargo check` — `check` does not link, and the missing-libcuvs_c link
+  # error is invisible to it. The GPU tests themselves are `#[ignore]`d
+  # and run on hardware; see the module docs in gpu_cuvs.rs.
+  #
+  # WHY THIS IS NOT A BLOCKING JOB, and what would make it one:
+  # cuvs-sys's CMake needs a CUDA toolkit. `nvcc` is not available as a
+  # usable pip wheel, and the `nvidia-*-cu12` wheels install a split
+  # layout (nvidia/cuda_runtime/, nvidia/cublas/, ...) that CMake's
+  # FindCUDAToolkit does not recognise. Installing the real toolkit is
+  # ~3 GB on a runner this workflow already has to scrub disk space to
+  # keep alive. So this follows the same pattern as `lindera-feature`
+  # above: schedule + manual dispatch rather than every push.
+  #
+  # This is weaker than it should be. It would become blocking the moment
+  # either (a) a CUDA-equipped runner is available, or (b) NVIDIA ships a
+  # pip layout FindCUDAToolkit accepts. Until then the authoritative
+  # verification is on the GPU host, and the weekly run is what stops
+  # gpu_cuvs silently rotting again the way it did before.
+  gpu-cuvs-feature:
+    name: cargo build (veda-index/gpu_cuvs)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          df -h /
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Install protoc (prost-build needs it for veda-log)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Cache the cuVS toolchain wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/cuvs-venv
+          key: cuvs-venv-${{ runner.os }}-libcuvs26.4.0-cmake3.31-v1
+      - name: Install the cuVS build toolchain
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/cuvs-venv/bin/cmake" ]; then
+            python3 -m venv "$HOME/cuvs-venv"
+            # cuvs-sys 26.4 needs CMake >= 3.30.4; ubuntu ships 3.22.
+            # Pinned to 3.31 rather than 4.x: RAPIDS' cmake modules are
+            # not validated against CMake 4's stricter compatibility rules.
+            "$HOME/cuvs-venv/bin/pip" install --quiet 'cmake==3.31.*' libclang
+            # A prebuilt libcuvs, so cuvs-sys links it instead of building
+            # RAPIDS from source (which takes hours).
+            "$HOME/cuvs-venv/bin/pip" install --quiet \
+              --extra-index-url https://pypi.nvidia.com 'libcuvs-cu12==26.4.0'
+          fi
+          df -h /
+      - uses: Swatinem/rust-cache@v2
+      - name: Build veda-index with gpu_cuvs
+        run: |
+          set -euo pipefail
+          V="$(echo "$HOME"/cuvs-venv/lib/python3*/site-packages)"
+          export PATH="$HOME/cuvs-venv/bin:$PATH"
+          export LIBCLANG_PATH="$V/clang/native"
+          # The pip libclang wheel ships no builtin headers, so point clang
+          # at gcc's; without this it cannot find limits.h.
+          GCC_INC="$(echo /usr/lib/gcc/x86_64-linux-gnu/*/include | tr ' ' '\n' | tail -1)"
+          export BINDGEN_EXTRA_CLANG_ARGS="-I$GCC_INC"
+          # cmake-rs blanks CMAKE_PREFIX_PATH, so each package is located
+          # by its own _DIR variable instead.
+          export cuvs_DIR="$V/libcuvs/lib64/cmake/cuvs"
+          export raft_DIR="$V/libraft/lib64/cmake/raft"
+          export rmm_DIR="$V/librmm/lib64/cmake/rmm"
+          export rapids_logger_DIR="$V/rapids_logger/lib64/cmake/rapids_logger"
+          export nvtx3_DIR="$V/librmm/lib64/cmake/nvtx3"
+          export CCCL_DIR="$V/libraft/lib64/rapids/cmake/cccl"
+          export Thrust_DIR="$V/libraft/lib64/rapids/cmake/thrust"
+          export CUB_DIR="$V/libraft/lib64/rapids/cmake/cub"
+          export libcudacxx_DIR="$V/libraft/lib64/rapids/cmake/libcudacxx"
+          export RUSTFLAGS="-L native=$V/libcuvs/lib64"
+          export LD_LIBRARY_PATH="$V/libcuvs/lib64:$V/libraft/lib64:$V/librmm/lib64:$V/rapids_logger/lib64:${LD_LIBRARY_PATH:-}"
+          cargo build -p veda-index --features gpu_cuvs --tests
+
   # All unit + integration tests.
   test:
     name: cargo test
