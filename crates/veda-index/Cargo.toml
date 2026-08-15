@@ -20,6 +20,7 @@ reqwest = { version = "0.12", optional = true, features = ["blocking"] }
 # build path. Both require the CUDA toolkit at build time and an
 # NVIDIA GPU at runtime. Default builds do not pull these in.
 cuvs = { version = "26.4", optional = true }
+cuvs-sys = { version = "26.4", optional = true }
 ndarray = { version = "0.15", optional = true }
 
 [features]
@@ -37,7 +38,7 @@ gpu_nim = ["dep:reqwest"]
 # runs CAGRA on the GPU (alternative to gpu_nim). Activating this
 # feature requires the CUDA toolkit on the build host; default
 # builds stay CUDA-free.
-gpu_cuvs = ["dep:cuvs", "dep:ndarray"]
+gpu_cuvs = ["dep:cuvs", "dep:cuvs-sys", "dep:ndarray"]
 
 [dev-dependencies]
 tempfile = "3"

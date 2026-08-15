@@ -6073,6 +6073,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "cuvs",
+ "cuvs-sys",
  "ndarray 0.15.6",
  "rand 0.8.5",
  "reqwest",
