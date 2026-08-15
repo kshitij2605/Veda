@@ -38,6 +38,16 @@ const DEMOS = [
     label: 'LLM cache & guardrails',
     blurb: 'Ask twice, pay once. Reworded questions still hit.',
   },
+  {
+    href: '/docs/retrieval-guardrails',
+    label: 'Retrieval guardrails',
+    blurb: 'A planted instruction, dropped before the model reads it.',
+  },
+  {
+    href: '/docs/external-collections',
+    label: 'External Parquet',
+    blurb: 'Register a file, query in place, writes refused.',
+  },
 ]
 
 export function SeeItInAction() {
