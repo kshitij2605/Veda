@@ -76,8 +76,14 @@ Both move behind a `Mutex` inside `CagraIndex`:
 #[cfg(feature = "gpu_cuvs")]
 struct CagraInner {
     resources: Resources,
-    index: CuvsCagraIndex,
+    handle: ffi::CagraHandle,
 }
+
+// SAFETY: the Mutex provides *exclusive access*; this impl asserts only
+// *thread mobility*. CUDA contexts have been process-wide since CUDA 4,
+// so the handle and its stream remain valid when the owning value moves
+// between threads. Sync is DERIVED from Mutex<T: Send> — never asserted.
+unsafe impl Send for CagraInner {}
 
 pub struct CagraIndex {
     metric: DistanceMetric,
@@ -88,8 +94,16 @@ pub struct CagraIndex {
 }
 ```
 
-`Send`/`Sync` follow from `Mutex`. **No `unsafe impl` asserting anything about cuVS
-internals** — an incorrect assertion there is a data race, not a test failure.
+**Correction to this design, found during implementation.** This section originally
+claimed `Send`/`Sync` would follow from the `Mutex` alone, with **no `unsafe impl`**.
+That is not achievable and the claim was wrong. `Mutex<T>` is `Send` only when `T: Send`,
+and `T` here transitively contains a raw `*mut cuvsCagraIndex`, which is not. Some
+`unsafe impl` is unavoidable; the question is only how narrow it can be made.
+
+What ships is the narrowest form: `Send` on the inner struct only. `Sync` — the property
+that actually governs concurrent access, and the one an incorrect assertion turns into a
+data race — is still **derived** from `Mutex<T: Send>`, never asserted. So the original
+intent holds where it matters; only the literal "no `unsafe impl`" claim does not.
 
 This serialises GPU search across threads. That is honest about the hardware — one shared
 device whose work already serialises substantially at the stream level — and the cost is
@@ -225,3 +239,37 @@ feature.
 | The CI wheel install is slow or large enough to be unwelcome. | Cache on the lockfile hash; fall back to a scheduled non-blocking job rather than dropping the check. |
 | `cuvs` changes its API again. | That is precisely what the CI check exists to catch. |
 | The environment recipe rots as versions move. | The recipe names exact versions (`cuvs 26.4`, `libcuvs-cu12==26.4.0`, `cmake==3.31.*`) and CI pins the same wheel. |
+
+## Build recipe
+
+The same seven steps are in the module doc comment of
+`crates/veda-index/src/gpu_cuvs.rs`, where a developer hits the error. Every one of these
+was a separate, real failure on a host that **already had** CUDA 12.9 and driver 575 —
+which is why "install CUDA" was not a sufficient prerequisite and the feature went years
+without anyone successfully compiling it.
+
+| # | Blocker | Fix |
+|---|---|---|
+| 1 | `nvcc` installed but not on `PATH` | `export PATH=/usr/local/cuda/bin:$PATH` |
+| 2 | `cuvs-sys 26.4.0` needs CMake ≥ 3.30.4; Ubuntu 22.04 ships 3.22 | `pip install 'cmake==3.31.*'` |
+| 3 | Without a prebuilt `libcuvs`, `cuvs-sys` builds RAPIDS from source (hours) | `pip install --extra-index-url https://pypi.nvidia.com 'libcuvs-cu12==26.4.0'` |
+| 4 | `cmake-rs` sets `CMAKE_PREFIX_PATH=""` (rust-lang/cmake-rs#111), so the normal way to point at a prebuilt library silently does nothing | Set nine `<Package>_DIR` vars instead: `cuvs_DIR`, `raft_DIR`, `rmm_DIR`, `rapids_logger_DIR`, `nvtx3_DIR`, `CCCL_DIR`, `Thrust_DIR`, `CUB_DIR`, `libcudacxx_DIR` |
+| 5 | bindgen needs libclang | `pip install libclang`; `LIBCLANG_PATH=<site-packages>/clang/native` |
+| 6 | clang cannot find `cuda_runtime.h` | `BINDGEN_EXTRA_CLANG_ARGS=-I/usr/local/cuda/include` |
+| 7 | the pip `libclang` wheel ships no builtin headers, so clang cannot find `limits.h` | add `-I/usr/lib/gcc/x86_64-linux-gnu/<ver>/include` to `BINDGEN_EXTRA_CLANG_ARGS` |
+
+Two further items are needed to **run** rather than compile, and are invisible to
+`cargo check`:
+
+8. `RUSTFLAGS="-L native=<site-packages>/libcuvs/lib64 -L native=/usr/local/cuda/lib64"`,
+   or the link step cannot find `libcuvs_c`.
+9. `LD_LIBRARY_PATH` must include the `lib64` directories of `libcuvs`, `libraft`,
+   `librmm` and `rapids_logger`.
+
+Because 8 and 9 are link/runtime-only, **`cargo check --features gpu_cuvs` passes while
+`cargo test` still fails**. This is why the CI job runs `cargo build --tests` rather than
+`cargo check`; a `check`-based job would have reported success on a feature that could not
+link.
+
+On `iitgpu11` the provisioned environment lives at `/home/mac/veda-cuvs-venv` and is
+disposable — `rm -rf` it and re-run steps 2, 3 and 5 to rebuild.
