@@ -335,6 +335,27 @@ real lesson:
 The test also now asserts that recall *improves with `ef`*. That is the property that was
 broken, and a floor alone would not have caught it.
 
+### The floor is a recall target, not a smoke alarm
+
+Measured on the test's corpus once it matched the benchmark's shape, at 1M x 128 with the
+final build degrees:
+
+| ef | itopk | width | recall@10 |
+|---|---|---|---|
+| 64 | 64 | 1 | 0.1719 |
+| 128 | 128 | 2 | 0.3125 |
+| 256 | 256 | 4 | 0.5156 |
+| 512 | 512 | 8 | 0.7656 |
+| 768 | 512 | 12 | 0.8438 |
+| **1024** (default) | 512 | 16 | **0.8750** |
+
+The floor is **0.80** — roughly 5.7 standard errors below the healthy 0.8750, loose enough
+not to flake and tight enough to catch every regression this branch fixed. Each of the three
+defects lands below it on this corpus: an unset `itopk_size` far below, `search_width` left
+at 1 gives 0.1719, and reverting the denser graph puts the same search budget against a
+sparser graph at roughly the 0.766 mark. That is the property the earlier, easier corpus
+could not provide — at saturation, any floor below 1.0 only detects collapse.
+
 ## Measured result
 
 Clustered synthetic corpus (1,000 centroids, sigma=0.10), 128 dimensions, k=10, mean over
@@ -377,17 +398,22 @@ algorithm being better. On small collections, use HNSW.
   also reported HNSW 100k search at 1247.9 us against the 549.8 us above, i.e. inflated
   2.3x, which briefly made CAGRA look ~1.5x faster at 100k when it is in fact ~1.85x
   slower. Treat build and latency ratios as approximate; treat recall as reliable.
-- **Recall is a property of a corpus, not of an index.** The same code measures 0.9300 on
-  this corpus and 1.0000 on the recall test's easier one. Neither number transfers to real
-  embeddings.
+- **Recall is a property of a corpus, not of an index.** This corpus measures 0.9300 and
+  the recall test's measures 0.8750. Neither number transfers to real embeddings.
 
-  The two corpora differ in three ways, which is why: this one draws 1,000 centroids with
-  two-sided noise at scale 0.10, the test's draws 500 with **one-sided** noise at scale
-  0.05 (so a per-dimension spread of ~0.0144, not 0.05 — the earlier "sigma=0.05" wording
-  here was a misnomer). Clusters are well separated in both; the test's are tighter, and a
-  healthy index saturates at 1.0 on it. The test's floor is therefore set for **collapse
-  detection**, not as a recall target — it cannot distinguish "healthy" from "somewhat
-  regressed", and is not intended to.
+  The test's corpus now uses the **same shape** as this one — 1,000 centroids, two-sided
+  noise at 0.10. It previously used 500 centroids with *one-sided* noise at 0.05, which was
+  easier in two ways the constants did not reveal (the one-sided noise offset each
+  cluster's true centre and cut the effective per-dimension spread to ~0.0144, so the
+  earlier "sigma=0.05" wording here was a misnomer). A healthy index **saturated at 1.0**
+  on it, which meant the floor could only detect total collapse: a partial regression to
+  0.9 would have passed. Matching the shape is what turns the floor into a recall target.
+
+  The test still reads slightly lower than this benchmark (0.8750 vs 0.9300) for two
+  reasons: it draws 64 queries rather than 200, so one standard error is ~0.013; and it
+  spreads its queries across all 1,000 clusters whereas the benchmark's `i % CLUSTERS` only
+  ever reaches the first 200. The test is therefore marginally the harder measurement,
+  which is the right direction for a guard.
 
 - **HNSW's 1M baseline is 0.9130, and only that.** Earlier revisions of this document and
   of the module comments quoted 0.936 and 0.9270 as well, from runs that shared the host

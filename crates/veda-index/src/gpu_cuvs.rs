@@ -102,19 +102,25 @@ use ndarray::{Array2, s};
 ///
 /// CAGRA needs a far larger budget than HNSW for the same recall.
 ///
-/// Measured on the **recall test's** 1M x 128 clustered corpus (500
-/// centroids), with the final build degrees: recall@10 was 0.2656 at
-/// ef=64, 0.5156 at 128, 0.7500 at 256, 0.9688 at 512 and 1.0000 from 768
-/// up. On the **benchmark's** harder corpus (1,000 centroids, two-sided
-/// noise) the same default measures 0.9300, against HNSW's 0.9130 there.
+/// Measured on the recall test's 1M x 128 corpus (1,000 centroids,
+/// two-sided noise at 0.10 — the same shape the benchmark uses), with the
+/// final build degrees: recall@10 was 0.1719 at ef=64, 0.3125 at 128,
+/// 0.5156 at 256, 0.7656 at 512, 0.8438 at 768 and **0.8750 at 1024**.
+/// The benchmark's own corpus measures 0.9300 at the same default, against
+/// HNSW's 0.9130 there.
 ///
-/// Those are two different corpora and the numbers are not
-/// interchangeable — recall is a property of a corpus, not of an index.
-/// Every figure in this module names the corpus it came from for that
-/// reason; earlier revisions of these comments quoted three mutually
-/// inconsistent HNSW baselines (0.936, 0.9270, 0.9130) drawn from runs
-/// that shared the host with other work. **0.9130 is the clean-host
-/// number** and the only one to compare against.
+/// The test reads lower than the benchmark despite matching its shape,
+/// for two reasons worth knowing: it draws 64 queries rather than 200 (so
+/// one standard error is ~0.013), and it spreads those queries across all
+/// 1,000 clusters where the benchmark's `i % CLUSTERS` only ever reaches
+/// the first 200. The test is therefore slightly the harder measurement.
+///
+/// Recall is a property of a corpus, not of an index, so every figure in
+/// this module names the corpus it came from. Earlier revisions of these
+/// comments quoted three mutually inconsistent HNSW baselines (0.936,
+/// 0.9270, 0.9130) drawn from runs that shared the host with other work.
+/// **0.9130 is the clean-host number** and the only one to compare
+/// against.
 ///
 /// Small corpora are not a useful guide here: at 50k, ef=512 already
 /// reached recall 1.0 and every value looked fine. The budget has to be
@@ -920,6 +926,12 @@ mod tests {
         );
     }
 
+    /// Corpus shape, matched to the benchmark's so the two are comparable.
+    #[cfg(feature = "gpu_cuvs")]
+    const TEST_CLUSTERS: usize = 1_000;
+    #[cfg(feature = "gpu_cuvs")]
+    const TEST_CLUSTER_SIGMA: f32 = 0.10;
+
     /// Vectors drawn from `clusters` centroids — the shape real embeddings
     /// have.
     ///
@@ -929,25 +941,50 @@ mod tests {
     /// cannot distinguish a healthy index from a broken one. Centroids come
     /// from a fixed seed so a query set and the corpus share structure.
     ///
-    /// Note the noise is **one-sided** — `deterministic_vectors` returns
-    /// values in `[0, 1)` — so each cluster's true centre is offset from
-    /// its centroid and the per-dimension spread is ~0.0144, not the 0.05
-    /// scale factor. The clusters are well separated regardless
-    /// (inter-centroid distance ~4.6 against a cluster radius ~0.23 at
-    /// dim=128), which is the property the test needs, but this corpus is
-    /// measurably easier than the benchmark's: a healthy index saturates
-    /// at 1.0 here while measuring 0.93 there. The floor below is set for
-    /// *collapse detection*, not as a recall target.
+    /// **Deliberately identical to `tests/cagra_gpu_bench.rs::generate`**:
+    /// 1,000 centroids, signed values in `[-1, 1)`, two-sided noise at
+    /// `TEST_CLUSTER_SIGMA`. An earlier version used 500 centroids with
+    /// one-sided noise at 0.05, which was easier in two ways that the
+    /// constants did not reveal — the one-sided noise offset each cluster's
+    /// true centre and cut the effective per-dimension spread to ~0.0144.
+    /// A healthy index then **saturated at 1.0** on it, so the floor could
+    /// only detect collapse and not a partial regression, and the test
+    /// scored 0.9641 where the benchmark it was meant to protect measured
+    /// 0.805. Matching the benchmark is what makes the floor a recall
+    /// target rather than a smoke alarm.
     #[cfg(feature = "gpu_cuvs")]
     fn clustered_vectors(n: usize, dim: usize, clusters: usize, seed: u64) -> Vec<Vec<f32>> {
         let centroids = deterministic_vectors(clusters, dim, 0xC0FF_EE01);
         let noise = deterministic_vectors(n, dim, seed);
         (0..n)
             .map(|i| {
-                let c = &centroids[i % clusters];
-                (0..dim).map(|d| c[d] + noise[i][d] * 0.05).collect()
+                // Spread the query set across the whole centroid set. With
+                // `n < clusters` — which is the query set — `i % clusters`
+                // only ever touches the first `n` centroids, so with 64
+                // queries over 1,000 clusters 94% of the corpus could never
+                // be a target and the measurement covered one corner of it.
+                let c_idx = if n >= clusters {
+                    i % clusters
+                } else {
+                    i * clusters / n
+                };
+                let c = &centroids[c_idx];
+                (0..dim)
+                    .map(|d| signed(c[d]) + signed(noise[i][d]) * TEST_CLUSTER_SIGMA)
+                    .collect()
             })
             .collect()
+    }
+
+    /// Map `deterministic_vectors`' `[0, 1)` output onto `[-1, 1)`.
+    ///
+    /// Without this the noise is one-sided, which offsets every cluster's
+    /// true centre from its centroid and shrinks the effective spread by
+    /// ~3.5x — making the corpus easier than the benchmark's in a way that
+    /// is invisible from the constants.
+    #[cfg(feature = "gpu_cuvs")]
+    fn signed(v: f32) -> f32 {
+        v * 2.0 - 1.0
     }
 
     /// Exact top-k by brute force, the ground truth recall is measured against.
@@ -989,16 +1026,33 @@ mod tests {
         // recall test would have passed throughout.
         const N: usize = 1_000_000;
         // Must match the dimension the benchmark measures. At dim=64 this
-        // test passed at 0.96 while the benchmark's dim=128 case measured
+        // test passed at 0.9641 while the benchmark's dim=128 case measured
         // 0.805 — green here, failing there. A test that does not cover
         // the configuration it exists to protect is worse than no test,
         // because it also supplies false confidence.
         const DIM: usize = 128;
         const K: usize = 10;
-        const FLOOR: f64 = 0.85;
+        // Set from measurement, with margin, and it is a real recall target
+        // rather than a collapse detector.
+        //
+        // A healthy index measures **0.8750** here. The floor sits ~5.7
+        // standard errors below that (64 queries x k=10 gives 640 samples,
+        // so one standard error is ~0.013), which is loose enough not to
+        // flake and tight enough to catch every regression this branch
+        // fixed. Measured on this corpus: reverting the denser graph lands
+        // near 0.766 (the ef=512 row of the sweep below is the same search
+        // budget against a sparser graph), leaving `search_width` at 1
+        // lands at 0.1719, and the original unset `itopk_size` lower still.
+        // All are caught.
+        //
+        // This is only meaningful because the corpus matches the
+        // benchmark's. On the previous, easier corpus a healthy index
+        // saturated at 1.0000, and any floor below it could only detect
+        // total collapse — a partial regression to 0.9 would have passed.
+        const FLOOR: f64 = 0.80;
 
-        let data = clustered_vectors(N, DIM, 500, 0x0BAD_F00D);
-        let queries = clustered_vectors(64, DIM, 500, 0x1234_ABCD);
+        let data = clustered_vectors(N, DIM, TEST_CLUSTERS, 0x0BAD_F00D);
+        let queries = clustered_vectors(64, DIM, TEST_CLUSTERS, 0x1234_ABCD);
         let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
 
         let mut idx = CagraIndex::new(DistanceMetric::Euclidean, DIM as u32);
