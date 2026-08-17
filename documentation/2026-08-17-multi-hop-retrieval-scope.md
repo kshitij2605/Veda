@@ -139,3 +139,91 @@ a plan. A plan should follow only after step 2 of §5 produces a number.
    latency budget cannot absorb that, approach A is out before it is designed.
 4. Does this need to work on multimodal corpora? If yes, B weakens sharply — entity extraction
    over images and audio is not a solved problem, and multimodality is Veda's differentiator.
+
+---
+
+# Measured: the existing agent loop on multi-hop questions
+
+**Date:** 2026-08-18. **Supersedes the "do first" list in §5** — step 2 of it is now done.
+
+§5 argued that the cheapest useful step was to measure the bounded ReAct loop that already
+exists, because that decides whether any of approaches A/B/C is warranted. That measurement has
+now been run against live infrastructure: `Qwen/Qwen3.5-122B-A10B` on vLLM, the
+`jina-v5-omni-small` embedder, and a Veda server on an isolated port.
+
+Harness and raw results are committed beside this document
+(`multihop-eval/multihop_probe.py`, `multihop-eval/results-2026-08-18.json`).
+
+## Design of the measurement
+
+A 15-document corpus in which **no single document answers any multi-hop question**: each answer
+needs a fact from one document joined to a fact in another (supplier -> country -> tariff change;
+contract -> signatory -> incident report; product -> plant -> certification). Three distractor
+documents share the vocabulary without carrying an answer.
+
+Every multi-hop case is paired with **single-hop controls** whose answers sit in one document.
+Without those, a low multi-hop score would be ambiguous between "cannot retrieve" and "cannot
+combine". The controls isolate the second.
+
+## Result
+
+| | correct | mean latency | mean steps |
+|---|---|---|---|
+| single-hop control | **4/4 (100%)** | 1.8 s | 3.0 |
+| multi-hop | **5/6 (83%)** | 2.4 s | 4.0 |
+
+**The existing loop already performs 2-hop entity-join retrieval.** Controls at 100% confirm the
+multi-hop figure measures combining rather than finding.
+
+### The one failure is the informative part
+
+`mh-1` asked which suppliers are headquartered in countries whose 2026 tariff rates changed
+(Estonia and Chile -> Nordwind, Braewick, Meridian). It answered "Nordwind Components, Meridian
+Alloys" — one supplier per country, **missing the second Estonian supplier**.
+
+That is incomplete enumeration on a **one-to-many join**: the loop finds a path and stops instead
+of exhausting the join. It is not a retrieval failure (the control proves the fact is findable)
+and not a reasoning failure (the two it found are correct).
+
+## What this does not support
+
+- **`mh-1` is nondeterministic.** An earlier run of the same case returned all three names. The
+  honest figure is 83–100% across runs, and with six cases run-to-run variance swamps the
+  difference. This is directional, not conclusive.
+- **The corpus is 15 documents.** Close to a best case: in a real corpus a wrong first hop is far
+  likelier, and the distractor set here is three documents.
+- **Only 2-hop, only entity joins.** No three-hop chains, no aggregative questions, no negative
+  cases where no answer exists (which is where a decomposition planner usually fails, by
+  confabulating a join).
+
+## Revised recommendation
+
+**The measurement argues against approaches B and C.** A knowledge graph (B) is a subsystem whose
+ingest-time entity extraction conflicts with Veda's multimodal positioning, and TreeRAG (C) targets
+aggregative questions rather than the entity joins that the loop already handles. Neither is
+justified by a loop scoring 83–100% on the cases they would address.
+
+It points instead at approach **A**, and at the narrowest form of it: **completeness on
+one-to-many joins**, which is the single observed failure. That is a prompt-and-termination
+concern inside the existing loop, not new retrieval machinery.
+
+**The blocker is eval capacity, not implementation.** Six cases cannot validate an improvement —
+a fix and LLM variance are indistinguishable at this sample size. Before any code changes:
+
+1. Expand to a few dozen cases spanning join shapes: one-to-many, three-hop chains, aggregative,
+   and **negative cases where no answer exists**.
+2. Re-measure to establish a baseline with usable error bars, running each case several times so
+   variance is quantified rather than assumed.
+3. Only then change the loop, and only where the expanded baseline shows a deficit.
+
+Doing it in the other order means shipping a change that cannot be shown to have helped — which is
+the failure this project has already paid for repeatedly this cycle.
+
+## Note on the harness
+
+The grader initially used substring matching, under which a `"no"` answer matched `"not"`,
+`"none"`, `"cannot"` and even `"Nordwind"`. `mh-1` scored 6/6 under it. It now matches on word
+boundaries, and that is what moved the multi-hop figure from 6/6 to 5/6 — the stricter grader is
+the reason the number is 83% and not 100%. Any future expansion of this eval set should keep the
+boundary matching, and should assume a grader is wrong until it has been shown to reject a
+plausible wrong answer.
