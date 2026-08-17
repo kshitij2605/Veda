@@ -1592,6 +1592,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
+    use tracing::instrument::WithSubscriber as _;
     use tracing::span::{Attributes, Id};
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt as _};
 
@@ -1665,20 +1666,34 @@ mod tests {
             final_completion("There is one collection: docs."),
         ]);
 
-        let result = tracing::subscriber::with_default(subscriber, || {
-            futures::executor::block_on(run(
-                &model,
-                &cat,
-                &ctx,
-                &agent,
-                "sys",
-                &[],
-                "what collections exist?",
-                DEFAULT_MAX_STEPS,
-                "openai",
-                "gpt-test",
-            ))
-        });
+        // Attach the collector to the FUTURE, not to the current thread
+        // for the duration of a nested executor.
+        //
+        // The previous form paired `tracing::subscriber::with_default` (which
+        // is thread-local) with `futures::executor::block_on` inside a
+        // `#[tokio::test]`. Two hazards followed. The subscriber covered only
+        // work that stayed on this thread, so a span created after an await
+        // that resumed elsewhere would not be captured. And the nested
+        // executor does not drive the tokio reactor, so any genuine async I/O
+        // on the tool path completed only when it happened not to need it -
+        // timing-dependent, and dependent on the host.
+        //
+        // `with_subscriber` is correct across await points and thread moves,
+        // and removes the nested executor entirely.
+        let result = run(
+            &model,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "what collections exist?",
+            DEFAULT_MAX_STEPS,
+            "openai",
+            "gpt-test",
+        )
+        .with_subscriber(subscriber)
+        .await;
 
         assert!(!result.hit_limit_or_error);
 
