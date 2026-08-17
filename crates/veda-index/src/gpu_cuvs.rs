@@ -62,11 +62,25 @@
 //! ```
 //!
 //! `--test-threads=1` is required, not preferred. These tests share one
-//! device, and the recall test builds a 50k-vector index; run in
-//! parallel with the others it fails intermittently on device
-//! contention while passing in isolation. `--release` matters too — the
-//! recall test brute-forces its own ground truth, which is slow in a
-//! debug build.
+//! device, and the recall test builds a **1,000,000 x 128** index; run in
+//! parallel with the others it fails intermittently on device contention
+//! while passing in isolation. `--release` matters too — the recall test
+//! brute-forces its own ground truth over that corpus.
+//!
+//! Budget roughly 4-5 minutes and ~2 GB of host memory for the recall
+//! test alone: the corpus and its noise buffer are held simultaneously,
+//! `build` stages another copy, and ground truth is 64 full passes over
+//! 1M vectors.
+//!
+//! ## A note on serialized indexes
+//!
+//! `save`/`load` record the vector count but **not** the build degrees.
+//! An index serialized before the degrees were raised will load without
+//! complaint and then be searched with the current, wider search
+//! parameters against a sparser graph — the 0.805 row in the design
+//! doc's fix table. Nothing detects this, so the recall figures here
+//! apply only to indexes built after that change. Rebuild rather than
+//! reload if the numbers matter.
 //!
 //! See `documentation/2026-08-15-gpu-cuvs-cagra-design.md` for the full
 //! recipe and the measured benchmark.
@@ -86,14 +100,24 @@ use ndarray::{Array2, s};
 
 /// Traversal budget used when a caller does not supply one.
 ///
-/// CAGRA needs a far larger budget than HNSW for the same recall. On a
-/// **1M** clustered corpus, recall@10 measured 0.38 at ef=128, 0.59 at
-/// 256, 0.84 at 512, 0.93 at 768 and 0.96 at 1024 — against HNSW's 0.936
-/// at its own default of 96. 1024 is the point where CAGRA matches HNSW,
-/// so it is the default.
+/// CAGRA needs a far larger budget than HNSW for the same recall.
+///
+/// Measured on the **recall test's** 1M x 128 clustered corpus (500
+/// centroids), with the final build degrees: recall@10 was 0.2656 at
+/// ef=64, 0.5156 at 128, 0.7500 at 256, 0.9688 at 512 and 1.0000 from 768
+/// up. On the **benchmark's** harder corpus (1,000 centroids, two-sided
+/// noise) the same default measures 0.9300, against HNSW's 0.9130 there.
+///
+/// Those are two different corpora and the numbers are not
+/// interchangeable — recall is a property of a corpus, not of an index.
+/// Every figure in this module names the corpus it came from for that
+/// reason; earlier revisions of these comments quoted three mutually
+/// inconsistent HNSW baselines (0.936, 0.9270, 0.9130) drawn from runs
+/// that shared the host with other work. **0.9130 is the clean-host
+/// number** and the only one to compare against.
 ///
 /// Small corpora are not a useful guide here: at 50k, ef=512 already
-/// reached recall 1.0, and every value looked fine. The budget has to be
+/// reached recall 1.0 and every value looked fine. The budget has to be
 /// chosen against the scale where the graph is actually hard to
 /// traverse.
 ///
@@ -114,6 +138,63 @@ const ITOPK_MIN: usize = 32;
 #[cfg(feature = "gpu_cuvs")]
 const ITOPK_MAX: usize = 512;
 
+/// Output graph degree, and the working degree used while pruning it.
+///
+/// cuVS defaults these to 64 / 128. Search-side tuning alone plateaued
+/// below HNSW at scale — at 1M x 128 dims, with both search knobs at
+/// their ceilings, recall@10 was 0.805 on the benchmark corpus against
+/// HNSW's 0.9130 there — because a
+/// sparser graph has fewer edges to traverse no matter how wide the
+/// frontier. A denser graph costs build time and index memory, both of
+/// which CAGRA has in hand: its build measured ~49x faster than HNSW's
+/// on the same corpus.
+///
+/// These are upper bounds, not absolutes: a k-NN graph cannot have a
+/// degree at or above its own vertex count, so [`graph_degrees_for`]
+/// clamps them against the corpus size.
+#[cfg(feature = "gpu_cuvs")]
+const GRAPH_DEGREE: usize = 128;
+#[cfg(feature = "gpu_cuvs")]
+const INTERMEDIATE_GRAPH_DEGREE: usize = 256;
+
+/// Clamp the build degrees against the corpus size.
+///
+/// `INTERMEDIATE_GRAPH_DEGREE` is 256, which is undefined for a corpus of
+/// fewer than 257 vectors — and this module's own tests build corpora of
+/// 200 and 500. It is not a test-only concern: a vector database seals
+/// small segments routinely, so any segment below ~257 vectors reaches
+/// this path in production. Rather than depend on whatever cuVS does with
+/// an over-large degree (it is not documented, and "silently clamps" and
+/// "fails with a bare CUVS_ERROR" are both plausible), state the clamp
+/// here.
+///
+/// Note the consequence: the recall figures quoted throughout this module
+/// were measured at the full degrees, so they do **not** describe a small
+/// index built with reduced ones.
+#[cfg(feature = "gpu_cuvs")]
+fn graph_degrees_for(n: usize) -> (usize, usize) {
+    let intermediate = INTERMEDIATE_GRAPH_DEGREE.min(n.saturating_sub(1)).max(1);
+    let graph = GRAPH_DEGREE.min(intermediate);
+    (graph, intermediate)
+}
+
+/// Number of graph nodes expanded per traversal iteration.
+///
+/// cuVS defaults this to 1, which expands a single frontier node per
+/// step. `itopk_size` alone was not enough to make CAGRA correct at
+/// scale: with `itopk_size` pinned at its 512 ceiling, recall@10 on a
+/// clustered 1M x 128 corpus was 0.40 at width 1, 0.8391 at width 8 and
+/// 0.9641 at width 16 — those three at the *original* build degrees, which
+/// is why they differ from the `DEFAULT_EF` figures above. It is derived
+/// from the same `ef` budget so callers still have a single dial to turn.
+///
+/// Capped at 16 because that is where CAGRA reached HNSW's recall on the
+/// measured corpus; wider costs latency for accuracy already in hand.
+#[cfg(feature = "gpu_cuvs")]
+fn search_width_for(ef: usize) -> usize {
+    (ef / 64).clamp(1, 16)
+}
+
 /// Map a caller's `ef` budget onto a legal `itopk_size`.
 ///
 /// Rounded to a **power of two**, not to cuVS's documented multiple of
@@ -121,40 +202,25 @@ const ITOPK_MAX: usize = 512;
 /// recall bit-identical to 64, so a 32-granularity knob silently lies
 /// about the budget it is applying. Powers of two are the granularity
 /// the library actually honours.
-/// Output graph degree, and the working degree used while pruning it.
 ///
-/// cuVS defaults these to 64 / 128. Search-side tuning alone plateaued
-/// below HNSW at scale — at 1M x 128 dims, with both search knobs at
-/// their ceilings, recall@10 was 0.805 against HNSW's 0.927 — because a
-/// sparser graph has fewer edges to traverse no matter how wide the
-/// frontier. A denser graph costs build time and index memory, both of
-/// which CAGRA has in hand: its build was already ~67x faster than
-/// HNSW's on the same corpus.
-#[cfg(feature = "gpu_cuvs")]
-const GRAPH_DEGREE: usize = 128;
-#[cfg(feature = "gpu_cuvs")]
-const INTERMEDIATE_GRAPH_DEGREE: usize = 256;
-
-/// Number of graph nodes expanded per traversal iteration.
-///
-/// cuVS defaults this to 1, which expands a single frontier node per
-/// step. `itopk_size` alone was not enough to make CAGRA correct at
-/// scale: with `itopk_size` pinned at its 512 ceiling, recall@10 on a
-/// clustered 1M corpus was 0.40 at width 1 and only reached HNSW parity
-/// at width 16 (0.9641). It is derived from the same `ef` budget so
-/// callers still have a single dial to turn.
-///
-/// Capped at 16 because that is where CAGRA overtook HNSW's recall on
-/// the measured corpus; wider costs latency for accuracy already in
-/// hand.
-#[cfg(feature = "gpu_cuvs")]
-fn search_width_for(ef: usize) -> usize {
-    (ef / 64).clamp(1, 16)
-}
-
+/// Note that `ef` saturates: any `ef` at or above 1024 yields the same
+/// `itopk_size = 512` (the hard ceiling) and the same `search_width = 16`
+/// (the cap), so raising `ef` past 1024 buys nothing.
 #[cfg(feature = "gpu_cuvs")]
 fn itopk_for(k: usize, ef: usize) -> usize {
-    ef.max(k).max(ITOPK_MIN).next_power_of_two().min(ITOPK_MAX)
+    // Clamp BEFORE rounding, not after. `next_power_of_two` panics on
+    // overflow in debug and wraps to 0 in release, so rounding first would
+    // turn a large `ef` into `itopk_size = 0`: cuVS writes nothing, the
+    // caller receives the zero-filled neighbour buffer as though it were a
+    // result set, and we are back to fast wrong answers reported as
+    // success. In debug it is worse — the panic fires while the index
+    // mutex is held, poisoning it and disabling the index for the rest of
+    // the process.
+    ef.min(ITOPK_MAX)
+        .max(k.min(ITOPK_MAX))
+        .max(ITOPK_MIN)
+        .next_power_of_two()
+        .min(ITOPK_MAX)
 }
 
 /// Raw cuVS CAGRA FFI.
@@ -269,6 +335,8 @@ mod ffi {
         dataset: &ManagedTensor,
         handle: &CagraHandle,
         metric: cuvs_sys::cuvsDistanceType,
+        graph_degree: usize,
+        intermediate_graph_degree: usize,
     ) -> Result<()> {
         let mut params: cuvs_sys::cuvsCagraIndexParams_t = std::ptr::null_mut();
         // SAFETY: valid out-pointer; the object is destroyed below on both
@@ -281,8 +349,8 @@ mod ffi {
         // own until it is destroyed below.
         unsafe {
             (*params).metric = metric;
-            (*params).graph_degree = super::GRAPH_DEGREE;
-            (*params).intermediate_graph_degree = super::INTERMEDIATE_GRAPH_DEGREE;
+            (*params).graph_degree = graph_degree;
+            (*params).intermediate_graph_degree = intermediate_graph_degree;
         };
         // SAFETY: `res.0` is a live resources handle; `params` was just
         // created; `dataset` outlives the call; `handle.raw()` is live.
@@ -506,65 +574,14 @@ fn feature_off_error(op: &str) -> VedaError {
     ))
 }
 
-impl VectorIndex for CagraIndex {
-    #[cfg(feature = "gpu_cuvs")]
-    fn build(&mut self, vectors: &[&[f32]]) -> Result<()> {
-        let cuvs_metric = Self::cuvs_metric(self.metric)?;
-        let n = vectors.len();
-        if n == 0 {
-            return Err(VedaError::Index(
-                "gpu_cuvs: cannot build over empty vector set".into(),
-            ));
-        }
-        let dim = self.dimension as usize;
-        for (i, v) in vectors.iter().enumerate() {
-            if v.len() != dim {
-                return Err(VedaError::Index(format!(
-                    "gpu_cuvs: vector {i} has dim {} but index dim is {dim}",
-                    v.len()
-                )));
-            }
-        }
-        let mut flat = Vec::with_capacity(n * dim);
-        for v in vectors {
-            flat.extend_from_slice(v);
-        }
-        let dataset: Array2<f32> = Array2::from_shape_vec((n, dim), flat)
-            .map_err(|e| VedaError::Index(format!("gpu_cuvs: ndarray reshape failed: {e}")))?;
-
-        let res = Resources::new()
-            .map_err(|e| VedaError::Index(format!("cuvs Resources init failed: {e:?}")))?;
-        let handle = ffi::CagraHandle::new()?;
-        let tensor = ManagedTensor::from(&dataset);
-        ffi::build(&res, &tensor, &handle, cuvs_metric)?;
-
-        *self.lock()? = Some(CagraInner {
-            resources: res,
-            handle,
-        });
-        self.count = n;
-        Ok(())
-    }
-
-    #[cfg(not(feature = "gpu_cuvs"))]
-    fn build(&mut self, _vectors: &[&[f32]]) -> Result<()> {
-        Err(feature_off_error("build"))
-    }
-
-    #[cfg(feature = "gpu_cuvs")]
-    fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
-        self.search_with_ef(query, k, DEFAULT_EF)
-    }
-
-    /// CAGRA's traversal budget, plumbed from `ef` to `itopk_size`.
+#[cfg(feature = "gpu_cuvs")]
+impl CagraIndex {
+    /// The single implementation of GPU search.
     ///
-    /// Overriding this is not optional for a graph index: the trait's
-    /// default implementation discards `ef` and calls `search`, so before
-    /// this existed CAGRA ignored the caller's budget entirely and always
-    /// ran at the cuVS default of 64 candidates — including on a 1M-vector
-    /// corpus, where that yielded recall@10 = 0.11.
-    #[cfg(feature = "gpu_cuvs")]
-    fn search_with_ef(&self, query: &[f32], k: usize, ef: usize) -> Result<Vec<SearchResult>> {
+    /// Inherent rather than a trait method so that both `search` and
+    /// `search_with_ef` delegate *down* to one body instead of to each
+    /// other — see the note on [`VectorIndex::search_with_ef`].
+    fn search_inner(&self, query: &[f32], k: usize, ef: usize) -> Result<Vec<SearchResult>> {
         let dim = self.dimension as usize;
         if query.len() != dim {
             return Err(VedaError::Index(format!(
@@ -634,6 +651,85 @@ impl VectorIndex for CagraIndex {
             });
         }
         Ok(results)
+    }
+}
+
+impl VectorIndex for CagraIndex {
+    #[cfg(feature = "gpu_cuvs")]
+    fn build(&mut self, vectors: &[&[f32]]) -> Result<()> {
+        let cuvs_metric = Self::cuvs_metric(self.metric)?;
+        let n = vectors.len();
+        if n == 0 {
+            return Err(VedaError::Index(
+                "gpu_cuvs: cannot build over empty vector set".into(),
+            ));
+        }
+        let dim = self.dimension as usize;
+        for (i, v) in vectors.iter().enumerate() {
+            if v.len() != dim {
+                return Err(VedaError::Index(format!(
+                    "gpu_cuvs: vector {i} has dim {} but index dim is {dim}",
+                    v.len()
+                )));
+            }
+        }
+        let mut flat = Vec::with_capacity(n * dim);
+        for v in vectors {
+            flat.extend_from_slice(v);
+        }
+        let dataset: Array2<f32> = Array2::from_shape_vec((n, dim), flat)
+            .map_err(|e| VedaError::Index(format!("gpu_cuvs: ndarray reshape failed: {e}")))?;
+
+        let res = Resources::new()
+            .map_err(|e| VedaError::Index(format!("cuvs Resources init failed: {e:?}")))?;
+        let handle = ffi::CagraHandle::new()?;
+        let tensor = ManagedTensor::from(&dataset);
+        let (graph_degree, intermediate_graph_degree) = graph_degrees_for(n);
+        ffi::build(
+            &res,
+            &tensor,
+            &handle,
+            cuvs_metric,
+            graph_degree,
+            intermediate_graph_degree,
+        )?;
+
+        *self.lock()? = Some(CagraInner {
+            resources: res,
+            handle,
+        });
+        self.count = n;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "gpu_cuvs"))]
+    fn build(&mut self, _vectors: &[&[f32]]) -> Result<()> {
+        Err(feature_off_error("build"))
+    }
+
+    #[cfg(feature = "gpu_cuvs")]
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
+        self.search_inner(query, k, DEFAULT_EF)
+    }
+
+    /// CAGRA's traversal budget, plumbed from `ef` onto the cuVS knobs.
+    ///
+    /// Overriding this is not optional for a graph index: the trait's
+    /// default implementation discards `ef` and calls `search`, so before
+    /// this existed CAGRA ignored the caller's budget entirely and always
+    /// ran at the cuVS default of 64 candidates — including on a 1M-vector
+    /// corpus, where that yielded recall@10 = 0.11.
+    ///
+    /// Both this and [`VectorIndex::search`] delegate to the inherent
+    /// [`CagraIndex::search_inner`] rather than to each other. That is
+    /// deliberate: if `search` delegated here and this override were ever
+    /// removed or fell out of the `cfg`, the trait default would delegate
+    /// straight back to `search` and recurse until the stack died. A
+    /// stack overflow in an `#[ignore]`d 1M-vector GPU test reads as
+    /// device trouble, not as a missing override.
+    #[cfg(feature = "gpu_cuvs")]
+    fn search_with_ef(&self, query: &[f32], k: usize, ef: usize) -> Result<Vec<SearchResult>> {
+        self.search_inner(query, k, ef)
     }
 
     #[cfg(not(feature = "gpu_cuvs"))]
@@ -773,6 +869,57 @@ mod tests {
         (0..n).map(|_| (0..dim).map(|_| next()).collect()).collect()
     }
 
+    /// `itopk_size` must never come back as 0, and must never be below `k`.
+    ///
+    /// `itopk_size = 0` is the dangerous case: cuVS writes nothing, and the
+    /// caller receives the zero-filled neighbour buffer as though it were a
+    /// result set. An earlier version rounded to a power of two before
+    /// clamping, so `ef = usize::MAX` wrapped to exactly that.
+    #[test]
+    #[cfg(feature = "gpu_cuvs")]
+    fn itopk_is_never_zero_and_never_below_k() {
+        for &ef in &[0usize, 1, 31, 32, 96, 512, 1024, usize::MAX / 2, usize::MAX] {
+            for &k in &[1usize, 10, 511, 512] {
+                let itopk = itopk_for(k, ef);
+                assert!(itopk > 0, "itopk_for({k}, {ef}) = 0");
+                assert!(itopk >= k, "itopk_for({k}, {ef}) = {itopk} < k");
+                assert!(itopk <= ITOPK_MAX, "itopk_for({k}, {ef}) = {itopk} > max");
+                assert!(itopk.is_power_of_two(), "itopk_for({k}, {ef}) = {itopk}");
+            }
+        }
+        assert!(search_width_for(usize::MAX) <= 16);
+        assert!(search_width_for(0) >= 1);
+    }
+
+    /// Build degrees must stay below the corpus size.
+    ///
+    /// A k-NN graph cannot have degree >= its own vertex count, and this
+    /// module's own tests build corpora of 200 and 500 against an
+    /// intermediate degree of 256.
+    #[test]
+    #[cfg(feature = "gpu_cuvs")]
+    fn graph_degrees_stay_under_the_corpus_size() {
+        for &n in &[2usize, 10, 200, 256, 257, 500, 1_000, 1_000_000] {
+            let (graph, intermediate) = graph_degrees_for(n);
+            assert!(
+                graph >= 1 && intermediate >= 1,
+                "n={n} produced a zero degree"
+            );
+            assert!(
+                graph <= intermediate,
+                "n={n}: graph {graph} > intermediate {intermediate}"
+            );
+            assert!(intermediate < n, "n={n}: intermediate {intermediate} >= n");
+            assert!(intermediate <= INTERMEDIATE_GRAPH_DEGREE);
+            assert!(graph <= GRAPH_DEGREE);
+        }
+        // Large corpora get the full, measured degrees.
+        assert_eq!(
+            graph_degrees_for(1_000_000),
+            (GRAPH_DEGREE, INTERMEDIATE_GRAPH_DEGREE)
+        );
+    }
+
     /// Vectors drawn from `clusters` centroids — the shape real embeddings
     /// have.
     ///
@@ -781,6 +928,16 @@ mod tests {
     /// near chance on them. A recall assertion over uniform data therefore
     /// cannot distinguish a healthy index from a broken one. Centroids come
     /// from a fixed seed so a query set and the corpus share structure.
+    ///
+    /// Note the noise is **one-sided** — `deterministic_vectors` returns
+    /// values in `[0, 1)` — so each cluster's true centre is offset from
+    /// its centroid and the per-dimension spread is ~0.0144, not the 0.05
+    /// scale factor. The clusters are well separated regardless
+    /// (inter-centroid distance ~4.6 against a cluster radius ~0.23 at
+    /// dim=128), which is the property the test needs, but this corpus is
+    /// measurably easier than the benchmark's: a healthy index saturates
+    /// at 1.0 here while measuring 0.93 there. The floor below is set for
+    /// *collapse detection*, not as a recall target.
     #[cfg(feature = "gpu_cuvs")]
     fn clustered_vectors(n: usize, dim: usize, clusters: usize, seed: u64) -> Vec<Vec<f32>> {
         let centroids = deterministic_vectors(clusters, dim, 0xC0FF_EE01);

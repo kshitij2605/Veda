@@ -378,8 +378,43 @@ algorithm being better. On small collections, use HNSW.
   2.3x, which briefly made CAGRA look ~1.5x faster at 100k when it is in fact ~1.85x
   slower. Treat build and latency ratios as approximate; treat recall as reliable.
 - **Recall is a property of a corpus, not of an index.** The same code measures 0.9300 on
-  this corpus and 1.0000 on the recall test's easier one (500 centroids, sigma=0.05).
-  Neither number transfers to real embeddings.
+  this corpus and 1.0000 on the recall test's easier one. Neither number transfers to real
+  embeddings.
+
+  The two corpora differ in three ways, which is why: this one draws 1,000 centroids with
+  two-sided noise at scale 0.10, the test's draws 500 with **one-sided** noise at scale
+  0.05 (so a per-dimension spread of ~0.0144, not 0.05 — the earlier "sigma=0.05" wording
+  here was a misnomer). Clusters are well separated in both; the test's are tighter, and a
+  healthy index saturates at 1.0 on it. The test's floor is therefore set for **collapse
+  detection**, not as a recall target — it cannot distinguish "healthy" from "somewhat
+  regressed", and is not intended to.
+
+- **HNSW's 1M baseline is 0.9130, and only that.** Earlier revisions of this document and
+  of the module comments quoted 0.936 and 0.9270 as well, from runs that shared the host
+  with other work. CAGRA's 0.9300 is better than 0.9130 but *worse* than the other two, so
+  the comparison inverted depending on which number a reader picked up. Every recall figure
+  now names the corpus and the run it came from; 0.9130 is the clean-host measurement and
+  supersedes the others.
 - **`itopk_size` has a hard ceiling of 512** — 1024 fails with a bare `CUVS_ERROR` — so
   `k > 512` is rejected up front, and CAGRA cannot trade further latency for recall beyond
-  the settings above without denser build parameters again.
+  the settings above without denser build parameters again. `ef` therefore **saturates**:
+  any `ef >= 1024` produces identical search parameters (`itopk_size = 512`,
+  `search_width = 16`), so raising it further buys nothing and reports nothing.
+
+  Note also that the 512 ceiling was established when `search_width` was 1 and
+  `graph_degree` 64. CAGRA's internal result buffer scales as
+  `itopk_size + search_width * graph_degree`, which those changes took from 576 to 2560, so
+  the ceiling is a property of the *combination*, not of `itopk_size` alone. The current
+  settings are measured to work; anyone raising the degrees or the width cap again should
+  expect to re-establish it.
+
+- **Small indexes do not get these parameters at all.** `intermediate_graph_degree = 256`
+  is undefined for a corpus of fewer than 257 vectors, so the build degrees are clamped
+  against the corpus size. A segment below that threshold is built with reduced degrees and
+  the recall above does not describe it. Sealed segments in this database are routinely that
+  small.
+
+- **Serialized indexes carry no record of their build degrees.** An index saved before the
+  degrees were raised reloads without complaint and is then searched with the current, wider
+  search parameters against a sparser graph — the 0.805 row in the fix table above. Nothing
+  detects the mismatch. Rebuild rather than reload where the numbers matter.
