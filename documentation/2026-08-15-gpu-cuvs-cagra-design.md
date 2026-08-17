@@ -221,8 +221,26 @@ All GPU tests are `#[cfg(feature = "gpu_cuvs")]` and `#[ignore]`, since CI has n
 1. **Round trip.** build → search → save → load → search, asserting the two result sets
    are identical. This is the test that would have caught the missing serialization API.
 2. **Concurrency.** Several threads searching one `Arc<CagraIndex>` concurrently, results
-   asserted correct. Verified to fail to compile if the `Mutex` is removed.
-3. **Recall.** CAGRA results compared against exact search on the same data, asserting
+   asserted correct, plus a `assert_send_sync::<CagraIndex>()` compile-time check.
+
+   **Verified by disabling the mechanism** (2026-08-17), rather than asserted: commenting
+   out `unsafe impl Send for CagraInner` fails the build with
+
+   ```text
+   error[E0277]: `*mut cuvsCagraIndex` cannot be sent between threads safely
+     = note: required for `Mutex<Option<CagraInner>>` to implement `Sync`
+    19 | pub trait VectorIndex: Send + Sync {
+   ```
+
+   which confirms the two things that matter: the `unsafe impl` is load-bearing, and
+   `Sync` is **derived** from `Mutex<T: Send>` rather than asserted anywhere. An incorrect
+   `Sync` assertion would be a data race instead of a compile error, so it matters that
+   the compiler is the one concluding it. The file was restored afterwards and matches
+   `HEAD`.
+3. **Recall.** *(This item described a test that did not exist. See "Correction: the
+   recall test was fictional" below — it exists now, and finding that it did not is what
+   uncovered the recall defect.)* CAGRA results compared against exact search on the same
+   data, asserting
    recall@10 above a stated floor — so a silently-wrong index cannot pass.
 4. **Feature-off behaviour** unchanged: existing tests keep passing untouched.
 
@@ -273,3 +291,156 @@ link.
 
 On `iitgpu11` the provisioned environment lives at `/home/mac/veda-cuvs-venv` and is
 disposable — `rm -rf` it and re-run steps 2, 3 and 5 to rebuild.
+
+## Correction: the recall test was fictional
+
+The Testing section above claimed a recall test that "a silently-wrong index cannot
+pass." No such test existed. What existed planted an exact duplicate of the query in the
+corpus and asserted it ranked first, at n=1000 / dim=32 — which a badly degraded graph
+passes anyway, because the query is itself a node in the graph and trivially reachable.
+
+Six GPU tests were green while CAGRA's measured recall@10 on a clustered 1M corpus was
+**0.11**. The feature would have shipped returning fast wrong answers.
+
+Three separate defects were behind that number, each found by measurement rather than
+inspection:
+
+| Fix | recall@10 at 1M x 128 |
+|---|---|
+| as found | 0.1145 |
+| `itopk_size` actually set from the caller's `ef` | 0.4000 |
+| `search_width` widened (cuVS defaults it to 1) | 0.8050 |
+| `graph_degree` 64 -> 128, intermediate 128 -> 256 | **0.9300** |
+
+`cuvsCagraSearchParams` was created and never configured, so every query ran at the
+library default of 64 retained candidates regardless of `k`, of the caller's budget, or
+of corpus size — a fixed budget explores a shrinking fraction of a growing graph.
+`CagraIndex` also never overrode `search_with_ef`, so it was the only graph index in the
+workspace silently discarding the caller's traversal budget.
+
+**Two things about the test corpus mattered more than the assertions**, and both are the
+real lesson:
+
+1. **Uniform-random vectors cannot express this test.** In 128 dimensions they are all
+   nearly equidistant, so the true top-10 is close to arbitrary and *every* graph index
+   scores near chance — HNSW measured 0.51 and CAGRA 0.37 on the same uniform data, which
+   made a broken index look merely typical. `scale-benchmark-results.md` had already
+   recorded this effect (HNSW at 0.38 on uniform, 1.0 on a real clustered corpus). The
+   corpus is now clustered.
+2. **Dimension mattered.** The test first ran at dim=64 and passed at 0.9641 while the
+   benchmark's dim=128 case measured 0.805 — green in the test, failing in the
+   configuration the test existed to protect. The test now runs at dim=128 and n=1M,
+   because the defect was invisible at 50k: every `ef` setting looked healthy there.
+
+The test also now asserts that recall *improves with `ef`*. That is the property that was
+broken, and a floor alone would not have caught it.
+
+### The floor is a recall target, not a smoke alarm
+
+Measured on the test's corpus once it matched the benchmark's shape, at 1M x 128 with the
+final build degrees:
+
+| ef | itopk | width | recall@10 |
+|---|---|---|---|
+| 64 | 64 | 1 | 0.1719 |
+| 128 | 128 | 2 | 0.3125 |
+| 256 | 256 | 4 | 0.5156 |
+| 512 | 512 | 8 | 0.7656 |
+| 768 | 512 | 12 | 0.8438 |
+| **1024** (default) | 512 | 16 | **0.8750** |
+
+The floor is **0.80** — roughly 5.7 standard errors below the healthy 0.8750, loose enough
+not to flake and tight enough to catch every regression this branch fixed. Each of the three
+defects lands below it on this corpus: an unset `itopk_size` far below, `search_width` left
+at 1 gives 0.1719, and reverting the denser graph puts the same search budget against a
+sparser graph at roughly the 0.766 mark. That is the property the earlier, easier corpus
+could not provide — at saturation, any floor below 1.0 only detects collapse.
+
+## Measured result
+
+Clustered synthetic corpus (1,000 centroids, sigma=0.10), 128 dimensions, k=10, mean over
+200 queries after a discarded warm-up, release build, one RTX 6000 Ada. Ground truth is
+exact brute force over the same vectors. **Nothing else was running on the host**, for
+reasons given below.
+
+| n | index | build | search (mean) | recall@10 |
+|---|---|---|---|---|
+| 100k | CAGRA (GPU) | **16.43 s** | 1018.1 us | **1.0000** |
+| 100k | HNSW (CPU) | 171.21 s | **549.8 us** | 0.9900 |
+| 1M | CAGRA (GPU) | **86.18 s** | **878.4 us** | **0.9300** |
+| 1M | HNSW (CPU) | 4184.40 s | 4488.1 us | 0.9130 |
+
+**Does CAGRA beat HNSW on this hardware at comparable recall?** At 1M, yes, on all three
+axes: ~49x faster build, ~5.1x faster search, at slightly better recall. At 100k, no, not
+on search: HNSW is ~1.85x faster per query, while CAGRA still builds ~10x faster and
+edges recall.
+
+The reason is the more useful finding than either ratio. **CAGRA's per-query latency is
+flat in corpus size** — 1018 us at 100k, 878 us at 1M — because it is dominated by kernel
+launch and host-to-device transfer, not by graph traversal. HNSW's grows with the corpus
+(549.8 us to 4488.1 us, 8.2x for 10x the data). So there is a crossover somewhere between
+these two sizes, and its position is set by fixed GPU overhead rather than by either
+algorithm being better. On small collections, use HNSW.
+
+### What these numbers do not say
+
+- **Per-query latency is the worst case for a GPU.** The `VectorIndex` trait searches one
+  query at a time, so every CAGRA search pays launch and transfer overhead that batching
+  would amortise. Batched throughput is where CAGRA should win far more decisively, and
+  the trait shape cannot express it. The flat-in-n latency above is direct evidence that
+  overhead, not traversal, is the cost.
+- **The HNSW build baseline is single-threaded.** `HnswIndex::build` is a sequential
+  `for id in 0..len` insert loop, so "49x faster build" is against an unparallelised
+  baseline, not against HNSW's best achievable.
+- **Wall-clock timings carry real error bars; recall does not.** Earlier runs shared the
+  host with other work, and the same HNSW 1M build measured 4313 s and 7996 s — an 85%
+  swing — while its recall came out at exactly 0.9270 both times. An earlier contended run
+  also reported HNSW 100k search at 1247.9 us against the 549.8 us above, i.e. inflated
+  2.3x, which briefly made CAGRA look ~1.5x faster at 100k when it is in fact ~1.85x
+  slower. Treat build and latency ratios as approximate; treat recall as reliable.
+- **Recall is a property of a corpus, not of an index.** This corpus measures 0.9300 and
+  the recall test's measures 0.8750. Neither number transfers to real embeddings.
+
+  The test's corpus now uses the **same shape** as this one — 1,000 centroids, two-sided
+  noise at 0.10. It previously used 500 centroids with *one-sided* noise at 0.05, which was
+  easier in two ways the constants did not reveal (the one-sided noise offset each
+  cluster's true centre and cut the effective per-dimension spread to ~0.0144, so the
+  earlier "sigma=0.05" wording here was a misnomer). A healthy index **saturated at 1.0**
+  on it, which meant the floor could only detect total collapse: a partial regression to
+  0.9 would have passed. Matching the shape is what turns the floor into a recall target.
+
+  The test still reads slightly lower than this benchmark (0.8750 vs 0.9300) for two
+  reasons: it draws 64 queries rather than 200, so one standard error is ~0.013; and it
+  spreads its queries across all 1,000 clusters whereas the benchmark's `i % CLUSTERS` only
+  ever reaches the first 200. The test is therefore marginally the harder measurement,
+  which is the right direction for a guard.
+
+- **HNSW's 1M baseline is 0.9130, and only that.** Earlier revisions of this document and
+  of the module comments quoted 0.936 and 0.9270 as well, from runs that shared the host
+  with other work. CAGRA's 0.9300 is better than 0.9130 but *worse* than the other two, so
+  the comparison inverted depending on which number a reader picked up. Every recall figure
+  now names the corpus and the run it came from; 0.9130 is the clean-host measurement and
+  supersedes the others.
+- **`itopk_size` has a hard ceiling of 512** — 1024 fails with a bare `CUVS_ERROR` — so
+  `k > 512` is rejected up front, and CAGRA cannot trade further latency for recall beyond
+  the settings above without denser build parameters again. `ef` therefore **saturates**:
+  any `ef >= 1024` produces identical search parameters (`itopk_size = 512`,
+  `search_width = 16`), so raising it further buys nothing and reports nothing.
+
+  Note also that the 512 ceiling was established when `search_width` was 1 and
+  `graph_degree` 64. CAGRA's internal result buffer scales as
+  `itopk_size + search_width * graph_degree`, which those changes took from 576 to 2560, so
+  the ceiling is a property of the *combination*, not of `itopk_size` alone. The current
+  settings are measured to work; anyone raising the degrees or the width cap again should
+  expect to re-establish it.
+
+- **Small indexes do not get these parameters at all.** `intermediate_graph_degree = 256`
+  is undefined for a corpus of fewer than 257 vectors, so the build degrees are clamped
+  against the corpus size. A segment below that threshold is built with reduced degrees and
+  the recall above does not describe it. Sealed segments in this database are routinely that
+  small.
+
+- **Serialized indexes carry no record of their build degrees.** An index saved before the
+  degrees were raised reloads without complaint and is then searched with the current, wider
+  search parameters against a sparser graph — the 0.805 row in the fix table above. Nothing
+  detects the mismatch. Rebuild rather than reload where the numbers matter.
