@@ -121,6 +121,20 @@ const ITOPK_MAX: usize = 512;
 /// recall bit-identical to 64, so a 32-granularity knob silently lies
 /// about the budget it is applying. Powers of two are the granularity
 /// the library actually honours.
+/// Output graph degree, and the working degree used while pruning it.
+///
+/// cuVS defaults these to 64 / 128. Search-side tuning alone plateaued
+/// below HNSW at scale — at 1M x 128 dims, with both search knobs at
+/// their ceilings, recall@10 was 0.805 against HNSW's 0.927 — because a
+/// sparser graph has fewer edges to traverse no matter how wide the
+/// frontier. A denser graph costs build time and index memory, both of
+/// which CAGRA has in hand: its build was already ~67x faster than
+/// HNSW's on the same corpus.
+#[cfg(feature = "gpu_cuvs")]
+const GRAPH_DEGREE: usize = 128;
+#[cfg(feature = "gpu_cuvs")]
+const INTERMEDIATE_GRAPH_DEGREE: usize = 256;
+
 /// Number of graph nodes expanded per traversal iteration.
 ///
 /// cuVS defaults this to 1, which expands a single frontier node per
@@ -265,7 +279,11 @@ mod ffi {
         )?;
         // SAFETY: `params` is a live, just-created struct we exclusively
         // own until it is destroyed below.
-        unsafe { (*params).metric = metric };
+        unsafe {
+            (*params).metric = metric;
+            (*params).graph_degree = super::GRAPH_DEGREE;
+            (*params).intermediate_graph_degree = super::INTERMEDIATE_GRAPH_DEGREE;
+        };
         // SAFETY: `res.0` is a live resources handle; `params` was just
         // created; `dataset` outlives the call; `handle.raw()` is live.
         let rc = unsafe { cuvs_sys::cuvsCagraBuild(res.0, params, dataset.as_ptr(), handle.raw()) };
@@ -813,7 +831,12 @@ mod tests {
         // (recall 0.99) and severe at 1M (0.40). A cheap small-corpus
         // recall test would have passed throughout.
         const N: usize = 1_000_000;
-        const DIM: usize = 64;
+        // Must match the dimension the benchmark measures. At dim=64 this
+        // test passed at 0.96 while the benchmark's dim=128 case measured
+        // 0.805 — green here, failing there. A test that does not cover
+        // the configuration it exists to protect is worse than no test,
+        // because it also supplies false confidence.
+        const DIM: usize = 128;
         const K: usize = 10;
         const FLOOR: f64 = 0.85;
 
