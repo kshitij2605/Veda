@@ -72,7 +72,7 @@ export const FEATURES: Feature[] = [
     accent: 'var(--color-node-6)',
     title: 'Lightweight by default',
     blurb:
-      'Three mandatory services — Veda, MinIO, NATS — with no external coordinator, message broker, or metadata store to provision. docker compose up and you have a vector database in under 30 seconds.',
+      'Three mandatory services — Veda, MinIO, NATS — with no external coordinator, message broker, or metadata store to provision. One compose file brings the whole thing up, and there is nothing else to stand up before you can index your first document.',
   },
   {
     icon: Activity,

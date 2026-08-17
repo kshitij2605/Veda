@@ -17,14 +17,12 @@ export function CTA() {
       <div className="relative mx-auto max-w-[860px] px-6 py-28 text-center md:px-10 md:py-36">
         <p className="mono-label text-[var(--color-accent)]">06 / Get started</p>
         <h2 className="mt-5 text-[clamp(34px,5.5vw,64px)] [font-family:var(--font-display)] font-bold leading-[1.04] tracking-[-0.025em] text-[var(--color-text)]">
-          Up and running in 30 seconds
+          Run it on your own machine
         </h2>
         <p className="mt-5 text-[17px] leading-relaxed text-[var(--color-text-muted)]">
-          Clone the repo, start three services, and ingest your first multimodal document.
+          Clone the repo, bring up three services, and ingest your first multimodal document. The
+          quick start walks through it end to end.
         </p>
-        <div className="mt-8 inline-flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-code)] px-5 py-3 [font-family:var(--font-mono)] text-[14px] text-[var(--color-text)]">
-          <span className="text-[var(--color-accent)]">$</span> docker compose up
-        </div>
         <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
           <Button variant="primary" size="lg" onClick={() => { window.location.href = '/docs' }}>
             Read the docs
