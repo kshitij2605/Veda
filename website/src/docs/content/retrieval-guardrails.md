@@ -52,9 +52,18 @@ It is **omitted entirely when the turn made no retrieving tool call** — "did n
 
 `skipped` and `unscreened` are always serialized even at zero, so an operator can tell them apart: `skipped` means there was nothing to screen against, `unscreened` means a verdict is missing.
 
-## Calibration
+## Calibration, and what it does not tell you
 
-Calibrated against a real corpus of **10 PDFs / 149 chunks** of known-clean Japanese business documents. The semantic layer produced **0 false positives out of 149**, with the nearest miss at **0.354** against a **0.60** threshold.
+The threshold was calibrated against a real corpus of **10 PDFs / 149 chunks** of known-clean Japanese business documents. The semantic layer produced **0 false positives out of 149**, with the nearest miss at **0.354** against a **0.60** threshold.
+
+That corpus contained **no planted attacks**, so it measures one thing only: the screen does not fire on ordinary documents. It is not a measurement of how many attacks it catches.
+
+**Treat this as a defence-in-depth layer, not a security boundary.** Detection is cosine similarity between a chunk's embedding and a curated seed list of hostile phrasings, and that has two consequences worth planning around:
+
+- An attack phrased unlike the seed patterns scores low. Canonical "ignore all previous instructions" wording is what it catches best.
+- **A hostile sentence buried in a longer, benign chunk is diluted.** The chunk's embedding is dominated by its bulk, so the similarity stays low even though the instruction is right there in the text.
+
+Our own adversarial testing bears both out. If retrieved-document injection is part of your threat model, pair this with controls that do not depend on recognising the attack — least-privilege tools, human review of what enters the corpus, and treating retrieved text as untrusted input at the prompt layer.
 
 ## What it does not cover
 

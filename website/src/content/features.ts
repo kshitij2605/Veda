@@ -142,7 +142,7 @@ export const FEATURES: Feature[] = [
     accent: 'var(--color-node-2)',
     title: 'Guardrails on what you retrieve',
     blurb:
-      'The dangerous instruction is not always in the prompt — it can be sitting in a PDF someone uploaded. Veda screens retrieved chunks for hostile content at ingest, reusing the embedding it already computed, and drops them at the tool-dispatch choke point so every agent surface is covered at once. Raw search annotates instead of dropping, so recall stays measurable.',
+      'The dangerous instruction is not always in the prompt — it can be sitting in a PDF someone uploaded. Veda screens retrieved chunks at ingest, reusing the embedding it already computed, and drops the ones it flags at the tool-dispatch choke point, so every agent surface is covered by one mechanism. Raw search annotates instead of dropping, so recall stays measurable. A defence-in-depth layer, and the docs are explicit about what it does and does not catch.',
   },
   {
     icon: Database,
