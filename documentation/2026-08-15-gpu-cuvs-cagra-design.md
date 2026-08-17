@@ -221,7 +221,22 @@ All GPU tests are `#[cfg(feature = "gpu_cuvs")]` and `#[ignore]`, since CI has n
 1. **Round trip.** build → search → save → load → search, asserting the two result sets
    are identical. This is the test that would have caught the missing serialization API.
 2. **Concurrency.** Several threads searching one `Arc<CagraIndex>` concurrently, results
-   asserted correct. Verified to fail to compile if the `Mutex` is removed.
+   asserted correct, plus a `assert_send_sync::<CagraIndex>()` compile-time check.
+
+   **Verified by disabling the mechanism** (2026-08-17), rather than asserted: commenting
+   out `unsafe impl Send for CagraInner` fails the build with
+
+   ```text
+   error[E0277]: `*mut cuvsCagraIndex` cannot be sent between threads safely
+     = note: required for `Mutex<Option<CagraInner>>` to implement `Sync`
+    19 | pub trait VectorIndex: Send + Sync {
+   ```
+
+   which confirms the two things that matter: the `unsafe impl` is load-bearing, and
+   `Sync` is **derived** from `Mutex<T: Send>` rather than asserted anywhere. An incorrect
+   `Sync` assertion would be a data race instead of a compile error, so it matters that
+   the compiler is the one concluding it. The file was restored afterwards and matches
+   `HEAD`.
 3. **Recall.** *(This item described a test that did not exist. See "Correction: the
    recall test was fictional" below — it exists now, and finding that it did not is what
    uncovered the recall defect.)* CAGRA results compared against exact search on the same
