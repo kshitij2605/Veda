@@ -86,16 +86,23 @@ use ndarray::{Array2, s};
 
 /// Traversal budget used when a caller does not supply one.
 ///
-/// Deliberately the maximum. CAGRA needs a far larger candidate budget
-/// than HNSW for the same recall on this hardware — measured on a 50k
-/// clustered corpus, recall@10 was 0.48 at 32, 0.59 at 64, 0.72 at 128,
-/// 0.89 at 256 and 1.00 at 512, whereas HNSW reaches 0.995 at its own
-/// default of 96. Defaulting low would mean shipping an index that
-/// silently returns wrong answers, which is exactly the state this
-/// module was found in. The latency this costs is measured and published
-/// in the benchmark rather than avoided by lowering the default.
+/// CAGRA needs a far larger budget than HNSW for the same recall. On a
+/// **1M** clustered corpus, recall@10 measured 0.38 at ef=128, 0.59 at
+/// 256, 0.84 at 512, 0.93 at 768 and 0.96 at 1024 — against HNSW's 0.936
+/// at its own default of 96. 1024 is the point where CAGRA matches HNSW,
+/// so it is the default.
+///
+/// Small corpora are not a useful guide here: at 50k, ef=512 already
+/// reached recall 1.0, and every value looked fine. The budget has to be
+/// chosen against the scale where the graph is actually hard to
+/// traverse.
+///
+/// Defaulting lower would mean shipping an index that silently returns
+/// wrong answers, which is the state this module was found in. The
+/// latency this costs is measured and published in the benchmark rather
+/// than avoided by quietly lowering the default.
 #[cfg(feature = "gpu_cuvs")]
-const DEFAULT_EF: usize = 512;
+const DEFAULT_EF: usize = 1024;
 
 /// Bounds on `itopk_size`.
 ///
@@ -114,6 +121,23 @@ const ITOPK_MAX: usize = 512;
 /// recall bit-identical to 64, so a 32-granularity knob silently lies
 /// about the budget it is applying. Powers of two are the granularity
 /// the library actually honours.
+/// Number of graph nodes expanded per traversal iteration.
+///
+/// cuVS defaults this to 1, which expands a single frontier node per
+/// step. `itopk_size` alone was not enough to make CAGRA correct at
+/// scale: with `itopk_size` pinned at its 512 ceiling, recall@10 on a
+/// clustered 1M corpus was 0.40 at width 1 and only reached HNSW parity
+/// at width 16 (0.9641). It is derived from the same `ef` budget so
+/// callers still have a single dial to turn.
+///
+/// Capped at 16 because that is where CAGRA overtook HNSW's recall on
+/// the measured corpus; wider costs latency for accuracy already in
+/// hand.
+#[cfg(feature = "gpu_cuvs")]
+fn search_width_for(ef: usize) -> usize {
+    (ef / 64).clamp(1, 16)
+}
+
 #[cfg(feature = "gpu_cuvs")]
 fn itopk_for(k: usize, ef: usize) -> usize {
     ef.max(k).max(ITOPK_MIN).next_power_of_two().min(ITOPK_MAX)
@@ -259,6 +283,7 @@ mod ffi {
         neighbors: &ManagedTensor,
         distances: &ManagedTensor,
         itopk: usize,
+        search_width: usize,
     ) -> Result<()> {
         let mut params: cuvs_sys::cuvsCagraSearchParams_t = std::ptr::null_mut();
         // SAFETY: valid out-pointer; destroyed below on every path.
@@ -278,6 +303,7 @@ mod ffi {
         // a live, uniquely-owned params object; nothing else aliases it.
         unsafe {
             (*params).itopk_size = itopk;
+            (*params).search_width = search_width;
         }
         let filter = cuvs_sys::cuvsFilter {
             addr: 0,
@@ -570,6 +596,7 @@ impl VectorIndex for CagraIndex {
             &neighbors_dev,
             &distances_dev,
             itopk_for(k, ef),
+            search_width_for(ef),
         )?;
 
         neighbors_dev
@@ -782,7 +809,10 @@ mod tests {
     #[cfg(feature = "gpu_cuvs")]
     #[ignore]
     fn recall_at_10_is_not_silently_terrible() {
-        const N: usize = 50_000;
+        // Scale matters: the defect this guards was invisible at 50k
+        // (recall 0.99) and severe at 1M (0.40). A cheap small-corpus
+        // recall test would have passed throughout.
+        const N: usize = 1_000_000;
         const DIM: usize = 64;
         const K: usize = 10;
         const FLOOR: f64 = 0.85;
@@ -811,6 +841,15 @@ mod tests {
             }
             total / queries.len() as f64
         };
+
+        for ef in [64usize, 128, 256, 512, 768, 1024] {
+            println!(
+                "ef={ef:<5} itopk={:<5} width={:<3} recall@{K}={:.4}",
+                itopk_for(K, ef),
+                search_width_for(ef),
+                measure(Some(ef))
+            );
+        }
 
         let recall = measure(None);
 
