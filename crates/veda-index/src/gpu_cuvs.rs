@@ -54,6 +54,20 @@
 //! `lib64` directories of `libcuvs`, `libraft`, `librmm` and
 //! `rapids_logger`.
 //!
+//! ## Running the GPU tests
+//!
+//! ```text
+//! cargo test --release -p veda-index --features gpu_cuvs --lib \
+//!     -- --ignored --nocapture --test-threads=1
+//! ```
+//!
+//! `--test-threads=1` is required, not preferred. These tests share one
+//! device, and the recall test builds a 50k-vector index; run in
+//! parallel with the others it fails intermittently on device
+//! contention while passing in isolation. `--release` matters too — the
+//! recall test brute-forces its own ground truth, which is slow in a
+//! debug build.
+//!
 //! See `documentation/2026-08-15-gpu-cuvs-cagra-design.md` for the full
 //! recipe and the measured benchmark.
 
@@ -69,6 +83,41 @@ use crate::traits::{SearchResult, VectorIndex};
 use cuvs::{ManagedTensor, Resources};
 #[cfg(feature = "gpu_cuvs")]
 use ndarray::{Array2, s};
+
+/// Traversal budget used when a caller does not supply one.
+///
+/// Deliberately the maximum. CAGRA needs a far larger candidate budget
+/// than HNSW for the same recall on this hardware — measured on a 50k
+/// clustered corpus, recall@10 was 0.48 at 32, 0.59 at 64, 0.72 at 128,
+/// 0.89 at 256 and 1.00 at 512, whereas HNSW reaches 0.995 at its own
+/// default of 96. Defaulting low would mean shipping an index that
+/// silently returns wrong answers, which is exactly the state this
+/// module was found in. The latency this costs is measured and published
+/// in the benchmark rather than avoided by lowering the default.
+#[cfg(feature = "gpu_cuvs")]
+const DEFAULT_EF: usize = 512;
+
+/// Bounds on `itopk_size`.
+///
+/// The ceiling is empirical, not from the docs: `itopk_size = 1024` makes
+/// `cuvsCagraSearch` fail with a bare `CUVS_ERROR` on this build. 512 is
+/// the largest value that works.
+#[cfg(feature = "gpu_cuvs")]
+const ITOPK_MIN: usize = 32;
+#[cfg(feature = "gpu_cuvs")]
+const ITOPK_MAX: usize = 512;
+
+/// Map a caller's `ef` budget onto a legal `itopk_size`.
+///
+/// Rounded to a **power of two**, not to cuVS's documented multiple of
+/// 32. cuVS rounds the value down internally: `itopk_size = 96` produced
+/// recall bit-identical to 64, so a 32-granularity knob silently lies
+/// about the budget it is applying. Powers of two are the granularity
+/// the library actually honours.
+#[cfg(feature = "gpu_cuvs")]
+fn itopk_for(k: usize, ef: usize) -> usize {
+    ef.max(k).max(ITOPK_MIN).next_power_of_two().min(ITOPK_MAX)
+}
 
 /// Raw cuVS CAGRA FFI.
 ///
@@ -209,6 +258,7 @@ mod ffi {
         queries: &ManagedTensor,
         neighbors: &ManagedTensor,
         distances: &ManagedTensor,
+        itopk: usize,
     ) -> Result<()> {
         let mut params: cuvs_sys::cuvsCagraSearchParams_t = std::ptr::null_mut();
         // SAFETY: valid out-pointer; destroyed below on every path.
@@ -216,6 +266,19 @@ mod ffi {
             unsafe { cuvs_sys::cuvsCagraSearchParamsCreate(&mut params) },
             "cuvsCagraSearchParamsCreate",
         )?;
+        // `itopk_size` is the number of intermediate candidates retained
+        // during traversal — CAGRA's accuracy/speed knob, the analogue of
+        // HNSW's `ef_search`. Leaving it at the library default (64) for
+        // every query regardless of corpus size is what made recall decay
+        // with scale: a fixed candidate budget explores a shrinking
+        // fraction of a growing graph. Measured recall@10 on a clustered
+        // corpus was 0.57 at 100k and 0.11 at 1M before this was set.
+        //
+        // SAFETY: `params` was just created by ParamsCreate above and is
+        // a live, uniquely-owned params object; nothing else aliases it.
+        unsafe {
+            (*params).itopk_size = itopk;
+        }
         let filter = cuvs_sys::cuvsFilter {
             addr: 0,
             type_: cuvs_sys::cuvsFilterType::NO_FILTER,
@@ -446,6 +509,18 @@ impl VectorIndex for CagraIndex {
 
     #[cfg(feature = "gpu_cuvs")]
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
+        self.search_with_ef(query, k, DEFAULT_EF)
+    }
+
+    /// CAGRA's traversal budget, plumbed from `ef` to `itopk_size`.
+    ///
+    /// Overriding this is not optional for a graph index: the trait's
+    /// default implementation discards `ef` and calls `search`, so before
+    /// this existed CAGRA ignored the caller's budget entirely and always
+    /// ran at the cuVS default of 64 candidates — including on a 1M-vector
+    /// corpus, where that yielded recall@10 = 0.11.
+    #[cfg(feature = "gpu_cuvs")]
+    fn search_with_ef(&self, query: &[f32], k: usize, ef: usize) -> Result<Vec<SearchResult>> {
         let dim = self.dimension as usize;
         if query.len() != dim {
             return Err(VedaError::Index(format!(
@@ -455,6 +530,15 @@ impl VectorIndex for CagraIndex {
         }
         if k == 0 {
             return Ok(Vec::new());
+        }
+        // CAGRA cannot return more results than it retains, and the
+        // retention ceiling is a hard library limit. Say so, rather than
+        // letting cuVS fail with a bare CUVS_ERROR carrying no detail.
+        if k > ITOPK_MAX {
+            return Err(VedaError::Index(format!(
+                "gpu_cuvs: k={k} exceeds CAGRA's maximum retained candidates ({ITOPK_MAX}); \
+                 use a CPU index for larger k"
+            )));
         }
 
         let guard = self.lock()?;
@@ -485,6 +569,7 @@ impl VectorIndex for CagraIndex {
             &queries_dev,
             &neighbors_dev,
             &distances_dev,
+            itopk_for(k, ef),
         )?;
 
         neighbors_dev
@@ -641,6 +726,113 @@ mod tests {
             ((s >> 40) as f32) / 16_777_216.0
         };
         (0..n).map(|_| (0..dim).map(|_| next()).collect()).collect()
+    }
+
+    /// Vectors drawn from `clusters` centroids — the shape real embeddings
+    /// have.
+    ///
+    /// Uniform-random vectors in high dimension are all nearly equidistant,
+    /// so the true top-k is close to arbitrary and *every* graph index scores
+    /// near chance on them. A recall assertion over uniform data therefore
+    /// cannot distinguish a healthy index from a broken one. Centroids come
+    /// from a fixed seed so a query set and the corpus share structure.
+    #[cfg(feature = "gpu_cuvs")]
+    fn clustered_vectors(n: usize, dim: usize, clusters: usize, seed: u64) -> Vec<Vec<f32>> {
+        let centroids = deterministic_vectors(clusters, dim, 0xC0FF_EE01);
+        let noise = deterministic_vectors(n, dim, seed);
+        (0..n)
+            .map(|i| {
+                let c = &centroids[i % clusters];
+                (0..dim).map(|d| c[d] + noise[i][d] * 0.05).collect()
+            })
+            .collect()
+    }
+
+    /// Exact top-k by brute force, the ground truth recall is measured against.
+    #[cfg(feature = "gpu_cuvs")]
+    fn exact_top_k(data: &[Vec<f32>], query: &[f32], k: usize) -> Vec<u32> {
+        let mut scored: Vec<(u32, f32)> = data
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let d: f32 = v
+                    .iter()
+                    .zip(query.iter())
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum();
+                (i as u32, d)
+            })
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)));
+        scored.into_iter().take(k).map(|(i, _)| i).collect()
+    }
+
+    /// CAGRA must actually find the true nearest neighbours.
+    ///
+    /// This is the test the design doc claimed existed and did not. The
+    /// pre-existing `build_and_search_finds_the_planted_neighbour` plants an
+    /// exact duplicate of the query and asserts it ranks first — which a
+    /// badly degraded graph still passes, because the query is itself a node
+    /// in the graph. It stayed green while measured recall@10 on a clustered
+    /// 1M corpus was 0.11.
+    ///
+    /// The floor is deliberately well below what a healthy CAGRA achieves:
+    /// this guards against collapse, not against ordinary ANN approximation.
+    #[test]
+    #[cfg(feature = "gpu_cuvs")]
+    #[ignore]
+    fn recall_at_10_is_not_silently_terrible() {
+        const N: usize = 50_000;
+        const DIM: usize = 64;
+        const K: usize = 10;
+        const FLOOR: f64 = 0.85;
+
+        let data = clustered_vectors(N, DIM, 500, 0x0BAD_F00D);
+        let queries = clustered_vectors(64, DIM, 500, 0x1234_ABCD);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+
+        let mut idx = CagraIndex::new(DistanceMetric::Euclidean, DIM as u32);
+        idx.build(&refs).expect("GPU build");
+
+        let truths: Vec<std::collections::HashSet<u32>> = queries
+            .iter()
+            .map(|q| exact_top_k(&data, q, K).into_iter().collect())
+            .collect();
+
+        let measure = |ef: Option<usize>| -> f64 {
+            let mut total = 0.0f64;
+            for (q, truth) in queries.iter().zip(truths.iter()) {
+                let hits = match ef {
+                    Some(e) => idx.search_with_ef(q, K, e).expect("GPU search"),
+                    None => idx.search(q, K).expect("GPU search"),
+                };
+                let found = hits.iter().filter(|r| truth.contains(&r.id)).count();
+                total += found as f64 / K as f64;
+            }
+            total / queries.len() as f64
+        };
+
+        let recall = measure(None);
+
+        assert!(
+            recall >= FLOOR,
+            "recall@{K} = {recall:.4} on {N} clustered vectors, below the {FLOOR} floor. \
+             CAGRA is returning fast wrong answers."
+        );
+
+        // A larger traversal budget must actually produce better recall.
+        // This is the assertion that would have caught the original
+        // defect: `search_with_ef` was not overridden, so `ef` was
+        // discarded and every query ran at the library default no matter
+        // what the caller asked for. Recall was then flat in `ef` — which
+        // is what this fails on.
+        let low = measure(Some(ITOPK_MIN));
+        assert!(
+            recall > low,
+            "recall@{K} did not improve with the traversal budget \
+             (ef={ITOPK_MIN} gives {low:.4}, default ef={DEFAULT_EF} gives {recall:.4}). \
+             `ef` is not reaching cuVS."
+        );
     }
 
     #[test]
