@@ -60,8 +60,20 @@ export function Hero() {
             View on GitHub
           </Button>
         </div>
-        <div className="mt-8 inline-flex w-fit items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[rgba(13,16,21,0.7)] px-4 py-2.5 [font-family:var(--font-mono)] text-[13px] text-[var(--color-text-muted)]">
-          <span className="text-[var(--color-accent)]">$</span> docker compose up
+        {/* The only install snippet on the page. It must be runnable as shown:
+            compose builds Veda from source, so the clone is not optional. */}
+        <div className="mt-8 w-fit rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[rgba(13,16,21,0.7)] px-4 py-3 [font-family:var(--font-mono)] text-[13px] text-[var(--color-text-muted)]">
+          <div className="flex items-center gap-2">
+            <span className="text-[var(--color-accent)]">$</span>
+            <span>git clone https://github.com/kshitij2605/Veda.git &amp;&amp; cd Veda</span>
+          </div>
+          <div className="mt-1.5 flex items-center gap-2">
+            <span className="text-[var(--color-accent)]">$</span>
+            <span>docker compose up</span>
+          </div>
+          <p className="mt-2.5 text-[12px] leading-relaxed text-[var(--color-text-subtle)] [font-family:var(--font-sans)]">
+            The first run builds the image from source, so allow a few minutes.
+          </p>
         </div>
       </div>
     </section>

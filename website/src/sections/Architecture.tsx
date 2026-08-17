@@ -50,9 +50,18 @@ export function Architecture() {
               </li>
             ))}
           </ul>
-          <div className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-code)] px-4 py-3 [font-family:var(--font-mono)] text-[13px] text-[var(--color-text)]">
-            <span className="text-[var(--color-accent)]">$</span> docker compose up
-          </div>
+          {/* The install command lives once, in the hero. Point here instead of
+              repeating a snippet that is incomplete without the clone step. */}
+          <p className="mt-6 text-[14px] text-[var(--color-text-muted)]">
+            One compose file brings all three up together —{' '}
+            <a
+              href="/docs/quickstart"
+              className="text-[var(--color-accent)] underline decoration-[rgba(255,178,36,0.4)] underline-offset-4 transition-colors hover:decoration-[var(--color-accent)]"
+            >
+              see the quick start
+            </a>
+            .
+          </p>
         </div>
 
         <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)]">

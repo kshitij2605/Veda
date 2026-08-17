@@ -1,8 +1,17 @@
 # Quick start
 
-Get a working Veda cluster and run your first vector search in a few minutes. The only prerequisite is Docker with Compose.
+Get a working Veda cluster and run your first vector search in a few minutes. You need **Docker with Compose** and **git** — there is no published Veda image yet, so Compose builds the server from source in this repo.
 
 ![Two API calls against a live Veda — create a collection, insert three sentences — then a search in plain English finds the right one without sharing a single keyword.](/videos/quickstart.mp4)
+
+## Get the repository
+
+Compose builds Veda from this repo, so clone it first — `docker compose` has nothing to read otherwise.
+
+```bash
+git clone https://github.com/kshitij2605/Veda.git
+cd Veda
+```
 
 ## Start the core services
 
@@ -13,6 +22,8 @@ cp .env.example .env
 # Core services (Veda + MinIO + NATS)
 docker compose up
 ```
+
+The **first** `up` compiles the server, so expect it to take a few minutes and a few GB of disk. Later starts reuse the built image and come up in seconds.
 
 This starts the Veda server, MinIO blob storage, and the NATS message queue:
 
