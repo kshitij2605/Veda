@@ -72,4 +72,4 @@ Published rather than discovered later:
 - A dense query's `field` is not validated against the registered `vector_field` (an internal collection does validate it).
 - A hit's row id appears both as `SearchHit.id` and again as a column inside `fields`.
 - External hits carry no `_guardrail_class` annotation, so [retrieval guardrails](/docs/retrieval-guardrails) do not annotate them.
-- **The Niriksha Search page cannot query an external collection.** It builds its vector-field picker from the collection's `fields`, which is empty by design here — the schema lives under `external`. Query external collections through the API for now.
+- In Niriksha, only **Dense** applies to an external collection. The Sparse, BM25 and Hybrid modes are still offered but the server refuses them with a `400`, since Parquet carries no inverted or sparse index.

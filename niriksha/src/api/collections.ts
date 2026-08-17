@@ -27,11 +27,26 @@ export interface CollectionSummary {
 /**
  * Full schema for one collection, returned by GET /v1/collections/{name}.
  */
+/**
+ * Read-in-place source on an external (Parquet) collection. Present only
+ * when the collection was registered with `external`; such a collection
+ * reports an EMPTY `fields` array, because its schema lives in the Parquet
+ * footer rather than in Veda's own schema.
+ */
+export interface ExternalSource {
+  format: string
+  uri: string
+  id_field: string
+  vector_field: string
+  metric?: string
+}
+
 export interface CollectionInfo {
   name: string
   fields: FieldSchema[]
   shard_count: number
   replication_factor: number
+  external?: ExternalSource
 }
 
 export interface HealthResponse {

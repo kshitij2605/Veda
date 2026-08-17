@@ -127,9 +127,11 @@ export function SearchPlayground() {
         setSchema(data)
         const firstVec = data.fields.find((f) => f.type === 'vector')
         const firstStr = data.fields.find((f) => f.type === 'string')
+        // Fall back to the external source's vector column (see `vectorFields`).
+        const vecName = firstVec?.name || data.external?.vector_field || ''
         setState((prev) => ({
           ...prev,
-          vectorField: prev.vectorField || firstVec?.name || '',
+          vectorField: prev.vectorField || vecName,
           bm25Field: prev.bm25Field || firstStr?.name || '',
           rerankField: prev.rerankField || firstStr?.name || '',
         }))
@@ -138,10 +140,22 @@ export function SearchPlayground() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.collection])
 
-  const vectorFields = useMemo(
-    () => schema?.fields.filter((f) => f.type === 'vector') ?? [],
-    [schema],
-  )
+  // An external (read-in-place Parquet) collection reports an empty `fields`
+  // array — its schema lives in the Parquet footer, and only the vector
+  // column is named, under `external`. Without this the field picker stays
+  // empty and the collection cannot be queried from the UI at all.
+  const vectorFields = useMemo(() => {
+    const declared = schema?.fields.filter((f) => f.type === 'vector') ?? []
+    if (declared.length > 0 || !schema?.external?.vector_field) return declared
+    return [
+      {
+        name: schema.external.vector_field,
+        type: 'vector',
+        filterable: false,
+        metric: schema.external.metric?.toLowerCase(),
+      } as FieldSchema,
+    ]
+  }, [schema])
   const stringFields = useMemo(
     () => schema?.fields.filter((f) => f.type === 'string') ?? [],
     [schema],
