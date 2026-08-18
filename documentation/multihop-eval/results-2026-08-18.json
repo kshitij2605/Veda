@@ -1,0 +1,157 @@
+[
+  {
+    "id": "ctl-1",
+    "hops": 1,
+    "ok": true,
+    "code": 200,
+    "secs": 1.7,
+    "steps": 3,
+    "tool_calls": 2,
+    "q": "Where is Nordwind Components headquartered?",
+    "answer": "Estonia",
+    "must": [
+      "estonia"
+    ],
+    "must_not": []
+  },
+  {
+    "id": "ctl-2",
+    "hops": 1,
+    "ok": true,
+    "code": 200,
+    "secs": 1.7,
+    "steps": 3,
+    "tool_calls": 2,
+    "q": "Which plant assembles Product Halcyon?",
+    "answer": "Riga",
+    "must": [
+      "riga"
+    ],
+    "must_not": []
+  },
+  {
+    "id": "ctl-3",
+    "hops": 1,
+    "ok": true,
+    "code": 200,
+    "secs": 1.8,
+    "steps": 3,
+    "tool_calls": 2,
+    "q": "Who signed the Q1 master service agreement?",
+    "answer": "Dana Whitfield",
+    "must": [
+      "dana whitfield"
+    ],
+    "must_not": []
+  },
+  {
+    "id": "ctl-4",
+    "hops": 1,
+    "ok": true,
+    "code": 200,
+    "secs": 1.8,
+    "steps": 3,
+    "tool_calls": 2,
+    "q": "Which countries had tariff changes in the 2026 schedule?",
+    "answer": "Estonia and Chile",
+    "must": [
+      "estonia",
+      "chile"
+    ],
+    "must_not": []
+  },
+  {
+    "id": "mh-1",
+    "hops": 2,
+    "ok": false,
+    "code": 200,
+    "secs": 1.7,
+    "steps": 3,
+    "tool_calls": 2,
+    "q": "Which of our suppliers are headquartered in countries where the 2026 tariff schedule changed? List the supplier names.",
+    "answer": "Nordwind Components, Meridian Alloys",
+    "must": [
+      "nordwind",
+      "braewick",
+      "meridian"
+    ],
+    "must_not": [
+      "kaito"
+    ]
+  },
+  {
+    "id": "mh-2",
+    "hops": 2,
+    "ok": true,
+    "code": 200,
+    "secs": 2.5,
+    "steps": 5,
+    "tool_calls": 4,
+    "q": "Did the person who signed the Q1 master service agreement also appear in the Q3 incident report? Answer yes or no.",
+    "answer": "no",
+    "must": [
+      "no"
+    ],
+    "must_not": []
+  },
+  {
+    "id": "mh-3",
+    "hops": 2,
+    "ok": true,
+    "code": 200,
+    "secs": 3.1,
+    "steps": 5,
+    "tool_calls": 4,
+    "q": "Did the person who signed the Q2 master service agreement also appear in the Q3 incident report? Answer yes or no.",
+    "answer": "yes",
+    "must": [
+      "yes"
+    ],
+    "must_not": []
+  },
+  {
+    "id": "mh-4",
+    "hops": 2,
+    "ok": true,
+    "code": 200,
+    "secs": 1.6,
+    "steps": 3,
+    "tool_calls": 2,
+    "q": "Is the plant that assembles Product Halcyon certified to ISO 14001? Answer yes or no.",
+    "answer": "yes",
+    "must": [
+      "yes"
+    ],
+    "must_not": []
+  },
+  {
+    "id": "mh-5",
+    "hops": 2,
+    "ok": true,
+    "code": 200,
+    "secs": 3.0,
+    "steps": 5,
+    "tool_calls": 4,
+    "q": "Is the plant that assembles Product Vesper certified to ISO 14001? Answer yes or no.",
+    "answer": "No",
+    "must": [
+      "no"
+    ],
+    "must_not": []
+  },
+  {
+    "id": "mh-6",
+    "hops": 2,
+    "ok": true,
+    "code": 200,
+    "secs": 2.7,
+    "steps": 3,
+    "tool_calls": 2,
+    "q": "Which supplier of gasket assemblies is in a country affected by the 2026 tariff change? Give the supplier name.",
+    "answer": "Braewick Seals",
+    "must": [
+      "braewick"
+    ],
+    "must_not": []
+  }
+]

@@ -1,0 +1,290 @@
+[
+  {
+    "arm": "A",
+    "id": "negative-1",
+    "rep": 0,
+    "ok": false,
+    "secs": 8.2,
+    "searches": 4,
+    "answer": "Based on the search results, the suppliers and their headquarters are:\n- Nordwind Components: Estonia\n- Meridian Alloys: Chile\n- Kaito Fasteners: Vietnam\n- Braewick Seals: Estonia\n\nNone of the suppliers listed are headqu"
+  },
+  {
+    "arm": "A",
+    "id": "negative-1",
+    "rep": 1,
+    "ok": true,
+    "secs": 7.4,
+    "searches": 4,
+    "answer": "none"
+  },
+  {
+    "arm": "A",
+    "id": "negative-1",
+    "rep": 2,
+    "ok": true,
+    "secs": 5.5,
+    "searches": 4,
+    "answer": "none"
+  },
+  {
+    "arm": "A",
+    "id": "negative-1",
+    "rep": 3,
+    "ok": false,
+    "secs": 11.0,
+    "searches": 8,
+    "answer": "I reached the maximum number of reasoning steps before producing a final answer. Here is what I gathered so far in the steps."
+  },
+  {
+    "arm": "A",
+    "id": "negative-2",
+    "rep": 0,
+    "ok": true,
+    "secs": 4.3,
+    "searches": 4,
+    "answer": "unknown"
+  },
+  {
+    "arm": "A",
+    "id": "negative-2",
+    "rep": 1,
+    "ok": true,
+    "secs": 5.8,
+    "searches": 5,
+    "answer": "unknown"
+  },
+  {
+    "arm": "A",
+    "id": "negative-2",
+    "rep": 2,
+    "ok": true,
+    "secs": 6.9,
+    "searches": 5,
+    "answer": "unknown"
+  },
+  {
+    "arm": "A",
+    "id": "negative-2",
+    "rep": 3,
+    "ok": true,
+    "secs": 5.4,
+    "searches": 3,
+    "answer": "The search results continue to show information about Q1 and Q2 master service agreements, but there is no document that explicitly states who signed the Q4 master service agreement. The Q4-related documents mention serv"
+  },
+  {
+    "arm": "A",
+    "id": "one2many-1",
+    "rep": 0,
+    "ok": true,
+    "secs": 2.9,
+    "searches": 2,
+    "answer": "Meridian Alloys\nNordwind Components\nBraewick Seals"
+  },
+  {
+    "arm": "A",
+    "id": "one2many-1",
+    "rep": 1,
+    "ok": false,
+    "secs": 3.3,
+    "searches": 2,
+    "answer": "Meridian Alloys\nNordwind Components"
+  },
+  {
+    "arm": "A",
+    "id": "one2many-1",
+    "rep": 2,
+    "ok": true,
+    "secs": 3.4,
+    "searches": 2,
+    "answer": "Nordwind Components\nBraewick Seals\nMeridian Alloys"
+  },
+  {
+    "arm": "A",
+    "id": "one2many-1",
+    "rep": 3,
+    "ok": true,
+    "secs": 5.7,
+    "searches": 3,
+    "answer": "Nordwind Components\nBraewick Seals\nMeridian Alloys"
+  },
+  {
+    "arm": "A",
+    "id": "one2one-2",
+    "rep": 0,
+    "ok": true,
+    "secs": 3.9,
+    "searches": 2,
+    "answer": "No"
+  },
+  {
+    "arm": "A",
+    "id": "one2one-2",
+    "rep": 1,
+    "ok": true,
+    "secs": 3.5,
+    "searches": 2,
+    "answer": "no"
+  },
+  {
+    "arm": "A",
+    "id": "one2one-2",
+    "rep": 2,
+    "ok": true,
+    "secs": 3.1,
+    "searches": 2,
+    "answer": "no"
+  },
+  {
+    "arm": "A",
+    "id": "one2one-2",
+    "rep": 3,
+    "ok": true,
+    "secs": 3.2,
+    "searches": 2,
+    "answer": "no"
+  },
+  {
+    "arm": "B",
+    "id": "negative-1",
+    "rep": 0,
+    "ok": false,
+    "secs": 6.0,
+    "searches": 4,
+    "answer": "Based on the search results, the suppliers mentioned and their headquarters are:\n- Nordwind Components: Estonia\n- Meridian Alloys: Chile\n- Kaito Fasteners: Vietnam\n- Braewick Seals: Estonia\n\nNo supplier is listed as bein"
+  },
+  {
+    "arm": "B",
+    "id": "negative-1",
+    "rep": 1,
+    "ok": true,
+    "secs": 6.1,
+    "searches": 4,
+    "answer": "none"
+  },
+  {
+    "arm": "B",
+    "id": "negative-1",
+    "rep": 2,
+    "ok": false,
+    "secs": 16.1,
+    "searches": 14,
+    "answer": "I reached the maximum number of reasoning steps before producing a final answer. Here is what I gathered so far in the steps."
+  },
+  {
+    "arm": "B",
+    "id": "negative-1",
+    "rep": 3,
+    "ok": true,
+    "secs": 5.4,
+    "searches": 4,
+    "answer": "none"
+  },
+  {
+    "arm": "B",
+    "id": "negative-2",
+    "rep": 0,
+    "ok": true,
+    "secs": 5.8,
+    "searches": 4,
+    "answer": "unknown"
+  },
+  {
+    "arm": "B",
+    "id": "negative-2",
+    "rep": 1,
+    "ok": true,
+    "secs": 5.1,
+    "searches": 3,
+    "answer": "unknown"
+  },
+  {
+    "arm": "B",
+    "id": "negative-2",
+    "rep": 2,
+    "ok": true,
+    "secs": 5.2,
+    "searches": 3,
+    "answer": "unknown"
+  },
+  {
+    "arm": "B",
+    "id": "negative-2",
+    "rep": 3,
+    "ok": true,
+    "secs": 4.2,
+    "searches": 3,
+    "answer": "unknown"
+  },
+  {
+    "arm": "B",
+    "id": "one2many-1",
+    "rep": 0,
+    "ok": false,
+    "secs": 2.9,
+    "searches": 2,
+    "answer": "Meridian Alloys\nNordwind Components"
+  },
+  {
+    "arm": "B",
+    "id": "one2many-1",
+    "rep": 1,
+    "ok": true,
+    "secs": 4.0,
+    "searches": 3,
+    "answer": "Nordwind Components\nBraewick Seals\nMeridian Alloys"
+  },
+  {
+    "arm": "B",
+    "id": "one2many-1",
+    "rep": 2,
+    "ok": false,
+    "secs": 12.3,
+    "searches": 8,
+    "answer": "That search didn't return the supplier documents directly. Let me try searching for the specific supplier document IDs I found earlier to see if there are more supplier documents.\n\n"
+  },
+  {
+    "arm": "B",
+    "id": "one2many-1",
+    "rep": 3,
+    "ok": true,
+    "secs": 2.8,
+    "searches": 2,
+    "answer": "Meridian Alloys, Nordwind Components, Braewick Seals"
+  },
+  {
+    "arm": "B",
+    "id": "one2one-2",
+    "rep": 0,
+    "ok": true,
+    "secs": 2.4,
+    "searches": 2,
+    "answer": "No"
+  },
+  {
+    "arm": "B",
+    "id": "one2one-2",
+    "rep": 1,
+    "ok": true,
+    "secs": 2.7,
+    "searches": 2,
+    "answer": "no"
+  },
+  {
+    "arm": "B",
+    "id": "one2one-2",
+    "rep": 2,
+    "ok": true,
+    "secs": 2.9,
+    "searches": 2,
+    "answer": "no"
+  },
+  {
+    "arm": "B",
+    "id": "one2one-2",
+    "rep": 3,
+    "ok": true,
+    "secs": 2.8,
+    "searches": 2,
+    "answer": "no"
+  }
+]

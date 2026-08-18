@@ -1,0 +1,332 @@
+[
+  {
+    "id": "ctl-1",
+    "kind": "control",
+    "rep": 0,
+    "ok": true,
+    "secs": 2.3,
+    "searches": 1,
+    "answer": "Estonia",
+    "q": "Where is Nordwind Components headquartered?"
+  },
+  {
+    "id": "ctl-1",
+    "kind": "control",
+    "rep": 1,
+    "ok": true,
+    "secs": 1.5,
+    "searches": 1,
+    "answer": "Estonia",
+    "q": "Where is Nordwind Components headquartered?"
+  },
+  {
+    "id": "ctl-1",
+    "kind": "control",
+    "rep": 2,
+    "ok": true,
+    "secs": 1.7,
+    "searches": 1,
+    "answer": "Estonia",
+    "q": "Where is Nordwind Components headquartered?"
+  },
+  {
+    "id": "ctl-2",
+    "kind": "control",
+    "rep": 0,
+    "ok": true,
+    "secs": 1.6,
+    "searches": 1,
+    "answer": "Riga",
+    "q": "Which plant assembles Product Halcyon?"
+  },
+  {
+    "id": "ctl-2",
+    "kind": "control",
+    "rep": 1,
+    "ok": true,
+    "secs": 6.8,
+    "searches": 1,
+    "answer": "Riga",
+    "q": "Which plant assembles Product Halcyon?"
+  },
+  {
+    "id": "ctl-2",
+    "kind": "control",
+    "rep": 2,
+    "ok": true,
+    "secs": 1.6,
+    "searches": 1,
+    "answer": "Riga",
+    "q": "Which plant assembles Product Halcyon?"
+  },
+  {
+    "id": "ctl-3",
+    "kind": "control",
+    "rep": 0,
+    "ok": true,
+    "secs": 1.5,
+    "searches": 1,
+    "answer": "Dana Whitfield",
+    "q": "Who signed the Q1 master service agreement?"
+  },
+  {
+    "id": "ctl-3",
+    "kind": "control",
+    "rep": 1,
+    "ok": true,
+    "secs": 1.6,
+    "searches": 1,
+    "answer": "Dana Whitfield",
+    "q": "Who signed the Q1 master service agreement?"
+  },
+  {
+    "id": "ctl-3",
+    "kind": "control",
+    "rep": 2,
+    "ok": true,
+    "secs": 1.6,
+    "searches": 1,
+    "answer": "Dana Whitfield",
+    "q": "Who signed the Q1 master service agreement?"
+  },
+  {
+    "id": "one2one-1",
+    "kind": "one-to-one",
+    "rep": 0,
+    "ok": true,
+    "secs": 2.7,
+    "searches": 2,
+    "answer": "yes",
+    "q": "Did the person who signed the Q2 master service agreement also appear in the Q3 incident report? Answer yes or no."
+  },
+  {
+    "id": "one2one-1",
+    "kind": "one-to-one",
+    "rep": 1,
+    "ok": true,
+    "secs": 2.8,
+    "searches": 2,
+    "answer": "yes",
+    "q": "Did the person who signed the Q2 master service agreement also appear in the Q3 incident report? Answer yes or no."
+  },
+  {
+    "id": "one2one-1",
+    "kind": "one-to-one",
+    "rep": 2,
+    "ok": true,
+    "secs": 2.6,
+    "searches": 2,
+    "answer": "yes",
+    "q": "Did the person who signed the Q2 master service agreement also appear in the Q3 incident report? Answer yes or no."
+  },
+  {
+    "id": "one2one-2",
+    "kind": "one-to-one",
+    "rep": 0,
+    "ok": true,
+    "secs": 2.7,
+    "searches": 2,
+    "answer": "No",
+    "q": "Did the person who signed the Q1 master service agreement also appear in the Q3 incident report? Answer yes or no."
+  },
+  {
+    "id": "one2one-2",
+    "kind": "one-to-one",
+    "rep": 1,
+    "ok": true,
+    "secs": 2.8,
+    "searches": 2,
+    "answer": "no",
+    "q": "Did the person who signed the Q1 master service agreement also appear in the Q3 incident report? Answer yes or no."
+  },
+  {
+    "id": "one2one-2",
+    "kind": "one-to-one",
+    "rep": 2,
+    "ok": true,
+    "secs": 2.8,
+    "searches": 2,
+    "answer": "no",
+    "q": "Did the person who signed the Q1 master service agreement also appear in the Q3 incident report? Answer yes or no."
+  },
+  {
+    "id": "one2one-3",
+    "kind": "one-to-one",
+    "rep": 0,
+    "ok": true,
+    "secs": 2.7,
+    "searches": 2,
+    "answer": "yes",
+    "q": "Is the plant that assembles Product Halcyon certified to ISO 14001? Answer yes or no."
+  },
+  {
+    "id": "one2one-3",
+    "kind": "one-to-one",
+    "rep": 1,
+    "ok": true,
+    "secs": 1.8,
+    "searches": 1,
+    "answer": "yes",
+    "q": "Is the plant that assembles Product Halcyon certified to ISO 14001? Answer yes or no."
+  },
+  {
+    "id": "one2one-3",
+    "kind": "one-to-one",
+    "rep": 2,
+    "ok": true,
+    "secs": 3.5,
+    "searches": 2,
+    "answer": "yes",
+    "q": "Is the plant that assembles Product Halcyon certified to ISO 14001? Answer yes or no."
+  },
+  {
+    "id": "one2one-4",
+    "kind": "one-to-one",
+    "rep": 0,
+    "ok": true,
+    "secs": 3.6,
+    "searches": 2,
+    "answer": "No",
+    "q": "Is the plant that assembles Product Vesper certified to ISO 14001? Answer yes or no."
+  },
+  {
+    "id": "one2one-4",
+    "kind": "one-to-one",
+    "rep": 1,
+    "ok": true,
+    "secs": 3.9,
+    "searches": 2,
+    "answer": "No",
+    "q": "Is the plant that assembles Product Vesper certified to ISO 14001? Answer yes or no."
+  },
+  {
+    "id": "one2one-4",
+    "kind": "one-to-one",
+    "rep": 2,
+    "ok": true,
+    "secs": 3.7,
+    "searches": 2,
+    "answer": "No",
+    "q": "Is the plant that assembles Product Vesper certified to ISO 14001? Answer yes or no."
+  },
+  {
+    "id": "one2many-1",
+    "kind": "one-to-many",
+    "rep": 0,
+    "ok": true,
+    "secs": 4.6,
+    "searches": 3,
+    "answer": "Nordwind Components\nBraewick Seals\nMeridian Alloys",
+    "q": "Which of our suppliers are headquartered in countries where the 2026 tariff schedule changed? List every supplier name."
+  },
+  {
+    "id": "one2many-1",
+    "kind": "one-to-many",
+    "rep": 1,
+    "ok": true,
+    "secs": 3.5,
+    "searches": 2,
+    "answer": "Meridian Alloys\nNordwind Components\nBraewick Seals",
+    "q": "Which of our suppliers are headquartered in countries where the 2026 tariff schedule changed? List every supplier name."
+  },
+  {
+    "id": "one2many-1",
+    "kind": "one-to-many",
+    "rep": 2,
+    "ok": true,
+    "secs": 3.6,
+    "searches": 2,
+    "answer": "Based on the search results:\n1.  The 2026 tariff schedule changed for **Estonia** and **Chile**.\n2.  **Nordwind Components** is headquartered in **Estonia**.\n3.  **Braewick Seals** is headquartered in",
+    "q": "Which of our suppliers are headquartered in countries where the 2026 tariff schedule changed? List every supplier name."
+  },
+  {
+    "id": "one2many-2",
+    "kind": "one-to-many",
+    "rep": 0,
+    "ok": true,
+    "secs": 4.0,
+    "searches": 3,
+    "answer": "Based on the search results, the suppliers headquartered in Estonia are:\n\n1.  **Nordwind Components**\n2.  **Braewick Seals**",
+    "q": "List every supplier headquartered in Estonia."
+  },
+  {
+    "id": "one2many-2",
+    "kind": "one-to-many",
+    "rep": 1,
+    "ok": true,
+    "secs": 1.6,
+    "searches": 1,
+    "answer": "Nordwind Components, Braewick Seals",
+    "q": "List every supplier headquartered in Estonia."
+  },
+  {
+    "id": "one2many-2",
+    "kind": "one-to-many",
+    "rep": 2,
+    "ok": true,
+    "secs": 1.5,
+    "searches": 1,
+    "answer": "Nordwind Components, Braewick Seals",
+    "q": "List every supplier headquartered in Estonia."
+  },
+  {
+    "id": "negative-1",
+    "kind": "negative",
+    "rep": 0,
+    "ok": false,
+    "secs": 7.3,
+    "searches": 5,
+    "answer": "Based on the search results, the suppliers mentioned and their headquarters are:\n- **Nordwind Components**: headquartered in **Estonia**\n- **Meridian Alloys**: headquartered in **Chile**\n- **Braewick ",
+    "q": "Which supplier is headquartered in Poland? If no supplier is headquartered there, answer exactly: none."
+  },
+  {
+    "id": "negative-1",
+    "kind": "negative",
+    "rep": 1,
+    "ok": false,
+    "secs": 9.2,
+    "searches": 6,
+    "answer": "Based on the search results, the suppliers and their headquarters are:\n- Nordwind Components: Estonia\n- Meridian Alloys: Chile\n- Kaito Fasteners: Vietnam\n- Braewick Seals: Estonia\n\nNone of the supplie",
+    "q": "Which supplier is headquartered in Poland? If no supplier is headquartered there, answer exactly: none."
+  },
+  {
+    "id": "negative-1",
+    "kind": "negative",
+    "rep": 2,
+    "ok": true,
+    "secs": 9.4,
+    "searches": 6,
+    "answer": "none",
+    "q": "Which supplier is headquartered in Poland? If no supplier is headquartered there, answer exactly: none."
+  },
+  {
+    "id": "negative-2",
+    "kind": "negative",
+    "rep": 0,
+    "ok": true,
+    "secs": 13.5,
+    "searches": 5,
+    "answer": "unknown",
+    "q": "Who signed the Q4 master service agreement? If the corpus does not say, answer exactly: unknown."
+  },
+  {
+    "id": "negative-2",
+    "kind": "negative",
+    "rep": 1,
+    "ok": false,
+    "secs": 6.2,
+    "searches": 3,
+    "answer": "The search results do not contain any information about who signed the Q4 master service agreement. The corpus mentions Q1 and Q2 MSAs being signed by Dana Whitfield and Owen Marsh respectively, but t",
+    "q": "Who signed the Q4 master service agreement? If the corpus does not say, answer exactly: unknown."
+  },
+  {
+    "id": "negative-2",
+    "kind": "negative",
+    "rep": 2,
+    "ok": true,
+    "secs": 6.5,
+    "searches": 4,
+    "answer": "unknown",
+    "q": "Who signed the Q4 master service agreement? If the corpus does not say, answer exactly: unknown."
+  }
+]
