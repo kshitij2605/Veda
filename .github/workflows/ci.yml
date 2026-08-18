@@ -6,7 +6,7 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    # Weekly Sunday 03:00 UTC — picks up upstream lindera / cuvs / etc.
+    # Weekly Sunday 03:00 UTC — picks up upstream cuvs / etc.
     # breakage in the optional-feature matrices.
     - cron: '0 3 * * 0'
 
@@ -38,11 +38,6 @@ jobs:
 
   # Per-feature check so the optional cargo features actually compile.
   # gpu_nim is cheap (one HTTP-client dep, no network at build time).
-  # lindera is intentionally NOT in this matrix because its `ipadic`
-  # feature pulls a build-time HTTPS download from lindera.s3 that
-  # CI runners may not be able to reach; see the dedicated
-  # `lindera-feature` job below which gates on a manual workflow
-  # dispatch.
   check-features:
     name: cargo check (${{ matrix.feature }})
     runs-on: ubuntu-latest
@@ -63,28 +58,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --features ${{ matrix.feature }}
-
-  # Lindera feature compile — runs on workflow_dispatch and weekly cron
-  # only, so a sandbox without outbound network doesn't fail the
-  # default CI pipeline. When this runs it both verifies the lindera
-  # 0.32 API surface still matches our wrapper and exercises the dict
-  # download path.
-  lindera-feature:
-    name: cargo check (lindera_tokenizer)
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Free up disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          sudo docker image prune --all --force || true
-          df -h /
-      - uses: dtolnay/rust-toolchain@1.96.0
-      - name: Install protoc (prost-build needs it for veda-log)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --features veda-storage/lindera_tokenizer
 
   # In-binary CAGRA GPU index compile.
   #
@@ -107,7 +80,7 @@ jobs:
   # layout (nvidia/cuda_runtime/, nvidia/cublas/, ...) that CMake's
   # FindCUDAToolkit does not recognise. Installing the real toolkit is
   # ~3 GB on a runner this workflow already has to scrub disk space to
-  # keep alive. So this follows the same pattern as `lindera-feature`
+  # keep alive. So this follows the same schedule-and-dispatch pattern
   # above: schedule + manual dispatch rather than every push.
   #
   # This is weaker than it should be. It would become blocking the moment

@@ -66,13 +66,16 @@ pub enum TokenizerKind {
     /// smaller postings; fine for ASCII / Latin-script workloads where
     /// CJK is rare.
     Whitespace,
-    /// Lindera-backed morphological tokenizer (Kuromoji-compatible
-    /// IPADIC). Activated only when the `lindera_tokenizer` cargo
-    /// feature is enabled — otherwise this variant deserializes
-    /// successfully but tokenization falls back to `CjkBigram` at
-    /// runtime, with a one-line warning logged the first time it's
-    /// touched. That keeps a segment serialized with `lindera` from
-    /// breaking a binary built without the feature.
+    /// Retired. The lindera (Kuromoji-compatible IPADIC) tokenizer was
+    /// removed: its `ipadic` feature pulled a build-time HTTPS download
+    /// from lindera.s3, which broke offline builds and forced a weekly
+    /// scheduled CI job to keep the wrapper honest.
+    ///
+    /// The variant itself is retained because it is persisted in segment
+    /// metadata as `"lindera"` — removing it would make any segment built
+    /// with this setting fail to deserialize. It now always tokenizes as
+    /// `CjkBigram`, which is what a binary built without the (previously
+    /// optional, default-off) feature already did.
     Lindera,
 }
 
@@ -853,76 +856,24 @@ fn run_tokenizer(kind: TokenizerKind, text: &str) -> Vec<String> {
     }
 }
 
-/// Lindera-backed morphological tokenizer.
+/// Compatibility shim for the retired lindera tokenizer.
 ///
-/// Two-layer activation:
-/// 1. The `lindera_tokenizer` cargo feature pulls the lindera crate
-///    into the binary. Without it, this function is a one-line stub
-///    that warns and falls back to `tokenize_cjk_bigram`.
-/// 2. Even with the feature on, the operator must supply a dict by
-///    setting `VEDA_LINDERA_DICT_PATH` to a directory containing a
-///    pre-built IPADIC / UniDic / etc. lindera dictionary. We
-///    deliberately do not bundle one — auto-downloading dicts at
-///    build time breaks sandboxed builds.
+/// A segment whose metadata says `"lindera"` still loads and still
+/// searches; its text is tokenized with `cjk_bigram`, exactly as a binary
+/// built without the (default-off) feature already did. Scores for such a
+/// segment therefore do not change on upgrade.
 ///
-/// When neither layer is satisfied, the fallback path keeps segments
-/// built or queried by feature-off binaries readable.
-#[cfg(feature = "lindera_tokenizer")]
-fn tokenize_lindera(text: &str) -> Vec<String> {
-    use std::sync::OnceLock;
-    static TOK: OnceLock<Option<lindera::tokenizer::Tokenizer>> = OnceLock::new();
-    let tok_opt = TOK.get_or_init(|| {
-        let path = match std::env::var("VEDA_LINDERA_DICT_PATH") {
-            Ok(p) if !p.is_empty() => std::path::PathBuf::from(p),
-            _ => {
-                tracing::warn!(
-                    "lindera_tokenizer feature is on but VEDA_LINDERA_DICT_PATH is unset; \
-                     falling back to cjk_bigram. Point it at a lindera-compatible dict \
-                     directory (e.g. IPADIC extracted from \
-                     https://lindera.s3.ap-northeast-1.amazonaws.com/mecab-ipadic-2.7.0-20070801.tar.gz)."
-                );
-                return None;
-            }
-        };
-        match lindera::tokenizer::Tokenizer::from_config(
-            lindera::tokenizer::TokenizerConfig {
-                dictionary: lindera::dictionary::DictionaryConfig {
-                    kind: None,
-                    path: Some(path),
-                },
-                user_dictionary: None,
-                mode: lindera::mode::Mode::Normal,
-            },
-        ) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                tracing::error!(error = %e, "lindera dict load failed; falling back to cjk_bigram");
-                None
-            }
-        }
-    });
-    let Some(tok) = tok_opt else {
-        return tokenize_cjk_bigram(text);
-    };
-    match tok.tokenize(text) {
-        Ok(toks) => toks
-            .into_iter()
-            .map(|t| t.text.to_lowercase())
-            .filter(|s| !s.trim().is_empty())
-            .collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
-#[cfg(not(feature = "lindera_tokenizer"))]
+/// The warning fires once per process so an operator relying on
+/// morphological segmentation finds out, rather than silently getting
+/// bigrams.
 fn tokenize_lindera(text: &str) -> Vec<String> {
     use std::sync::Once;
     static WARN: Once = Once::new();
     WARN.call_once(|| {
         tracing::warn!(
-            "bm25 field requested lindera tokenizer but the lindera_tokenizer \
-             cargo feature is not enabled; falling back to cjk_bigram. \
-             Build with `--features veda-storage/lindera_tokenizer` to enable."
+            "bm25 field requests the lindera tokenizer, which has been \
+             removed; tokenizing with cjk_bigram instead. Set the field's \
+             tokenizer to cjk_bigram to silence this."
         );
     });
     tokenize_cjk_bigram(text)
