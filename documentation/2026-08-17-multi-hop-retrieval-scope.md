@@ -227,3 +227,93 @@ boundaries, and that is what moved the multi-hop figure from 6/6 to 5/6 — the 
 the reason the number is 83% and not 100%. Any future expansion of this eval set should keep the
 boundary matching, and should assume a grader is wrong until it has been shown to reject a
 plausible wrong answer.
+
+---
+
+# Re-measured on a corpus that actually forces hops (v2)
+
+**Date:** 2026-08-18. **This supersedes the v1 result above.**
+
+## Why v1 did not measure multi-hop
+
+v1 used 15 documents. Dumping the loop's actual tool calls showed a single search with
+`limit=20` returning the whole corpus: in the two failing runs the model had *every* fact in
+context and still omitted one supplier; in the passing run it happened to issue three searches.
+
+So v1 measured how reliably the LLM scans a context window it already holds — not retrieval. The
+"83% multi-hop" figure and the one-to-many gap drawn from it do not describe multi-hop behaviour.
+
+v2 buries the same 12 fact documents in **2,000 filler documents** sharing the business
+vocabulary, so no top-k search can hold both halves of an answer. It adds one-to-many and
+**negative** cases (correct answer "none"/"unknown"), and runs each case 3x because v1 showed the
+loop is nondeterministic.
+
+## Result (2,012 documents, 3 repeats per case)
+
+| case type | correct | mean searches |
+|---|---|---|
+| single-hop control | 9/9 (100%) | 1.0 |
+| one-to-one join | 12/12 (100%) | 1.9 |
+| one-to-many join | **6/6 (100%)** | 2.0 |
+| negative (no answer exists) | **3/6 (50%)** | 4.8 |
+
+**The one-to-many gap was an artifact of the small corpus.** With hops actually forced it is 6/6.
+Implementing the enumeration fix v1 recommended would have built machinery for a non-problem.
+
+**The real gap is negative answers**, and it consumes the most searches. The failures are not
+wrong facts; they are failures to *conclude*. `negative-1` returned "Based on the search results,
+the suppliers mentioned and their headquarters are: ..." — reciting context instead of answering
+"none", and listing suppliers that are not in Poland.
+
+One nuance: `negative-2 r1` answered "The search results do not contain any information about who
+signed the Q4 master service agreement" — semantically correct but not the literal word the
+prompt demanded. That is instruction compliance, not reasoning, so the true reasoning failure is
+2/6 rather than 3/6.
+
+## The cheap fix was tested and does not work
+
+Before proposing any loop change, the obvious candidate was that the probe's instructions never
+said what to do when nothing is found. Two arms, same corpus and cases, 4 repeats:
+
+| arm | negative-1 | negative-2 | one2many-1 | one2one-2 | total |
+|---|---|---|---|---|---|
+| A: baseline instructions | 2/4 | 4/4 | 3/4 | 4/4 | **13/16** |
+| B: + "say so in the exact word rather than summarising" | 2/4 | 4/4 | 2/4 | 4/4 | **12/16** |
+
+No measurable improvement (at n=4 per cell the difference is noise), and arm B used more searches.
+
+**But it exposed the mechanism.** Two arm-B failures are new in kind: `negative-1 r2` made **14
+searches** and returned "I reached the maximum number of reasoning steps before producing a final
+answer"; `one2many-1 r2` made 8 and abandoned mid-reasoning. Pressing the model to try harder made
+it search until `max_steps` and emit a non-answer.
+
+Nothing in the loop notices that repeated searches are returning documents it has **already
+seen**, so there is no signal to stop searching and answer. That is a loop-level deficiency, and
+it is what the scoping section above predicted when it named termination as "genuinely hard and
+where these systems usually fail in practice".
+
+## Implementation this now supports
+
+**Stagnation detection in the ReAct loop.** Track the record ids returned by retrieval tool calls
+within a turn; when a call returns no ids that have not already been seen, tell the model that
+further searching is returning nothing new, so it should answer from what it has — including
+answering that the corpus does not contain the fact.
+
+This is narrow (it touches the loop's tool-result handling, adds no retrieval machinery), it
+targets the only measured deficit, and it is falsifiable against the baseline above: negative
+cases 3/6 and mean 4.8 searches, with one-to-many at 6/6 as the regression guard, since arm B
+showed that pushing on negatives can degrade positives.
+
+It does **not** support building a knowledge graph or TreeRAG. Both target retrieval, and
+retrieval measured 100% across control, one-to-one and one-to-many.
+
+## Reproducing
+
+`documentation/multihop-eval/multihop_v2.py` builds the corpus and runs the suite;
+`neg_probe.py` runs the two-arm instruction test. Both need a Veda server with an embedder and
+`VEDA_LLM_ENDPOINT` configured — they were run against Qwen3.5-122B on vLLM and
+`jina-v5-omni-small`, with the server on an isolated port so a shared instance is untouched.
+
+Note for whoever runs these: use `python3 -u`. Python block-buffers stdout to a file, so a long
+run looks like it is producing nothing until it exits — which cost time here, and is the same
+buffering trap already recorded for the Rust benchmark in the CAGRA design document.
