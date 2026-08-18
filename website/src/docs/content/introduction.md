@@ -7,7 +7,8 @@
 Most vector databases just store vectors: you bring your own embedding services, OCR pipeline, and chunking glue. Veda handles the whole pipeline natively, in a single pure-Rust engine.
 
 - **Multimodal native** — first-class support for text, image, audio, video, and PDF, with audio and video [fully wired through the pipeline](/docs/multimodal) and automatic modality-based routing; point Veda at a unified omni embedding model and all modalities share one cross-modal space, so a text query retrieves audio, video, and images directly.
-- **10 vector index types** — HNSW, DiskANN (Vamana graph), IVF-PQ, Flat, three RaBitQ variants, and Sq4 + Sq8 scalar quantization, [each with recall@10 measured against exact search](/docs/indexes). A suffix array for exact text patterns and scalar indexes for metadata filtering sit alongside them.
+- **10 vector index types** — HNSW, DiskANN (Vamana graph), IVF-PQ, Flat, three RaBitQ variants, and Sq4 + Sq8 scalar quantization, so you can [trade recall, latency and memory per collection](/docs/indexes). A suffix array for exact text patterns and scalar indexes for metadata filtering sit alongside them, plus a GPU CAGRA index on cuVS builds.
+- **Multi-hop questions** — the agent [searches again when one lookup is not enough](/docs/multi-hop), joining facts across documents with no knowledge graph and no query planner.
 - **Guardrails on retrieved documents** — [hostile instructions hiding inside your corpus](/docs/retrieval-guardrails) are screened at ingest and dropped before an LLM sees them, at the tool-dispatch choke point that every agent surface shares.
 - **Query Parquet in place** — [register a collection over existing Parquet files](/docs/external-collections) and search them with no ingestion and no second copy.
 - **SIMD-optimized distances** — SimSIMD kernels (AVX-512, ARM NEON, SVE) on by default, with an AVX2/scalar fallback, across 6 metrics (Cosine, Euclidean, DotProduct, Hamming, Manhattan, Jaccard).
@@ -27,7 +28,7 @@ Veda also ships a distributed data plane (per-shard append-only logs with quorum
 ## How these docs are organized
 
 - **Getting started** — [Quick start](/docs/quickstart) gets a cluster running and serving queries in minutes; [Installation & config](/docs/installation) covers building from source, cluster modes, and configuration.
-- **Core concepts** — [Collections & fields](/docs/collections), [External collections](/docs/external-collections), [Indexes](/docs/indexes), [Search & fusion](/docs/search), [Multimodal & cross-modal](/docs/multimodal), the [Document pipeline](/docs/document-pipeline), [Agents & MCP](/docs/agents-mcp), and [Web Connectors](/docs/web-connectors).
+- **Core concepts** — [Collections & fields](/docs/collections), [External collections](/docs/external-collections), [Indexes](/docs/indexes), [Search & fusion](/docs/search), [Multimodal & cross-modal](/docs/multimodal), the [Document pipeline](/docs/document-pipeline), [Agents & MCP](/docs/agents-mcp), [Multi-hop retrieval](/docs/multi-hop), and [Web Connectors](/docs/web-connectors).
 - **Reference** — the [REST API](/docs/rest-api), the [Python SDK](/docs/python-sdk), [Observability](/docs/observability), [APM & Performance](/docs/apm-observability), [LLM Observability](/docs/llm-observability), [Retrieval guardrails](/docs/retrieval-guardrails), [AIOps](/docs/aiops) (and its deep dives: the [Ops Advisor](/docs/ops-advisor), [Log Insights](/docs/log-insights), [Node Resource Signals](/docs/resource-signals), [Service Reliability](/docs/service-reliability), and [RAG & AIOps Intelligence](/docs/rag-aiops)), and [RAG Auto-Tuning](/docs/auto-tuning).
 
 ## License
