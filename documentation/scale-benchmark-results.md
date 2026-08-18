@@ -12,6 +12,16 @@ Run with:
 cargo test --release -p veda-index --test scale_benchmark -- --ignored --nocapture
 ```
 
+> **The corpus below is uniform-random, and that decides most of what the
+> table says.** In high dimension, uniformly random points are all nearly
+> equidistant, so the true top-10 is close to arbitrary and *every* graph
+> and quantization index scores near chance. Recall figures measured on
+> this shape rank index types by how they behave on data no production
+> corpus resembles. They are kept because the recorded results used this
+> shape and changing it would make them incomparable — not because they
+> are representative. See "Corpus shape decides recall" below before
+> quoting any number from this section.
+
 ## 100K × 1024d (`scale_100k_dim_1024`, release build, single-host)
 
 | Index            | Build (ms) | p50 (ms) | p95 (ms) | recall@10 |
@@ -27,12 +37,19 @@ cargo test --release -p veda-index --test scale_benchmark -- --ignored --nocaptu
 - **flat** is the latency floor for a 100K × 1024d corpus on this host
   (~48 ms per query). Useful as the recall and latency baseline.
 - **hnsw** alone is ~10× faster than flat but recall@10 = 0.38 at the
-  defaults — the graph parameters (`m`, `ef_construction`, `ef_search`)
-  need tuning for 1024d before HNSW pulls its weight. The 466-second
-  build cost is the dominant story; this is the wall-clock that
-  motivates GPU CAGRA / cuVS for the deep-quantized HNSW path.
+  defaults. This was previously read as "the graph parameters need tuning
+  for 1024d". That reading is wrong: the same HNSW implementation scores
+  **1.000** on a clustered corpus at default parameters (measured below,
+  and again on live data in the Elasticsearch comparison further down).
+  0.38 is the corpus shape, not the parameters. The 466-second build cost
+  is the real story here; that is the wall-clock motivating GPU CAGRA /
+  cuVS for the deep-quantized HNSW path.
 - **rabitq** (1-bit only) has the lowest build time at 0.8 s but recall
-  collapses to 0.35 — expected for pure binary quantization at this dim.
+  collapses to 0.35. Also previously mis-read — as "expected for pure
+  binary quantization at this dim". Binary quantization is not the whole
+  cause; see the RaBitQ entry below, where the same index scores 0.032 on
+  a *clustered* corpus, far worse than here. The defect is that this path
+  quantizes against a single global centroid.
 - **rabitq+rerank** climbs back to recall 0.78 by reranking the top-N
   binary hits with full-precision vectors. p95 latency stays at ~192 ms
   because rerank dominates; this is the "land where RaBitQ wins" once
@@ -58,12 +75,78 @@ cargo test --release -p veda-index --test scale_benchmark -- --ignored --nocaptu
   The 10M case is gated by index parameter tuning and GPU CAGRA wiring
   (see `documentation/gpu-indexing.md`).
 
+## Corpus shape decides recall (2026-08-18)
+
+Recall is a property of the corpus as much as of the index. Running the
+same index types over a **clustered** corpus — the shape real embeddings
+have, where intrinsic dimensionality sits far below the ambient dimension
+— re-ranks them, in both directions. Measured with
+`crates/veda-index/tests/ann_benchmark.rs` at 10,000 × 128d, Cosine,
+10 clusters of ~1,000 points (`ann_benchmark_10k_128d_clustered` and
+`ann_benchmark_10k_128d`):
+
+| Index   | recall@10, uniform | recall@10, clustered |
+|---------|-------------------:|---------------------:|
+| Flat    |              1.000 |                1.000 |
+| HNSW    |              0.892 |                1.000 |
+| DiskANN |              0.965 |                0.990 |
+| IVF-PQ  |              0.349 |                0.984 |
+| RaBitQ  |              0.353 |                0.032 |
+
+The RaBitQ row comes from the quantization entry points
+(`ann_benchmark_quantization_clustered` and its uniform counterpart),
+which run the same corpus size and dimension; every other row is from the
+two entry points named above. HNSW is at defaults (`ef_search`=128).
+
+Two findings came out of chasing the outliers in this table.
+
+**DiskANN scored 0.202 on the clustered corpus before 2026-08-18** — the
+worst result of any graph index, on the shape it should handle best. The
+cause was in graph construction. `build_vamana` pruned over the `l_build`
+closest candidates rather than over **V, the visited set**, which is what
+Algorithm 3 of the DiskANN paper specifies. A node's closest candidates
+are all its immediate neighbours, so pruning over them yields only short
+edges; the visited set additionally holds the nodes the walk passed
+through on its way in from the medoid, and those are where every
+long-range edge comes from. The built graph had **106 cross-cluster edges
+out of 618,617**, leaving one disconnected component per cluster, and
+greedy search from a single global medoid could reach only 1,051 of
+10,000 nodes. Out-degree was measured at 61.86 of `r`=64 — the graph was
+not starved of edges, it was starved of *long* ones. Fixed; the guard is
+`tests/diskann_connectivity.rs`, which asserts the structural property
+rather than a recall number.
+
+**RaBitQ scores 0.032 on the clustered corpus** — worse than on uniform
+random, and worse than chance-adjacent. In the Cosine estimator,
+`estimated_dot = v_norm * mean_abs * raw_dot` is divided by
+`q_norm * v_norm`, so `v_norm` cancels and ranking depends only on
+`raw_dot`, the sign-agreement count. On clustered data the sign pattern is
+dominated by each cluster's offset from the single *global* centroid, so
+every point in a cluster produces a near-identical `raw_dot` and
+within-cluster ranking is arbitrary — which is exactly where the true
+neighbours are. RaBitQ is designed to quantize **residuals from a nearest
+IVF centroid**; using it standalone over globally-centred vectors is the
+misuse. Adding a random orthogonal (Hadamard) rotation before binarization
+was tried and **measured no better** (0.032 → 0.036): rotation is unitary,
+so near-identical vectors stay near-identical and their sign bits still
+agree. Not yet fixed; `rabitq+rerank` is unaffected, since reranking with
+full-precision vectors repairs the ordering.
+
+**Do not publish per-index recall without naming the corpus shape.** The
+same index moves from 0.892 to 1.000, or from 0.353 to 0.032, on nothing
+but the data.
+
 ## Next runs
 
 - 1M × 1024d (`scale_1m_dim_1024`) — confirm the rabitq+rerank
   crossover.
-- Re-run 100K with tuned HNSW params (`m=32`, `ef_construction=400`,
-  `ef_search=128`) before drawing index-quality conclusions.
+- Re-run the 100K table on a **clustered** corpus. The uniform-random
+  figures above cannot settle any index-quality question, and re-running
+  them with tuned HNSW parameters would not change that — the previously
+  planned tuning run has been superseded by this.
+- Fix RaBitQ to quantize IVF residuals rather than a global centroid, and
+  re-measure. Until then the standalone RaBitQ path should not be
+  recommended for clustered (i.e. real) corpora.
 - 10M × 768d on a GPU host once `gpu_cuvs` build path lands.
 
 ---
