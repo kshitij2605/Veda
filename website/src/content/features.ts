@@ -19,6 +19,7 @@ import {
   SlidersHorizontal,
   ShieldAlert,
   Database,
+  Route,
 } from 'lucide-react'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
@@ -51,7 +52,7 @@ export const FEATURES: Feature[] = [
     accent: 'var(--color-node-3)',
     title: '10 vector index types',
     blurb:
-      'HNSW, DiskANN, IVF-PQ, Flat, three RaBitQ variants, Sq4 + Sq8 scalar quantization — every one validated end-to-end with recall@10 measured against exact search. Plus a suffix array and scalar filter indexes alongside them.',
+      'HNSW, DiskANN, IVF-PQ, Flat, three RaBitQ variants, Sq4 + Sq8 scalar quantization — pick the recall, latency and memory trade-off per collection instead of working around one index. A suffix array and scalar filter indexes sit alongside them, and cuVS builds add a GPU CAGRA index that builds a 1M-vector index in 86 seconds.',
   },
   {
     icon: GitMerge,
@@ -136,6 +137,13 @@ export const FEATURES: Feature[] = [
     title: 'Semantic LLM cache & guardrails',
     blurb:
       'Veda turns its vector engine into the LLM layer: a near-duplicate prompt is served from a semantic cache with no LLM call, an unsafe prompt is blocked by embedding-similarity guardrails, and every run lands in a trace store you search and cluster by meaning — observe, optimize, and secure in one engine.',
+  },
+  {
+    icon: Route,
+    accent: 'var(--color-node-3)',
+    title: 'Answers that span documents',
+    blurb:
+      'Ask which plant assembles a product and whether that plant is ISO 14001 certified, and no single document holds the answer. Veda’s agent searches, reads the name out of the result, and searches again. On a 2,012-document corpus with Qwen3.5-122B it answered two-document and one-to-many joins correctly in about two searches. No knowledge graph, no query planner, nothing to keep in sync.',
   },
   {
     icon: ShieldAlert,

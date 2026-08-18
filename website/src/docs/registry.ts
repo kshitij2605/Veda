@@ -7,6 +7,7 @@ import search from './content/search.md?raw'
 import multimodal from './content/multimodal.md?raw'
 import documentPipeline from './content/document-pipeline.md?raw'
 import agentsMcp from './content/agents-mcp.md?raw'
+import multiHop from './content/multi-hop.md?raw'
 import webConnectors from './content/web-connectors.md?raw'
 import externalCollections from './content/external-collections.md?raw'
 import retrievalGuardrails from './content/retrieval-guardrails.md?raw'
@@ -56,6 +57,7 @@ export const DOCS: DocGroup[] = [
       { slug: 'multimodal', title: 'Multimodal & cross-modal', md: multimodal },
       { slug: 'document-pipeline', title: 'Document pipeline', md: documentPipeline },
       { slug: 'agents-mcp', title: 'Agents & MCP', md: agentsMcp },
+      { slug: 'multi-hop', title: 'Multi-hop retrieval', md: multiHop },
       { slug: 'web-connectors', title: 'Web Connectors', md: webConnectors },
     ],
   },
