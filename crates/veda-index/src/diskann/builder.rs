@@ -2,7 +2,7 @@ use rand::Rng;
 use rand::seq::SliceRandom;
 
 use crate::diskann::graph::VamanaGraph;
-use crate::diskann::searcher::greedy_search;
+use crate::diskann::searcher::greedy_search_with_visited;
 use crate::distance::compute_distance;
 use veda_core::types::DistanceMetric;
 
@@ -107,8 +107,11 @@ pub fn build_vamana(
     order.shuffle(&mut rng);
 
     for &p in &order {
-        // Greedy search from medoid to find L nearest neighbors of p.
-        let candidates = greedy_search(
+        // Greedy search from the medoid, keeping the whole visited set:
+        // pruning over just the L closest would give p only short edges, and
+        // on a clustered corpus that builds one disconnected component per
+        // cluster. See `greedy_search_with_visited`.
+        let (_, visited) = greedy_search_with_visited(
             &vectors[p as usize],
             medoid,
             l_build,
@@ -118,7 +121,7 @@ pub fn build_vamana(
         );
 
         // RobustPrune to select neighbors for p.
-        let new_neighbors = robust_prune(p, &candidates, alpha, r, vectors, metric);
+        let new_neighbors = robust_prune(p, &visited, alpha, r, vectors, metric);
         graph.set_neighbors(p, new_neighbors.clone());
 
         // Add reverse edges and prune over-full neighbors.
