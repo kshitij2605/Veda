@@ -1670,8 +1670,8 @@ mod tests {
         }
     }
 
-    impl<S: tracing::Subscriber> Layer<S> for SpanCollector {
-        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
+    impl SpanCollector {
+        fn record_new(&self, attrs: &Attributes<'_>, id: &Id) {
             let mut cap = CapturedSpan {
                 name: attrs.metadata().name().to_owned(),
                 fields: HashMap::new(),
@@ -1679,18 +1679,76 @@ mod tests {
             attrs.record(&mut FieldStringifier(&mut cap.fields));
             self.spans.lock().unwrap().insert(id.into_u64(), cap);
         }
-        fn on_record(&self, id: &Id, values: &tracing::span::Record<'_>, _ctx: Context<'_, S>) {
+        fn record_update(&self, id: &Id, values: &tracing::span::Record<'_>) {
             if let Some(cap) = self.spans.lock().unwrap().get_mut(&id.into_u64()) {
                 values.record(&mut FieldStringifier(&mut cap.fields));
             }
         }
     }
 
+    thread_local! {
+        /// Collector installed by the test running on this thread, if any.
+        static ACTIVE_COLLECTOR: std::cell::RefCell<Option<SpanCollector>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The one subscriber this test binary installs, forwarding to whichever
+    /// collector the current thread registered.
+    ///
+    /// `tracing` caches each callsite's interest process-globally, and every
+    /// test in this binary shares that cache. Installing the collector as a
+    /// *scoped* subscriber therefore does not reliably switch the executor's
+    /// spans on: when a sibling test reaches the callsite first, what gets
+    /// cached is "no subscriber is interested", and the span is then never
+    /// created for anyone — including the thread that asked for it. That is
+    /// the whole of the flake, and it is why the failure mode was the
+    /// collector holding zero spans rather than wrong ones. An always-
+    /// interested subscriber installed once for the binary settles the cached
+    /// interest as "always"; the thread-local keeps capture scoped to the test
+    /// that wants it.
+    struct SpanRouter;
+
+    impl<S: tracing::Subscriber> Layer<S> for SpanRouter {
+        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
+            ACTIVE_COLLECTOR.with(|c| {
+                if let Some(c) = c.borrow().as_ref() {
+                    c.record_new(attrs, id);
+                }
+            });
+        }
+        fn on_record(&self, id: &Id, values: &tracing::span::Record<'_>, _ctx: Context<'_, S>) {
+            ACTIVE_COLLECTOR.with(|c| {
+                if let Some(c) = c.borrow().as_ref() {
+                    c.record_update(id, values);
+                }
+            });
+        }
+    }
+
+    /// Capture into `collector` every span created on this thread during `f`.
+    fn with_collector<T>(collector: SpanCollector, f: impl FnOnce() -> T) -> T {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(SpanRouter),
+            )
+            .expect("nothing else sets a global subscriber in this test binary");
+            // Any callsite reached before this point already has an interest
+            // cached against the subscriber-less default; this re-evaluates
+            // all of them against the one just installed.
+            tracing::callsite::rebuild_interest_cache();
+        });
+
+        ACTIVE_COLLECTOR.with(|c| *c.borrow_mut() = Some(collector));
+        let out = f();
+        ACTIVE_COLLECTOR.with(|c| *c.borrow_mut() = None);
+        out
+    }
+
     #[tokio::test]
     async fn emits_genai_semconv_spans_for_chat_and_tool_calls() {
         let collector = SpanCollector::default();
         let captured = collector.spans.clone();
-        let subscriber = tracing_subscriber::registry().with(collector);
 
         let tmp = tempfile::tempdir().unwrap();
         let (state, tenant) = seeded_state(tmp.path(), "docs").await;
@@ -1708,7 +1766,7 @@ mod tests {
             final_completion("There is one collection: docs."),
         ]);
 
-        let result = tracing::subscriber::with_default(subscriber, || {
+        let result = with_collector(collector, || {
             futures::executor::block_on(run(
                 &model,
                 &cat,
