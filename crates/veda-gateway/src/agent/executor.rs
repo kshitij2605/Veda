@@ -254,6 +254,37 @@ fn truncate_for_model(s: &str, cap: usize) -> String {
     format!("{}…[truncated]", &s[..end])
 }
 
+/// Appended to a retrieval result that surfaced nothing the model has not
+/// already been shown.
+///
+/// Measured motivation: on a corpus where the answer does not exist, the loop
+/// searched until `max_steps` and then returned a non-answer, because nothing
+/// told it that its searches had stopped producing evidence. See
+/// `documentation/2026-08-17-multi-hop-retrieval-scope.md`.
+const STAGNATION_NOTE: &str = "\n\n[note: this call returned no records you have not \
+already been shown. Further searching is not producing new evidence — answer from what \
+you have, and if the answer is not present in it, say so.]";
+
+/// The record ids a tool result carries, or `None` when the result is not a
+/// retrieval result at all.
+///
+/// Retrieval tools answer with `{"hits": [...]}` (`search`) or
+/// `{"records": [...]}` (`filter_query`, `get_record`), each entry carrying an
+/// `id`. Everything else — `list_collections`, `aggregate`, an error payload —
+/// says nothing about whether more evidence is reachable, so repeating it must
+/// not count as stagnation.
+fn retrieved_ids(value: &serde_json::Value) -> Option<Vec<String>> {
+    let arr = value
+        .get("hits")
+        .or_else(|| value.get("records"))?
+        .as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|h| Some(h.get("id")?.as_str()?.to_owned()))
+            .collect(),
+    )
+}
+
 /// Run the tool-calling loop for `agent` against `model`, starting from
 /// `history` plus a fresh `user_input` turn.
 ///
@@ -441,6 +472,9 @@ async fn run_core<M: ChatModel>(
     }
 
     let mut last_content: Option<String> = None;
+    // Every record id retrieval has surfaced this run, so a call that adds
+    // none can be flagged with `STAGNATION_NOTE`.
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for _ in 0..max_steps {
         step_calls = step_calls.saturating_add(1);
@@ -661,10 +695,19 @@ async fn run_core<M: ChatModel>(
                         duration_ms: Some(dispatch_ms),
                     });
                     let result_str = outcome.content.to_string();
-                    let tool_msg = ChatMessage::tool_result(
-                        call.id.clone(),
-                        truncate_for_model(&result_str, TOOL_RESULT_CAP_BYTES),
-                    );
+                    // Append the note AFTER truncating, so a full result page
+                    // cannot cut it off.
+                    let mut for_model = truncate_for_model(&result_str, TOOL_RESULT_CAP_BYTES);
+                    if !outcome.is_error {
+                        if let Some(ids) = retrieved_ids(&outcome.content) {
+                            let fresh = ids.iter().filter(|id| !seen_ids.contains(*id)).count();
+                            seen_ids.extend(ids);
+                            if fresh == 0 {
+                                for_model.push_str(STAGNATION_NOTE);
+                            }
+                        }
+                    }
+                    let tool_msg = ChatMessage::tool_result(call.id.clone(), for_model);
                     messages.push(tool_msg.clone());
                     new_messages.push(tool_msg);
                 }
@@ -1803,6 +1846,118 @@ mod tests {
                 })
                 .count(),
             1
+        );
+    }
+
+    /// Collect the tool-result messages the model was shown, in order.
+    fn tool_messages(result: &RunResult) -> Vec<String> {
+        result
+            .new_messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.content.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn repeating_a_retrieval_that_returns_nothing_new_tells_the_model_to_stop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_state(tmp.path(), "docs").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let agent = test_agent(vec!["filter_query".to_owned()]);
+
+        // The same filter twice: the second call can only return records the
+        // model has already been shown.
+        let args = r#"{"collection":"docs","filter":"title = 'hello world'"}"#;
+        let model = FakeModel::scripted(vec![
+            completion_with_call(None, tool_call("call_1", "filter_query", args)),
+            completion_with_call(None, tool_call("call_2", "filter_query", args)),
+            final_completion("unknown"),
+        ]);
+
+        let result = run(
+            &model, &cat, &ctx, &agent, "sys", &[], "who signed it?", DEFAULT_MAX_STEPS, "openai",
+            "test-model",
+        )
+        .await;
+
+        let msgs = tool_messages(&result);
+        assert_eq!(msgs.len(), 2, "expected two tool results");
+        assert!(
+            msgs[0].contains("hello world"),
+            "first call should return the record: {}",
+            msgs[0]
+        );
+        assert!(
+            !msgs[0].contains(STAGNATION_NOTE),
+            "the first call returns a new record, so it must not be flagged: {}",
+            msgs[0]
+        );
+        assert!(
+            msgs[1].contains(STAGNATION_NOTE),
+            "the second call returned nothing new and must be flagged: {}",
+            msgs[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn stagnation_is_not_flagged_for_non_retrieval_tools() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_state(tmp.path(), "docs").await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let agent = test_agent(vec!["list_collections".to_owned()]);
+
+        // `list_collections` returns the identical payload every time, but it
+        // is not retrieval — repeating it says nothing about whether more
+        // evidence is reachable.
+        let model = FakeModel::scripted(vec![
+            completion_with_call(None, tool_call("call_1", "list_collections", "{}")),
+            completion_with_call(None, tool_call("call_2", "list_collections", "{}")),
+            final_completion("docs"),
+        ]);
+
+        let result = run(
+            &model,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "what collections exist?",
+            DEFAULT_MAX_STEPS,
+            "openai",
+            "test-model",
+        )
+        .await;
+
+        for m in tool_messages(&result) {
+            assert!(!m.contains(STAGNATION_NOTE), "must not be flagged: {m}");
+        }
+    }
+
+    #[test]
+    fn retrieved_ids_reads_both_result_shapes_and_ignores_the_rest() {
+        let hits = serde_json::json!({ "hits": [{ "id": "a" }, { "id": "b" }], "count": 2 });
+        assert_eq!(retrieved_ids(&hits), Some(vec!["a".to_owned(), "b".to_owned()]));
+
+        let records = serde_json::json!({ "records": [{ "id": "c" }], "count": 1 });
+        assert_eq!(retrieved_ids(&records), Some(vec!["c".to_owned()]));
+
+        // An empty result set is still a retrieval result: it returned no
+        // new ids, which is exactly the signal stagnation detection wants.
+        let empty = serde_json::json!({ "hits": [], "count": 0 });
+        assert_eq!(retrieved_ids(&empty), Some(Vec::new()));
+
+        // Not retrieval.
+        assert_eq!(
+            retrieved_ids(&serde_json::json!({ "collections": ["docs"], "count": 1 })),
+            None
+        );
+        assert_eq!(
+            retrieved_ids(&serde_json::json!({ "error": "boom" })),
+            None
         );
     }
 }
