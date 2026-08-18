@@ -42,6 +42,19 @@ export function HeroScatter({ className }: { className?: string }) {
     const LINK = 110
     const QUERY_R = 260
     const K = 7
+    // On large screens this canvas starts at 42% of the viewport, so its left
+    // edge falls in the middle of the screen. Points bounce off that edge,
+    // which reads as the field being cut off mid-page. Fade everything out
+    // across this band instead, so points dissolve on their way in and out.
+    const EDGE_FADE = 260
+
+    /** 0 at the canvas's left edge, 1 once past the fade band. */
+    const edgeAlpha = (x: number) => {
+      if (x >= EDGE_FADE) return 1
+      if (x <= 0) return 0
+      const t = x / EDGE_FADE
+      return t * t * (3 - 2 * t) // smoothstep, so the fade has no visible seam
+    }
 
     const resize = () => {
       const rect = canvas.getBoundingClientRect()
@@ -113,7 +126,11 @@ export function HeroScatter({ className }: { className?: string }) {
           const dy = a.y - b.y
           const d2 = dx * dx + dy * dy
           if (d2 < LINK * LINK) {
-            const alpha = (1 - Math.sqrt(d2) / LINK) * 0.1
+            // A link is only as visible as its faintest endpoint, otherwise
+            // lines would survive past the edge their points faded at.
+            const fade = Math.min(edgeAlpha(a.x), edgeAlpha(b.x))
+            if (fade <= 0) continue
+            const alpha = (1 - Math.sqrt(d2) / LINK) * 0.1 * fade
             ctx.strokeStyle = `rgba(242,244,248,${alpha.toFixed(3)})`
             ctx.beginPath()
             ctx.moveTo(a.x, a.y)
@@ -125,7 +142,9 @@ export function HeroScatter({ className }: { className?: string }) {
 
       // nodes
       for (const p of pts) {
-        ctx.globalAlpha = 0.88
+        const fade = edgeAlpha(p.x)
+        if (fade <= 0) continue
+        ctx.globalAlpha = 0.88 * fade
         ctx.fillStyle = p.color
         ctx.beginPath()
         ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2)
@@ -141,35 +160,25 @@ export function HeroScatter({ className }: { className?: string }) {
           .sort((a, b) => a.d - b.d)
           .slice(0, K)
         ctx.lineWidth = 1.2
+        const pointerFade = edgeAlpha(pointer.x)
         for (const { p, d } of near) {
-          const alpha = (1 - d / QUERY_R) * 0.6
+          const fade = Math.min(edgeAlpha(p.x), pointerFade)
+          if (fade <= 0) continue
+          const alpha = (1 - d / QUERY_R) * 0.6 * fade
           ctx.strokeStyle = `rgba(255,178,36,${alpha.toFixed(3)})`
           ctx.beginPath()
           ctx.moveTo(pointer.x, pointer.y)
           ctx.lineTo(p.x, p.y)
           ctx.stroke()
+          ctx.globalAlpha = fade
           ctx.fillStyle = SAFFRON
           ctx.beginPath()
           ctx.arc(p.x, p.y, p.r * 1.6, 0, Math.PI * 2)
           ctx.fill()
+          ctx.globalAlpha = 1
         }
-        // the query point: saffron ring + crosshair ticks
-        ctx.strokeStyle = 'rgba(255,178,36,0.9)'
-        ctx.lineWidth = 1.5
-        ctx.beginPath()
-        ctx.arc(pointer.x, pointer.y, 9, 0, Math.PI * 2)
-        ctx.stroke()
-        ctx.beginPath()
-        for (const [tx, ty] of [
-          [0, -1],
-          [0, 1],
-          [-1, 0],
-          [1, 0],
-        ] as const) {
-          ctx.moveTo(pointer.x + tx * 12, pointer.y + ty * 12)
-          ctx.lineTo(pointer.x + tx * 17, pointer.y + ty * 17)
-        }
-        ctx.stroke()
+        // No marker is drawn at the pointer itself — a ring with ticks read as
+        // a crosshair reticle. The neighbours lighting up is the whole signal.
       }
     }
 
