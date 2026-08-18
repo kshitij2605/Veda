@@ -317,3 +317,80 @@ retrieval measured 100% across control, one-to-one and one-to-many.
 Note for whoever runs these: use `python3 -u`. Python block-buffers stdout to a file, so a long
 run looks like it is producing nothing until it exits — which cost time here, and is the same
 buffering trap already recorded for the Rust benchmark in the CAGRA design document.
+
+---
+
+# Stagnation detection: implemented, measured, and it does not work (v3)
+
+**Date:** 2026-08-18. **This supersedes the "Implementation this now supports" section above.**
+
+The v2 section proposed one narrow change and stated the baseline it had to beat. That change
+was built, unit-tested, and measured against exactly that baseline. It does not move it.
+
+## Result
+
+Same 2,012-document corpus, same agent instructions, same grader, 3 repeats per case. Only
+the server binary differs. The baseline column was measured twice, on separate runs, with
+identical figures both times.
+
+| case type | baseline (x2) | with stagnation detection |
+|---|---|---|
+| single-hop control | 9/9 (100%) | 9/9 (100%) |
+| one-to-one join | 12/12 (100%) | 12/12 (100%) |
+| one-to-many join | 6/6 (100%) | 6/6 (100%) |
+| **negative** | **3/6 (50%), 4.8 searches** | **3/6 (50%), 4.7 searches** |
+
+No improvement on the target, and no regression on the guard.
+
+## Why: the trigger almost never fires
+
+A null result has two causes that need different fixes - the signal reached the model and
+changed nothing, or the signal was never sent. Replaying the loop's own bookkeeping over the
+returned steps separates them. Six runs of the two negative cases:
+
+| run | retrievals | times the note fired | answer |
+|---|---|---|---|
+| negative-1 r0 | 5 | **0** | recited context (fail) |
+| negative-1 r1 | 8 | 2 | hit max_steps (fail) |
+| negative-1 r2 | 7 | **0** | "none" (pass) |
+| negative-2 r0 | 5 | **0** | "unknown" (pass) |
+| negative-2 r1 | 6 | **0** | "unknown" (pass) |
+| negative-2 r2 | 2 | **0** | "unknown" (pass) |
+
+The note fired in **one run out of six**. The condition it was given - a retrieval call that
+returns *no* record id the run has not already seen - is far too strict for a corpus of this
+size. Every reworded query pulls back at least one document that has not appeared yet, even
+when none of them are relevant. The loop is not re-reading the same documents; it is reading
+new irrelevant ones.
+
+So the v2 diagnosis was right that the loop cannot tell when searching has stopped paying,
+and wrong about how to detect it. "No new documents" is not the signal. "No new *relevant*
+documents" is, and that is a materially harder thing to compute - it needs a relevance
+judgement, which is the retrieval problem again, not a bookkeeping problem.
+
+## What this does and does not license
+
+The code is correct, tested, and load-bearing (disabling the guard fails its test on the
+intended assertion). It is also, by measurement, close to inert on real traffic. It should
+not be merged as a fix for the negative-answer deficit, because it does not fix it.
+
+Candidates a future attempt could measure, in rough order of cost:
+
+- Fire on a *proportion* of new ids rather than requiring zero - e.g. under 20% new. Cheap,
+  and directly testable against the table above.
+- Fire on repeated near-identical queries rather than on returned ids.
+- Score returned documents against the question and fire when the best score stops improving.
+  This is the one that matches the actual failure, and the most expensive.
+
+Whichever is tried, the firing-rate check above should be run first: a change that never
+triggers cannot be evaluated by its win rate, and would otherwise have looked simply
+ineffective.
+
+## A note on what the failures now look like
+
+The recited-context failure mode from v2 persists (`negative-1` twice returned "Based on the
+search results, the suppliers mentioned and their headquarters are: ..."). The
+instruction-compliance case also recurs: one `negative-2` run answered "The search results do
+not contain any information about who signed the Q4 master service agreement" - correct in
+substance, not the literal word the prompt demanded. As in v2, the true reasoning failure
+count is below the raw score.

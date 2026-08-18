@@ -1,0 +1,299 @@
+[
+  {
+    "id": "ctl-1",
+    "kind": "control",
+    "rep": 0,
+    "ok": true,
+    "secs": 2.4,
+    "searches": 1,
+    "answer": "Estonia"
+  },
+  {
+    "id": "ctl-1",
+    "kind": "control",
+    "rep": 1,
+    "ok": true,
+    "secs": 2.1,
+    "searches": 1,
+    "answer": "Estonia"
+  },
+  {
+    "id": "ctl-1",
+    "kind": "control",
+    "rep": 2,
+    "ok": true,
+    "secs": 1.9,
+    "searches": 1,
+    "answer": "Estonia"
+  },
+  {
+    "id": "ctl-2",
+    "kind": "control",
+    "rep": 0,
+    "ok": true,
+    "secs": 1.9,
+    "searches": 1,
+    "answer": "Riga"
+  },
+  {
+    "id": "ctl-2",
+    "kind": "control",
+    "rep": 1,
+    "ok": true,
+    "secs": 2.3,
+    "searches": 1,
+    "answer": "Riga"
+  },
+  {
+    "id": "ctl-2",
+    "kind": "control",
+    "rep": 2,
+    "ok": true,
+    "secs": 2.8,
+    "searches": 1,
+    "answer": "Riga"
+  },
+  {
+    "id": "ctl-3",
+    "kind": "control",
+    "rep": 0,
+    "ok": true,
+    "secs": 2.4,
+    "searches": 1,
+    "answer": "Dana Whitfield"
+  },
+  {
+    "id": "ctl-3",
+    "kind": "control",
+    "rep": 1,
+    "ok": true,
+    "secs": 2.3,
+    "searches": 1,
+    "answer": "Dana Whitfield"
+  },
+  {
+    "id": "ctl-3",
+    "kind": "control",
+    "rep": 2,
+    "ok": true,
+    "secs": 3.1,
+    "searches": 1,
+    "answer": "Dana Whitfield"
+  },
+  {
+    "id": "one2one-1",
+    "kind": "one-to-one",
+    "rep": 0,
+    "ok": true,
+    "secs": 4.2,
+    "searches": 2,
+    "answer": "yes"
+  },
+  {
+    "id": "one2one-1",
+    "kind": "one-to-one",
+    "rep": 1,
+    "ok": true,
+    "secs": 3.7,
+    "searches": 2,
+    "answer": "yes"
+  },
+  {
+    "id": "one2one-1",
+    "kind": "one-to-one",
+    "rep": 2,
+    "ok": true,
+    "secs": 3.8,
+    "searches": 2,
+    "answer": "Yes"
+  },
+  {
+    "id": "one2one-2",
+    "kind": "one-to-one",
+    "rep": 0,
+    "ok": true,
+    "secs": 4.1,
+    "searches": 2,
+    "answer": "no"
+  },
+  {
+    "id": "one2one-2",
+    "kind": "one-to-one",
+    "rep": 1,
+    "ok": true,
+    "secs": 3.5,
+    "searches": 2,
+    "answer": "no"
+  },
+  {
+    "id": "one2one-2",
+    "kind": "one-to-one",
+    "rep": 2,
+    "ok": true,
+    "secs": 3.7,
+    "searches": 2,
+    "answer": "no"
+  },
+  {
+    "id": "one2one-3",
+    "kind": "one-to-one",
+    "rep": 0,
+    "ok": true,
+    "secs": 3.2,
+    "searches": 2,
+    "answer": "Yes"
+  },
+  {
+    "id": "one2one-3",
+    "kind": "one-to-one",
+    "rep": 1,
+    "ok": true,
+    "secs": 2.2,
+    "searches": 1,
+    "answer": "Yes"
+  },
+  {
+    "id": "one2one-3",
+    "kind": "one-to-one",
+    "rep": 2,
+    "ok": true,
+    "secs": 2.0,
+    "searches": 1,
+    "answer": "yes"
+  },
+  {
+    "id": "one2one-4",
+    "kind": "one-to-one",
+    "rep": 0,
+    "ok": true,
+    "secs": 3.3,
+    "searches": 2,
+    "answer": "no"
+  },
+  {
+    "id": "one2one-4",
+    "kind": "one-to-one",
+    "rep": 1,
+    "ok": true,
+    "secs": 3.4,
+    "searches": 2,
+    "answer": "no"
+  },
+  {
+    "id": "one2one-4",
+    "kind": "one-to-one",
+    "rep": 2,
+    "ok": true,
+    "secs": 4.4,
+    "searches": 2,
+    "answer": "no"
+  },
+  {
+    "id": "one2many-1",
+    "kind": "one-to-many",
+    "rep": 0,
+    "ok": true,
+    "secs": 4.8,
+    "searches": 2,
+    "answer": "Meridian Alloys\nNordwind Components\nBraewick Seals"
+  },
+  {
+    "id": "one2many-1",
+    "kind": "one-to-many",
+    "rep": 1,
+    "ok": true,
+    "secs": 4.5,
+    "searches": 2,
+    "answer": "Nordwind Components, Braewick Seals, Meridian Alloys"
+  },
+  {
+    "id": "one2many-1",
+    "kind": "one-to-many",
+    "rep": 2,
+    "ok": true,
+    "secs": 3.6,
+    "searches": 2,
+    "answer": "Meridian Alloys\nNordwind Components\nBraewick Seals"
+  },
+  {
+    "id": "one2many-2",
+    "kind": "one-to-many",
+    "rep": 0,
+    "ok": true,
+    "secs": 4.1,
+    "searches": 3,
+    "answer": "Nordwind Components, Braewick Seals"
+  },
+  {
+    "id": "one2many-2",
+    "kind": "one-to-many",
+    "rep": 1,
+    "ok": true,
+    "secs": 4.2,
+    "searches": 2,
+    "answer": "Based on the search results, the suppliers headquartered in Estonia are:\n1. Nordwind Components\n2. Braewick Seals"
+  },
+  {
+    "id": "one2many-2",
+    "kind": "one-to-many",
+    "rep": 2,
+    "ok": true,
+    "secs": 3.5,
+    "searches": 2,
+    "answer": "Nordwind Components, Braewick Seals"
+  },
+  {
+    "id": "negative-1",
+    "kind": "negative",
+    "rep": 0,
+    "ok": true,
+    "secs": 5.8,
+    "searches": 4,
+    "answer": "none"
+  },
+  {
+    "id": "negative-1",
+    "kind": "negative",
+    "rep": 1,
+    "ok": false,
+    "secs": 13.9,
+    "searches": 8,
+    "answer": "I reached the maximum number of reasoning steps before producing a final answer. Here is what I gathered so far in the steps."
+  },
+  {
+    "id": "negative-1",
+    "kind": "negative",
+    "rep": 2,
+    "ok": false,
+    "secs": 9.8,
+    "searches": 5,
+    "answer": "Based on the search results, the suppliers mentioned and their headquarters are:\n- Nordwind Components: Estonia\n- Meridian Alloys: Chile\n- Kaito Fasteners: Vietnam\n- Braewick Seals: Estonia\n\nNone of t"
+  },
+  {
+    "id": "negative-2",
+    "kind": "negative",
+    "rep": 0,
+    "ok": false,
+    "secs": 10.5,
+    "searches": 4,
+    "answer": "The corpus contains information about the Q1 and Q2 master service agreements (signed by Dana Whitfield and Owen Marsh, respectively), but it does not mention who signed the Q4 master service agreemen"
+  },
+  {
+    "id": "negative-2",
+    "kind": "negative",
+    "rep": 1,
+    "ok": true,
+    "secs": 7.2,
+    "searches": 4,
+    "answer": "unknown"
+  },
+  {
+    "id": "negative-2",
+    "kind": "negative",
+    "rep": 2,
+    "ok": true,
+    "secs": 6.2,
+    "searches": 4,
+    "answer": "unknown"
+  }
+]
