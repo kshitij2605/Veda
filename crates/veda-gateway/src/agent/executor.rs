@@ -698,13 +698,13 @@ async fn run_core<M: ChatModel>(
                     // Append the note AFTER truncating, so a full result page
                     // cannot cut it off.
                     let mut for_model = truncate_for_model(&result_str, TOOL_RESULT_CAP_BYTES);
-                    if !outcome.is_error {
-                        if let Some(ids) = retrieved_ids(&outcome.content) {
-                            let fresh = ids.iter().filter(|id| !seen_ids.contains(*id)).count();
-                            seen_ids.extend(ids);
-                            if fresh == 0 {
-                                for_model.push_str(STAGNATION_NOTE);
-                            }
+                    if !outcome.is_error
+                        && let Some(ids) = retrieved_ids(&outcome.content)
+                    {
+                        let fresh = ids.iter().filter(|id| !seen_ids.contains(*id)).count();
+                        seen_ids.extend(ids);
+                        if fresh == 0 {
+                            for_model.push_str(STAGNATION_NOTE);
                         }
                     }
                     let tool_msg = ChatMessage::tool_result(call.id.clone(), for_model);
@@ -1877,7 +1877,15 @@ mod tests {
         ]);
 
         let result = run(
-            &model, &cat, &ctx, &agent, "sys", &[], "who signed it?", DEFAULT_MAX_STEPS, "openai",
+            &model,
+            &cat,
+            &ctx,
+            &agent,
+            "sys",
+            &[],
+            "who signed it?",
+            DEFAULT_MAX_STEPS,
+            "openai",
             "test-model",
         )
         .await;
@@ -1940,7 +1948,10 @@ mod tests {
     #[test]
     fn retrieved_ids_reads_both_result_shapes_and_ignores_the_rest() {
         let hits = serde_json::json!({ "hits": [{ "id": "a" }, { "id": "b" }], "count": 2 });
-        assert_eq!(retrieved_ids(&hits), Some(vec!["a".to_owned(), "b".to_owned()]));
+        assert_eq!(
+            retrieved_ids(&hits),
+            Some(vec!["a".to_owned(), "b".to_owned()])
+        );
 
         let records = serde_json::json!({ "records": [{ "id": "c" }], "count": 1 });
         assert_eq!(retrieved_ids(&records), Some(vec!["c".to_owned()]));
@@ -1955,9 +1966,6 @@ mod tests {
             retrieved_ids(&serde_json::json!({ "collections": ["docs"], "count": 1 })),
             None
         );
-        assert_eq!(
-            retrieved_ids(&serde_json::json!({ "error": "boom" })),
-            None
-        );
+        assert_eq!(retrieved_ids(&serde_json::json!({ "error": "boom" })), None);
     }
 }
