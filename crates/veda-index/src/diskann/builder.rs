@@ -6,6 +6,61 @@ use crate::diskann::searcher::greedy_search_with_visited;
 use crate::distance::compute_distance;
 use veda_core::types::DistanceMetric;
 
+/// Slots of each node's degree budget reserved for long-range edges.
+///
+/// `robust_prune` discards a candidate `v` only when `alpha * d(v, p*) <= d(v, p)`
+/// — that is, only when the already-selected `p*` is substantially closer to `v`
+/// than `p` is. In high dimension distances concentrate, so that condition stops
+/// firing. Measured on a 10k clustered corpus, every intra-cluster distance falls
+/// in [0.0084, 0.0120] at 768d — a spread of 1.4x, against 2.3x at 128d — which
+/// leaves `d(v, p*) ~= d(v, p)` and keeps essentially every candidate. The degree
+/// budget then fills with the `r` nearest neighbours, all inside the node's own
+/// cluster, and no long edge survives: 257 cross-cluster edges out of 628,763,
+/// with 999 of 10,000 nodes reachable from the medoid, and recall@10 of 10% where
+/// the same code scores 100% at 128d.
+///
+/// Reserving a few slots for uniformly random targets restores navigability
+/// without relying on the pruning rule to free them. A handful of random
+/// out-edges per node makes the graph connected with high probability, and greedy
+/// search needs only one edge into the query's neighbourhood to descend into it.
+const LONG_EDGE_BUDGET: usize = 4;
+
+/// Cap on the candidate pool `robust_prune` scans, matching the reference DiskANN
+/// implementation's `maxc`.
+///
+/// Pruning normally shrinks the pool as selection proceeds. Under the distance
+/// concentration described above it shrinks nothing, so each of the `r` selection
+/// rounds rescans the entire visited set. Capping the pool bounds that work. The
+/// pool arrives sorted by distance, so truncating keeps the closest candidates,
+/// the ones that make good local edges; long-range connectivity comes from the
+/// reserved slots instead.
+///
+/// This is a bound, not a cure: the 10k x 768d build still takes ~435s against
+/// 14s for HNSW, because the reverse-edge pass — not this prune — dominates.
+/// Widening the degree budget so that pass fires less often was tried and
+/// measured *worse* (630s), since longer lists inflate every visited set in
+/// turn. The build cost at high dimension remains an open problem.
+const MAX_CANDIDATES: usize = 750;
+
+/// Write `local` as `id`'s neighbours with the reserved long-range edges appended.
+///
+/// Used for every write during the build so that neither the main pass nor the
+/// reverse-edge prune can drop them: both would, since the reserved targets are
+/// by construction the farthest entries in any list they appear in.
+fn set_with_long_edges(
+    graph: &mut VamanaGraph,
+    id: u32,
+    mut local: Vec<u32>,
+    long_edges: &[Vec<u32>],
+) {
+    for &target in &long_edges[id as usize] {
+        if target != id && !local.contains(&target) {
+            local.push(target);
+        }
+    }
+    graph.set_neighbors(id, local);
+}
+
 /// Compute the medoid: the vector closest to the centroid of all vectors.
 pub fn compute_medoid(vectors: &[Vec<f32>], metric: DistanceMetric) -> u32 {
     let n = vectors.len();
@@ -102,6 +157,24 @@ pub fn build_vamana(
         graph.set_neighbors(i as u32, neighbors);
     }
 
+    // Reserved long-range targets, drawn once and re-attached on every write.
+    let long_budget = LONG_EDGE_BUDGET.min(n - 1);
+    let long_edges: Vec<Vec<u32>> = (0..n)
+        .map(|i| {
+            let mut picks: Vec<u32> = Vec::with_capacity(long_budget);
+            while picks.len() < long_budget {
+                let j = rng.gen_range(0..n) as u32;
+                if j != i as u32 && !picks.contains(&j) {
+                    picks.push(j);
+                }
+            }
+            picks
+        })
+        .collect();
+
+    // The pruned local neighbours share the budget with the reserved slots.
+    let local_r = r.saturating_sub(long_budget).max(1);
+
     // Step 3: Iterate over all vectors in random order.
     let mut order: Vec<u32> = (0..n as u32).collect();
     order.shuffle(&mut rng);
@@ -121,8 +194,9 @@ pub fn build_vamana(
         );
 
         // RobustPrune to select neighbors for p.
-        let new_neighbors = robust_prune(p, &visited, alpha, r, vectors, metric);
-        graph.set_neighbors(p, new_neighbors.clone());
+        let pool = &visited[..visited.len().min(MAX_CANDIDATES)];
+        let new_neighbors = robust_prune(p, pool, alpha, local_r, vectors, metric);
+        set_with_long_edges(&mut graph, p, new_neighbors.clone(), &long_edges);
 
         // Add reverse edges and prune over-full neighbors.
         for &neighbor in &new_neighbors {
@@ -146,10 +220,10 @@ pub fn build_vamana(
                     .collect();
                 scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-                let pruned = robust_prune(neighbor, &scored, alpha, r, vectors, metric);
-                graph.set_neighbors(neighbor, pruned);
+                let pruned = robust_prune(neighbor, &scored, alpha, local_r, vectors, metric);
+                set_with_long_edges(&mut graph, neighbor, pruned, &long_edges);
             } else {
-                graph.set_neighbors(neighbor, n_neighbors);
+                set_with_long_edges(&mut graph, neighbor, n_neighbors, &long_edges);
             }
         }
     }
