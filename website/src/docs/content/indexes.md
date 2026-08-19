@@ -21,18 +21,28 @@ All 10 are reachable through the API and validated end-to-end.
 
 A GPU **CAGRA** index is also available in builds compiled with NVIDIA cuVS — see [GPU index (CAGRA)](#gpu-index-cagra) below. It is not counted among the 10 CPU index types, and on a build without cuVS, creating a collection with `cagra` is rejected with a `400` rather than failing later at index-build time.
 
-## A note on recall figures
+## Recall, measured on a corpus that looks like embeddings
 
-We are not publishing a per-index recall table, and it is worth saying why.
+A recall number without the corpus it was measured on is not a claim. Benchmarks routinely generate **uniform-random vectors**, where every point is roughly equidistant from every other in high dimension — so the resulting figures describe the corpus, not the index. Measured that way, HNSW at 768 dimensions scores 58.4%. Measured on a **clustered** corpus, the shape real embeddings actually have, the same index on the same data scores 99.6%.
 
-Our index benchmark generated its corpora from **uniform-random vectors**. In high dimension those points are all roughly equidistant, so recall measured on them describes the *corpus* more than the index. Re-measuring the same indexes on a **clustered** corpus — which is what real embeddings look like — moved results in *both* directions, some by a lot.
+So these are the numbers we publish, and the conditions they were taken under: **10,000 vectors, clustered corpus, cosine, recall@10 against exact search**.
 
-Two consequences we would rather publish than let you discover:
+| Index | 128d | 768d |
+|---|---|---|
+| **Flat** (exact by construction) | 100.0% | 100.0% |
+| **HNSW** (`ef_search=128`) | 100.0% | 99.6% |
+| **HNSW** (tuned, `ef_search=256`) | 100.0% | 99.9% |
+| **IVF-PQ** (`nlist=64`) | 99.2% | 99.6% |
 
-- **DiskANN and RaBitQ recall on clustered data is currently under investigation**, and we are not quoting a figure for either until it is resolved.
-- HNSW and IVF-PQ measured *better* on realistic data than on uniform-random, so nothing we previously said about them was overstated.
+### Two indexes we are not quoting
 
-A recall number without the corpus it was measured on is not a meaningful claim. If recall matters to your choice of index — and it should — measure it on your own embeddings. [RAG auto-tuning](/docs/auto-tuning) does exactly that: it searches index configurations against a test set generated from your corpus and reports recall per trial.
+**DiskANN** and **RaBitQ** are under investigation and we are not publishing a recall figure for either.
+
+DiskANN is **dimension-dependent** right now: a graph-pruning fix brought it to 100.0% at 128 dimensions, but on the same clustered corpus at 768 dimensions it returns roughly 10%. Since most embedding models output 768 or more, that is the case that matters, and we would rather say so than publish the flattering half of the result.
+
+RaBitQ's 1-bit encoding degrades on clustered data — its reconstruction error roughly triples against uniform-random — and recall follows. Its rerank variants exist precisely because 1-bit screening is meant to be re-scored against precise vectors, but we have not re-measured those either.
+
+If recall matters to your choice of index — and it should — measure it on your own embeddings rather than trusting anyone's table, ours included. [RAG auto-tuning](/docs/auto-tuning) does this for you: it searches index configurations against a test set generated from your own corpus and reports recall per trial.
 
 ### Not vector indexes
 

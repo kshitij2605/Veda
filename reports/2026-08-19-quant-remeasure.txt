@@ -1,0 +1,47 @@
+    Finished `release` profile [optimized] target(s) in 2.37s
+     Running tests/ann_benchmark.rs (target/release/deps/ann_benchmark-f48fdc18f8fd910a)
+
+running 2 tests
+test ann_benchmark_quantization ... 
+======================================================================
+  Quantization Benchmark: 10,000 vectors, 128 dimensions, Cosine
+======================================================================
+
+  Generating quantization benchmark dataset: 10000 vectors x 128 dimensions...
+  Corpus shape: uniform-random (NOT representative; see Corpus docs) (10 clusters, ~1000 points each)
+  Training RaBitQuantizer...
+  Training ScalarQuantizer...
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                     Veda Quantization Benchmark Results                      ║
+║                   Dataset: 10000 vectors, dim=128, Cosine                    ║
+╠═════════════╬══════════╬══════════╬══════════╬══════════╬══════════╬═════════╣
+║ Quantizer   ║ Train(ms) ║  Enc(ms) ║      QPS ║     R@10 ║      MAE ║ Mem(MB) ║
+╠═════════════╬══════════╬══════════╬══════════╬══════════╬══════════╬═════════╣
+║ RaBitQ      ║     83.0 ║      8.7 ║      372 ║    35.3% ║   0.0352 ║    0.19 ║
+║ Scalar(SQ8) ║     64.0 ║      6.5 ║      333 ║    99.4% ║   0.0003 ║    1.22 ║
+╚═════════════╩══════════╩══════════╩══════════╩══════════╩══════════╩═════════╝
+ok
+test ann_benchmark_quantization_clustered ... 
+======================================================================
+  Quantization Benchmark: 10,000 vectors, 128 dimensions, CLUSTERED
+======================================================================
+
+  Generating quantization benchmark dataset: 10000 vectors x 128 dimensions...
+  Corpus shape: clustered (10 clusters, ~1000 points each)
+  Training RaBitQuantizer...
+  Training ScalarQuantizer...
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                     Veda Quantization Benchmark Results                      ║
+║                   Dataset: 10000 vectors, dim=128, Cosine                    ║
+╠═════════════╬══════════╬══════════╬══════════╬══════════╬══════════╬═════════╣
+║ Quantizer   ║ Train(ms) ║  Enc(ms) ║      QPS ║     R@10 ║      MAE ║ Mem(MB) ║
+╠═════════════╬══════════╬══════════╬══════════╬══════════╬══════════╬═════════╣
+║ RaBitQ      ║     25.5 ║      5.1 ║      395 ║     3.2% ║   0.1030 ║    0.19 ║
+║ Scalar(SQ8) ║     54.5 ║      6.5 ║      336 ║    94.0% ║   0.0002 ║    1.22 ║
+╚═════════════╩══════════╩══════════╩══════════╩══════════╩══════════╩═════════╝
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 1.82s
+
