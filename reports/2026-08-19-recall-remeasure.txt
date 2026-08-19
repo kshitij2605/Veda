@@ -1,0 +1,120 @@
+   Compiling veda-index v0.1.0 (/home/mac/test/project-mdb/crates/veda-index)
+    Finished `release` profile [optimized] target(s) in 12.78s
+     Running tests/ann_benchmark.rs (target/release/deps/ann_benchmark-f48fdc18f8fd910a)
+
+running 9 tests
+test ann_benchmark_10k_128d ... 
+======================================================================
+  ANN Benchmark: 10,000 vectors, 128 dimensions, Cosine
+======================================================================
+
+  Generating dataset: 10000 vectors x 128 dimensions...
+  Corpus shape: uniform-random (NOT representative; see Corpus docs) (10 clusters, ~1000 points each)
+  Building FlatIndex (ground truth)...
+  Building HnswIndex (ef_search=128)...
+  Building HnswIndex (ef_search=256)...
+  Building DiskAnnIndex...
+  Building IvfPqIndex (nlist=64)...
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          Veda ANN Benchmark Results                          ║
+║                   Dataset: 10000 vectors, dim=128, Cosine                    ║
+╠═══════════════╬══════════╬══════════╬══════════╬══════════╬═════════════════╣
+║ Index         ║ Build(ms) ║      QPS ║     R@10 ║    R@100 ║      Memory(MB) ║
+╠═══════════════╬══════════╬══════════╬══════════╬══════════╬═════════════════╣
+║ Flat          ║     24.9 ║     2803 ║   100.0% ║   100.0% ║             4.9 ║
+║ HNSW          ║   4499.0 ║     6610 ║    89.0% ║    80.2% ║             6.1 ║
+║ HNSW (tuned)  ║   4388.7 ║     3707 ║    98.1% ║    94.9% ║             6.1 ║
+║ DiskANN       ║  70756.3 ║     1353 ║    96.5% ║    91.5% ║             7.3 ║
+║ IVF-PQ        ║   4379.4 ║     1317 ║    36.6% ║    29.5% ║             0.2 ║
+╚═══════════════╩══════════╩══════════╩══════════╩══════════╩═════════════════╝
+ok
+test ann_benchmark_10k_128d_clustered ... 
+======================================================================
+  ANN Benchmark: 10,000 vectors, 128 dimensions, Cosine, CLUSTERED
+======================================================================
+
+  Generating dataset: 10000 vectors x 128 dimensions...
+  Corpus shape: clustered (10 clusters, ~1000 points each)
+  Building FlatIndex (ground truth)...
+  Building HnswIndex (ef_search=128)...
+  Building HnswIndex (ef_search=256)...
+  Building DiskAnnIndex...
+  Building IvfPqIndex (nlist=64)...
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          Veda ANN Benchmark Results                          ║
+║                   Dataset: 10000 vectors, dim=128, Cosine                    ║
+╠═══════════════╬══════════╬══════════╬══════════╬══════════╬═════════════════╣
+║ Index         ║ Build(ms) ║      QPS ║     R@10 ║    R@100 ║      Memory(MB) ║
+╠═══════════════╬══════════╬══════════╬══════════╬══════════╬═════════════════╣
+║ Flat          ║     16.3 ║     2334 ║   100.0% ║   100.0% ║             4.9 ║
+║ HNSW          ║   2412.8 ║    11984 ║   100.0% ║    99.8% ║             6.1 ║
+║ HNSW (tuned)  ║   2432.6 ║     8830 ║   100.0% ║   100.0% ║             6.1 ║
+║ DiskANN       ║  31293.6 ║     1871 ║   100.0% ║    99.8% ║             7.3 ║
+║ IVF-PQ        ║   4226.2 ║      984 ║    99.2% ║    98.6% ║             0.2 ║
+╚═══════════════╩══════════╩══════════╩══════════╩══════════╩═════════════════╝
+ok
+test ann_benchmark_10k_768d ... 
+======================================================================
+  ANN Benchmark: 10,000 vectors, 768 dimensions, Cosine
+======================================================================
+
+  Generating dataset: 10000 vectors x 768 dimensions...
+  Corpus shape: uniform-random (NOT representative; see Corpus docs) (10 clusters, ~1000 points each)
+  Building FlatIndex (ground truth)...
+  Building HnswIndex (ef_search=128)...
+  Building HnswIndex (ef_search=256)...
+  Building DiskAnnIndex...
+  Building IvfPqIndex (nlist=64)...
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          Veda ANN Benchmark Results                          ║
+║                   Dataset: 10000 vectors, dim=768, Cosine                    ║
+╠═══════════════╬══════════╬══════════╬══════════╬══════════╬═════════════════╣
+║ Index         ║ Build(ms) ║      QPS ║     R@10 ║    R@100 ║      Memory(MB) ║
+╠═══════════════╬══════════╬══════════╬══════════╬══════════╬═════════════════╣
+║ Flat          ║    212.7 ║       94 ║   100.0% ║   100.0% ║            29.3 ║
+║ HNSW          ║  19916.3 ║     1104 ║    58.4% ║    53.3% ║            30.5 ║
+║ HNSW (tuned)  ║  16086.7 ║      851 ║    80.5% ║    75.9% ║            30.5 ║
+║ DiskANN       ║ 1301703.7 ║       63 ║    73.7% ║    69.4% ║            31.7 ║
+║ IVF-PQ        ║  33553.6 ║      163 ║    22.5% ║    19.3% ║             1.0 ║
+╚═══════════════╩══════════╩══════════╩══════════╩══════════╩═════════════════╝
+ok
+test ann_benchmark_10k_768d_clustered ... 
+======================================================================
+  ANN Benchmark: 10,000 vectors, 768 dimensions, Cosine, CLUSTERED
+======================================================================
+
+  Generating dataset: 10000 vectors x 768 dimensions...
+  Corpus shape: clustered (10 clusters, ~1000 points each)
+  Building FlatIndex (ground truth)...
+  Building HnswIndex (ef_search=128)...
+  Building HnswIndex (ef_search=256)...
+  Building DiskAnnIndex...
+  Building IvfPqIndex (nlist=64)...
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          Veda ANN Benchmark Results                          ║
+║                   Dataset: 10000 vectors, dim=768, Cosine                    ║
+╠═══════════════╬══════════╬══════════╬══════════╬══════════╬═════════════════╣
+║ Index         ║ Build(ms) ║      QPS ║     R@10 ║    R@100 ║      Memory(MB) ║
+╠═══════════════╬══════════╬══════════╬══════════╬══════════╬═════════════════╣
+║ Flat          ║    134.2 ║      195 ║   100.0% ║   100.0% ║            29.3 ║
+║ HNSW          ║   7856.0 ║     3830 ║    99.6% ║    99.2% ║            30.5 ║
+║ HNSW (tuned)  ║   7560.9 ║     2858 ║    99.9% ║    99.9% ║            30.5 ║
+║ DiskANN       ║ 457566.6 ║     2177 ║    10.0% ║     9.9% ║            31.7 ║
+║ IVF-PQ        ║  29631.1 ║       68 ║    99.6% ║    99.4% ║             1.0 ║
+╚═══════════════╩══════════╩══════════╩══════════╩══════════╩═════════════════╝
+ok
+test ann_benchmark_50k_128d ... 
+======================================================================
+  ANN Benchmark: 50,000 vectors, 128 dimensions, Cosine
+======================================================================
+
+  Generating dataset: 50000 vectors x 128 dimensions...
+  Corpus shape: uniform-random (NOT representative; see Corpus docs) (50 clusters, ~1000 points each)
+  Building FlatIndex (ground truth)...
+  Building HnswIndex (ef_search=128)...
+  Building HnswIndex (ef_search=256)...
+  Building DiskAnnIndex...
