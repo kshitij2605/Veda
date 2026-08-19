@@ -12,7 +12,6 @@ use veda_core::types::DistanceMetric;
 use veda_index::diskann::builder::build_vamana;
 
 const N: usize = 2_000;
-const DIM: usize = 128;
 const CLUSTERS: usize = 5;
 const SIGMA: f32 = 0.10;
 const CENTROID_SEED: u64 = 0xC0FF_EE01;
@@ -42,13 +41,13 @@ fn random_dataset(n: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {
 /// Same generator as `Corpus::Clustered` in `tests/ann_benchmark.rs`, so a
 /// failure here explains a recall number measured there. Node `i` belongs to
 /// cluster `i % CLUSTERS`.
-fn clustered_corpus() -> Vec<Vec<f32>> {
-    let centroids = random_dataset(CLUSTERS, DIM, CENTROID_SEED);
-    let noise = random_dataset(N, DIM, CORPUS_SEED);
+fn clustered_corpus(dim: usize) -> Vec<Vec<f32>> {
+    let centroids = random_dataset(CLUSTERS, dim, CENTROID_SEED);
+    let noise = random_dataset(N, dim, CORPUS_SEED);
     (0..N)
         .map(|i| {
             let c = &centroids[i % CLUSTERS];
-            (0..DIM).map(|d| c[d] + noise[i][d] * SIGMA).collect()
+            (0..dim).map(|d| c[d] + noise[i][d] * SIGMA).collect()
         })
         .collect()
 }
@@ -71,9 +70,8 @@ fn reachable_from_medoid(graph: &veda_index::diskann::graph::VamanaGraph) -> Vec
     seen
 }
 
-#[test]
-fn every_cluster_is_reachable_from_the_medoid() {
-    let vectors = clustered_corpus();
+fn assert_every_cluster_reachable(dim: usize) {
+    let vectors = clustered_corpus(dim);
     let graph = build_vamana(&vectors, DistanceMetric::Cosine, 64, 100, 1.2);
 
     let seen = reachable_from_medoid(&graph);
@@ -86,23 +84,41 @@ fn every_cluster_is_reachable_from_the_medoid() {
     }
     let reached = seen.iter().filter(|&&s| s).count();
 
-    // Pruning legitimately leaves a few nodes with no inbound edge, so this
-    // is not "every node". What it rules out is whole clusters being cut off,
-    // which is what the top-L build did: it left one disconnected component
-    // per cluster, and search from the single medoid reached only its own.
+    // Pruning legitimately leaves a few nodes with no inbound edge, so this is
+    // not "every node". What it rules out is whole clusters being cut off.
     //
     // The corpus is kept small enough to stay cheap in a debug CI build.
-    // Cluster size (400) only has to exceed r (64) for the defect to appear:
-    // that is what makes a node's 64 nearest candidates all intra-cluster.
+    // Cluster size (400) only has to exceed r (64) for either defect to
+    // appear: that is what makes a node's 64 nearest candidates all
+    // intra-cluster.
     assert!(
         reached * 100 >= N * 95,
-        "only {reached}/{N} nodes reachable from the medoid; per cluster: {per_cluster:?}"
+        "dim={dim}: only {reached}/{N} nodes reachable from the medoid;          per cluster: {per_cluster:?}"
     );
     let starved: Vec<usize> = (0..CLUSTERS)
         .filter(|&c| per_cluster[c] * 2 < N / CLUSTERS)
         .collect();
     assert!(
         starved.is_empty(),
-        "clusters {starved:?} are mostly unreachable from the medoid; per cluster: {per_cluster:?}"
+        "dim={dim}: clusters {starved:?} are mostly unreachable from the          medoid; per cluster: {per_cluster:?}"
     );
+}
+
+#[test]
+fn every_cluster_is_reachable_from_the_medoid_at_128d() {
+    assert_every_cluster_reachable(128);
+}
+
+/// The same assertion at a dimension real embeddings actually use.
+///
+/// Pruning over the visited set fixed 128d and left this case broken, because
+/// the two failures have different causes: the first was a candidate set with
+/// no long-range members, the second is distance concentration stopping the
+/// pruning rule from ever firing, so the degree budget fills with nearest
+/// neighbours before any long-range candidate is reached. A 128d-only guard
+/// passed throughout. Embeddings are 768-1024d, so that is the case that has
+/// to be covered.
+#[test]
+fn every_cluster_is_reachable_from_the_medoid_at_768d() {
+    assert_every_cluster_reachable(768);
 }
