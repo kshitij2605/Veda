@@ -154,14 +154,43 @@ the MCP handler does not set the admin flag on its `ToolContext`. This is delibe
 fail-closed: an autonomous agent holding an admin token still cannot read restricted fields. If an
 operator needs an agent to see them, the field should not be marked `restricted`.
 
-## What was not done
+## Phase 2 gate: the memory-provider contract
 
-**Veda as a Hermes memory provider** (Phase 2) is gated on this phase and remains unstarted.
-Hermes's built-in memory is `MEMORY.md` plus SQLite FTS5 full-text history — no embeddings, no
-semantic search, no multimodal recall — against a documented `memory.provider` interface with
-eight existing plugins. That is a Veda-shaped hole, but the claim to test there is that semantic
-recall beats FTS5 on Hermes's own workload, which needs a real transcript recall set and a
-measured number. No number, no claim.
+Phase 2 — Veda as a Hermes *memory provider*, replacing `MEMORY.md` + SQLite FTS5 — was gated on
+the extension point being real rather than aspirational. **It is real.** Recording the contract
+here, before any design, as the gate required.
+
+- **The ABC** is `agent/memory_provider.py::MemoryProvider`, with a 336-line developer guide at
+  `website/docs/developer-guide/memory-provider-plugin.md` covering installation layouts, config
+  schema, entry point, `plugin.yaml`, an explicit threading contract, profile isolation, testing,
+  and CLI extension.
+- **Only four methods are abstract**: `name()`, `is_available()`, `initialize(session_id, **kwargs)`,
+  and `get_tool_schemas()`. Everything else is an optional hook with a default —
+  `prefetch(query)`, `sync_turn(...)`, `handle_tool_call(...)`, `on_session_end(messages)`,
+  `on_pre_compress(messages)`, `on_delegation(...)`, `backup_paths()`, and roughly a dozen more.
+  A minimal provider is small; the hooks are where recall quality would actually come from.
+- **Seven providers already ship in-tree** (`plugins/memory/`: mem0, hindsight, supermemory,
+  byterover, openviking, holographic, retaindb), so the interface has multiple real consumers and
+  is unlikely to churn silently.
+- **Dependencies are lazy** (`tools/lazy_deps.py`), so a Veda provider would not add weight to a
+  Hermes install that does not enable it.
+
+Two things this surfaced that change the shape of Phase 2:
+
+1. **A Veda memory provider is a Python package, not Rust.** Nothing in `crates/` would change;
+   it would consume the existing `embed-insert` and `/search` endpoints. Where that package lives
+   — beside `sdk/python/`, or its own repo — is an open decision, not a technical one.
+2. **The mem0 vector-store route is closed via Hermes, open upstream.** Hermes's mem0 plugin
+   pins its own `VECTOR_PROVIDERS` registry to `qdrant` and `pgvector`, and `validate_oss_config`
+   rejects anything else — so Veda cannot be dropped in as a mem0 backend without patching
+   Hermes. Upstream mem0 supports many more stores; adding Veda *there* would reach mem0's whole
+   user base rather than Hermes alone. That is a separate contribution and a go-to-market call,
+   not part of this integration.
+
+**Phase 2 remains unstarted, deliberately.** The claim worth making is that semantic recall beats
+FTS5 on Hermes's own workload, and that needs a recall set built from real session transcripts
+with its size and construction stated. No number, no claim — so the work does not begin with the
+implementation.
 
 ## Environment notes
 
