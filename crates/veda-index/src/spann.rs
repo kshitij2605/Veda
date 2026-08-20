@@ -148,6 +148,42 @@ pub struct SpannIndex {
     pub stats: IoStats,
 }
 
+/// The object store this process serves SPANN indexes from.
+///
+/// A process-global rather than a parameter because
+/// [`crate::traits::VectorIndex`] is the interface the rest of the
+/// engine builds and loads indexes through, and its `load(path, metric,
+/// dimension)` is a static with nowhere to thread a handle. Threading a
+/// store through every index constructor to serve one index type would
+/// touch far more than it buys.
+///
+/// A `RwLock` rather than a `OnceLock` because the gateway swaps the
+/// process blob store after startup when `VEDA_BLOB_BACKEND` names an
+/// object store (`AppState::load_blob_store_from_env`) — a `OnceLock`
+/// would pin the local-filesystem store installed during construction.
+static SPANN_STORE: std::sync::RwLock<Option<Arc<dyn RangeStore>>> = std::sync::RwLock::new(None);
+
+/// Install the store SPANN indexes read and write. Called by the server
+/// at startup and again whenever the blob backend is reconfigured.
+pub fn register_store(store: Arc<dyn RangeStore>) {
+    *SPANN_STORE.write().unwrap() = Some(store);
+}
+
+/// The registered store, or `None` if nothing has been installed.
+pub fn registered_store() -> Option<Arc<dyn RangeStore>> {
+    SPANN_STORE.read().unwrap().clone()
+}
+
+fn require_store() -> Result<Arc<dyn RangeStore>> {
+    registered_store().ok_or_else(|| {
+        VedaError::Index(
+            "no object store is registered for SPANN indexes; call \
+             veda_index::spann::register_store at startup"
+                .into(),
+        )
+    })
+}
+
 /// Adapter making any [`veda_storage::blob_store::BlobStore`] usable as
 /// a [`RangeStore`].
 ///
@@ -398,6 +434,22 @@ impl SpannIndex {
     /// Search for the `k` nearest neighbours, reading only the posting
     /// lists of the `nprobe` closest centroids.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
+        self.search_with_nprobe(query, k, self.nprobe)
+    }
+
+    /// Search at a caller-supplied probe budget, leaving the index's own
+    /// `nprobe` untouched.
+    ///
+    /// This is what backs `VectorIndex::search_with_ef`: the recall /
+    /// bytes-fetched trade-off is per query, and mutating shared index
+    /// state to express it would make concurrent queries interfere.
+    pub fn search_with_nprobe(
+        &self,
+        query: &[f32],
+        k: usize,
+        nprobe: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let nprobe = nprobe.clamp(1, self.manifest.centroids.len());
         if query.len() != self.manifest.dimension as usize {
             return Err(VedaError::Index(format!(
                 "query has dimension {}, index has {}",
@@ -418,7 +470,7 @@ impl SpannIndex {
             .map(|(i, c)| (i, compute_distance(query, c, metric)))
             .collect();
         probes.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        probes.truncate(self.nprobe);
+        probes.truncate(nprobe);
 
         let mut hits: Vec<SearchResult> = Vec::new();
         for (cid, _) in probes {
@@ -436,6 +488,215 @@ impl SpannIndex {
         });
         hits.truncate(k);
         Ok(hits)
+    }
+}
+
+/// [`crate::traits::VectorIndex`] adapter, so SPANN is selectable as
+/// `IndexType::Spann` alongside every other index.
+///
+/// # Where the corpus lives, and when
+///
+/// Serving is the property this index exists for: once built, a query
+/// touches `nlist` resident centroids and fetches only the posting lists
+/// it probes. **Building is not yet incremental** — `build` receives the
+/// whole batch in memory because that is the shape
+/// `SearchExecutor::build_indexes` hands every index, so peak build-time
+/// memory is unchanged from any other index type. Streaming the build
+/// straight from segment storage into the object store is the next step
+/// and is what would make the tier cheap at ingest as well as at query.
+pub struct SpannVectorIndex {
+    inner: Option<SpannIndex>,
+    prefix: String,
+    metric: DistanceMetric,
+    dimension: u32,
+    nlist: Option<usize>,
+    nprobe: Option<usize>,
+    /// Logical deletes, filtered at search. Matches the convention the
+    /// other build-once indexes use (see `RaBitQIndex`): sealed segments
+    /// build once and never mutate, and the segment's delete bitmap is
+    /// the real authority.
+    deleted: std::collections::HashSet<u32>,
+}
+
+impl std::fmt::Debug for SpannVectorIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpannVectorIndex")
+            .field("prefix", &self.prefix)
+            .field("built", &self.inner.is_some())
+            .field("deleted", &self.deleted.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SpannVectorIndex {
+    /// A SPANN index that will publish under `prefix` when built.
+    ///
+    /// The caller supplies the prefix so it can be **deterministic** —
+    /// `build_indexes` derives it from segment id and field name. A
+    /// generated-per-build prefix would leave the previous build's
+    /// objects orphaned in the bucket on every restart, since vector
+    /// indexes are rebuilt at recovery rather than persisted.
+    pub fn new(prefix: impl Into<String>, metric: DistanceMetric, dimension: u32) -> Self {
+        Self {
+            inner: None,
+            prefix: prefix.into(),
+            metric,
+            dimension,
+            nlist: None,
+            nprobe: None,
+            deleted: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Override the centroid count. Defaults to `~sqrt(n)`, clamped to
+    /// [64, 4096] — enough lists that a probe reads a small slice, few
+    /// enough that the resident half stays small.
+    pub fn with_nlist(mut self, nlist: usize) -> Self {
+        self.nlist = Some(nlist);
+        self
+    }
+
+    /// Override the probe count. Defaults to 8.
+    pub fn with_nprobe(mut self, nprobe: usize) -> Self {
+        self.nprobe = Some(nprobe);
+        self
+    }
+
+    fn default_nlist(n: usize) -> usize {
+        ((n as f64).sqrt() as usize).clamp(64, 4096).min(n.max(1))
+    }
+
+    /// The underlying index, for callers that want [`IoStats`].
+    pub fn inner(&self) -> Option<&SpannIndex> {
+        self.inner.as_ref()
+    }
+
+    fn built(&self) -> Result<&SpannIndex> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| VedaError::Index("SPANN index has not been built".into()))
+    }
+
+    /// Search, then drop logically-deleted ids.
+    ///
+    /// Oversamples so deletions cannot shorten the result set: asking the
+    /// index for exactly `k` and then filtering would silently return
+    /// fewer than `k` live hits.
+    fn search_live(
+        &self,
+        query: &[f32],
+        k: usize,
+        nprobe: Option<usize>,
+    ) -> Result<Vec<SearchResult>> {
+        let idx = self.built()?;
+        let want = if self.deleted.is_empty() {
+            k
+        } else {
+            k.saturating_add(self.deleted.len()).min(idx.len().max(k))
+        };
+        let mut hits = match nprobe {
+            Some(p) if p != idx.nprobe() => idx.search_with_nprobe(query, want, p)?,
+            _ => idx.search(query, want)?,
+        };
+        if !self.deleted.is_empty() {
+            hits.retain(|r| !self.deleted.contains(&r.id));
+        }
+        hits.truncate(k);
+        Ok(hits)
+    }
+}
+
+impl crate::traits::VectorIndex for SpannVectorIndex {
+    fn build(&mut self, vectors: &[&[f32]]) -> Result<()> {
+        let store = require_store()?;
+        let nlist = self
+            .nlist
+            .unwrap_or_else(|| Self::default_nlist(vectors.len()));
+        let mut idx = SpannIndex::build_into(store, &self.prefix, vectors, nlist, self.metric)?;
+        if let Some(p) = self.nprobe {
+            idx = idx.with_nprobe(p);
+        }
+        self.dimension = idx.dimension();
+        self.inner = Some(idx);
+        Ok(())
+    }
+
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
+        self.search_live(query, k, None)
+    }
+
+    /// `ef` is the IVF `nprobe` for this index — the per-query candidate
+    /// budget, exactly as the trait describes it.
+    fn search_with_ef(&self, query: &[f32], k: usize, ef: usize) -> Result<Vec<SearchResult>> {
+        self.search_live(query, k, Some(ef.max(1)))
+    }
+
+    fn insert(&mut self, id: u32, _vector: &[f32]) -> Result<()> {
+        // Same posture as the other build-once indexes: appending would
+        // mean re-clustering and rewriting a posting list in the object
+        // store. Sealed segments build once and do not mutate, so this
+        // only ever un-deletes.
+        self.deleted.remove(&id);
+        Ok(())
+    }
+
+    fn delete(&mut self, id: u32) -> Result<()> {
+        self.deleted.insert(id);
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.inner
+            .as_ref()
+            .map(|i| i.len().saturating_sub(self.deleted.len()))
+            .unwrap_or(0)
+    }
+
+    /// Write a pointer, not the index.
+    ///
+    /// The index already lives in the object store; copying it to a
+    /// local path would defeat the entire point. What is persisted is
+    /// the prefix needed to find it again.
+    fn save(&self, path: &std::path::Path) -> Result<()> {
+        let pointer = serde_json::json!({
+            "spann_prefix": self.prefix,
+            "metric": self.metric,
+            "dimension": self.dimension,
+        });
+        std::fs::write(path, serde_json::to_vec(&pointer)?)?;
+        Ok(())
+    }
+
+    fn load(path: &std::path::Path, metric: DistanceMetric, dimension: u32) -> Result<Self> {
+        let raw = std::fs::read(path)?;
+        let pointer: serde_json::Value = serde_json::from_slice(&raw)?;
+        let prefix = pointer["spann_prefix"]
+            .as_str()
+            .ok_or_else(|| VedaError::Index("SPANN pointer file has no spann_prefix".into()))?
+            .to_owned();
+        let store = require_store()?;
+        let inner = SpannIndex::open(store, &prefix)?;
+        Ok(Self {
+            prefix,
+            metric,
+            dimension: if dimension == 0 {
+                inner.dimension()
+            } else {
+                dimension
+            },
+            nlist: None,
+            nprobe: None,
+            deleted: std::collections::HashSet::new(),
+            inner: Some(inner),
+        })
+    }
+
+    fn metric(&self) -> DistanceMetric {
+        self.metric
+    }
+
+    fn dimension(&self) -> u32 {
+        self.dimension
     }
 }
 
@@ -534,6 +795,21 @@ mod tests {
             let end = (start + len).min(data.len());
             Ok(data[start..end].to_vec())
         }
+    }
+
+    /// Serialises every test that touches [`SPANN_STORE`].
+    ///
+    /// `cargo test` runs tests in parallel threads within one process,
+    /// and the store is process-global by design, so a test that clears
+    /// it would otherwise pull the store out from under a concurrent
+    /// test that had just registered one. Guarding is cheaper than
+    /// chasing the intermittent failure later.
+    static STORE_GUARD: Mutex<()> = Mutex::new(());
+
+    /// Take the guard, tolerating a previous test's panic having
+    /// poisoned it — the lock protects ordering, not invariants.
+    fn store_guard() -> std::sync::MutexGuard<'static, ()> {
+        STORE_GUARD.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     struct Lcg(u64);
@@ -911,6 +1187,142 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_vector_index_adapter_builds_searches_and_round_trips() {
+        let _g = store_guard();
+        use crate::traits::VectorIndex;
+        use veda_storage::blob_store::LocalBlobStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let blobs: std::sync::Arc<dyn veda_storage::blob_store::BlobStore> =
+            std::sync::Arc::new(LocalBlobStore::new(dir.path()).unwrap());
+        register_store(Arc::new(BlobRangeStore(blobs)));
+
+        let dim = 64;
+        let data = clustered(1_200, dim, 10);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+
+        let mut idx = SpannVectorIndex::new("seg-1/embedding", DistanceMetric::Cosine, dim as u32)
+            .with_nlist(24)
+            .with_nprobe(6);
+        idx.build(&refs).unwrap();
+
+        assert_eq!(idx.len(), 1_200);
+        assert_eq!(idx.dimension(), dim as u32);
+        let hits = idx.search(&data[5], 10).unwrap();
+        assert_eq!(hits.len(), 10);
+        assert_eq!(hits[0].id, 5, "a vector's nearest neighbour is itself");
+
+        // save() writes a pointer, not the index: the whole point is
+        // that the index does not come back to local disk.
+        let ptr = dir.path().join("spann.idx");
+        idx.save(&ptr).unwrap();
+        let bytes = std::fs::metadata(&ptr).unwrap().len();
+        assert!(
+            bytes < 512,
+            "pointer file is {bytes} bytes; it should not hold the index"
+        );
+
+        let reloaded = SpannVectorIndex::load(&ptr, DistanceMetric::Cosine, dim as u32).unwrap();
+        assert_eq!(
+            reloaded
+                .search(&data[5], 10)
+                .unwrap()
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            hits.iter().map(|r| r.id).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn deleted_ids_are_filtered_without_shortening_the_result_set() {
+        let _g = store_guard();
+        use crate::traits::VectorIndex;
+        use veda_storage::blob_store::LocalBlobStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let blobs: std::sync::Arc<dyn veda_storage::blob_store::BlobStore> =
+            std::sync::Arc::new(LocalBlobStore::new(dir.path()).unwrap());
+        register_store(Arc::new(BlobRangeStore(blobs)));
+
+        let dim = 32;
+        let data = clustered(600, dim, 6);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+        let mut idx = SpannVectorIndex::new("seg-del/f", DistanceMetric::Cosine, dim as u32)
+            .with_nlist(12)
+            .with_nprobe(12);
+        idx.build(&refs).unwrap();
+
+        let before = idx.search(&data[0], 5).unwrap();
+        let victim = before[1].id;
+        idx.delete(victim).unwrap();
+
+        let after = idx.search(&data[0], 5).unwrap();
+        assert!(
+            !after.iter().any(|r| r.id == victim),
+            "deleted id came back"
+        );
+        assert_eq!(
+            after.len(),
+            5,
+            "oversampling must keep the result set full after a delete"
+        );
+        assert_eq!(idx.len(), 599);
+    }
+
+    #[test]
+    fn search_with_ef_changes_the_probe_budget_without_mutating_the_index() {
+        let _g = store_guard();
+        use crate::traits::VectorIndex;
+        let dim = 64;
+        let data = clustered(2_000, dim, 16);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+        let store: Arc<dyn RangeStore> = Arc::new(MemStore::default());
+        register_store(store);
+
+        let mut idx = SpannVectorIndex::new("seg-ef/f", DistanceMetric::Cosine, dim as u32)
+            .with_nlist(32)
+            .with_nprobe(1);
+        idx.build(&refs).unwrap();
+
+        let (_, narrow, _) = idx.inner().unwrap().stats.snapshot();
+        idx.search_with_ef(&data[0], 10, 16).unwrap();
+        let (_, wide, _) = idx.inner().unwrap().stats.snapshot();
+        assert!(
+            wide > narrow,
+            "ef=16 must fetch more than the default nprobe=1"
+        );
+
+        // The index's own nprobe is untouched, so a concurrent query at
+        // the default budget is unaffected.
+        assert_eq!(idx.inner().unwrap().nprobe(), 1);
+    }
+
+    #[test]
+    fn building_without_a_registered_store_fails_with_a_clear_message() {
+        // Fails loudly rather than silently falling back to a local
+        // index, which would look like it worked and quietly reinstate
+        // the residency this tier exists to remove.
+        let _g = store_guard();
+        let saved = registered_store();
+        *SPANN_STORE.write().unwrap() = None;
+        use crate::traits::VectorIndex;
+        let v = vec![0.1f32; 8];
+        let refs: Vec<&[f32]> = vec![v.as_slice()];
+        let mut idx = SpannVectorIndex::new("nostore/f", DistanceMetric::Cosine, 8);
+        let err = idx.build(&refs).unwrap_err();
+        // Restore before asserting, so a failure here does not leave the
+        // global cleared for whatever runs next.
+        if let Some(s) = saved {
+            register_store(s);
+        }
+        assert!(
+            format!("{err}").contains("no object store is registered"),
+            "got: {err}"
+        );
     }
 
     #[test]

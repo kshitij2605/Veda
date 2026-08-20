@@ -18,15 +18,32 @@ use crate::search::{
 
 /// Build a vector index of the declared type, populated from `vectors`.
 ///
+/// `prefix` names where an object-storage-backed index publishes itself.
+/// Every other index type ignores it. Callers derive it from segment id
+/// and field name so it is **stable across rebuilds**: vector indexes
+/// are rebuilt at recovery rather than persisted, and a prefix that
+/// changed each time would orphan the previous build's objects in the
+/// bucket on every restart.
+///
 /// For unknown / non-vector index types, falls back to `Flat`.
 fn build_vector_index(
     index_type: IndexType,
     metric: DistanceMetric,
     dimension: u32,
     vectors: Vec<Vec<f32>>,
+    prefix: &str,
 ) -> Result<Box<dyn VectorIndex>> {
     let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
     match index_type {
+        IndexType::Spann => {
+            // Object-storage-native IVF: centroids resident, posting
+            // lists fetched from the configured object store by byte
+            // range. See `crates/veda-index/src/spann.rs`.
+            use veda_index::spann::SpannVectorIndex;
+            let mut idx = SpannVectorIndex::new(prefix, metric, dimension);
+            idx.build(&refs)?;
+            Ok(Box::new(idx))
+        }
         IndexType::Hnsw => {
             let mut idx = HnswIndex::new(metric, dimension);
             idx.build(&refs)?;
@@ -206,12 +223,16 @@ impl LocalShardSearcher {
                         vectors.push(vec.to_vec());
                     }
 
-                    // Full-dim primary index.
+                    // Full-dim primary index. The prefix is derived from
+                    // segment id + field name so a rebuild overwrites the
+                    // same objects rather than leaving the old ones
+                    // orphaned in the bucket.
                     let index = build_vector_index(
                         field_def.index_type(),
                         *metric,
                         *dimension,
                         vectors.clone(),
+                        &format!("spann/{seg_id}/{}", field_def.name()),
                     )?;
                     field_indexes.insert(field_def.name().to_owned(), index);
 
@@ -232,6 +253,7 @@ impl LocalShardSearcher {
                                 *metric,
                                 d,
                                 truncated,
+                                &format!("spann/{seg_id}/{}/mrl{d}", field_def.name()),
                             )?;
                             per_dim.insert(d, idx);
                         }
