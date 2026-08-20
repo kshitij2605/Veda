@@ -8,6 +8,7 @@
 pub mod cache;
 pub mod catalog;
 pub mod executor;
+pub mod field_guard;
 pub mod grounding;
 pub mod guardrails;
 pub mod index;
