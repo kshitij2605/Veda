@@ -1,0 +1,608 @@
+[
+  {
+    "arm": "A-unannotated",
+    "id": "q-country",
+    "rep": 0,
+    "ok": false,
+    "secs": 1.2,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": false,
+    "answer": "0",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'EST'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-country",
+    "rep": 1,
+    "ok": false,
+    "secs": 1.2,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": true,
+    "answer": "0",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'Estonia'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-country",
+    "rep": 2,
+    "ok": false,
+    "secs": 1.2,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": true,
+    "answer": "0",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'Estonia'\", \"limit\": 1000}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-country",
+    "rep": 3,
+    "ok": false,
+    "secs": 1.2,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": true,
+    "answer": "0",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'Estonia'\", \"limit\": 1000}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-country",
+    "rep": 4,
+    "ok": false,
+    "secs": 1.2,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": true,
+    "answer": "0",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'Estonia'\", \"limit\": 1000}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-country-list",
+    "rep": 0,
+    "ok": false,
+    "secs": 1.4,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": true,
+    "answer": "No records found with `ctry_cd = 'Estonia'`. The answer is not present in the data.",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'Estonia'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-country-list",
+    "rep": 1,
+    "ok": false,
+    "secs": 1.3,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": true,
+    "answer": "No suppliers headquartered in Estonia were found in the 'anno_plain' collection.",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'Estonia'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-country-list",
+    "rep": 2,
+    "ok": true,
+    "secs": 1.2,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Nordwind Components, Braewick Seals",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'EE'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-country-list",
+    "rep": 3,
+    "ok": true,
+    "secs": 1.1,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Nordwind Components, Braewick Seals",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'EE'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-country-list",
+    "rep": 4,
+    "ok": false,
+    "secs": 1.2,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": true,
+    "answer": "No records found.",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'Estonia'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-amount",
+    "rep": 0,
+    "ok": false,
+    "secs": 2.2,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": false,
+    "answer": "964000",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"limit\": 10, \"query\": \"Meridian Alloys annual contract value\"}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-amount",
+    "rep": 1,
+    "ok": false,
+    "secs": 2.2,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": false,
+    "answer": "964000",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"limit\": 5, \"query\": \"Meridian Alloys annual contract value\"}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-amount",
+    "rep": 2,
+    "ok": false,
+    "secs": 2.3,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": false,
+    "answer": "964000",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"query\": \"Meridian Alloys annual contract value\"}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-amount",
+    "rep": 3,
+    "ok": false,
+    "secs": 2.8,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": false,
+    "answer": "964000",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"limit\": 10, \"query\": \"Meridian Alloys annual contract value\"}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-amount",
+    "rep": 4,
+    "ok": false,
+    "secs": 1.2,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": false,
+    "answer": "964000",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"content LIKE '%Meridian Alloys%'\", \"limit\": 10}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-chile",
+    "rep": 0,
+    "ok": true,
+    "secs": 2.8,
+    "calls": 3,
+    "used_code": false,
+    "used_plain": true,
+    "answer": "Meridian Alloys",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'Chile'\", \"limit\": 10}",
+      "{\"collection\": \"anno_plain\", \"limit\": 10, \"query\": \"supplier headquartered in Chile\"}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-chile",
+    "rep": 1,
+    "ok": true,
+    "secs": 1.7,
+    "calls": 3,
+    "used_code": true,
+    "used_plain": true,
+    "answer": "Meridian Alloys",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'Chile'\", \"limit\": 100}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'CL'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-chile",
+    "rep": 2,
+    "ok": true,
+    "secs": 1.1,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Meridian Alloys",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'CL'\", \"limit\": 10}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-chile",
+    "rep": 3,
+    "ok": true,
+    "secs": 1.6,
+    "calls": 3,
+    "used_code": true,
+    "used_plain": true,
+    "answer": "Meridian Alloys",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'Chile'\", \"limit\": 10}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'CL'\", \"limit\": 10}"
+    ]
+  },
+  {
+    "arm": "A-unannotated",
+    "id": "q-chile",
+    "rep": 4,
+    "ok": true,
+    "secs": 3.1,
+    "calls": 3,
+    "used_code": false,
+    "used_plain": true,
+    "answer": "Meridian Alloys",
+    "tool_args": [
+      "{\"name\": \"anno_plain\"}",
+      "{\"collection\": \"anno_plain\", \"filter\": \"ctry_cd = 'Chile'\", \"limit\": 10}",
+      "{\"collection\": \"anno_plain\", \"limit\": 10, \"query\": \"supplier headquartered in Chile\"}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-country",
+    "rep": 0,
+    "ok": true,
+    "secs": 2.2,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "2",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"field\": \"ref_no\", \"filter\": \"ctry_cd = 'EE'\", \"metric\": \"count\"}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-country",
+    "rep": 1,
+    "ok": true,
+    "secs": 3.0,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "2",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'EE'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-country",
+    "rep": 2,
+    "ok": true,
+    "secs": 1.9,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "2",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"field\": \"ctry_cd\", \"filter\": \"ctry_cd = 'EE'\", \"metric\": \"count\"}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-country",
+    "rep": 3,
+    "ok": true,
+    "secs": 1.8,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "2",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'EE'\", \"limit\": 1000}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-country",
+    "rep": 4,
+    "ok": true,
+    "secs": 1.8,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "2",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"field\": \"ctry_cd\", \"filter\": \"ctry_cd = 'EE'\", \"metric\": \"count\"}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-country-list",
+    "rep": 0,
+    "ok": true,
+    "secs": 1.6,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Nordwind Components, Braewick Seals",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'EE'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-country-list",
+    "rep": 1,
+    "ok": true,
+    "secs": 1.6,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Nordwind Components, Braewick Seals",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'EE'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-country-list",
+    "rep": 2,
+    "ok": true,
+    "secs": 1.5,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Nordwind Components, Braewick Seals",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'EE'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-country-list",
+    "rep": 3,
+    "ok": true,
+    "secs": 1.6,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Nordwind Components\nBraewick Seals",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'EE'\", \"limit\": 1000}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-country-list",
+    "rep": 4,
+    "ok": true,
+    "secs": 1.6,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Nordwind Components, Braewick Seals",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'EE'\", \"limit\": 100}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-amount",
+    "rep": 0,
+    "ok": true,
+    "secs": 1.7,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": false,
+    "answer": "9640",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"content LIKE '%Meridian Alloys%'\", \"limit\": 10}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-amount",
+    "rep": 1,
+    "ok": false,
+    "secs": 1.6,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": false,
+    "answer": "964000",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"content LIKE '%Meridian Alloys%'\", \"limit\": 1}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-amount",
+    "rep": 2,
+    "ok": true,
+    "secs": 1.3,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": false,
+    "answer": "9640",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"content LIKE '%Meridian Alloys%'\", \"limit\": 10}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-amount",
+    "rep": 3,
+    "ok": true,
+    "secs": 1.6,
+    "calls": 2,
+    "used_code": false,
+    "used_plain": false,
+    "answer": "9640",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"content LIKE '%Meridian Alloys%'\", \"limit\": 10}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-amount",
+    "rep": 4,
+    "ok": true,
+    "secs": 3.2,
+    "calls": 4,
+    "used_code": false,
+    "used_plain": false,
+    "answer": "9640",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ref_no = 'SUP-1001'\", \"limit\": 1}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ref_no = 'SUP-1002'\", \"limit\": 1}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ref_no = 'SUP-1003'\", \"limit\": 1}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-chile",
+    "rep": 0,
+    "ok": true,
+    "secs": 1.3,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Meridian Alloys",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'CL'\", \"limit\": 10}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-chile",
+    "rep": 1,
+    "ok": true,
+    "secs": 1.6,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Meridian Alloys",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'CL'\", \"limit\": 1}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-chile",
+    "rep": 2,
+    "ok": true,
+    "secs": 1.6,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Meridian Alloys",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'CL'\", \"limit\": 10}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-chile",
+    "rep": 3,
+    "ok": true,
+    "secs": 1.5,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Meridian Alloys",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'CL'\", \"limit\": 1}"
+    ]
+  },
+  {
+    "arm": "B-annotated",
+    "id": "q-chile",
+    "rep": 4,
+    "ok": true,
+    "secs": 1.6,
+    "calls": 2,
+    "used_code": true,
+    "used_plain": false,
+    "answer": "Meridian Alloys",
+    "tool_args": [
+      "{\"name\": \"anno_rich\"}",
+      "{\"collection\": \"anno_rich\", \"filter\": \"ctry_cd = 'CL'\", \"limit\": 10}"
+    ]
+  }
+]
