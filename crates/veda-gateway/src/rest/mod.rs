@@ -13,6 +13,7 @@ pub mod admin;
 pub mod agents;
 pub mod aggregate;
 pub mod alias;
+pub mod annotation_tuning;
 pub mod answer_score;
 pub mod auto_optimization;
 pub mod changepoint;
