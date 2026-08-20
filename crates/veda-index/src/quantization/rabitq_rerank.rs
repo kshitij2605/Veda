@@ -33,7 +33,33 @@ use crate::traits::{SearchResult, VectorIndex};
 /// distance. Tuned empirically on similar quantizer + rerank stacks
 /// (FAISS, Milvus); we expose `set_rerank_multiplier` for workloads
 /// that want to dial it.
-const DEFAULT_RERANK_MULTIPLIER: usize = 10;
+/// Candidates the coarse pass hands to the exact rerank, as a multiple of `k`.
+///
+/// **Measured, not guessed.** On a 10,000-vector clustered corpus (10 clusters,
+/// sigma 0.10 — the shape `ann_benchmark.rs` uses), recall@10 against exact
+/// ground truth:
+///
+/// | multiplier | candidates | recall@10 (128d) | recall@10 (768d) |
+/// |---|---|---|---|
+/// | 10 (the old default) | 100 | **0.250** | **0.218** |
+/// | 25 | 250 | 0.448 | 0.418 |
+/// | 50 | 500 | 0.724 | 0.690 |
+/// | **100** | **1000** | **1.000** | **1.000** |
+/// | 200 | 2000 | 1.000 | 1.000 |
+///
+/// At 10 the index silently returned a quarter of the correct neighbours on a
+/// clustered corpus. The coarse 1-bit pass cannot order points *within* a tight
+/// cluster — its distance-estimate error is a large fraction of the whole
+/// intra-cluster spread — so recall is governed by how deep the candidate pool
+/// is, and stage 2 cannot recover a neighbour stage 1 never returned.
+///
+/// The cost is bounded and does **not** grow with the corpus: the multiplier
+/// scales with `k`, so this is a fixed ~1000 exact distance computations per
+/// `k=10` query whether the collection holds ten thousand rows or ten million.
+///
+/// Reproduce: `cargo test -p veda-index --release --test rabitq_rerank_sweep
+/// -- --ignored --nocapture`.
+const DEFAULT_RERANK_MULTIPLIER: usize = 100;
 
 pub struct RaBitQRerankIndex {
     quantizer: RaBitQuantizer,
