@@ -261,9 +261,9 @@ fn truncate_for_model(s: &str, cap: usize) -> String {
 /// searched until `max_steps` and then returned a non-answer, because nothing
 /// told it that its searches had stopped producing evidence. See
 /// `documentation/2026-08-17-multi-hop-retrieval-scope.md`.
-const STAGNATION_NOTE: &str = "\n\n[note: this call returned no records you have not \
-already been shown. Further searching is not producing new evidence — answer from what \
-you have, and if the answer is not present in it, say so.]";
+const STAGNATION_NOTE: &str = "\n\n[note: this call surfaced no records that are both \
+new and as relevant as what you have already seen. Further searching is not producing new \
+evidence — answer from what you have, and if the answer is not present in it, say so.]";
 
 /// The record ids a tool result carries, or `None` when the result is not a
 /// retrieval result at all.
@@ -273,17 +273,37 @@ you have, and if the answer is not present in it, say so.]";
 /// `id`. Everything else — `list_collections`, `aggregate`, an error payload —
 /// says nothing about whether more evidence is reachable, so repeating it must
 /// not count as stagnation.
-fn retrieved_ids(value: &serde_json::Value) -> Option<Vec<String>> {
+fn retrieved_hits(value: &serde_json::Value) -> Option<Vec<(String, Option<f64>)>> {
     let arr = value
         .get("hits")
         .or_else(|| value.get("records"))?
         .as_array()?;
     Some(
         arr.iter()
-            .filter_map(|h| Some(h.get("id")?.as_str()?.to_owned()))
+            .filter_map(|h| {
+                let id = h.get("id")?.as_str()?.to_owned();
+                // `distance` is present on `search` hits (lower = more
+                // similar) and absent on `filter_query` records, which are
+                // unordered. Absent means "relevance unknown", which is
+                // treated as informative rather than as stagnant.
+                let d = h.get("distance").and_then(serde_json::Value::as_f64);
+                Some((id, d))
+            })
             .collect(),
     )
 }
+
+/// How much worse than the best hit so far a record may be and still count as
+/// new evidence.
+///
+/// v1 fired only when a call returned **zero** ids the run had not already
+/// seen, and measured a firing rate of 1 run in 6: on a corpus of any size
+/// every reworded query pulls back at least one document that has not appeared
+/// yet, even when none of them are relevant. The loop was not re-reading the
+/// same documents, it was reading new irrelevant ones — so "no new ids" was
+/// never going to be the signal. "No new *relevant* ids" is, and `distance`
+/// makes it computable without a second relevance judgement.
+const STAGNATION_RELEVANCE_TOLERANCE: f64 = 1.05;
 
 /// Run the tool-calling loop for `agent` against `model`, starting from
 /// `history` plus a fresh `user_input` turn.
@@ -472,9 +492,11 @@ async fn run_core<M: ChatModel>(
     }
 
     let mut last_content: Option<String> = None;
-    // Every record id retrieval has surfaced this run, so a call that adds
-    // none can be flagged with `STAGNATION_NOTE`.
+    // Every record id retrieval has surfaced this run, plus the best (lowest)
+    // distance seen, so a call that adds no *relevant* record can be flagged
+    // with `STAGNATION_NOTE`.
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut best_distance: Option<f64> = None;
 
     for _ in 0..max_steps {
         step_calls = step_calls.saturating_add(1);
@@ -699,11 +721,39 @@ async fn run_core<M: ChatModel>(
                     // cannot cut it off.
                     let mut for_model = truncate_for_model(&result_str, TOOL_RESULT_CAP_BYTES);
                     if !outcome.is_error
-                        && let Some(ids) = retrieved_ids(&outcome.content)
+                        && let Some(hits) = retrieved_hits(&outcome.content)
                     {
-                        let fresh = ids.iter().filter(|id| !seen_ids.contains(*id)).count();
-                        seen_ids.extend(ids);
-                        if fresh == 0 {
+                        // A record counts as new evidence when it is unseen AND
+                        // at least as relevant as the best already surfaced. A
+                        // hit with no distance (`filter_query`) counts as new
+                        // evidence on identity alone, since there is no
+                        // relevance to compare.
+                        let threshold = best_distance.map(|b| b * STAGNATION_RELEVANCE_TOLERANCE);
+                        let fresh = hits
+                            .iter()
+                            .filter(|(id, d)| {
+                                !seen_ids.contains(id)
+                                    && match (d, threshold) {
+                                        (Some(d), Some(t)) => *d <= t,
+                                        _ => true,
+                                    }
+                            })
+                            .count();
+                        for (_, d) in &hits {
+                            if let Some(d) = d {
+                                best_distance = Some(best_distance.map_or(*d, |b: f64| b.min(*d)));
+                            }
+                        }
+                        seen_ids.extend(hits.into_iter().map(|(id, _)| id));
+                        let fired = fresh == 0;
+                        // Always counted, fired or not: a rate is the only way
+                        // to tell an ineffective signal from an inert one.
+                        metrics::counter!(
+                            veda_core::metrics::STAGNATION_CHECKS,
+                            "fired" => if fired { "true" } else { "false" }
+                        )
+                        .increment(1);
+                        if fired {
                             for_model.push_str(STAGNATION_NOTE);
                         }
                     }
@@ -2004,26 +2054,115 @@ mod tests {
     }
 
     #[test]
-    fn retrieved_ids_reads_both_result_shapes_and_ignores_the_rest() {
-        let hits = serde_json::json!({ "hits": [{ "id": "a" }, { "id": "b" }], "count": 2 });
+    fn retrieved_hits_reads_both_result_shapes_and_ignores_the_rest() {
+        let hits = serde_json::json!({
+            "hits": [{ "id": "a", "distance": 0.1 }, { "id": "b", "distance": 0.4 }],
+            "count": 2
+        });
         assert_eq!(
-            retrieved_ids(&hits),
-            Some(vec!["a".to_owned(), "b".to_owned()])
+            retrieved_hits(&hits),
+            Some(vec![
+                ("a".to_owned(), Some(0.1)),
+                ("b".to_owned(), Some(0.4))
+            ])
         );
 
+        // `filter_query` records are unordered and carry no distance, so
+        // relevance is unknown rather than zero.
         let records = serde_json::json!({ "records": [{ "id": "c" }], "count": 1 });
-        assert_eq!(retrieved_ids(&records), Some(vec!["c".to_owned()]));
+        assert_eq!(retrieved_hits(&records), Some(vec![("c".to_owned(), None)]));
 
         // An empty result set is still a retrieval result: it returned no
         // new ids, which is exactly the signal stagnation detection wants.
         let empty = serde_json::json!({ "hits": [], "count": 0 });
-        assert_eq!(retrieved_ids(&empty), Some(Vec::new()));
+        assert_eq!(retrieved_hits(&empty), Some(Vec::new()));
 
         // Not retrieval.
         assert_eq!(
-            retrieved_ids(&serde_json::json!({ "collections": ["docs"], "count": 1 })),
+            retrieved_hits(&serde_json::json!({ "collections": ["docs"], "count": 1 })),
             None
         );
-        assert_eq!(retrieved_ids(&serde_json::json!({ "error": "boom" })), None);
+        assert_eq!(
+            retrieved_hits(&serde_json::json!({ "error": "boom" })),
+            None
+        );
+    }
+
+    /// The rule v2 turns on, exercised directly rather than through the loop.
+    ///
+    /// v1 asked "did this call return an id I have not seen?", which on any
+    /// real corpus is almost always yes — it fired in 1 run out of 6. v2 asks
+    /// "did it return an *unseen and at least as relevant* record?".
+    fn fresh_count(
+        hits: &[(String, Option<f64>)],
+        seen: &std::collections::HashSet<String>,
+        best: Option<f64>,
+    ) -> usize {
+        let threshold = best.map(|b| b * STAGNATION_RELEVANCE_TOLERANCE);
+        hits.iter()
+            .filter(|(id, d)| {
+                !seen.contains(id)
+                    && match (d, threshold) {
+                        (Some(d), Some(t)) => *d <= t,
+                        _ => true,
+                    }
+            })
+            .count()
+    }
+
+    #[test]
+    fn new_but_irrelevant_records_do_not_count_as_progress() {
+        let seen: std::collections::HashSet<String> = ["a".to_owned()].into_iter().collect();
+        // Two ids never seen before — v1 would call this progress and stay
+        // silent. Both are far worse than the best hit so far (0.10), so v2
+        // recognises the search has stopped paying.
+        let hits = vec![("x".to_owned(), Some(0.80)), ("y".to_owned(), Some(0.95))];
+        assert_eq!(fresh_count(&hits, &seen, Some(0.10)), 0);
+    }
+
+    #[test]
+    fn a_new_and_relevant_record_still_counts_as_progress() {
+        let seen: std::collections::HashSet<String> = ["a".to_owned()].into_iter().collect();
+        let hits = vec![
+            ("x".to_owned(), Some(0.09)), // better than the best so far
+            ("y".to_owned(), Some(0.95)),
+        ];
+        assert_eq!(fresh_count(&hits, &seen, Some(0.10)), 1);
+    }
+
+    #[test]
+    fn the_tolerance_admits_a_near_equal_hit() {
+        // Exactly at the boundary: 0.10 * 1.05 = 0.105. A record marginally
+        // worse than the best is still evidence, not stagnation — without the
+        // tolerance the rule would fire on ties and float noise.
+        let seen = std::collections::HashSet::new();
+        assert_eq!(
+            fresh_count(&[("x".to_owned(), Some(0.105))], &seen, Some(0.10)),
+            1
+        );
+        assert_eq!(
+            fresh_count(&[("x".to_owned(), Some(0.106))], &seen, Some(0.10)),
+            0
+        );
+    }
+
+    #[test]
+    fn the_first_retrieval_is_never_stagnant_and_distanceless_hits_always_count() {
+        let seen = std::collections::HashSet::new();
+        // No best distance yet: nothing to be worse than.
+        assert_eq!(fresh_count(&[("x".to_owned(), Some(0.9))], &seen, None), 1);
+        // `filter_query` has no distance, so it is judged on identity alone —
+        // treating unknown relevance as irrelevant would make every
+        // filter_query call look stagnant.
+        assert_eq!(fresh_count(&[("x".to_owned(), None)], &seen, Some(0.01)), 1);
+    }
+
+    #[test]
+    fn an_already_seen_record_never_counts_however_relevant() {
+        let seen: std::collections::HashSet<String> = ["x".to_owned()].into_iter().collect();
+        assert_eq!(
+            fresh_count(&[("x".to_owned(), Some(0.0))], &seen, Some(0.5)),
+            0
+        );
     }
 }
