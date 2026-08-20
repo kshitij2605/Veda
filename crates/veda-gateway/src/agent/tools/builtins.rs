@@ -220,11 +220,37 @@ pub async fn describe_collection(ctx: &ToolContext<'_>, args: serde_json::Value)
                 FieldType::Uuid => "uuid",
                 FieldType::Array(_) => "array",
             };
-            serde_json::json!({
+            let mut out = serde_json::json!({
                 "name": f.name(),
                 "type": kind,
                 "filterable": f.filterable(),
-            })
+            });
+            // Field meaning, when the schema carries any. Flattened in
+            // beside the physical facts rather than nested under an
+            // "annotations" key: the model reads this as one description
+            // of the field, and an extra level of nesting is one more
+            // thing for it to get wrong. Absent keys stay absent, so an
+            // unannotated collection renders exactly as it did before.
+            let ann = f.annotations();
+            if let Some(obj) = out.as_object_mut() {
+                if let Some(d) = &ann.description {
+                    obj.insert("description".into(), serde_json::json!(d));
+                }
+                if let Some(s) = &ann.semantic_type {
+                    obj.insert("semantic_type".into(), serde_json::json!(s));
+                }
+                if let Some(v) = &ann.value_domain {
+                    obj.insert("value_domain".into(), serde_json::json!(v));
+                }
+                if f.is_withheld_from_non_admin() {
+                    // Say so explicitly. A model that knows a field is
+                    // withheld can answer "I can't see that" instead of
+                    // burning steps searching for a column that will
+                    // never appear in any result.
+                    obj.insert("restricted".into(), serde_json::json!(true));
+                }
+            }
+            out
         })
         .collect();
 
