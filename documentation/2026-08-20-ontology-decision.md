@@ -173,3 +173,131 @@ In order, each its own decision:
    and machine-usable; free text is adoptable. Elasticsearch's `unit`/`metric_type` convention
    suggests the closed set is what makes the feature useful rather than decorative. Decide with
    Gate A's data, not before it.
+
+---
+
+# Measured: Gates A and B, and what they changed (2026-08-20)
+
+**This supersedes §4 and §5 of the decision above.** The gates were defined there and have now
+been run. Harness committed beside this document as `annotation-eval/gate_a.py`; raw results in
+`annotation-eval/gate_a-2026-08-20.json`.
+
+## Setup
+
+A 5-record collection whose field names are deliberately non-obvious and — the discriminating
+part — whose **stored encoding differs from how a question phrases it**:
+
+| field | stores | a question says |
+|---|---|---|
+| `ctry_cd` | ISO-3166 alpha-2 (`"EE"`) | "Estonia" |
+| `amt_2` | an amount in **cents** (`964000`) | "in US dollars" |
+| `ref_no` | `SUP-1001` | "the supplier" |
+
+Two arms differ **only** in whether the schema carries annotations. Same data, same questions,
+same agent instructions, same seed. 4 cases × 5 repeats × 2 arms = 40 runs, against
+`Qwen/Qwen3.5-122B-A10B` on vLLM and `jina-v5-omni-small`, on an isolated server (port 6357,
+its own data directory — neither the live instance on 6340 nor the multi-hop server on 6355 was
+touched).
+
+## Gate A — does the model read the annotation? **PASS**
+
+The firing rate is read from **the model's own tool-call arguments**, never from its final
+answer, so guessing right by luck does not register as having read anything.
+
+| arm | used the stored encoding | used plaintext (the wrong guess) |
+|---|---|---|
+| unannotated | 5/20 (25%) | **11/20** |
+| annotated | **15/20 (75%)** | **0/20** |
+
+The plaintext column is the cleanest result in this cycle. Unannotated, the model filters
+`ctry_cd = 'Estonia'`, gets zero rows, and reports "no suppliers found" — confidently and
+wrongly. Annotated, that failure mode **does not occur once in 20 runs**.
+
+The 75% understates the true rate: the detector only recognises the country-code channel, so
+the `amt_2` cases score 0/5 on "used code" while being 4/5 correct. Treat 75% as a floor.
+
+## Gate B — does it improve accuracy? **PASS**
+
+| arm | correct |
+|---|---|
+| unannotated | 7/20 (35%) |
+| annotated | **19/20 (95%)** |
+
+Per case, annotated: `q-country` 5/5, `q-country-list` 5/5, `q-amount` 4/5, `q-chile` 5/5. The
+gap is far outside run-to-run variance at this sample size, which is the bar §4 set and the bar
+the v2 multi-hop work failed to clear when it called a 13/16-vs-12/16 difference noise.
+
+## The gate found a bug that had nothing to do with annotations
+
+The first run scored 25% → 70%, with `q-country-list` at **0/5 in both arms** even though the
+annotated model issued exactly the right query (`ctry_cd = 'EE'`, limit 100). Calling the tool
+directly showed `count: 2` — both records returned, correctly.
+
+They were returned behind their full 1024-dimension embeddings. `filter_query` and `get_record`
+serialised every field of every record verbatim, so ~2k float components buried the two fields
+that mattered. The model answered from the first record only, and in one run invented a
+supplier that is not in the corpus. `search` never had this bug — it hydrates hits by walking
+the schema and skips vector fields explicitly.
+
+Fixed in `05661e7`. Re-running the identical probe:
+
+| arm | before fix | after fix |
+|---|---|---|
+| unannotated | 25% | 35% |
+| annotated | 70% | **95%** |
+| `q-country-list` (annotated) | 0/5 | **5/5** |
+
+This is worth recording for a reason beyond the fix. That failure looked exactly like a
+one-to-many **enumeration** weakness in the agent loop — the same diagnosis the v1 multi-hop
+work reached and spent a cycle preparing to fix before v2 showed it was a small-corpus artifact.
+It was neither. It was a serialisation bug three layers away. **A plausible mechanism that
+matches the symptom is still not the mechanism**, and the only thing that separated them here
+was calling the tool directly and reading what it returned.
+
+## D1 (annotations as a tuned artifact) — blocked, and not on effort
+
+§5 proposed making annotations a searched parameter in the tier-3 tuning campaign. Two findings
+change that, one favourable and one blocking.
+
+**Favourable: annotations are tier 1, not tier 3.** They change only what the agent is *told*.
+No reindex, no re-embed, no storage change — the cheapest tier in the campaign's cost model,
+not the most expensive. §5 had this wrong.
+
+**Blocking: the campaign cannot score them.** `TrialObjectives` is `{recall, faithfulness}`
+plus latency (`crates/veda-gateway/src/tuning/campaign.rs:28`). Recall@k compares retrieved
+chunk ids against expected ids; annotations never enter the retrieval path, so they cannot move
+it. Adding `annotation_variant` to the param vector would create a search dimension with **zero
+gradient** — NSGA-II would wander on it and report noise as a result.
+
+That is precisely the stagnation-detector failure: a mechanism that is correct, tested, and
+inert, which looks merely ineffective when judged on win rate. **So it is not being built.**
+
+What D1 actually needs is an **agent-task-accuracy objective** — the thing `gate_a.py` already
+computes. The remaining work is not the search dimension; it is teaching the eval harness to
+hold agent-task cases (question → expected answer, graded on the final response) alongside its
+retrieval cases, and exposing that as a third objective. That is a design discussion, not an
+afternoon, and it should start from the harness committed here rather than from scratch.
+
+## Revised recommendation order
+
+1. **Done** — annotations exist, render to agents and MCP through `ToolCatalog` (`15288e5`),
+   and sensitivity is enforced on every retrieval path (`689c45b`).
+2. **Done, and unplanned** — the embedding-burial fix (`05661e7`), which is worth more than the
+   annotations on the evidence above: it moved the unannotated arm too, and it applies to every
+   `filter_query` and `get_record` call any agent has ever made.
+3. **Next** — an agent-task-accuracy objective in the eval harness. Without it D1 is
+   unmeasurable, and with it D1 is a small change.
+4. **Unchanged** — constraint validation (D3) still has no demand signal; cross-collection
+   relations still serve a workload measured at 100%.
+
+## What these numbers do not support
+
+- **Five records, four questions, one model.** The corpus is small enough that retrieval is
+  trivial; the probe isolates *encoding* knowledge, not retrieval, and says nothing about
+  behaviour at scale.
+- **The effect size is inflated by design.** Field names were chosen to be maximally opaque and
+  the encodings maximally counterintuitive. A schema whose fields are named `country` and
+  `amount_usd` should be expected to show little or no gain — the honest claim is "annotations
+  help when the schema is not self-describing", not "annotations add 60 points".
+- **One model.** No claim about smaller models, which may read annotations less reliably, or
+  about models that ignore `describe_collection` entirely.
