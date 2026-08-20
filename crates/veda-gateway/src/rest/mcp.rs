@@ -99,6 +99,70 @@ fn err(id: serde_json::Value, code: i32, message: impl Into<String>) -> JsonRpcR
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// What [`handle_mcp`] must do with a request before dispatching it.
+#[derive(Debug, PartialEq, Eq)]
+enum Precheck {
+    /// Route to the method dispatch.
+    Dispatch,
+    /// A JSON-RPC notification: acknowledge with `202` and no body.
+    AcknowledgeOnly,
+    /// `MCP-Protocol-Version` is present and unsupported: `400`.
+    UnsupportedVersion,
+}
+
+/// Decide what happens to a request before it reaches the dispatch.
+///
+/// Split out of [`handle_mcp`] so the two spec rules below are testable
+/// without an `AppState` — both were live bugs, and a test that cannot fail
+/// when the rule is removed does not guard it.
+///
+/// 1. **`initialize` is exempt from the version-header gate.** The header
+///    governs requests made *after* initialization. `initialize` negotiates
+///    the version in its own body, and [`handle_initialize`] already does that
+///    correctly — echoing the client's version when we support it, falling
+///    back to ours when we do not. Gating `initialize` on the header defeats
+///    that entirely: a client offering a version newer than anything in
+///    `SUPPORTED_PROTOCOL_VERSIONS` can never be told to fall back, because
+///    the reply it needs is the one being withheld. Found against Hermes
+///    Agent's `mcp 2.0.0` client, which offers `2025-11-25`, received
+///    `400 unsupported MCP-Protocol-Version`, retried four times and gave up.
+///
+/// 2. **A request with no `id` is a notification and gets no reply.** JSON-RPC
+///    2.0 is explicit that "the Server MUST NOT reply to a Notification", and
+///    the MCP Streamable HTTP binding says the same in transport terms: `202`
+///    with an empty body. Veda used to fall through to the dispatch, so the
+///    mandatory `notifications/initialized` that every client sends straight
+///    after `initialize` came back as
+///    `{"id": null, "error": {"code": -32601, ...}}` — a reply to something
+///    that must not be replied to, reporting an error for a message that was
+///    perfectly valid. Hermes tolerated it; a stricter client is entitled to
+///    fail the session over it.
+///
+/// The version check runs first so a malformed request is still told *why* it
+/// was rejected rather than being silently acknowledged.
+fn precheck(
+    method: &str,
+    has_id: bool,
+    version_header: Option<&axum::http::HeaderValue>,
+) -> Precheck {
+    if method != "initialize"
+        && let Some(v) = version_header
+    {
+        let ok = v
+            .to_str()
+            .ok()
+            .map(|s| SUPPORTED_PROTOCOL_VERSIONS.contains(&s))
+            .unwrap_or(false);
+        if !ok {
+            return Precheck::UnsupportedVersion;
+        }
+    }
+    if !has_id {
+        return Precheck::AcknowledgeOnly;
+    }
+    Precheck::Dispatch
+}
+
 /// MCP Streamable HTTP POST endpoint (stateless).
 ///
 /// Honors the `MCP-Protocol-Version` header leniently: absent → assume a
@@ -116,15 +180,12 @@ pub async fn handle_mcp(
     headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> axum::response::Response {
-    // Lenient MCP-Protocol-Version check: only reject a header that is
-    // *present and unsupported*.
-    if let Some(v) = headers.get("mcp-protocol-version") {
-        let ok_version = v
-            .to_str()
-            .ok()
-            .map(|s| SUPPORTED_PROTOCOL_VERSIONS.contains(&s))
-            .unwrap_or(false);
-        if !ok_version {
+    match precheck(
+        &req.method,
+        req.id.is_some(),
+        headers.get("mcp-protocol-version"),
+    ) {
+        Precheck::UnsupportedVersion => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -134,6 +195,8 @@ pub async fn handle_mcp(
             )
                 .into_response();
         }
+        Precheck::AcknowledgeOnly => return (StatusCode::ACCEPTED, ()).into_response(),
+        Precheck::Dispatch => {}
     }
 
     let id = req.id.unwrap_or(serde_json::Value::Null);
@@ -263,4 +326,111 @@ async fn handle_tools_call(
         "structuredContent": outcome.content,
         "isError": false
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_params(version: &str) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "protocolVersion": version,
+            "capabilities": {},
+            "clientInfo": { "name": "test", "version": "0.1.0" }
+        }))
+    }
+
+    #[test]
+    fn a_supported_version_is_echoed_back() {
+        for v in SUPPORTED_PROTOCOL_VERSIONS {
+            let out = handle_initialize(init_params(v)).unwrap();
+            assert_eq!(out["protocolVersion"], *v);
+        }
+    }
+
+    #[test]
+    fn a_newer_client_version_negotiates_down_instead_of_failing() {
+        // The case that broke Hermes Agent: its `mcp 2.0.0` client offers
+        // 2025-11-25, which is newer than anything Veda knows. Per the MCP
+        // spec the server must answer with a version it *does* support, so
+        // the client can decide whether to proceed — not refuse.
+        let out = handle_initialize(init_params("2025-11-25")).unwrap();
+        assert_eq!(
+            out["protocolVersion"], PROTOCOL_VERSION,
+            "an unknown newer version must negotiate down to ours"
+        );
+    }
+
+    #[test]
+    fn a_missing_version_falls_back_to_ours() {
+        let out = handle_initialize(Some(serde_json::json!({}))).unwrap();
+        assert_eq!(out["protocolVersion"], PROTOCOL_VERSION);
+        let out = handle_initialize(None).unwrap();
+        assert_eq!(out["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn the_advertised_default_is_itself_supported() {
+        // Guards a rename or bump that leaves the two lists inconsistent —
+        // which would make every negotiated-down handshake advertise a
+        // version the header gate then rejects on the next request.
+        assert!(
+            SUPPORTED_PROTOCOL_VERSIONS.contains(&PROTOCOL_VERSION),
+            "PROTOCOL_VERSION {PROTOCOL_VERSION} is not in SUPPORTED_PROTOCOL_VERSIONS"
+        );
+    }
+
+    fn hv(s: &str) -> axum::http::HeaderValue {
+        axum::http::HeaderValue::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn initialize_is_exempt_from_the_version_header_gate() {
+        // Hermes Agent offers a version newer than any we know. Gating
+        // `initialize` on the header made the handshake unrecoverable.
+        assert_eq!(
+            precheck("initialize", true, Some(&hv("2025-11-25"))),
+            Precheck::Dispatch
+        );
+    }
+
+    #[test]
+    fn a_later_request_with_an_unsupported_version_is_still_rejected() {
+        // The exemption must be scoped to `initialize` alone — the header
+        // still means something on every request after it.
+        assert_eq!(
+            precheck("tools/list", true, Some(&hv("2025-11-25"))),
+            Precheck::UnsupportedVersion
+        );
+        for v in SUPPORTED_PROTOCOL_VERSIONS {
+            assert_eq!(
+                precheck("tools/list", true, Some(&hv(v))),
+                Precheck::Dispatch
+            );
+        }
+        assert_eq!(precheck("tools/list", true, None), Precheck::Dispatch);
+    }
+
+    #[test]
+    fn a_notification_is_acknowledged_never_answered() {
+        // `notifications/initialized` is sent by every client immediately
+        // after `initialize`, and carries no `id`.
+        assert_eq!(
+            precheck("notifications/initialized", false, None),
+            Precheck::AcknowledgeOnly
+        );
+        assert_eq!(
+            precheck(
+                "notifications/cancelled",
+                false,
+                Some(&hv(PROTOCOL_VERSION))
+            ),
+            Precheck::AcknowledgeOnly
+        );
+    }
+
+    #[test]
+    fn an_ordinary_request_still_dispatches() {
+        assert_eq!(precheck("tools/call", true, None), Precheck::Dispatch);
+    }
 }
