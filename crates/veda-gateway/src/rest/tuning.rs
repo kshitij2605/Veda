@@ -533,6 +533,7 @@ async fn evaluate_one_trial(
             recall: 0.0,
             faithfulness: 0.0,
             latency_p50_ms: 10_000.0,
+            answer_correctness: None,
         };
     };
     let embedder = crate::rest::rag_eval::text_embedder_pub(state).await;
@@ -540,6 +541,12 @@ async fn evaluate_one_trial(
     let mut recalls = Vec::new();
     let mut faithfulnesses = Vec::new();
     let mut latencies_ms = Vec::new();
+    // End-to-end answer correctness, opt-in: it costs two model calls per case
+    // per trial, so a 50-trial campaign over 20 cases is ~2,000 calls.
+    let score_answers = std::env::var("VEDA_TUNING_SCORE_ANSWERS")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let mut correctness = Vec::new();
 
     for case in &set.cases {
         let Some(query_vec) = (match embedder.as_ref() {
@@ -589,9 +596,50 @@ async fn evaluate_one_trial(
         {
             faithfulnesses.push(crate::rest::rag_eval::cosine_pub(&hv, &gv) as f64);
         }
+
+        // The only objective here that can move for a change acting downstream
+        // of the hit list: it generates an answer from what this trial actually
+        // retrieved and scores THAT, where `recall` and `faithfulness` both
+        // score the retrieval.
+        if score_answers {
+            let context: Vec<String> = hits
+                .iter()
+                .filter_map(|h| h.fields.get(text_field).and_then(|v| v.as_str()))
+                .map(str::to_owned)
+                .collect();
+            if let Some((answer, factual)) = crate::rest::answer_score::generate_and_judge(
+                &case.query,
+                &context,
+                case.gold_answer.as_deref(),
+            )
+            .await
+            {
+                let similarity = match (&case.gold_answer, embedder.as_ref()) {
+                    (Some(gold), Some(e)) => {
+                        match (e.embed_text(&answer).await, e.embed_text(gold).await) {
+                            (Ok(av), Ok(gv)) => {
+                                Some(crate::rest::rag_eval::cosine_pub(&av, &gv) as f64)
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(c) = crate::rest::answer_score::combine(factual, similarity) {
+                    correctness.push(c);
+                }
+            }
+        }
     }
 
     TrialObjectives {
+        // `None`, not 0.0, when unscored: a zero is a score, and the optimizer
+        // would read it as "this configuration answered nothing correctly".
+        answer_correctness: if correctness.is_empty() {
+            None
+        } else {
+            Some(mean_or(&correctness, 0.0))
+        },
         recall: mean_or(&recalls, 0.0),
         faithfulness: if faithfulnesses.is_empty() {
             0.5
@@ -1039,6 +1087,7 @@ mod tests {
                 recall: 0.9,
                 faithfulness: 0.9,
                 latency_p50_ms: 10.0,
+                answer_correctness: None,
             },
             is_pareto_optimal: true,
             started_at: 0,
