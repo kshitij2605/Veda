@@ -1076,12 +1076,48 @@ fn project_fields(
     *fields = projected;
 }
 
+/// Render a field value for an LLM, summarising embeddings instead of
+/// dumping them.
+///
+/// `field_value_to_json` serialises a `Vector` as its full component
+/// list, which is right for REST — a client asking for a record may
+/// genuinely want the embedding — and wrong for a model. A 1024-dim
+/// vector is ~1k JSON numbers, and the tools return one per record.
+///
+/// This is not only a token-cost problem, it measurably degrades
+/// answers. In the 2026-08-20 annotation measurement, `filter_query`
+/// on a 5-record collection returned `count: 2` correctly, but both
+/// records arrived behind ~2k float components; the model reported only
+/// the first supplier and in one run invented a second name outright.
+/// The retrieval was perfect and the answer was wrong purely because
+/// the useful fields were buried.
+///
+/// A model can do nothing with raw components, so they are replaced by
+/// a shape summary that still says the field exists and is populated.
+fn agent_field_value(value: &veda_core::record::FieldValue) -> serde_json::Value {
+    use veda_core::record::FieldValue as FV;
+    match value {
+        FV::Vector(v) => serde_json::json!({ "vector": { "dim": v.as_slice().len() } }),
+        FV::SparseVector(sv) => {
+            serde_json::json!({ "sparse_vector": { "nnz": sv.indices().len() } })
+        }
+        FV::MultiVector(rows) => serde_json::json!({
+            "multi_vector": {
+                "vectors": rows.len(),
+                "dim": rows.first().map(|r| r.len()).unwrap_or(0),
+            }
+        }),
+        other => field_value_to_json(other),
+    }
+}
+
 /// Serialise a record to `{ "id", "fields" }` — matching the REST
-/// `GetRecordResponse` shape so the agent/MCP surfaces stay consistent.
+/// `GetRecordResponse` shape so the agent/MCP surfaces stay consistent,
+/// except that embeddings are summarised (see [`agent_field_value`]).
 fn record_json(rec: &Record) -> serde_json::Value {
     let mut fields = serde_json::Map::new();
     for (key, value) in rec.fields() {
-        fields.insert(key.clone(), field_value_to_json(value));
+        fields.insert(key.clone(), agent_field_value(value));
     }
     serde_json::json!({ "id": rec.id().to_string(), "fields": fields })
 }
@@ -1165,6 +1201,44 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn a_records_embedding_is_summarised_not_dumped_to_the_model() {
+        // `search` already skipped vector fields when hydrating hits;
+        // `filter_query` and `get_record` did not, because both go
+        // through `record_json`. On a 5-record collection that meant two
+        // matching records arrived behind ~2k float components and the
+        // model answered from the first one only. Retrieval was correct
+        // and the answer was wrong purely from burial.
+        use veda_core::record::{FieldValue, Record};
+        use veda_core::vector::DenseVector;
+
+        let mut rec = Record::new();
+        rec.set("name", FieldValue::String("Nordwind".to_owned()));
+        rec.set(
+            "vec",
+            FieldValue::Vector(DenseVector::new(vec![0.5f32; 1024])),
+        );
+
+        let json = record_json(&rec);
+        let fields = json["fields"].as_object().unwrap();
+
+        assert_eq!(fields["name"], "Nordwind", "real fields must survive");
+        assert!(
+            !fields["vec"].is_array(),
+            "the raw component list must not reach the model: {}",
+            fields["vec"]
+        );
+        assert_eq!(
+            fields["vec"]["vector"]["dim"], 1024,
+            "but the model should still be told the field exists and its shape"
+        );
+
+        // The whole payload must stay small. The pre-fix version of this
+        // record serialised to roughly 8 KB.
+        let len = serde_json::to_string(&json).unwrap().len();
+        assert!(len < 400, "record json unexpectedly large: {len} bytes");
     }
 
     #[test]
