@@ -2101,6 +2101,15 @@ mod tests {
             self.get_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.get(key)
         }
+        fn get_range(
+            &self,
+            key: &str,
+            offset: u64,
+            len: usize,
+        ) -> veda_core::error::Result<Vec<u8>> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.get_range(key, offset, len)
+        }
         fn delete(&self, key: &str) -> veda_core::error::Result<()> {
             self.inner.delete(key)
         }
