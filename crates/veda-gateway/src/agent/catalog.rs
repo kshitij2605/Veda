@@ -311,7 +311,13 @@ impl ToolCatalog {
             return outcome;
         }
         let vector_field = resolve_vector_field(ctx, collection.as_deref()).await;
-        let outcome = apply_retrieval_guard(outcome, vector_field.as_deref());
+        let mut outcome = apply_retrieval_guard(outcome, vector_field.as_deref());
+        // Raw embeddings are summarised here and NOT earlier. The guard
+        // above reads each hit's vector out of its `fields` map for
+        // conflict detection, and `filter_query` is the only path where
+        // that works, so stripping in `record_json` silently disabled
+        // it. See `field_guard::strip_embeddings`.
+        crate::agent::field_guard::strip_embeddings(&mut outcome.content);
         // Schema-declared field sensitivity, applied at the same choke
         // point and for the same reason: a transport that skipped it
         // would be a silent bypass. Ordered after the retrieval guard so

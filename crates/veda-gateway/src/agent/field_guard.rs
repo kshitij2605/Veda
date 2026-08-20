@@ -129,6 +129,89 @@ pub fn redact_payload(payload: &mut serde_json::Value, withheld: &[String]) -> F
     report
 }
 
+/// Replace raw embedding components with a shape summary, everywhere in
+/// a tool payload.
+///
+/// **Ordering is load-bearing.** This must run at the dispatch choke
+/// point and only *after* `apply_retrieval_guard`, because
+/// `temporal_check`'s conflict detection reads each hit's vector back
+/// out of the `fields` map, and `filter_query` is the only path where
+/// that detection works at all (`search` skips vector fields when
+/// hydrating hits). Stripping earlier — inside `record_json`, which is
+/// where it was first tried — leaves the guard reading `None` and
+/// silently disables it.
+///
+/// Why strip at all: a 1024-dim vector is ~1k JSON numbers and the tools
+/// return one per record. That is not only token cost. Measured on the
+/// 2026-08-20 annotation probe, `filter_query` returned `count: 2`
+/// correctly on a 5-record collection and the model answered from the
+/// first record only — once inventing a name absent from the corpus —
+/// because the two useful fields sat behind ~2k float components.
+/// Removing them moved that case from 0/5 to 5/5.
+///
+/// Returns the number of field values summarised.
+pub fn strip_embeddings(payload: &mut serde_json::Value) -> usize {
+    fn summarise(v: &serde_json::Value) -> Option<serde_json::Value> {
+        // A dense vector: a non-empty array of numbers.
+        if let Some(arr) = v.as_array() {
+            if !arr.is_empty() && arr.iter().all(serde_json::Value::is_number) {
+                return Some(serde_json::json!({ "vector": { "dim": arr.len() } }));
+            }
+            // A multi-vector: an array of such arrays.
+            if !arr.is_empty()
+                && arr.iter().all(|row| {
+                    row.as_array().is_some_and(|r| {
+                        !r.is_empty() && r.iter().all(serde_json::Value::is_number)
+                    })
+                })
+            {
+                let dim = arr[0].as_array().map(|r| r.len()).unwrap_or(0);
+                return Some(serde_json::json!({
+                    "multi_vector": { "vectors": arr.len(), "dim": dim }
+                }));
+            }
+            return None;
+        }
+        // A sparse vector: `{indices: [...], values: [...]}`.
+        if let Some(obj) = v.as_object()
+            && let (Some(idx), true) = (
+                obj.get("indices").and_then(|i| i.as_array()),
+                obj.contains_key("values"),
+            )
+        {
+            return Some(serde_json::json!({ "sparse_vector": { "nnz": idx.len() } }));
+        }
+        None
+    }
+
+    fn walk_fields(v: &mut serde_json::Value, n: &mut usize) {
+        let Some(fields) = v.get_mut("fields").and_then(|f| f.as_object_mut()) else {
+            return;
+        };
+        let names: Vec<String> = fields.keys().cloned().collect();
+        for name in names {
+            if let Some(replacement) = fields.get(&name).and_then(summarise) {
+                fields.insert(name, replacement);
+                *n += 1;
+            }
+        }
+    }
+
+    let mut n = 0;
+    let Some(obj) = payload.as_object_mut() else {
+        return 0;
+    };
+    for key in ["hits", "records"] {
+        if let Some(arr) = obj.get_mut(key).and_then(|v| v.as_array_mut()) {
+            for hit in arr.iter_mut() {
+                walk_fields(hit, &mut n);
+            }
+        }
+    }
+    walk_fields(payload, &mut n); // get_record's bare `{id, fields}`
+    n
+}
+
 /// The first withheld field named anywhere in a filter expression, if any.
 ///
 /// Walks every variant. The match is exhaustive on purpose — no wildcard
@@ -245,6 +328,95 @@ mod tests {
         let report = redact_payload(&mut payload, &withheld());
         assert_eq!(payload, original);
         assert!(report.is_empty());
+    }
+
+    #[test]
+    fn embeddings_are_summarised_in_every_payload_shape() {
+        let vec1024: Vec<f32> = vec![0.5; 1024];
+        let mut payload = serde_json::json!({
+            "records": [{
+                "id": "1",
+                "fields": {
+                    "name": "Nordwind",
+                    "vec": vec1024,
+                    "sp": { "indices": [1, 7, 9], "values": [0.2, 0.3, 0.5] },
+                    "mv": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]],
+                }
+            }]
+        });
+        let n = strip_embeddings(&mut payload);
+        let f = &payload["records"][0]["fields"];
+
+        assert_eq!(
+            n, 3,
+            "dense, sparse and multi-vector should all be summarised"
+        );
+        assert_eq!(f["name"], "Nordwind", "ordinary fields must survive");
+        assert_eq!(f["vec"]["vector"]["dim"], 1024);
+        assert_eq!(f["sp"]["sparse_vector"]["nnz"], 3);
+        assert_eq!(f["mv"]["multi_vector"]["vectors"], 3);
+        assert_eq!(f["mv"]["multi_vector"]["dim"], 2);
+
+        let len = serde_json::to_string(&payload).unwrap().len();
+        assert!(len < 400, "payload unexpectedly large: {len} bytes");
+    }
+
+    #[test]
+    fn the_bare_get_record_shape_is_stripped_too() {
+        let mut payload = serde_json::json!({
+            "id": "1",
+            "fields": { "name": "Ada", "vec": vec![0.25f32; 768] }
+        });
+        assert_eq!(strip_embeddings(&mut payload), 1);
+        assert_eq!(payload["fields"]["vec"]["vector"]["dim"], 768);
+    }
+
+    #[test]
+    fn a_short_numeric_array_that_is_not_an_embedding_is_left_alone() {
+        // Guards the heuristic: `strip_embeddings` matches on shape, so
+        // an ordinary numeric array field would be collateral damage.
+        // It is still summarised (any numeric array is indistinguishable
+        // from a tiny embedding), which is why this asserts the CURRENT
+        // behaviour explicitly rather than leaving it undefined — if a
+        // collection ever needs to return real numeric arrays to a
+        // model, this is the line that has to change.
+        let mut payload = serde_json::json!({
+            "id": "1",
+            "fields": { "scores": [1, 2, 3], "label": "x" }
+        });
+        assert_eq!(strip_embeddings(&mut payload), 1);
+        assert_eq!(payload["fields"]["scores"]["vector"]["dim"], 3);
+        assert_eq!(payload["fields"]["label"], "x");
+    }
+
+    #[test]
+    fn stripping_runs_after_the_guard_can_read_the_vector() {
+        // The regression this ordering exists to prevent: conflict
+        // detection reads the vector out of the hit's fields, so a
+        // payload that has already been stripped yields no findings.
+        use crate::agent::retrieval_guard::temporal_check;
+
+        let now = 1_000_000i64;
+        let a: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
+        let b: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
+        let hits = vec![
+            serde_json::json!({"id": "new", "fields": {"_indexed_at": now - 10, "vec": a}}),
+            serde_json::json!({"id": "old", "fields": {"_indexed_at": now - 10_000_000, "vec": b}}),
+        ];
+
+        let before = temporal_check(&hits, now, Some("vec"));
+        assert!(
+            before.iter().any(|f| f.kind == "conflict"),
+            "with vectors present the guard must find the conflict: {before:?}"
+        );
+
+        let mut stripped = serde_json::json!({ "hits": hits });
+        strip_embeddings(&mut stripped);
+        let after = temporal_check(stripped["hits"].as_array().unwrap(), now, Some("vec"));
+        assert!(
+            !after.iter().any(|f| f.kind == "conflict"),
+            "stripping first blinds the guard — which is why dispatch runs it second"
+        );
     }
 
     #[test]
