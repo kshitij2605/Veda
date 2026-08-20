@@ -104,6 +104,17 @@ pub struct ToolContext<'a> {
     /// Authenticated subject (`sub` claim) when RLS applies; `None`
     /// for unauthenticated / admin contexts.
     pub user: Option<&'a str>,
+    /// Whether the caller holds `Role::Admin`, which is what lets
+    /// schema-restricted fields through [`crate::agent::field_guard`].
+    ///
+    /// **Defaults to `false`, and that is deliberate.** `user: None`
+    /// already conflates "unauthenticated" with "admin", which is
+    /// harmless for RLS (it only decides whether to add an owner
+    /// predicate) and would be a privilege escalation here. So this is a
+    /// separate flag that fails closed: a transport must prove admin to
+    /// get restricted fields, and one that never calls
+    /// [`Self::with_admin`] simply never sees them.
+    pub is_admin: bool,
 }
 
 impl<'a> ToolContext<'a> {
@@ -112,11 +123,19 @@ impl<'a> ToolContext<'a> {
             state,
             tenant,
             user: None,
+            is_admin: false,
         }
     }
 
     pub fn with_user(mut self, user: Option<&'a str>) -> Self {
         self.user = user;
+        self
+    }
+
+    /// Grant this context admin privilege for schema-restricted fields.
+    /// Only call where the caller's role has actually been checked.
+    pub fn with_admin(mut self, is_admin: bool) -> Self {
+        self.is_admin = is_admin;
         self
     }
 }
@@ -292,8 +311,73 @@ impl ToolCatalog {
             return outcome;
         }
         let vector_field = resolve_vector_field(ctx, collection.as_deref()).await;
-        apply_retrieval_guard(outcome, vector_field.as_deref())
+        let outcome = apply_retrieval_guard(outcome, vector_field.as_deref());
+        // Schema-declared field sensitivity, applied at the same choke
+        // point and for the same reason: a transport that skipped it
+        // would be a silent bypass. Ordered after the retrieval guard so
+        // that guard still sees the reserved `_guardrail_*` columns it
+        // classifies on — redacting first could strip what it reads.
+        let withheld = resolve_withheld_fields(ctx, collection.as_deref()).await;
+        apply_field_guard(outcome, &withheld)
     }
+}
+
+/// Field names the caller may not see, for a tool call's `collection`
+/// argument. Empty for an Admin caller, and empty for every collection
+/// whose schema carries no sensitivity annotation — which is all of them
+/// until someone opts in, so this is a no-op on existing deployments.
+///
+/// Follows the same scope-then-alias-resolve idiom as [`resolve_vector_field`]:
+/// reading the unresolved name has repeatedly produced bugs where a
+/// handler operated on an abandoned base collection after a reindex
+/// swapped the alias, and here that would mean enforcing the *wrong
+/// schema's* sensitivity.
+async fn resolve_withheld_fields(ctx: &ToolContext<'_>, collection: Option<&str>) -> Vec<String> {
+    if ctx.is_admin {
+        return Vec::new();
+    }
+    let Some(coll) = collection else {
+        return Vec::new();
+    };
+    let scoped = crate::tenant::scope(ctx.tenant, coll);
+    let scoped = ctx.state.inner.aliases.resolve(&scoped).await;
+    let schemas = ctx.state.inner.schemas.read().await;
+    schemas
+        .get(&scoped)
+        .map(|schema| {
+            schema
+                .withheld_fields_for_non_admin()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Strip schema-restricted fields from a tool payload and report what went.
+///
+/// The report is attached under `field_guard` so the removal is never
+/// silent — the same reasoning as `retrieval_guard.dropped_chunks`. A
+/// model told a field was withheld can answer "I can't see that"; one
+/// that just finds the key missing will keep searching for it and burn
+/// steps.
+fn apply_field_guard(mut outcome: ToolOutcome, withheld: &[String]) -> ToolOutcome {
+    use crate::agent::field_guard::redact_payload;
+
+    if withheld.is_empty() {
+        return outcome;
+    }
+    let report = redact_payload(&mut outcome.content, withheld);
+    if report.is_empty() {
+        return outcome;
+    }
+    if let Some(obj) = outcome.content.as_object_mut() {
+        obj.insert(
+            "field_guard".into(),
+            serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    outcome
 }
 
 /// Resolve the name of the collection's first vector field for a tool call's

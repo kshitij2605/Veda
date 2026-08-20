@@ -78,6 +78,16 @@ pub(crate) fn rls_user(claims: &Option<Claims>) -> Option<String> {
     }
 }
 
+/// Whether the caller proved `Role::Admin`, for schema-restricted fields.
+///
+/// Deliberately NOT derived from [`rls_user`] returning `None`. That
+/// `None` means "admin **or** no claims at all", a conflation that is
+/// harmless for RLS but would hand every unauthenticated caller admin
+/// privilege here. Absent claims yield `false`, so this fails closed.
+pub(crate) fn is_admin_caller(claims: &Option<Claims>) -> bool {
+    claims.as_ref().is_some_and(crate::rls::is_admin)
+}
+
 // ── Agents CRUD ──────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -270,7 +280,9 @@ pub async fn execute_tool(
 
     let claims = claims.map(|axum::Extension(c)| c);
     let user = rls_user(&claims);
-    let ctx = ToolContext::new(&state, &tenant).with_user(user.as_deref());
+    let ctx = ToolContext::new(&state, &tenant)
+        .with_user(user.as_deref())
+        .with_admin(is_admin_caller(&claims));
 
     let outcome = state.inner.tool_catalog.dispatch(&ctx, &id, args).await;
     if outcome.is_error {
