@@ -2331,6 +2331,7 @@ fn parse_index_type(idx: &str) -> Result<veda_core::types::IndexType, String> {
         "rabitq_ext_rerank" | "ext_rabitq_rerank" | "rabitq4_rerank" => {
             veda_core::types::IndexType::RaBitQExtRerank
         }
+        "spann" => veda_core::types::IndexType::Spann,
         "sq4" => veda_core::types::IndexType::Sq4,
         "sq8" => veda_core::types::IndexType::Sq8,
         other => return Err(format!("unknown vector index type '{other}'")),

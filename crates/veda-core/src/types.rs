@@ -153,6 +153,13 @@ pub enum IndexType {
     /// 8-bit per-dimension scalar quantization. ~D bytes/vec;
     /// highest-recall quantized option (~0.99). Brute-force scan.
     Sq8,
+    /// SPANN-style object-storage-native IVF. Centroids stay resident
+    /// (`O(nlist x dim)`, independent of corpus size); posting lists live
+    /// in the configured object store and are fetched by byte range, so a
+    /// query reads only the lists it probes. Requires a registered object
+    /// store (`veda_index::spann::register_store`), which the server
+    /// installs at startup. See `crates/veda-index/src/spann.rs`.
+    Spann,
     SuffixArray,
     Inverted,
     Range,
