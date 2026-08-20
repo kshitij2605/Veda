@@ -21,7 +21,7 @@ matters to you, that alone decides it.
 | Modalities | Unified text · image · audio · video space | Vectors you provide (bring your own embeddings) |
 | Document ingestion | Built-in: PDF/DOCX/PPTX/XLSX/scans → OCR → chunk → embed | None — you embed and upload vectors yourself |
 | Search modes | Dense + sparse (SPLADE) + BM25 + hybrid fusion + reranking | Dense (+ sparse in some tiers) |
-| Index types | 11 tunable (HNSW, DiskANN, IVF-PQ, RaBitQ, SQ4/SQ8) | Managed, internals not user-tunable |
+| Index types | 12 tunable (HNSW, DiskANN, IVF-PQ, RaBitQ, SPANN, SQ4/SQ8) | Managed, internals not user-tunable |
 | Pricing | Free (self-hosted) or a flat commercial license | Usage-based (storage + read/write units) |
 
 ## Why teams pick Veda over a managed vector store
@@ -40,7 +40,7 @@ matters to you, that alone decides it.
   you already pay for, with a predictable flat license instead of per-read/write-unit
   pricing that scales with traffic.
 - **A rigorously engineered ANN core.** Pure Rust, SIMD (AVX2+FMA) distance kernels, mmap
-  zero-copy reads, and 11 index types with an explicit recall/latency dial — we benchmark
+  zero-copy reads, and 12 index types with an explicit recall/latency dial — we benchmark
   this seriously (see our [head-to-head against Elasticsearch](/docs/vs-elasticsearch),
   where Veda's dense search came out ~13× faster than a mature production engine on equal
   hardware).
