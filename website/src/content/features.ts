@@ -50,7 +50,7 @@ export const FEATURES: Feature[] = [
   {
     icon: Layers,
     accent: 'var(--color-node-3)',
-    title: '10 vector index types',
+    title: '11 vector index types',
     blurb:
       'HNSW, DiskANN, IVF-PQ, Flat, three RaBitQ variants, Sq4 + Sq8 scalar quantization — pick the recall, latency and memory trade-off per collection instead of working around one index. A suffix array and scalar filter indexes sit alongside them, and cuVS builds add a GPU CAGRA index that builds a 1M-vector index in 86 seconds.',
   },

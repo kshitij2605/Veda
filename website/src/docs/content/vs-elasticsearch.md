@@ -54,7 +54,7 @@ Elasticsearch's architecture makes these hard to bolt on; Veda was designed arou
 - **Self-hosted, private, LLM-agnostic.** Embedder, OCR, reranker, and LLM endpoint are all
   swappable and self-hostable — the whole stack runs air-gapped, for regulated or
   sovereignty-bound deployments.
-- **11 tunable ANN/quantization index types** (HNSW, DiskANN, IVF-PQ, RaBitQ family, SQ4,
+- **12 tunable ANN/quantization index types** (HNSW, DiskANN, IVF-PQ, RaBitQ family, SPANN, SQ4,
   SQ8) with an explicit recall/latency dial, versus Elasticsearch's more opaque internals.
 
 ## Where Elasticsearch is still ahead
