@@ -70,9 +70,24 @@ pub type Entry = (u32, Vec<f32>);
 /// rather than cloning the list into every caller.
 pub type PostingList = Arc<Vec<Entry>>;
 
-/// Where one centroid's posting list sits inside the lists object.
+/// Largest lists object written, and therefore the ceiling on how much of the
+/// index is held in memory while building.
+///
+/// The first version concatenated every posting list into ONE object, which
+/// meant materialising a second copy of the whole corpus in RAM before the
+/// `put` — a 100 GB index needed 100 GB of buffer to publish. Parts cap that
+/// at this size regardless of corpus size, while keeping the object count
+/// small (`index_size / 64 MB`) so a query still issues one ranged read per
+/// probed list rather than hunting through thousands of tiny objects.
+const PART_BYTES: usize = 64 * 1024 * 1024;
+
+/// Where one centroid's posting list sits: which part object, and where inside
+/// it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 struct ListSpan {
+    /// Index of the `lists.{part}.bin` object holding this list. A list is
+    /// never split across parts, so one ranged read always suffices.
+    part: u32,
     offset: u64,
     len: u64,
     count: u32,
@@ -86,13 +101,18 @@ struct Manifest {
     dimension: u32,
     metric: DistanceMetric,
     total_vectors: u64,
+    /// How many `lists.{n}.bin` objects the index was written as.
+    part_count: u32,
     /// Format version. bincode is not self-describing, so an explicit
     /// version is the only way a future layout change can be detected
     /// rather than mis-parsed into plausible garbage.
     version: u16,
 }
 
-const MANIFEST_VERSION: u16 = 1;
+/// Bumped to 2 when posting lists moved from one concatenated object to
+/// size-capped parts, so a v1 index is refused rather than read with `part`
+/// interpreted as whatever byte happened to be there.
+const MANIFEST_VERSION: u16 = 2;
 
 /// Counters proving the index actually reads a small fraction of itself.
 ///
@@ -226,8 +246,8 @@ impl SpannIndex {
     fn manifest_key(prefix: &str) -> String {
         format!("{prefix}/manifest.bin")
     }
-    fn lists_key(prefix: &str) -> String {
-        format!("{prefix}/lists.bin")
+    fn part_key(prefix: &str, part: u32) -> String {
+        format!("{prefix}/lists.{part}.bin")
     }
 
     /// Build an index over `vectors` and write it to `store` under `prefix`.
@@ -242,6 +262,25 @@ impl SpannIndex {
         nlist: usize,
         metric: DistanceMetric,
     ) -> Result<Self> {
+        Self::build_into_with_part_size(store, prefix, vectors, nlist, metric, PART_BYTES)
+    }
+
+    /// [`Self::build_into`] with an explicit part-size cap.
+    ///
+    /// The cap is a parameter rather than only a constant so the streaming
+    /// behaviour is testable: at the 64 MB production value, any corpus small
+    /// enough to build in a unit test fits in a single part, and a test that
+    /// cannot produce a second part cannot prove parts are flushed rather than
+    /// accumulated.
+    pub fn build_into_with_part_size(
+        store: Arc<dyn RangeStore>,
+        prefix: &str,
+        vectors: &[&[f32]],
+        nlist: usize,
+        metric: DistanceMetric,
+        part_bytes: usize,
+    ) -> Result<Self> {
+        let part_bytes = part_bytes.max(1);
         if vectors.is_empty() {
             return Err(VedaError::Index("cannot build SPANN over 0 vectors".into()));
         }
@@ -262,26 +301,43 @@ impl SpannIndex {
             buckets[nearest_centroid(v, &centroids, metric)].push(id as u32);
         }
 
-        // Serialise every list back to back, recording each span. Full
-        // f32 vectors are stored, not PQ codes: this index's claim is
-        // about *where the bytes live*, and mixing in a lossy encoding
-        // would confound a recall measurement with a quantisation one.
-        let mut blob: Vec<u8> = Vec::with_capacity(vectors.len() * entry_bytes(dim));
+        // Serialise the lists into size-capped parts, flushing each as it
+        // fills, so peak build memory is bounded by `PART_BYTES` rather than
+        // by the corpus. Full f32 vectors are stored, not PQ codes: this
+        // index's claim is about *where the bytes live*, and mixing in a lossy
+        // encoding would confound a recall measurement with a quantisation one.
+        let mut part_buf: Vec<u8> = Vec::with_capacity(part_bytes.min(1 << 20));
+        let mut part_index: u32 = 0;
         let mut spans = Vec::with_capacity(centroids.len());
         for bucket in &buckets {
-            let offset = blob.len() as u64;
+            let list_len = bucket.len() * entry_bytes(dim);
+            // A list is never split across parts, so one ranged read always
+            // suffices at query time. Flush first when this list would push
+            // the part over the cap — unless the part is empty, in which case
+            // a single oversized list gets its own part rather than looping.
+            if !part_buf.is_empty() && part_buf.len() + list_len > part_bytes {
+                store.put(&Self::part_key(prefix, part_index), &part_buf)?;
+                part_buf.clear();
+                part_index += 1;
+            }
+            let offset = part_buf.len() as u64;
             for &id in bucket {
-                blob.extend_from_slice(&id.to_le_bytes());
+                part_buf.extend_from_slice(&id.to_le_bytes());
                 for &c in vectors[id as usize] {
-                    blob.extend_from_slice(&c.to_le_bytes());
+                    part_buf.extend_from_slice(&c.to_le_bytes());
                 }
             }
             spans.push(ListSpan {
+                part: part_index,
                 offset,
-                len: blob.len() as u64 - offset,
+                len: part_buf.len() as u64 - offset,
                 count: bucket.len() as u32,
             });
         }
+        // The final part, including the empty-corpus-of-empty-lists case where
+        // nothing was ever flushed.
+        store.put(&Self::part_key(prefix, part_index), &part_buf)?;
+        let part_count = part_index + 1;
 
         let manifest = Manifest {
             centroids,
@@ -289,10 +345,13 @@ impl SpannIndex {
             dimension: dim as u32,
             metric,
             total_vectors: vectors.len() as u64,
+            part_count,
             version: MANIFEST_VERSION,
         };
 
-        store.put(&Self::lists_key(prefix), &blob)?;
+        // The manifest is written LAST, after every part is durable. It is the
+        // only object `open` reads to find the rest, so publishing it first
+        // would make a half-written index look complete.
         let encoded = bincode::serialize(&manifest)
             .map_err(|e| VedaError::Index(format!("manifest serialize failed: {e}")))?;
         store.put(&Self::manifest_key(prefix), &encoded)?;
@@ -381,9 +440,10 @@ impl SpannIndex {
             return Ok(Arc::new(Vec::new()));
         }
 
-        // The ranged read: only this list's bytes cross the wire.
+        // The ranged read: only this list's bytes cross the wire. A list never
+        // spans two parts, so this stays exactly one request.
         let raw = self.store.get_range(
-            &Self::lists_key(&self.prefix),
+            &Self::part_key(&self.prefix, span.part),
             span.offset,
             span.len as usize,
         )?;
@@ -1036,6 +1096,93 @@ mod tests {
             "nprobe=8 recall {r8:.3} should beat nprobe=1 {r1:.3}"
         );
         assert!(b8 > b1, "and it should cost more bytes: {b8} vs {b1}");
+    }
+
+    #[test]
+    fn lists_are_written_as_size_capped_parts() {
+        // The build must not hold a second copy of the corpus. Asserting the
+        // largest object written is the observable proxy: the old
+        // one-object-per-index layout buffered the whole thing before its
+        // single `put`, so a corpus larger than the cap proves parts are being
+        // flushed rather than accumulated.
+        //
+        // `MemStore` records every object, so the largest is the high-water
+        // mark of the build's buffer.
+        let dim = 64;
+        let stride = entry_bytes(dim); // 4 + 64*4 = 260 bytes
+        let n = 4_000; // 1.04 MB of lists
+        const TEST_PART_BYTES: usize = 200 * 1024; // ~6 parts
+        let data = clustered(n, dim, 8);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+        let store = Arc::new(MemStore::default());
+        let dynstore: Arc<dyn RangeStore> = store.clone();
+
+        let idx = SpannIndex::build_into_with_part_size(
+            dynstore,
+            "parts",
+            &refs,
+            64,
+            DistanceMetric::Cosine,
+            TEST_PART_BYTES,
+        )
+        .unwrap();
+
+        let objects = store.objects.lock().unwrap();
+        let list_objects: Vec<(&String, usize)> = objects
+            .iter()
+            .filter(|(k, _)| k.contains("lists."))
+            .map(|(k, v)| (k, v.len()))
+            .collect();
+        assert!(
+            list_objects.len() >= 2,
+            "expected the corpus to span several parts, got {:?}",
+            list_objects.iter().map(|(k, _)| k).collect::<Vec<_>>()
+        );
+        let total: usize = list_objects.iter().map(|(_, n)| n).sum();
+        assert_eq!(
+            total,
+            n * stride,
+            "every vector must be written exactly once across the parts"
+        );
+        // No part exceeds the cap, except where a single oversized list needs
+        // its own — which cannot happen at this cluster size.
+        for (k, len) in &list_objects {
+            assert!(*len <= TEST_PART_BYTES, "part {k} is {len} bytes");
+        }
+        assert_eq!(idx.len(), n);
+    }
+
+    #[test]
+    fn a_list_never_straddles_two_parts() {
+        // The whole point of parts is that a probe stays one ranged read. If a
+        // list were split, `load_list` would silently return a truncated list
+        // and recall would drop with nothing failing.
+        let dim = 64;
+        let data = clustered(3_000, dim, 8);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+        let store = Arc::new(MemStore::default());
+        let dynstore: Arc<dyn RangeStore> = store.clone();
+        let idx = SpannIndex::build_into_with_part_size(
+            dynstore,
+            "straddle",
+            &refs,
+            32,
+            DistanceMetric::Cosine,
+            100 * 1024,
+        )
+        .unwrap();
+
+        let objects = store.objects.lock().unwrap();
+        for (i, span) in idx.manifest.spans.iter().enumerate() {
+            let key = SpannIndex::part_key("straddle", span.part);
+            let part_len = objects.get(&key).map(|v| v.len()).unwrap_or(0);
+            assert!(
+                span.offset + span.len <= part_len as u64,
+                "list {i} runs past the end of {key}: offset {} + len {} > {part_len}",
+                span.offset,
+                span.len
+            );
+        }
     }
 
     #[test]
