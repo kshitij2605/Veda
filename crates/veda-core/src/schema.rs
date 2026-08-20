@@ -103,6 +103,10 @@ pub struct FieldDefinition {
     /// existed load unchanged.
     #[serde(default)]
     annotations: FieldAnnotations,
+    /// Declarative validation rules. Empty by default, so a field that
+    /// declares none is unconstrained. See [`crate::constraints`].
+    #[serde(default)]
+    constraints: crate::constraints::FieldConstraints,
     /// Build a full-text BM25 index over this field's string values.
     /// Only meaningful for `String` fields; ignored elsewhere. When
     /// `true`, the segment writer maintains a `Bm25Index` and the
@@ -127,6 +131,7 @@ impl FieldDefinition {
             bm25: false,
             bm25_tokenizer: None,
             annotations: FieldAnnotations::default(),
+            constraints: crate::constraints::FieldConstraints::default(),
             index_type: IndexType::None,
         }
     }
@@ -147,6 +152,7 @@ impl FieldDefinition {
             bm25: false,
             bm25_tokenizer: None,
             annotations: FieldAnnotations::default(),
+            constraints: crate::constraints::FieldConstraints::default(),
             index_type: IndexType::Hnsw,
         }
     }
@@ -172,6 +178,7 @@ impl FieldDefinition {
             bm25: false,
             bm25_tokenizer: None,
             annotations: FieldAnnotations::default(),
+            constraints: crate::constraints::FieldConstraints::default(),
             index_type: IndexType::Hnsw,
         }
     }
@@ -223,6 +230,7 @@ impl FieldDefinition {
             bm25: false,
             bm25_tokenizer: None,
             annotations: FieldAnnotations::default(),
+            constraints: crate::constraints::FieldConstraints::default(),
             index_type: IndexType::None,
         }
     }
@@ -246,6 +254,7 @@ impl FieldDefinition {
             bm25: false,
             bm25_tokenizer: None,
             annotations: FieldAnnotations::default(),
+            constraints: crate::constraints::FieldConstraints::default(),
             index_type: IndexType::None,
         }
     }
@@ -259,6 +268,7 @@ impl FieldDefinition {
             bm25: false,
             bm25_tokenizer: None,
             annotations: FieldAnnotations::default(),
+            constraints: crate::constraints::FieldConstraints::default(),
             index_type: IndexType::None,
         }
     }
@@ -296,6 +306,12 @@ impl FieldDefinition {
         self
     }
 
+    /// Attach declarative validation rules.
+    pub fn with_constraints(mut self, constraints: crate::constraints::FieldConstraints) -> Self {
+        self.constraints = constraints;
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -327,6 +343,11 @@ impl FieldDefinition {
     /// Field meaning. Empty for a field that was never annotated.
     pub fn annotations(&self) -> &FieldAnnotations {
         &self.annotations
+    }
+
+    /// Validation rules. Empty for a field that declares none.
+    pub fn constraints(&self) -> &crate::constraints::FieldConstraints {
+        &self.constraints
     }
 
     /// Whether this field must be withheld from a non-Admin caller.
@@ -521,6 +542,26 @@ impl CollectionSchema {
     }
 
     /// Look up a field by name.
+    /// Check a record against every field's declared constraints.
+    ///
+    /// Returns all violations across all fields, so one pass tells an
+    /// operator everything wrong with the record. An empty vec means the
+    /// record satisfies the schema — which is every record on a collection
+    /// that declares no constraints.
+    pub fn validate_record(
+        &self,
+        record: &crate::record::Record,
+    ) -> Vec<crate::constraints::Violation> {
+        let mut out = Vec::new();
+        for f in &self.fields {
+            if f.constraints().is_empty() {
+                continue;
+            }
+            out.extend(f.constraints().check(f.name(), record.get(f.name())));
+        }
+        out
+    }
+
     /// Names of fields that must not be returned to a non-Admin caller.
     ///
     /// Empty for any collection whose fields carry no sensitivity
