@@ -223,20 +223,12 @@ impl LocalShardSearcher {
                         vectors.push(vec.to_vec());
                     }
 
-                    // Full-dim primary index. The prefix is derived from
-                    // segment id + field name so a rebuild overwrites the
-                    // same objects rather than leaving the old ones
-                    // orphaned in the bucket.
-                    let index = build_vector_index(
-                        field_def.index_type(),
-                        *metric,
-                        *dimension,
-                        vectors.clone(),
-                        &format!("spann/{seg_id}/{}", field_def.name()),
-                    )?;
-                    field_indexes.insert(field_def.name().to_owned(), index);
-
-                    // Truncated indexes for each declared MRL ladder rung.
+                    // The MRL rungs are built FIRST, from a borrow, so the
+                    // full-dimension build below can take `vectors` by value.
+                    // Building the primary index first forced a
+                    // `vectors.clone()` here — a second full copy of the
+                    // segment's vectors, for every index type, on every
+                    // recovery. Order is the whole fix; nothing else changes.
                     if let Some(dims) = mrl_dims {
                         let mut per_dim: HashMap<u32, Box<dyn VectorIndex>> = HashMap::new();
                         for &d in dims {
@@ -261,6 +253,20 @@ impl LocalShardSearcher {
                             field_mrl.insert(field_def.name().to_owned(), per_dim);
                         }
                     }
+
+                    // Full-dim primary index, last, so it can consume
+                    // `vectors` instead of cloning it. The prefix is derived
+                    // from segment id + field name so a rebuild overwrites the
+                    // same objects rather than leaving the old ones orphaned
+                    // in the bucket.
+                    let index = build_vector_index(
+                        field_def.index_type(),
+                        *metric,
+                        *dimension,
+                        vectors,
+                        &format!("spann/{seg_id}/{}", field_def.name()),
+                    )?;
+                    field_indexes.insert(field_def.name().to_owned(), index);
                 }
             }
 
