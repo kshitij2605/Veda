@@ -169,6 +169,15 @@ pub struct FieldDef {
     /// values fall back to `hnsw`.
     #[serde(default)]
     pub index: Option<String>,
+    /// What this field *means*, as opposed to how it is stored:
+    /// `{"description": "...", "semantic_type": "iso3166_alpha2",
+    /// "value_domain": ["DE","EE"], "sensitivity": "restricted",
+    /// "pii": false}`. Every member is optional. Rendered to agents and
+    /// MCP clients by `describe_collection`; `sensitivity: "restricted"`
+    /// and `pii: true` additionally withhold the field from non-Admin
+    /// callers on every retrieval path.
+    #[serde(default)]
+    pub annotations: Option<veda_core::schema::FieldAnnotations>,
 }
 
 #[derive(Debug, Serialize)]
@@ -266,6 +275,10 @@ pub struct FieldInfo {
     #[serde(rename = "type")]
     pub field_type: String,
     pub filterable: bool,
+    /// Field meaning, omitted entirely when the field was never
+    /// annotated so responses for existing collections are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<veda_core::schema::FieldAnnotations>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dimension: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2325,6 +2338,17 @@ fn parse_index_type(idx: &str) -> Result<veda_core::types::IndexType, String> {
 }
 
 fn parse_field_def(f: &FieldDef) -> Result<FieldDefinition, String> {
+    let fd = parse_field_type(f)?;
+    Ok(match &f.annotations {
+        Some(a) => fd.with_annotations(a.clone()),
+        None => fd,
+    })
+}
+
+/// Build the `FieldDefinition` for `f` from its physical type alone.
+/// Split out so annotations attach in one place rather than on each of
+/// the type arms.
+fn parse_field_type(f: &FieldDef) -> Result<FieldDefinition, String> {
     match f.field_type.as_str() {
         "vector" => {
             let dim = f
@@ -2507,6 +2531,7 @@ fn field_to_info(f: &FieldDefinition) -> FieldInfo {
         name: f.name().to_owned(),
         field_type: type_str.to_owned(),
         filterable: f.filterable(),
+        annotations: (!f.annotations().is_empty()).then(|| f.annotations().clone()),
         dimension,
         metric,
         model,
