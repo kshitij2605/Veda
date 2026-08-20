@@ -1076,48 +1076,25 @@ fn project_fields(
     *fields = projected;
 }
 
-/// Render a field value for an LLM, summarising embeddings instead of
-/// dumping them.
-///
-/// `field_value_to_json` serialises a `Vector` as its full component
-/// list, which is right for REST — a client asking for a record may
-/// genuinely want the embedding — and wrong for a model. A 1024-dim
-/// vector is ~1k JSON numbers, and the tools return one per record.
-///
-/// This is not only a token-cost problem, it measurably degrades
-/// answers. In the 2026-08-20 annotation measurement, `filter_query`
-/// on a 5-record collection returned `count: 2` correctly, but both
-/// records arrived behind ~2k float components; the model reported only
-/// the first supplier and in one run invented a second name outright.
-/// The retrieval was perfect and the answer was wrong purely because
-/// the useful fields were buried.
-///
-/// A model can do nothing with raw components, so they are replaced by
-/// a shape summary that still says the field exists and is populated.
-fn agent_field_value(value: &veda_core::record::FieldValue) -> serde_json::Value {
-    use veda_core::record::FieldValue as FV;
-    match value {
-        FV::Vector(v) => serde_json::json!({ "vector": { "dim": v.as_slice().len() } }),
-        FV::SparseVector(sv) => {
-            serde_json::json!({ "sparse_vector": { "nnz": sv.indices().len() } })
-        }
-        FV::MultiVector(rows) => serde_json::json!({
-            "multi_vector": {
-                "vectors": rows.len(),
-                "dim": rows.first().map(|r| r.len()).unwrap_or(0),
-            }
-        }),
-        other => field_value_to_json(other),
-    }
-}
-
 /// Serialise a record to `{ "id", "fields" }` — matching the REST
-/// `GetRecordResponse` shape so the agent/MCP surfaces stay consistent,
-/// except that embeddings are summarised (see [`agent_field_value`]).
+/// `GetRecordResponse` shape so the agent/MCP surfaces stay consistent.
+///
+/// **Embeddings are serialised in full here on purpose**, even though no
+/// model can use them, because `temporal_check`'s conflict detection
+/// reads each hit's vector back out of this `fields` map (`hit_vector`,
+/// `agent::retrieval_guard`). `filter_query` is the only path where that
+/// detection works at all — `search` skips vector fields when hydrating
+/// hits, which is exactly why the v0.6.0 notes record conflict detection
+/// as "active on `filter_query` and inert on `search`".
+///
+/// They are stripped immediately afterwards, at the dispatch choke point
+/// and only once the guard has run: see
+/// [`crate::agent::field_guard::strip_embeddings`]. Summarising them
+/// *here* instead silently disabled the one working conflict detector.
 fn record_json(rec: &Record) -> serde_json::Value {
     let mut fields = serde_json::Map::new();
     for (key, value) in rec.fields() {
-        fields.insert(key.clone(), agent_field_value(value));
+        fields.insert(key.clone(), field_value_to_json(value));
     }
     serde_json::json!({ "id": rec.id().to_string(), "fields": fields })
 }
@@ -1204,13 +1181,13 @@ mod tests {
     }
 
     #[test]
-    fn a_records_embedding_is_summarised_not_dumped_to_the_model() {
-        // `search` already skipped vector fields when hydrating hits;
-        // `filter_query` and `get_record` did not, because both go
-        // through `record_json`. On a 5-record collection that meant two
-        // matching records arrived behind ~2k float components and the
-        // model answered from the first one only. Retrieval was correct
-        // and the answer was wrong purely from burial.
+    fn record_json_keeps_the_embedding_for_the_guard_to_read() {
+        // Counterpart to `strip_embeddings` in `agent::field_guard`.
+        // The vector MUST still be here: `temporal_check`'s conflict
+        // detection reads it back out of this map, and `filter_query` is
+        // the only path where that detection works. Summarising it here
+        // is what silently disabled it, so this test pins the ordering
+        // the two pieces depend on.
         use veda_core::record::{FieldValue, Record};
         use veda_core::vector::DenseVector;
 
@@ -1221,24 +1198,14 @@ mod tests {
             FieldValue::Vector(DenseVector::new(vec![0.5f32; 1024])),
         );
 
-        let json = record_json(&rec);
-        let fields = json["fields"].as_object().unwrap();
-
-        assert_eq!(fields["name"], "Nordwind", "real fields must survive");
-        assert!(
-            !fields["vec"].is_array(),
-            "the raw component list must not reach the model: {}",
-            fields["vec"]
-        );
+        let fields = record_json(&rec);
+        let fields = fields["fields"].as_object().unwrap();
+        assert_eq!(fields["name"], "Nordwind");
         assert_eq!(
-            fields["vec"]["vector"]["dim"], 1024,
-            "but the model should still be told the field exists and its shape"
+            fields["vec"].as_array().map(|a| a.len()),
+            Some(1024),
+            "the guard needs the real components; stripping happens at dispatch"
         );
-
-        // The whole payload must stay small. The pre-fix version of this
-        // record serialised to roughly 8 KB.
-        let len = serde_json::to_string(&json).unwrap().len();
-        assert!(len < 400, "record json unexpectedly large: {len} bytes");
     }
 
     #[test]
