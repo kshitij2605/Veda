@@ -329,7 +329,7 @@ pub async fn ingest_markdown(
                             Some(FieldValue::String(s)) => s.clone(),
                             _ => chunk.text.clone(),
                         };
-                        match splade.encode(&input) {
+                        match splade.encode(&input).await {
                             Ok(enc) => {
                                 if let Ok(sv) =
                                     veda_core::sparse::SparseVec::new(enc.indices, enc.values)
