@@ -80,3 +80,93 @@ async fn executing_a_known_tool_against_a_missing_collection_is_404() {
         "a missing collection should be 404, not 500: {body}"
     );
 }
+
+/// `mode: "sparse"` used to be refused outright by `build_query_body` with
+/// "not yet supported". It now runs, so the failure modes that remain must be
+/// caller errors an agent can act on, not opaque 500s.
+///
+/// Both cases below are deterministic and need no encoder: the first
+/// collection has no sparse field at all, and the test server is started
+/// without `VEDA_SPLADE_ENDPOINT`, so the second exercises the
+/// missing-encoder path.
+#[tokio::test]
+async fn sparse_mode_fails_with_an_actionable_message_not_a_500() {
+    let (base, _tmp) = start_test_server().await;
+
+    // A dense-only collection.
+    let resp = client()
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "dense_only",
+            "shard_count": 1,
+            "fields": [
+                { "name": "content", "type": "string", "bm25": true },
+                { "name": "vec", "type": "vector", "dimension": 8,
+                  "metric": "cosine", "index": "hnsw" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "setup failed: {}",
+        resp.text().await.unwrap()
+    );
+
+    let resp = client()
+        .post(format!("{base}/v1/agent-tools/search/execute"))
+        .json(&json!({ "collection": "dense_only", "query": "valves", "mode": "sparse" }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap();
+    assert_eq!(
+        status, 400,
+        "no sparse field should be a caller error: {body}"
+    );
+    assert!(
+        body.contains("sparse_vector"),
+        "the message must name what is missing: {body}"
+    );
+
+    // A collection that does declare a sparse field, with no encoder wired up.
+    let resp = client()
+        .post(format!("{base}/v1/collections"))
+        .json(&json!({
+            "name": "has_sparse",
+            "shard_count": 1,
+            "fields": [
+                { "name": "content", "type": "string", "bm25": true },
+                { "name": "sv", "type": "sparse_vector", "dimension": 30522 },
+                { "name": "vec", "type": "vector", "dimension": 8,
+                  "metric": "cosine", "index": "hnsw" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "setup failed: {}",
+        resp.text().await.unwrap()
+    );
+
+    let resp = client()
+        .post(format!("{base}/v1/agent-tools/search/execute"))
+        .json(&json!({ "collection": "has_sparse", "query": "valves", "mode": "sparse" }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap();
+    assert_eq!(
+        status, 400,
+        "a missing encoder is a configuration error: {body}"
+    );
+    assert!(
+        body.contains("VEDA_SPLADE_ENDPOINT"),
+        "the message must say how to fix it: {body}"
+    );
+}
