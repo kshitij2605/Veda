@@ -109,11 +109,23 @@ pub struct SpladeEncoding {
 /// SPLADE encoder client.
 pub struct SpladeClient {
     config: SpladeClientConfig,
+    http: reqwest::Client,
 }
 
 impl SpladeClient {
     pub fn new(config: SpladeClientConfig) -> Self {
-        Self { config }
+        // One async client, built once and reused, exactly as
+        // [`crate::embedding_client::EmbeddingClient`] does. It must be the
+        // async client: every caller is inside a Tokio runtime, and
+        // `reqwest::blocking` panics there with "Cannot drop a runtime in a
+        // context where blocking is not allowed" the moment its internal
+        // runtime is dropped. That panic was reachable from `ingest_markdown`
+        // for any collection with a sparse auto-embed field.
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(config.timeout_seconds))
+            .build()
+            .unwrap_or_default();
+        Self { config, http }
     }
 
     /// Encode `text` into a sparse vector. Returns an error wrapping
@@ -125,26 +137,24 @@ impl SpladeClient {
         skip(self, text),
         fields(model = %self.config.model, input_len = text.len())
     )]
-    pub fn encode(&self, text: &str) -> Result<SpladeEncoding> {
+    pub async fn encode(&self, text: &str) -> Result<SpladeEncoding> {
         let url = format!(
             "{}/embed_sparse",
             self.config.endpoint.trim_end_matches('/')
         );
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(self.config.timeout_seconds))
-            .build()
-            .map_err(|e| VedaError::Index(format!("splade: client build: {e}")))?;
         let body = serde_json::json!({"inputs": [text]});
-        let mut req = client.post(&url).json(&body);
+        let mut req = self.http.post(&url).json(&body);
         if let Some(key) = &self.config.api_key {
             req = req.bearer_auth(key);
         }
         let resp = req
             .send()
+            .await
             .map_err(|e| VedaError::Index(format!("splade: request failed: {e}")))?;
         let status = resp.status();
         let bytes = resp
             .bytes()
+            .await
             .map_err(|e| VedaError::Index(format!("splade: read body: {e}")))?;
         if !status.is_success() {
             return Err(VedaError::Index(format!(
@@ -248,5 +258,59 @@ mod tests {
         assert_eq!(out.values, vec![1.4, 0.6, 2.9]);
         // Must satisfy the SparseVec contract.
         crate::sparse::SparseVec::new(out.indices, out.values).unwrap();
+    }
+
+    /// A one-shot HTTP server returning a canned TEI sparse body.
+    ///
+    /// Runs on its own OS thread with no async runtime of its own, so the only
+    /// runtime in play is the one the test itself runs under — which is the
+    /// whole point of the test below.
+    fn spawn_stub() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf);
+                let body = br#"[[{"index": 11, "value": 0.4}, {"index": 5, "value": 0.7}]]"#;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes());
+                let _ = sock.write_all(body);
+                let _ = sock.flush();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn stub_config(endpoint: String) -> SpladeClientConfig {
+        SpladeClientConfig {
+            endpoint,
+            model: "test".to_owned(),
+            api_key: None,
+            timeout_seconds: 10,
+            vocab_size: 32,
+        }
+    }
+
+    /// Encoding must work from inside a Tokio runtime.
+    ///
+    /// Every caller in the product is async — `ingest_markdown` calls this
+    /// immediately after an `.await` — so this is the only context that
+    /// matters. Every other test here drives `parse_response` directly and
+    /// never makes an HTTP call, which is precisely how a blocking client
+    /// survived in this module undetected.
+    #[tokio::test]
+    async fn encode_works_from_an_async_context() {
+        let client = SpladeClient::new(stub_config(spawn_stub()));
+        let enc = client
+            .encode("pressure valves")
+            .await
+            .expect("encode must succeed from async");
+        assert_eq!(enc.indices, vec![5, 11]);
+        assert_eq!(enc.values, vec![0.7, 0.4]);
     }
 }
