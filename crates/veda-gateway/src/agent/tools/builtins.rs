@@ -254,12 +254,44 @@ pub async fn describe_collection(ctx: &ToolContext<'_>, args: serde_json::Value)
         })
         .collect();
 
-    ToolOutcome::ok(serde_json::json!({
+    let mut out = serde_json::json!({
         "name": user_name,
         "fields": fields,
         "record_count": total,
         "shard_count": schema.shard_count(),
-    }))
+    });
+    // `total` comes from the local segment manager, which an external
+    // collection has but never fills — so an external collection would
+    // otherwise be described as having zero records and zero fields while its
+    // dataset is fully populated. Its `fields` really are empty: registering
+    // an external collection with declared fields is rejected, because it
+    // infers its schema from the source. So the useful description is the
+    // source descriptor itself, which is what REST's `describe` reports too.
+    //
+    // This tool is deliberately not refused the way the record-reading tools
+    // are: describing a collection is how an agent is meant to discover that
+    // it is external.
+    if schema.is_external()
+        && let Some(obj) = out.as_object_mut()
+    {
+        obj.remove("record_count");
+        obj.insert(
+            "external".into(),
+            schema
+                .external()
+                .and_then(|src| serde_json::to_value(src).ok())
+                .unwrap_or(serde_json::Value::Bool(true)),
+        );
+        obj.insert(
+            "note".into(),
+            serde_json::json!(
+                "external read-in-place collection: it stores no records locally and declares \
+                 no fields, so record counts and the record-reading tools do not apply. Query \
+                 it with POST /v1/collections/{name}/search."
+            ),
+        );
+    }
+    ToolOutcome::ok(out)
 }
 
 /// Retrieval mode for the multimodal `search` tool. Parsed from the
@@ -441,6 +473,39 @@ fn search_rls_filter_expr(
     }
 }
 
+/// Refuse a tool that reads locally stored records when the collection is
+/// external (read-in-place Parquet).
+///
+/// `materialize_collection_locally` hands every collection an (empty) segment
+/// manager, external ones included. Without this guard the read finds that
+/// empty manager and answers a well-formed `200` with zero rows against a
+/// fully populated dataset — indistinguishable from a genuinely empty
+/// collection, and handed to an agent that will act on it as fact. An error is
+/// strictly better than a confident wrong answer here.
+///
+/// REST guards its own read paths with
+/// [`crate::rest::collections::reject_if_external_for_read`], whose docstring
+/// already notes this guard "has twice shipped applied at only some of several
+/// entry points". The agent and MCP surfaces were the third: nothing in this
+/// module asked `is_external()` at all.
+///
+/// `aggregate` is deliberately absent — it routes through `aggregate_core`,
+/// which carries the same check already. `describe_collection` and
+/// `list_collections` are absent on purpose too: describing an external
+/// collection is exactly how an agent discovers that it is one.
+fn reject_if_external(
+    schema: &veda_core::schema::CollectionSchema,
+    user_collection: &str,
+) -> Option<ToolOutcome> {
+    schema.is_external().then(|| {
+        ToolOutcome::invalid_args(format!(
+            "collection '{user_collection}' is external (read-in-place Parquet) and has no \
+             locally stored records; query it through POST \
+             /v1/collections/{user_collection}/search instead"
+        ))
+    })
+}
+
 pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
     let Some(user_collection) = args["collection"].as_str() else {
         return ToolOutcome::invalid_args("collection is required");
@@ -497,6 +562,9 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
             None => return ToolOutcome::not_found(format!("collection '{collection}' not found")),
         }
     };
+    if let Some(out) = reject_if_external(&schema, user_collection) {
+        return out;
+    }
 
     // RLS: inject an owner-equality predicate at the AST level for a scoped
     // (`Some`) caller on an RLS collection; `None` (admin/system) bypasses.
@@ -723,7 +791,12 @@ pub async fn get_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolO
     let rls_field = {
         let schemas = ctx.state.inner.schemas.read().await;
         match schemas.get(collection) {
-            Some(s) => s.rls_owner_field().map(str::to_owned),
+            Some(s) => {
+                if let Some(out) = reject_if_external(s, user_collection) {
+                    return out;
+                }
+                s.rls_owner_field().map(str::to_owned)
+            }
             None => {
                 return ToolOutcome::not_found(format!("collection '{user_collection}' not found"));
             }
@@ -951,10 +1024,15 @@ pub async fn filter_query(ctx: &ToolContext<'_>, args: serde_json::Value) -> Too
     let (rls_field, withheld) = {
         let schemas = ctx.state.inner.schemas.read().await;
         match schemas.get(collection) {
-            Some(s) => (
-                s.rls_owner_field().map(str::to_owned),
-                withheld_fields(ctx, s),
-            ),
+            Some(s) => {
+                if let Some(out) = reject_if_external(s, user_collection) {
+                    return out;
+                }
+                (
+                    s.rls_owner_field().map(str::to_owned),
+                    withheld_fields(ctx, s),
+                )
+            }
             None => {
                 return ToolOutcome::not_found(format!("collection '{user_collection}' not found"));
             }
