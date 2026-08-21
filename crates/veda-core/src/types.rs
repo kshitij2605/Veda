@@ -120,6 +120,16 @@ pub enum IndexType {
     /// over compact binary codes — 32× smaller in memory than raw f32
     /// vectors, but no graph pruning. Wins above ~1M rows where the
     /// cheaper distance op + smaller working set beats HNSW's pruning.
+    ///
+    /// **Do not choose this for a clustered corpus.** Measured recall@10 on a
+    /// 10,000-vector clustered corpus is **~2%** at both 128d and 768d, because
+    /// one bit per dimension cannot order points inside a tight cluster: the
+    /// distance-estimate error is comparable to the entire intra-cluster
+    /// spread. This is an information limit, not a tuning problem — a k-means
+    /// residual codebook cuts reconstruction error 20x and leaves recall
+    /// unchanged. Use [`IndexType::RaBitQRerank`] (recall 1.000 on the same
+    /// corpus) or [`IndexType::Sq8`] (0.94) instead. Evidence:
+    /// `crates/veda-index/tests/rabitq_centroid_sweep.rs`.
     RaBitQ,
     /// Two-stage retrieval: RaBitQ for coarse candidate scan, then
     /// raw-f32 distance for the precise top-k pass. Trades the
@@ -153,6 +163,13 @@ pub enum IndexType {
     /// 8-bit per-dimension scalar quantization. ~D bytes/vec;
     /// highest-recall quantized option (~0.99). Brute-force scan.
     Sq8,
+    /// SPANN-style object-storage-native IVF. Centroids stay resident
+    /// (`O(nlist x dim)`, independent of corpus size); posting lists live
+    /// in the configured object store and are fetched by byte range, so a
+    /// query reads only the lists it probes. Requires a registered object
+    /// store (`veda_index::spann::register_store`), which the server
+    /// installs at startup. See `crates/veda-index/src/spann.rs`.
+    Spann,
     SuffixArray,
     Inverted,
     Range,

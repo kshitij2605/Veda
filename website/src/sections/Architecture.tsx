@@ -26,7 +26,7 @@ export function Architecture() {
       number="06"
       overline="Architecture"
       title="Lightweight by default, deep when you need it"
-      lede="Three mandatory services get you running in seconds. Ten vector index types let you tune recall, latency, and memory per collection."
+      lede="Three mandatory services get you running in seconds. Eleven vector index types let you tune recall, latency, and memory per collection."
     >
       <div className="mt-12 grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
         <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-7">

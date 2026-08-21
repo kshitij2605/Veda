@@ -1,10 +1,10 @@
 # Indexes
 
-Veda ships **10 CPU vector index types** in one engine, so you can pick the right recall/latency/memory tradeoff per collection instead of working around a single index type. Scalar indexes for metadata filtering and the suffix array for exact text patterns are separate structures, covered further down.
+Veda ships **11 CPU vector index types** in one engine, so you can pick the right recall/latency/memory tradeoff per collection instead of working around a single index type. Scalar indexes for metadata filtering and the suffix array for exact text patterns are separate structures, covered further down.
 
-## The 10 vector indexes
+## The 11 vector indexes
 
-All 10 are reachable through the API and validated end-to-end.
+All 11 are reachable through the API and validated end-to-end.
 
 | Index | API value | Best for |
 |---|---|---|
@@ -18,8 +18,9 @@ All 10 are reachable through the API and validated end-to-end.
 | **RaBitQ + rerank** | `rabitq_rerank` | 1-bit screening, then re-scoring against precise vectors |
 | **HNSW + RaBitQ** | `hnsw_rabitq` | Graph traversal over 1-bit codes |
 | **RaBitQ ext rerank** | `rabitq_ext_rerank` | External rerank pass over quantized candidates |
+| **SPANN** | `spann` | Indexes larger than the node that serves them; posting lists live in object storage |
 
-A GPU **CAGRA** index is also available in builds compiled with NVIDIA cuVS — see [GPU index (CAGRA)](#gpu-index-cagra) below. It is not counted among the 10 CPU index types, and on a build without cuVS, creating a collection with `cagra` is rejected with a `400` rather than failing later at index-build time.
+A GPU **CAGRA** index is also available in builds compiled with NVIDIA cuVS — see [GPU index (CAGRA)](#gpu-index-cagra) below. It is not counted among the 11 CPU index types, and on a build without cuVS, creating a collection with `cagra` is rejected with a `400` rather than failing later at index-build time.
 
 ## Recall, measured on a corpus that looks like embeddings
 
@@ -33,14 +34,23 @@ So these are the numbers we publish, and the conditions they were taken under: *
 | **HNSW** (`ef_search=128`) | 100.0% | 99.6% |
 | **HNSW** (tuned, `ef_search=256`) | 100.0% | 99.9% |
 | **IVF-PQ** (`nlist=64`) | 99.2% | 99.6% |
+| **DiskANN** (Vamana, `r=64`) | 100.0% | 99.7% |
+| **RaBitQ + rerank** (`rabitq_rerank`) | 100.0% | 100.0% |
+| **RaBitQ** (bare 1-bit scan) | 2.4% | 1.2% |
 
-### Two indexes we are not quoting
+### DiskANN, resolved
 
-**DiskANN** and **RaBitQ** are under investigation and we are not publishing a recall figure for either.
+An earlier version of this page reported DiskANN at roughly 10% recall at 768 dimensions and declined to quote a figure. **That is fixed.** The cause was distance concentration: in high dimension the graph's pruning rule stops firing, so each node's edge budget fills with its nearest cluster-mates and the graph fragments — 999 of 10,000 nodes were reachable from the entry point. Reserving a few edges per node for long-range targets restores navigability.
 
-DiskANN is **dimension-dependent** right now: a graph-pruning fix brought it to 100.0% at 128 dimensions, but on the same clustered corpus at 768 dimensions it returns roughly 10%. Since most embedding models output 768 or more, that is the case that matters, and we would rather say so than publish the flattering half of the result.
+DiskANN is included in the table above. Its remaining weakness is **build time**, not recall: at 768 dimensions the build is several times slower than HNSW for the same corpus. If build latency matters more than the memory profile, use HNSW.
 
-RaBitQ's 1-bit encoding degrades on clustered data — its reconstruction error roughly triples against uniform-random — and recall follows. Its rerank variants exist precisely because 1-bit screening is meant to be re-scored against precise vectors, but we have not re-measured those either.
+### RaBitQ: use the rerank variants
+
+`rabitq` on its own — the bare 1-bit scan with no re-scoring — scores about **2% recall@10 on a clustered corpus** at both 128 and 768 dimensions, and should not be selected for one.
+
+This is an information limit rather than a tuning problem. One bit per dimension cannot order points *inside* a tight cluster: the distance estimate's error is a large fraction of the entire spread between a query's true neighbours. We tested the obvious fix — a k-means residual codebook, which is what RaBitQ is designed for — and it cut reconstruction error twentyfold while leaving recall unchanged.
+
+What does work is giving the exact re-scoring pass enough candidates. `rabitq_rerank` reaches **1.000** on the same corpus. Use it, or `sq8`, and treat the bare scan as a screening primitive for uniform-ish data rather than a general-purpose index.
 
 If recall matters to your choice of index — and it should — measure it on your own embeddings rather than trusting anyone's table, ours included. [RAG auto-tuning](/docs/auto-tuning) does this for you: it searches index configurations against a test set generated from your own corpus and reports recall per trial.
 
@@ -79,6 +89,40 @@ Accepted values: `hnsw`, `diskann`, `ivfpq` (or `ivf_pq`), `flat`, `rabitq`, `ra
 | `Sq8` (8-bit/dim) | 0.995 | 1.000 | 1536 |
 
 Rules of thumb: `Sq8` is the highest-recall quantized option — near-exact at half the memory of f32. `Sq4` halves memory again and, on real embedding distributions, matches it. Both are brute-force scans over compact codes (like RaBitQ), so they shine where memory dominates and collections are mid-sized; graph indexes (HNSW/DiskANN) win on latency at very large scale.
+
+## SPANN — the index in object storage
+
+Every other index here is *resident*: the node that answers a query holds the
+whole structure. `spann` splits it in two.
+
+- **Resident:** the centroids. Their size depends on the number of clusters,
+  **not on the number of vectors**, so it does not grow as the collection does.
+- **In object storage:** the posting lists, written as size-capped objects.
+  A query finds its nearest centroids and fetches **only those lists**, by byte
+  range.
+
+Measured on a clustered corpus at 768 dimensions, recall@10 against exact
+search:
+
+| Vectors | Index size | Held on the node | Read per query | recall@10 |
+|---|---|---|---|---|
+| 10,000 | 30.8 MB | 0.31 MB (1.01%) | 2.96% | 0.950 |
+| 50,000 | 153.8 MB | 0.69 MB (0.45%) | 3.83% | 0.912 |
+
+The corpus grows fivefold and the resident *share* falls, because it tracks the
+centroid count rather than the corpus.
+
+`nprobe` is the dial: more probes read more of the index and return more of the
+true neighbours. At 50,000 vectors, `nprobe=16` reaches recall 1.000 while still
+reading 6.6% of the index per query.
+
+**This is not the same thing as storing blobs on S3.** Veda has always kept
+original files in MinIO or S3; here the *index itself* lives there, so a node
+can serve a collection it could not hold.
+
+**What it does not do yet:** the build is not incremental. Building the index
+still materialises the corpus in memory, so `spann` lowers what a node needs to
+*serve* a collection, not what it needs to *build* one.
 
 ## GPU index (CAGRA)
 

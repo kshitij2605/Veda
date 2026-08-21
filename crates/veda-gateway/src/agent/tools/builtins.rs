@@ -220,11 +220,37 @@ pub async fn describe_collection(ctx: &ToolContext<'_>, args: serde_json::Value)
                 FieldType::Uuid => "uuid",
                 FieldType::Array(_) => "array",
             };
-            serde_json::json!({
+            let mut out = serde_json::json!({
                 "name": f.name(),
                 "type": kind,
                 "filterable": f.filterable(),
-            })
+            });
+            // Field meaning, when the schema carries any. Flattened in
+            // beside the physical facts rather than nested under an
+            // "annotations" key: the model reads this as one description
+            // of the field, and an extra level of nesting is one more
+            // thing for it to get wrong. Absent keys stay absent, so an
+            // unannotated collection renders exactly as it did before.
+            let ann = f.annotations();
+            if let Some(obj) = out.as_object_mut() {
+                if let Some(d) = &ann.description {
+                    obj.insert("description".into(), serde_json::json!(d));
+                }
+                if let Some(s) = &ann.semantic_type {
+                    obj.insert("semantic_type".into(), serde_json::json!(s));
+                }
+                if let Some(v) = &ann.value_domain {
+                    obj.insert("value_domain".into(), serde_json::json!(v));
+                }
+                if f.is_withheld_from_non_admin() {
+                    // Say so explicitly. A model that knows a field is
+                    // withheld can answer "I can't see that" instead of
+                    // burning steps searching for a column that will
+                    // never appear in any result.
+                    obj.insert("restricted".into(), serde_json::json!(true));
+                }
+            }
+            out
         })
         .collect();
 
@@ -358,6 +384,37 @@ pub fn select_query_model(
         .ok_or_else(|| format!("no embedding model configured for modality '{modality}'"))
 }
 
+/// Field names this caller may not read, from an already-resolved schema.
+///
+/// Empty for an Admin caller and for any schema carrying no sensitivity
+/// annotation. Takes the schema rather than re-resolving it, so callers
+/// that already hold one do not pay a second alias lookup.
+fn withheld_fields(
+    ctx: &ToolContext<'_>,
+    schema: &veda_core::schema::CollectionSchema,
+) -> Vec<String> {
+    if ctx.is_admin {
+        return Vec::new();
+    }
+    schema
+        .withheld_fields_for_non_admin()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The first restricted field named in an optional filter expression.
+///
+/// Thin wrapper over [`crate::agent::field_guard::filter_mentions_withheld`]
+/// that tolerates the `None` filter case, which is the common one.
+fn withheld_field_in_filter(expr: &Option<FilterExpr>, withheld: &[String]) -> Option<String> {
+    if withheld.is_empty() {
+        return None;
+    }
+    expr.as_ref()
+        .and_then(|e| crate::agent::field_guard::filter_mentions_withheld(e, withheld))
+}
+
 /// Build the AST-level filter for an agent `search`, enforcing RLS.
 ///
 /// Parses the optional user-supplied `filter` string, then — for a scoped
@@ -450,6 +507,14 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
             Ok(e) => e,
             Err(e) => return ToolOutcome::invalid_args(e),
         };
+
+    // A restricted field is an oracle even when it is never returned: the
+    // caller cannot see `salary`, but `salary > 100000` reads it off the
+    // result count one comparison at a time. Redaction cannot close that,
+    // so the query is refused instead.
+    if let Some(bad) = withheld_field_in_filter(&filter_expr, &withheld_fields(ctx, &schema)) {
+        return ToolOutcome::invalid_args(crate::agent::field_guard::restricted_field_error(&bad));
+    }
 
     // Resolve target vector field.
     let vec_fields = schema.vector_fields();
@@ -781,6 +846,53 @@ pub async fn aggregate(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOu
         ));
     }
     let scoped = crate::tenant::scope(ctx.tenant, user_collection);
+
+    // Aggregation reaches a restricted field's values without ever
+    // returning the field, so redaction at the payload level is useless
+    // here and the request is refused instead. Three separate routes:
+    //   - `field` with min/max returns the value directly;
+    //   - `group_by` emits every distinct key VERBATIM, which is the
+    //     whole column one row at a time;
+    //   - `filter` is the same oracle `search`/`filter_query` refuse.
+    // The same reasoning that made this tool pass `true` to
+    // `aggregate_core` for hostile-content withholding applies again.
+    {
+        let resolved = ctx.state.inner.aliases.resolve(&scoped).await;
+        let schemas = ctx.state.inner.schemas.read().await;
+        if let Some(schema) = schemas.get(&resolved) {
+            let withheld = withheld_fields(ctx, schema);
+            if !withheld.is_empty() {
+                let group_by = args["group_by"].as_str();
+                let named = [Some(field), group_by]
+                    .into_iter()
+                    .flatten()
+                    .find(|n| withheld.iter().any(|w| w == n))
+                    .map(str::to_owned);
+                if let Some(bad) = named {
+                    return ToolOutcome::invalid_args(
+                        crate::agent::field_guard::restricted_field_error(&bad),
+                    );
+                }
+                if let Some(f) = args["filter"].as_str() {
+                    match FilterParser::parse(f) {
+                        Ok(expr) => {
+                            if let Some(bad) = crate::agent::field_guard::filter_mentions_withheld(
+                                &expr, &withheld,
+                            ) {
+                                return ToolOutcome::invalid_args(
+                                    crate::agent::field_guard::restricted_field_error(&bad),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            return ToolOutcome::invalid_args(format!("invalid filter: {e}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let query = AggregateQuery {
         field: field.to_owned(),
         metric: metric.to_owned(),
@@ -836,15 +948,26 @@ pub async fn filter_query(ctx: &ToolContext<'_>, args: serde_json::Value) -> Too
 
     // RLS: a scoped (`Some`) user only sees rows they own when the
     // collection declares an owner field; `None` (admin) bypasses.
-    let rls_field = {
+    let (rls_field, withheld) = {
         let schemas = ctx.state.inner.schemas.read().await;
         match schemas.get(collection) {
-            Some(s) => s.rls_owner_field().map(str::to_owned),
+            Some(s) => (
+                s.rls_owner_field().map(str::to_owned),
+                withheld_fields(ctx, s),
+            ),
             None => {
                 return ToolOutcome::not_found(format!("collection '{user_collection}' not found"));
             }
         }
     };
+
+    // Same oracle argument as in `search`: a predicate on a restricted
+    // field leaks its value through the result count without ever
+    // returning it, so refuse rather than redact.
+    if let Some(bad) = crate::agent::field_guard::filter_mentions_withheld(&filter_expr, &withheld)
+    {
+        return ToolOutcome::invalid_args(crate::agent::field_guard::restricted_field_error(&bad));
+    }
     let rls_owner = rls_field.as_deref().and(ctx.user);
 
     let managers = ctx.state.inner.segment_managers.read().await;
@@ -955,6 +1078,19 @@ fn project_fields(
 
 /// Serialise a record to `{ "id", "fields" }` — matching the REST
 /// `GetRecordResponse` shape so the agent/MCP surfaces stay consistent.
+///
+/// **Embeddings are serialised in full here on purpose**, even though no
+/// model can use them, because `temporal_check`'s conflict detection
+/// reads each hit's vector back out of this `fields` map (`hit_vector`,
+/// `agent::retrieval_guard`). `filter_query` is the only path where that
+/// detection works at all — `search` skips vector fields when hydrating
+/// hits, which is exactly why the v0.6.0 notes record conflict detection
+/// as "active on `filter_query` and inert on `search`".
+///
+/// They are stripped immediately afterwards, at the dispatch choke point
+/// and only once the guard has run: see
+/// [`crate::agent::field_guard::strip_embeddings`]. Summarising them
+/// *here* instead silently disabled the one working conflict detector.
 fn record_json(rec: &Record) -> serde_json::Value {
     let mut fields = serde_json::Map::new();
     for (key, value) in rec.fields() {
@@ -1042,6 +1178,34 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn record_json_keeps_the_embedding_for_the_guard_to_read() {
+        // Counterpart to `strip_embeddings` in `agent::field_guard`.
+        // The vector MUST still be here: `temporal_check`'s conflict
+        // detection reads it back out of this map, and `filter_query` is
+        // the only path where that detection works. Summarising it here
+        // is what silently disabled it, so this test pins the ordering
+        // the two pieces depend on.
+        use veda_core::record::{FieldValue, Record};
+        use veda_core::vector::DenseVector;
+
+        let mut rec = Record::new();
+        rec.set("name", FieldValue::String("Nordwind".to_owned()));
+        rec.set(
+            "vec",
+            FieldValue::Vector(DenseVector::new(vec![0.5f32; 1024])),
+        );
+
+        let fields = record_json(&rec);
+        let fields = fields["fields"].as_object().unwrap();
+        assert_eq!(fields["name"], "Nordwind");
+        assert_eq!(
+            fields["vec"].as_array().map(|a| a.len()),
+            Some(1024),
+            "the guard needs the real components; stripping happens at dispatch"
+        );
     }
 
     #[test]

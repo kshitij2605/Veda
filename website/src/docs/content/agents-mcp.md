@@ -122,7 +122,9 @@ The bridge reads newline-delimited JSON-RPC from stdin, forwards each message to
 
 ### Connect over Streamable HTTP
 
-For `mcp-remote` and HTTP MCP clients, POST JSON-RPC directly to `/v1/mcp` with `Authorization: Bearer <jwt>`. The server is stateless (no session id), honors the `MCP-Protocol-Version` header (unsupported → `400`), and returns `405` on `GET` (there is no server-initiated stream).
+For `mcp-remote` and HTTP MCP clients, POST JSON-RPC directly to `/v1/mcp` with `Authorization: Bearer <jwt>`. The server is stateless (no session id) and returns `405` on `GET` (there is no server-initiated stream).
+
+The `MCP-Protocol-Version` header is honored on every request **except** `initialize`, which negotiates the version in its own body: a client offering a version newer than Veda supports negotiates down to `2025-06-18` rather than failing. On any other request, an unsupported version is a `400`. Requests with no `id` are JSON-RPC notifications and receive `202 Accepted` with an empty body — never a reply.
 
 ```bash
 curl -X POST http://localhost:6340/v1/mcp \
@@ -131,6 +133,33 @@ curl -X POST http://localhost:6340/v1/mcp \
   -H "MCP-Protocol-Version: 2025-06-18" \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}'
 ```
+
+### Connect Hermes Agent
+
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) connects with config alone — no
+adapter on either side. In `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  veda:
+    url: "http://veda-host:6340/v1/mcp"
+    headers:
+      Authorization: "Bearer <jwt>"
+    tools:
+      include: [search, filter_query, describe_collection, list_collections, get_record]
+```
+
+Then `hermes mcp test veda`.
+
+**Set `tools.include`.** The catalog has 15 tools including `upsert_record` and
+`delete_collection`; the five above are the read-only working set most operators want an
+autonomous agent to have. The allowlist applies at agent exposure, so an excluded tool is
+refused inside Hermes and never reaches Veda.
+
+Field sensitivity is enforced at Veda's dispatch choke point, so it holds across MCP: a field
+marked `sensitivity: restricted` is withheld from results and refused as a filter target, with a
+`field_guard` report naming what was withheld. MCP callers are treated as non-admin regardless of
+JWT role — an agent holding an admin token still cannot read restricted fields.
 
 ## Agent-to-Agent (A2A)
 
