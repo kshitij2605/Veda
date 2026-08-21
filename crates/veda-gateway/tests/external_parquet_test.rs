@@ -1631,3 +1631,123 @@ async fn external_set_auto_optimization_is_rejected() {
         .unwrap();
     assert_rejected_as_external(r, "PUT /auto-optimization", name).await;
 }
+
+/// The agent tools must not answer an external collection out of the empty
+/// local segment manager it gets from `materialize_collection_locally`.
+///
+/// REST guards its own read paths with `reject_if_external_for_read`, whose
+/// docstring notes this guard "has twice shipped applied at only some of
+/// several entry points". The agent and MCP surfaces were a third: nothing in
+/// `agent/tools/builtins.rs` ever asked `is_external()`, so `filter_query`
+/// and `get_record` read the empty manager and returned a perfectly
+/// well-formed **200 with zero rows** on a fully populated dataset — a silent
+/// wrong answer handed to an autonomous agent, which is worse than an error.
+#[tokio::test]
+async fn agent_tools_refuse_an_external_collection_rather_than_answer_empty() {
+    let (base, tmp) = start_server().await;
+    let file_path = tmp.path().join("ext_agent.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(4));
+    let r = register_external(&base, "ext_agent", &file_uri(&file_path)).await;
+    assert!(
+        r.status().is_success(),
+        "registration failed: {}",
+        r.text().await.unwrap()
+    );
+
+    let cases: Vec<(&str, serde_json::Value)> = vec![
+        (
+            "filter_query",
+            json!({ "collection": "ext_agent", "filter": "id = 'a'", "limit": 5 }),
+        ),
+        (
+            // A syntactically valid UUID: `get_record` validates the id before
+            // it ever looks at the schema, so an unparseable one would fail on
+            // argument validation and never reach the path under test.
+            "get_record",
+            json!({
+                "collection": "ext_agent",
+                "id": "00000000-0000-4000-8000-000000000001"
+            }),
+        ),
+        (
+            "search",
+            json!({ "collection": "ext_agent", "query": "anything", "limit": 5 }),
+        ),
+    ];
+
+    for (tool, args) in cases {
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/v1/agent-tools/{tool}/execute"))
+            .json(&args)
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap();
+
+        assert_ne!(
+            status, 200,
+            "{tool} answered 200 on an external collection; a zero-row success here is              indistinguishable from a genuinely empty collection: {body}"
+        );
+        assert!(
+            body.to_lowercase().contains("external"),
+            "{tool} must say the collection is external so the agent can act on it,              got {status}: {body}"
+        );
+    }
+}
+
+/// `describe_collection` is the tool an agent uses to find out what it is
+/// looking at, so it must not report an external collection as an ordinary
+/// empty one.
+///
+/// `record_count` is summed from the local segment manager, which an external
+/// collection has but never fills — so before this it answered `0` for a fully
+/// populated dataset, with nothing in the payload marking it external. Unlike
+/// the record-reading tools this one is not refused: describing is exactly how
+/// the agent is supposed to learn the collection's nature.
+#[tokio::test]
+async fn describe_collection_marks_an_external_collection_instead_of_reporting_zero_rows() {
+    let (base, tmp) = start_server().await;
+    let file_path = tmp.path().join("ext_describe.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(4));
+    let r = register_external(&base, "ext_describe", &file_uri(&file_path)).await;
+    assert!(r.status().is_success());
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/agent-tools/describe_collection/execute"))
+        .json(&json!({ "name": "ext_describe" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    let ext = body
+        .get("external")
+        .unwrap_or_else(|| panic!("must be marked external: {body}"));
+    // The source descriptor, not just a flag: an external collection declares
+    // no fields of its own (registering one with `fields` is rejected — it
+    // infers its schema from the source), so the descriptor is the only thing
+    // that actually tells an agent what it is looking at.
+    assert_eq!(
+        ext.get("format").and_then(|v| v.as_str()),
+        Some("parquet"),
+        "external source descriptor must be reported: {body}"
+    );
+    assert!(
+        ext.get("uri")
+            .and_then(|v| v.as_str())
+            .is_some_and(|u| u.ends_with(".parquet")),
+        "descriptor must name the source: {body}"
+    );
+    assert!(
+        body.get("record_count").is_none(),
+        "a local record count is meaningless here and must not be reported: {body}"
+    );
+    assert!(
+        body.get("note")
+            .and_then(|v| v.as_str())
+            .is_some_and(|n| n.contains("search")),
+        "the note must point at the route that does work: {body}"
+    );
+}
