@@ -49,6 +49,12 @@ receives the whole batch in memory, so peak *build* memory is unchanged from any
 type. The property is about serving. Streaming the build is named as the next step and is not
 done.
 
+> **Update 2026-08-21.** A streaming build now exists and is measured: peak build memory 4.5% of
+> the corpus at 768d, producing a byte-identical index. The claim above still holds for anything
+> customer-facing, because the path is **opt-in** — `IndexType::Spann` still builds through the
+> in-memory route, so ingest cost is unchanged for anyone selecting `spann` on a collection. Say
+> ingest is cheaper only once a segment-backed `VectorSource` is wired into `build_indexes`.
+
 **Do NOT publish latency comparisons for it.** The exact-scan baseline moved 100× between two
 runs on the build host. Only the recall and byte figures above are trustworthy.
 

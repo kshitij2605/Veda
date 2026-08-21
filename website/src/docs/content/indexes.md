@@ -120,9 +120,31 @@ reading 6.6% of the index per query.
 original files in MinIO or S3; here the *index itself* lives there, so a node
 can serve a collection it could not hold.
 
-**What it does not do yet:** the build is not incremental. Building the index
-still materialises the corpus in memory, so `spann` lowers what a node needs to
-*serve* a collection, not what it needs to *build* one.
+### Building without holding the corpus
+
+The default build receives the whole batch in memory, because that is the shape
+the search executor hands every index type. A streaming build takes a
+`VectorSource` instead and holds only a budgeted slice at a time, trading passes
+over the source for memory. It produces a **byte-identical** index — same
+centroids, same layout, same objects — when the budget admits the whole corpus.
+
+20,000 vectors at 768 dimensions (61.5 MB of posting-list bytes):
+
+| Budget | Groups | Passes | Peak held | vs corpus |
+|---|---|---|---|---|
+| 61.5 MB | 1 | 3 | 61.5 MB | 100% |
+| 15.4 MB | 5 | 7 | 15.1 MB | 24.5% |
+| 3.8 MB | 18 | 20 | 6.1 MB | 10.0% |
+| 1.0 MB | 69 | 71 | 2.8 MB | **4.5%** |
+
+The floor is the largest posting list, not the budget: a list is never split
+across parts, so it is always buffered whole. `nlist` governs that floor, and a
+budget below it buys extra passes for no saving.
+
+**What it does not do yet:** this path is opt-in. `IndexType::Spann` still
+builds through the in-memory route, so choosing `spann` in a collection lowers
+what a node needs to *serve*, not yet what it needs to *build*. Closing that
+gap needs a `VectorSource` backed by segment storage.
 
 ## GPU index (CAGRA)
 
