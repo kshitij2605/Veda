@@ -67,8 +67,27 @@ answers 3/6 → 6/6 *because of* the stagnation change — was an artefact of co
 without an A/B, and is retracted here.
 
 The open question is what did close the negative-answer gap between 2026-08-18 and 2026-08-21.
-Answering it needs a bisect over that range with this suite, which is worth doing before the next
-agent-loop change claims credit for something it did not do.
+
+## One candidate tested and set aside
+
+`05661e7` / `214d5db` stopped dumping raw 1024-dim embeddings into the model's context, and the
+docstring on `strip_embeddings` records that removing them moved an annotation-probe case from
+0/5 to 5/5. That is the most plausible candidate in the range, so it was tested the same way: a
+binary with the strip suppressed, two runs.
+
+Every category scored 100%, identical to the normal binary — which looks like a refutation and is
+**not one**. Inspecting the step trace shows a `search` hit carries `content`, `doc` and the
+`_guardrail_*` columns and **no vector at all**. `strip_embeddings` is a no-op on this suite, so
+the arm was never different from the control. The measured 0/5 → 5/5 was on `filter_query`, and
+this suite's agent is `tool_ids: ["search"]`.
+
+The result is therefore *inconclusive by construction*, not evidence either way — the same class
+of error as the `fired = 0` probe above, caught the same way, by checking whether the mechanism
+could fire before believing that it did not.
+
+**A bisect over the range is still the way to answer this**, and it must use an agent with
+`filter_query` in its toolset if it wants the embedding-strip commits to be distinguishable at
+all. Worth doing before the next agent-loop change claims credit for something it did not do.
 
 ## Reproducing
 
