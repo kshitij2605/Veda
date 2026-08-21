@@ -1269,7 +1269,33 @@ impl AppState {
     ///
     /// If `VEDA_BLOB_BACKEND` is set, creates an `ObjectBlobStore` and swaps it
     /// into the RwLock (replacing the default `LocalBlobStore`).
+    /// Publish the effective blob store to the SPANN index tier.
+    ///
+    /// `IndexType::Spann` keeps its posting lists in the object store and
+    /// reaches it through a process-global registered by this call.
+    /// Called after every point the blob store is decided, so the tier
+    /// follows the same backend as everything else rather than needing
+    /// its own configuration.
+    pub async fn register_spann_store(&self) {
+        let store = self.inner.blob_store.read().await.clone();
+        veda_index::spann::register_store(std::sync::Arc::new(veda_index::spann::BlobRangeStore(
+            store,
+        )));
+    }
+
+    /// Load the configured blob store, then publish it to the SPANN tier.
+    ///
+    /// Registration happens on **every** path, including the one where
+    /// `VEDA_BLOB_BACKEND` is unset and the local store is kept: a SPANN
+    /// index on a single-node deployment must still work, and an
+    /// unregistered store fails the build loudly rather than silently
+    /// degrading.
     pub async fn load_blob_store_from_env(&self) {
+        self.load_blob_store_from_env_inner().await;
+        self.register_spann_store().await;
+    }
+
+    async fn load_blob_store_from_env_inner(&self) {
         let backend = match std::env::var("VEDA_BLOB_BACKEND")
             .ok()
             .filter(|s| !s.is_empty())

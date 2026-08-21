@@ -36,6 +36,61 @@ curl -X POST http://localhost:6340/v1/collections \
 
 **Distance metrics** for vector fields: `cosine`, `euclidean`, `dot_product`, `hamming`, `manhattan`, `jaccard`.
 
+## Field annotations
+
+A field's type says how a value is stored. It does not say what the value
+*means* — a `string` may hold an ISO country code, an email address, or free
+prose, and nothing in the type distinguishes them. Annotations carry that, and
+they are optional: a collection without them behaves exactly as before.
+
+```json
+{
+  "name": "ctry_cd",
+  "type": "string",
+  "filterable": true,
+  "annotations": {
+    "description": "Country where the supplier is headquartered.",
+    "semantic_type": "iso3166_alpha2",
+    "value_domain": ["EE", "VN", "CL", "PL"],
+    "sensitivity": "internal"
+  }
+}
+```
+
+| Key | Purpose |
+|---|---|
+| `description` | Human-readable meaning, shown to agents and MCP clients |
+| `semantic_type` | What the value *is* — `iso3166_alpha2`, `email`, `currency_cents_usd` |
+| `value_domain` | The values the field takes, or a representative sample |
+| `sensitivity` | `public` (default), `internal`, or `restricted` |
+| `pii` | `true` when the field holds personally-identifiable information |
+
+`description`, `semantic_type` and `value_domain` are rendered by the
+`describe_collection` tool, so an agent reading your schema learns that
+`ctry_cd` holds `"EE"` rather than `"Estonia"` without having to discover it by
+trial and error.
+
+### Sensitivity is enforced, not advisory
+
+`sensitivity: "restricted"` and `pii: true` are the two that change behaviour.
+A field marked either way is **withheld from non-admin callers on every
+retrieval path** — `search`, `filter_query`, `get_record` and `aggregate` —
+and a query that *names* it in a filter or an aggregation is refused rather
+than answered.
+
+That second half matters. Withholding a column from results is not enough on
+its own: a caller who cannot see `salary` could otherwise recover it by asking
+for `salary > 100000` and reading the answer off the result count. Filtering
+and grouping on a restricted field are therefore rejected outright.
+
+`internal` is deliberately **advisory** — it is carried to agents and operators
+and never enforced — so it can be used to record a distinction without changing
+what anyone sees.
+
+Because Veda owns ingestion, embedding and retrieval, this is enforced in the
+engine. A stack that assembles a separate embedder and vector store has no
+single place to put it.
+
 ## Insert records
 
 Records are flat maps of field name to value. An `id` is generated when omitted.

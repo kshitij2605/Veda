@@ -160,8 +160,13 @@ async fn process_document(base: &str, name: &str) -> (reqwest::StatusCode, Strin
     (status, resp.text().await.unwrap())
 }
 
-/// Every inserted record, with its fields — `filter_query` serializes vector
-/// fields, which is how the vector column is verified as actually filled.
+/// Every inserted record, with its fields.
+///
+/// `filter_query` is an agent-facing tool, so the dispatch choke point
+/// summarises embeddings rather than serialising their components (see
+/// `agent::field_guard::strip_embeddings`). The summary still carries the
+/// dimension, so this is still how the vector column is verified as
+/// actually filled — see [`vector_len`].
 async fn all_records(base: &str, name: &str) -> Vec<Value> {
     let body: Value = client()
         .post(format!("{base}/v1/agent-tools/filter_query/execute"))
@@ -178,11 +183,22 @@ async fn all_records(base: &str, name: &str) -> Vec<Value> {
         .unwrap_or_else(|| panic!("records array: {body}"))
 }
 
+/// Width of the record's embedding column.
+///
+/// Agent-facing payloads render a dense vector as
+/// `{"vector": {"dim": N}}` instead of N floats, so this reads the
+/// reported dimension. The invariant under test is unchanged: the key is
+/// absent entirely when the column was never filled, so a present
+/// summary with a non-zero dim still proves the round trip populated it.
 fn vector_len(record: &Value) -> usize {
-    record["fields"]["embedding"]
-        .as_array()
+    let embedding = &record["fields"]["embedding"];
+    embedding["vector"]["dim"]
+        .as_u64()
+        .map(|d| d as usize)
+        // Tolerate a raw component list too, so this helper keeps working
+        // on any path that does not go through the agent dispatch.
+        .or_else(|| embedding.as_array().map(|a| a.len()))
         .unwrap_or_else(|| panic!("record has no embedding vector: {record}"))
-        .len()
 }
 
 /// The end-to-end round trip: a document WITH an image, into a collection

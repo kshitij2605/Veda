@@ -29,6 +29,17 @@ pub struct TrialObjectives {
     pub recall: f64,
     pub faithfulness: f64,
     pub latency_p50_ms: f64,
+    /// End-to-end answer correctness in [0, 1] — RAGAS's
+    /// `0.75 * factual + 0.25 * similarity` over a generated answer.
+    ///
+    /// `None` when the campaign did not enable answer scoring, which is the
+    /// default because it costs two model calls per case per trial. The two
+    /// objectives beside it are both *retrieval* metrics (`faithfulness` is
+    /// `cosine(top_retrieved_chunk, gold_answer)` and never generates
+    /// anything), so this is the only one that can move for a change acting
+    /// downstream of the hit list. See `crate::rest::answer_score`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_correctness: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -173,6 +184,7 @@ mod campaign_loop_tests {
                 recall: (ef / 200.0).min(1.0),
                 faithfulness: 0.9,
                 latency_p50_ms: ef * 0.4,
+                answer_correctness: None,
             }
         })
         .await;
@@ -220,6 +232,7 @@ mod campaign_loop_tests {
                     recall: 0.9,
                     faithfulness: 0.9,
                     latency_p50_ms: 10.0,
+                    answer_correctness: None,
                 }
             }
         })
@@ -241,6 +254,7 @@ mod campaign_loop_tests {
                 recall: 0.5,
                 faithfulness: 0.5,
                 latency_p50_ms: 20.0,
+                answer_correctness: None,
             }
         })
         .await;
@@ -263,18 +277,21 @@ mod campaign_loop_tests {
                         recall: 0.95,
                         faithfulness: 0.9,
                         latency_p50_ms: 20.0,
+                        answer_correctness: None,
                     }
                 } else if config.tier1.ef_search == 32 {
                     TrialObjectives {
                         recall: 0.4,
                         faithfulness: 0.4,
                         latency_p50_ms: 1.0,
+                        answer_correctness: None,
                     }
                 } else {
                     TrialObjectives {
                         recall: 0.95,
                         faithfulness: 0.8,
                         latency_p50_ms: 5.0,
+                        answer_correctness: None,
                     }
                 }
             }
@@ -327,7 +344,16 @@ use crate::tuning::search::{MultiObjectiveSearch, Nsga2Search};
 /// recall and faithfulness are already "higher is better"; latency is
 /// negated so "higher (less negative) is better" too.
 fn objectives_vec(o: &TrialObjectives) -> Vec<f64> {
-    vec![o.recall, o.faithfulness, -o.latency_p50_ms]
+    let mut v = vec![o.recall, o.faithfulness, -o.latency_p50_ms];
+    // Appended only when it was actually measured. Passing a constant for
+    // unscored campaigns would hand NSGA-II a zero-gradient dimension to
+    // wander on and report noise from — the exact failure this objective was
+    // added to avoid. Within one campaign the flag does not change, so every
+    // trial yields the same vector length.
+    if let Some(ac) = o.answer_correctness {
+        v.push(ac);
+    }
+    v
 }
 
 /// Run one bounded campaign: for each distinct tier-2/3 base in

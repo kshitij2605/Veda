@@ -471,6 +471,7 @@ fn index_type_str(it: veda_core::types::IndexType) -> &'static str {
         I::RaBitQExtRerank => "rabitq_ext_rerank",
         I::Sq4 => "sq4",
         I::Sq8 => "sq8",
+        I::Spann => "spann",
         I::SuffixArray => "suffix_array",
         I::Inverted => "inverted",
         I::Range => "range",

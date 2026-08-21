@@ -8,5 +8,6 @@ pub mod gpu_nim_client;
 pub mod hnsw;
 pub mod ivfpq;
 pub mod quantization;
+pub mod spann;
 pub mod suffix_array;
 pub mod traits;

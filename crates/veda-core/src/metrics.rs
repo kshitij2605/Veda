@@ -10,6 +10,14 @@ pub const INSERT_TOTAL: &str = "veda_insert_total";
 pub const INSERT_DURATION: &str = "veda_insert_duration_seconds";
 pub const EMBEDDING_DURATION: &str = "veda_embedding_duration_seconds";
 pub const BLOB_OP_DURATION: &str = "veda_blob_operation_duration_seconds";
+/// Retrieval calls the agent loop evaluated for stagnation, labelled
+/// `fired="true"|"false"`.
+///
+/// Exists because v1 of the detector was correct, unit-tested, and fired in
+/// **1 run out of 6** — measured only by win rate it looked ineffective rather
+/// than inert. A firing rate is the first thing to check before any claim
+/// about whether the signal helps.
+pub const STAGNATION_CHECKS: &str = "veda_agent_stagnation_checks_total";
 pub const SEGMENTS_TOTAL: &str = "veda_segments_total";
 pub const INDEX_BUILD_DURATION: &str = "veda_index_build_duration_seconds";
 pub const COMPACTION_DURATION: &str = "veda_compaction_duration_seconds";
