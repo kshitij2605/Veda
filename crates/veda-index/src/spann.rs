@@ -242,6 +242,141 @@ impl std::fmt::Debug for SpannIndex {
     }
 }
 
+/// Serialises posting lists into size-capped part objects, flushing each part
+/// as it fills.
+///
+/// Shared by the in-memory and streaming builds so the on-disk layout has
+/// exactly one implementation: the streaming path's whole claim is that it
+/// produces the *same* index using less memory, and two copies of this logic
+/// would let that quietly stop being true.
+struct PartWriter<'a> {
+    store: &'a dyn RangeStore,
+    prefix: &'a str,
+    part_bytes: usize,
+    buf: Vec<u8>,
+    part_index: u32,
+    spans: Vec<ListSpan>,
+}
+
+impl<'a> PartWriter<'a> {
+    fn new(store: &'a dyn RangeStore, prefix: &'a str, part_bytes: usize, nlist: usize) -> Self {
+        let part_bytes = part_bytes.max(1);
+        Self {
+            store,
+            prefix,
+            part_bytes,
+            buf: Vec::with_capacity(part_bytes.min(1 << 20)),
+            part_index: 0,
+            spans: Vec::with_capacity(nlist),
+        }
+    }
+
+    /// Append one complete posting list, in centroid order.
+    fn push_list(&mut self, entries: &[(u32, &[f32])]) -> Result<()> {
+        let dim = entries.first().map(|(_, v)| v.len()).unwrap_or(0);
+        let list_len = entries.len() * entry_bytes(dim);
+        // A list is never split across parts, so one ranged read always
+        // suffices at query time. Flush first when this list would push the
+        // part over the cap — unless the part is empty, in which case a single
+        // oversized list gets its own part rather than looping.
+        if !self.buf.is_empty() && self.buf.len() + list_len > self.part_bytes {
+            self.store.put(
+                &SpannIndex::part_key(self.prefix, self.part_index),
+                &self.buf,
+            )?;
+            self.buf.clear();
+            self.part_index += 1;
+        }
+        let offset = self.buf.len() as u64;
+        for (id, v) in entries {
+            self.buf.extend_from_slice(&id.to_le_bytes());
+            for &c in *v {
+                self.buf.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        self.spans.push(ListSpan {
+            part: self.part_index,
+            offset,
+            len: self.buf.len() as u64 - offset,
+            count: entries.len() as u32,
+        });
+        Ok(())
+    }
+
+    /// Write the final part — including the all-empty-lists case, where
+    /// nothing was ever flushed — and hand back the manifest's span table.
+    fn finish(self) -> Result<(Vec<ListSpan>, u32)> {
+        self.store.put(
+            &SpannIndex::part_key(self.prefix, self.part_index),
+            &self.buf,
+        )?;
+        Ok((self.spans, self.part_index + 1))
+    }
+}
+
+/// A corpus the streaming build can read more than once.
+///
+/// The point of the trait is the `for_each` shape: a caller backed by segment
+/// storage can hand over one vector at a time and never materialise the
+/// corpus, which is what keeps [`SpannIndex::build_into_streaming`] off
+/// `O(n * dim)`. Re-readable rather than an `Iterator` because the build makes
+/// several passes and each must see every vector with the same id.
+pub trait VectorSource {
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Vector width. Ragged input is rejected by the build, not here.
+    fn dimension(&self) -> usize;
+    /// Invoke `f` once per vector, ids ascending from 0, every pass.
+    fn for_each(&self, f: &mut dyn FnMut(u32, &[f32]) -> Result<()>) -> Result<()>;
+}
+
+/// A [`VectorSource`] over a slice already in memory.
+///
+/// Exists so the streaming path can be tested against the in-memory one, and
+/// so a caller that *does* have the whole batch can still use it.
+pub struct SliceSource<'a> {
+    vectors: &'a [&'a [f32]],
+}
+
+impl<'a> SliceSource<'a> {
+    pub fn new(vectors: &'a [&'a [f32]]) -> Self {
+        Self { vectors }
+    }
+}
+
+impl VectorSource for SliceSource<'_> {
+    fn len(&self) -> usize {
+        self.vectors.len()
+    }
+    fn dimension(&self) -> usize {
+        self.vectors.first().map(|v| v.len()).unwrap_or(0)
+    }
+    fn for_each(&self, f: &mut dyn FnMut(u32, &[f32]) -> Result<()>) -> Result<()> {
+        for (i, v) in self.vectors.iter().enumerate() {
+            f(i as u32, v)?;
+        }
+        Ok(())
+    }
+}
+
+/// What a streaming build actually did.
+///
+/// `peak_buffered_bytes` is the number the whole exercise turns on. Without it
+/// the memory claim is unfalsifiable: a build that quietly buffered the entire
+/// corpus would produce a correct index and a correct recall figure, and look
+/// identical from the outside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamingBuildStats {
+    /// Passes over the source: one to sample, one to count, one per group.
+    pub passes: u32,
+    /// Centroid groups the build was split into. 1 means it all fit at once.
+    pub groups: u32,
+    /// High-water mark of posting-list bytes held in memory at any moment.
+    pub peak_buffered_bytes: usize,
+}
+
 impl SpannIndex {
     fn manifest_key(prefix: &str) -> String {
         format!("{prefix}/manifest.bin")
@@ -306,38 +441,15 @@ impl SpannIndex {
         // by the corpus. Full f32 vectors are stored, not PQ codes: this
         // index's claim is about *where the bytes live*, and mixing in a lossy
         // encoding would confound a recall measurement with a quantisation one.
-        let mut part_buf: Vec<u8> = Vec::with_capacity(part_bytes.min(1 << 20));
-        let mut part_index: u32 = 0;
-        let mut spans = Vec::with_capacity(centroids.len());
+        let mut writer = PartWriter::new(store.as_ref(), prefix, part_bytes, centroids.len());
         for bucket in &buckets {
-            let list_len = bucket.len() * entry_bytes(dim);
-            // A list is never split across parts, so one ranged read always
-            // suffices at query time. Flush first when this list would push
-            // the part over the cap — unless the part is empty, in which case
-            // a single oversized list gets its own part rather than looping.
-            if !part_buf.is_empty() && part_buf.len() + list_len > part_bytes {
-                store.put(&Self::part_key(prefix, part_index), &part_buf)?;
-                part_buf.clear();
-                part_index += 1;
-            }
-            let offset = part_buf.len() as u64;
-            for &id in bucket {
-                part_buf.extend_from_slice(&id.to_le_bytes());
-                for &c in vectors[id as usize] {
-                    part_buf.extend_from_slice(&c.to_le_bytes());
-                }
-            }
-            spans.push(ListSpan {
-                part: part_index,
-                offset,
-                len: part_buf.len() as u64 - offset,
-                count: bucket.len() as u32,
-            });
+            let entries: Vec<(u32, &[f32])> = bucket
+                .iter()
+                .map(|&id| (id, vectors[id as usize]))
+                .collect();
+            writer.push_list(&entries)?;
         }
-        // The final part, including the empty-corpus-of-empty-lists case where
-        // nothing was ever flushed.
-        store.put(&Self::part_key(prefix, part_index), &part_buf)?;
-        let part_count = part_index + 1;
+        let (spans, part_count) = writer.finish()?;
 
         let manifest = Manifest {
             centroids,
@@ -357,6 +469,171 @@ impl SpannIndex {
         store.put(&Self::manifest_key(prefix), &encoded)?;
 
         Ok(Self::attach(manifest, store, prefix))
+    }
+
+    /// Build from a [`VectorSource`] without ever holding the corpus in memory.
+    ///
+    /// [`Self::build_into`] needs `&[&[f32]]`, so the caller must materialise
+    /// every vector first — `O(n * dim)` before the build even starts. That is
+    /// the wrong shape for an index whose entire premise is that the data does
+    /// not fit in memory. This path keeps peak usage near `budget_bytes` by
+    /// trading memory for passes over the source:
+    ///
+    /// 1. **Sample** — take a strided sample that fits the budget and run
+    ///    k-means on it. When the budget admits the whole corpus the sample
+    ///    *is* the corpus, and the result is identical to [`Self::build_into`].
+    /// 2. **Count** — one pass assigning every vector to its nearest centroid,
+    ///    keeping only per-centroid counts (`O(nlist)`). This is what makes the
+    ///    memory bound exact rather than a guess: the groups below are cut from
+    ///    real list sizes.
+    /// 3. **Group** — split the centroids into contiguous runs whose lists fit
+    ///    the budget, and make one pass per run, buffering only that run's
+    ///    lists before writing them.
+    ///
+    /// Centroid runs are contiguous and processed in order, so lists reach the
+    /// [`PartWriter`] in exactly the order the in-memory build would produce —
+    /// the on-disk layout is byte-identical, not merely equivalent.
+    ///
+    /// The cost is `2 + groups` passes over the source and `groups` times the
+    /// assignment work. A single posting list larger than the budget still gets
+    /// buffered whole, since a list is never split across parts; `nlist` should
+    /// be large enough that no one cluster dominates.
+    pub fn build_into_streaming(
+        store: Arc<dyn RangeStore>,
+        prefix: &str,
+        source: &dyn VectorSource,
+        nlist: usize,
+        metric: DistanceMetric,
+        budget_bytes: usize,
+    ) -> Result<(Self, StreamingBuildStats)> {
+        Self::build_into_streaming_with_part_size(
+            store,
+            prefix,
+            source,
+            nlist,
+            metric,
+            budget_bytes,
+            PART_BYTES,
+        )
+    }
+
+    /// [`Self::build_into_streaming`] with an explicit part-size cap, for the
+    /// same reason [`Self::build_into_with_part_size`] has one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_into_streaming_with_part_size(
+        store: Arc<dyn RangeStore>,
+        prefix: &str,
+        source: &dyn VectorSource,
+        nlist: usize,
+        metric: DistanceMetric,
+        budget_bytes: usize,
+        part_bytes: usize,
+    ) -> Result<(Self, StreamingBuildStats)> {
+        let n = source.len();
+        if n == 0 {
+            return Err(VedaError::Index("cannot build SPANN over 0 vectors".into()));
+        }
+        let dim = source.dimension();
+        if dim == 0 {
+            return Err(VedaError::Index(
+                "cannot build SPANN over 0-dimensional vectors".into(),
+            ));
+        }
+        // A budget below one entry would divide to a zero-size sample and
+        // zero-size groups; one entry is the smallest coherent unit.
+        let budget = budget_bytes.max(entry_bytes(dim));
+
+        // --- pass 1: strided sample -> centroids -------------------------
+        let sample_cap = (budget / entry_bytes(dim)).clamp(1, n);
+        let stride = n.div_ceil(sample_cap);
+        let mut sample: Vec<Vec<f32>> = Vec::with_capacity(sample_cap);
+        source.for_each(&mut |id, v| {
+            if v.len() != dim {
+                return Err(VedaError::Index(format!(
+                    "vector {id} has dimension {}, expected {dim}",
+                    v.len()
+                )));
+            }
+            if (id as usize).is_multiple_of(stride) {
+                sample.push(v.to_vec());
+            }
+            Ok(())
+        })?;
+        let sample_refs: Vec<&[f32]> = sample.iter().map(|v| v.as_slice()).collect();
+        // Clamped against the sample, not `n`: k-means cannot produce more
+        // distinct centroids than it has points to seed from.
+        let k = nlist.clamp(1, sample_refs.len());
+        let centroids = kmeans(&sample_refs, k, 25, metric);
+        drop(sample_refs);
+        drop(sample);
+
+        // --- pass 2: exact list sizes, O(nlist) memory --------------------
+        let mut counts = vec![0usize; centroids.len()];
+        source.for_each(&mut |_, v| {
+            counts[nearest_centroid(v, &centroids, metric)] += 1;
+            Ok(())
+        })?;
+
+        // Cut the centroids into contiguous runs that fit the budget.
+        let mut groups: Vec<(usize, usize)> = Vec::new();
+        let mut lo = 0usize;
+        let mut acc = 0usize;
+        for (c, &count) in counts.iter().enumerate() {
+            let bytes = count * entry_bytes(dim);
+            if c > lo && acc + bytes > budget {
+                groups.push((lo, c));
+                lo = c;
+                acc = 0;
+            }
+            acc += bytes;
+        }
+        groups.push((lo, centroids.len()));
+
+        // --- one pass per group ------------------------------------------
+        let mut writer = PartWriter::new(store.as_ref(), prefix, part_bytes, centroids.len());
+        let mut peak_buffered_bytes = 0usize;
+        for &(lo, hi) in &groups {
+            let mut bufs: Vec<Vec<(u32, Vec<f32>)>> =
+                (lo..hi).map(|c| Vec::with_capacity(counts[c])).collect();
+            let mut buffered = 0usize;
+            source.for_each(&mut |id, v| {
+                let c = nearest_centroid(v, &centroids, metric);
+                if c >= lo && c < hi {
+                    bufs[c - lo].push((id, v.to_vec()));
+                    buffered += entry_bytes(dim);
+                }
+                Ok(())
+            })?;
+            peak_buffered_bytes = peak_buffered_bytes.max(buffered);
+            for b in &bufs {
+                let entries: Vec<(u32, &[f32])> =
+                    b.iter().map(|(id, v)| (*id, v.as_slice())).collect();
+                writer.push_list(&entries)?;
+            }
+        }
+        let (spans, part_count) = writer.finish()?;
+
+        let manifest = Manifest {
+            centroids,
+            spans,
+            dimension: dim as u32,
+            metric,
+            total_vectors: n as u64,
+            part_count,
+            version: MANIFEST_VERSION,
+        };
+        // Written last, for the same reason as in the in-memory build: it is
+        // the only object `open` reads to find the rest.
+        let encoded = bincode::serialize(&manifest)
+            .map_err(|e| VedaError::Index(format!("manifest serialize failed: {e}")))?;
+        store.put(&Self::manifest_key(prefix), &encoded)?;
+
+        let stats = StreamingBuildStats {
+            passes: 2 + groups.len() as u32,
+            groups: groups.len() as u32,
+            peak_buffered_bytes,
+        };
+        Ok((Self::attach(manifest, store, prefix), stats))
     }
 
     /// Attach to an index already in the store, fetching only the manifest.
@@ -558,12 +835,17 @@ impl SpannIndex {
 ///
 /// Serving is the property this index exists for: once built, a query
 /// touches `nlist` resident centroids and fetches only the posting lists
-/// it probes. **Building is not yet incremental** — `build` receives the
-/// whole batch in memory because that is the shape
-/// `SearchExecutor::build_indexes` hands every index, so peak build-time
-/// memory is unchanged from any other index type. Streaming the build
-/// straight from segment storage into the object store is the next step
-/// and is what would make the tier cheap at ingest as well as at query.
+/// it probes.
+///
+/// Building has two entry points. [`crate::traits::VectorIndex::build`]
+/// receives the whole batch in memory, because that is the shape
+/// `SearchExecutor::build_indexes` hands every index — peak build memory is
+/// then `O(n * dim)`, same as any other index type. [`Self::build_from_source`]
+/// takes a [`VectorSource`] instead and holds only a budgeted slice of the
+/// corpus at a time, producing a byte-identical index. What remains before the
+/// tier is cheap at ingest as well as at query is a `VectorSource` backed by
+/// segment storage and a `build_indexes` path that prefers it; until then the
+/// streaming build is reachable but not the default.
 pub struct SpannVectorIndex {
     inner: Option<SpannIndex>,
     prefix: String,
@@ -663,6 +945,41 @@ impl SpannVectorIndex {
         }
         hits.truncate(k);
         Ok(hits)
+    }
+}
+
+impl SpannVectorIndex {
+    /// Build from a [`VectorSource`], holding roughly `budget_bytes` of the
+    /// corpus at a time instead of all of it.
+    ///
+    /// Same index as [`crate::traits::VectorIndex::build`] would produce —
+    /// byte-identical when the budget admits the whole corpus — but reachable
+    /// without materialising the batch first. Returns the build's
+    /// [`StreamingBuildStats`] so a caller can record what the memory
+    /// actually was rather than assume it.
+    pub fn build_from_source(
+        &mut self,
+        source: &dyn VectorSource,
+        budget_bytes: usize,
+    ) -> Result<StreamingBuildStats> {
+        let store = require_store()?;
+        let nlist = self
+            .nlist
+            .unwrap_or_else(|| Self::default_nlist(source.len()));
+        let (mut idx, stats) = SpannIndex::build_into_streaming(
+            store,
+            &self.prefix,
+            source,
+            nlist,
+            self.metric,
+            budget_bytes,
+        )?;
+        if let Some(p) = self.nprobe {
+            idx = idx.with_nprobe(p);
+        }
+        self.dimension = idx.dimension();
+        self.inner = Some(idx);
+        Ok(stats)
     }
 }
 
@@ -1485,5 +1802,294 @@ mod tests {
         let err =
             SpannIndex::build_into(store, "r", &ragged, 2, DistanceMetric::Cosine).unwrap_err();
         assert!(format!("{err}").contains("dimension"), "got: {err}");
+    }
+
+    /// Every object an index wrote, so two builds can be compared whole.
+    fn dump(store: &MemStore, prefix: &str) -> Vec<(String, Vec<u8>)> {
+        let objects = store.objects.lock().unwrap();
+        let mut out: Vec<(String, Vec<u8>)> = objects
+            .iter()
+            .filter(|(k, _)| k.starts_with(&format!("{prefix}/")))
+            .map(|(k, v)| (k[prefix.len() + 1..].to_owned(), v.clone()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_generous_budget_reproduces_the_in_memory_index_byte_for_byte() {
+        // The streaming path's claim is that it builds the *same* index with
+        // less memory. Equivalent recall would not show that — a different but
+        // similarly good layout would pass. Identical bytes is the real check.
+        let dim = 64;
+        let data = clustered(600, dim, 8);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+        let store = Arc::new(MemStore::default());
+        let dynstore: Arc<dyn RangeStore> = store.clone();
+
+        SpannIndex::build_into(dynstore.clone(), "mem", &refs, 24, DistanceMetric::Cosine).unwrap();
+        let (_, stats) = SpannIndex::build_into_streaming(
+            dynstore,
+            "stream",
+            &SliceSource::new(&refs),
+            24,
+            DistanceMetric::Cosine,
+            usize::MAX / 4,
+        )
+        .unwrap();
+
+        assert_eq!(stats.groups, 1, "a budget this large should not split");
+        assert_eq!(dump(&store, "mem"), dump(&store, "stream"));
+    }
+
+    #[test]
+    fn a_tight_budget_splits_into_groups_and_stays_inside_it() {
+        let dim = 64;
+        let n = 600;
+        let data = clustered(n, dim, 8);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+        let store = Arc::new(MemStore::default());
+        let dynstore: Arc<dyn RangeStore> = store.clone();
+
+        let corpus_bytes = n * entry_bytes(dim);
+        let budget = corpus_bytes / 8;
+        let (idx, stats) = SpannIndex::build_into_streaming(
+            dynstore,
+            "idx",
+            &SliceSource::new(&refs),
+            24,
+            DistanceMetric::Cosine,
+            budget,
+        )
+        .unwrap();
+
+        assert!(
+            stats.groups > 1,
+            "a budget of 1/8 the corpus must split; got {} group(s)",
+            stats.groups
+        );
+        assert_eq!(
+            stats.passes,
+            2 + stats.groups,
+            "one sample, one count, one per group"
+        );
+
+        // A single posting list is never split across parts, so a cluster
+        // larger than the budget is buffered whole. That is the one documented
+        // way to exceed it — so the bound is checked against it rather than
+        // waved away.
+        let biggest_list = idx
+            .manifest
+            .spans
+            .iter()
+            .map(|s| s.len as usize)
+            .max()
+            .unwrap();
+        let ceiling = budget.max(biggest_list);
+        assert!(
+            stats.peak_buffered_bytes <= ceiling,
+            "peak {} exceeded ceiling {} (budget {budget}, largest list {biggest_list})",
+            stats.peak_buffered_bytes,
+            ceiling
+        );
+        assert_eq!(idx.len(), n, "every vector must still be indexed");
+    }
+
+    #[test]
+    fn the_streaming_build_never_buffers_the_whole_corpus() {
+        // The reason the path exists. A build that quietly materialised
+        // everything would still return a correct index and correct recall,
+        // so this is the only assertion that can catch it.
+        let dim = 128;
+        let n = 1_200;
+        let data = clustered(n, dim, 12);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+        let store: Arc<dyn RangeStore> = Arc::new(MemStore::default());
+
+        let corpus_bytes = n * entry_bytes(dim);
+        let (_, stats) = SpannIndex::build_into_streaming(
+            store,
+            "idx",
+            &SliceSource::new(&refs),
+            40,
+            DistanceMetric::Cosine,
+            corpus_bytes / 10,
+        )
+        .unwrap();
+
+        assert!(
+            stats.peak_buffered_bytes * 4 < corpus_bytes,
+            "peak {} is not meaningfully below the corpus {corpus_bytes}",
+            stats.peak_buffered_bytes
+        );
+    }
+
+    #[test]
+    fn a_streaming_built_index_is_searchable_at_768d() {
+        // 768d for the same reason the in-memory recall test uses it: a
+        // 128d-only guard is how the DiskANN fix shipped broken.
+        let dim = 768;
+        let data = clustered(2_000, dim, 10);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+        let store: Arc<dyn RangeStore> = Arc::new(MemStore::default());
+
+        let (idx, stats) = SpannIndex::build_into_streaming(
+            store,
+            "idx",
+            &SliceSource::new(&refs),
+            40,
+            DistanceMetric::Cosine,
+            2_000 * entry_bytes(dim) / 6,
+        )
+        .unwrap();
+        let idx = idx.with_nprobe(8);
+        assert!(stats.groups > 1, "expected a split at this budget");
+
+        let mut hit = 0usize;
+        let mut total = 0usize;
+        for q in data.iter().take(50) {
+            let truth = brute_force(&data, q, 10, DistanceMetric::Cosine);
+            for r in &idx.search(q, 10).unwrap() {
+                if truth.contains(&r.id) {
+                    hit += 1;
+                }
+            }
+            total += truth.len();
+        }
+        let recall = hit as f64 / total as f64;
+        // Lower than the in-memory 0.90 bar on purpose: centroids come from a
+        // sixth of the corpus here, and pretending sampling is free would make
+        // this a test of nothing.
+        assert!(recall >= 0.80, "recall@10 = {recall:.3}, expected >= 0.80");
+    }
+
+    #[test]
+    fn streaming_over_nothing_or_ragged_input_is_refused() {
+        let store: Arc<dyn RangeStore> = Arc::new(MemStore::default());
+        let empty: Vec<&[f32]> = Vec::new();
+        assert!(
+            SpannIndex::build_into_streaming(
+                store.clone(),
+                "idx",
+                &SliceSource::new(&empty),
+                4,
+                DistanceMetric::Cosine,
+                1 << 20,
+            )
+            .is_err()
+        );
+
+        let a = [1.0f32, 2.0, 3.0];
+        let b = [1.0f32, 2.0];
+        let ragged: Vec<&[f32]> = vec![&a, &b];
+        let err = SpannIndex::build_into_streaming(
+            store,
+            "idx",
+            &SliceSource::new(&ragged),
+            2,
+            DistanceMetric::Cosine,
+            1 << 20,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("dimension"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn the_adapter_streaming_build_matches_its_in_memory_build() {
+        use crate::traits::VectorIndex;
+
+        let dim = 64;
+        let data = clustered(500, dim, 8);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+        let store = Arc::new(MemStore::default());
+        register_store(store.clone());
+
+        let mut batch =
+            SpannVectorIndex::new("adapter-mem", DistanceMetric::Cosine, dim as u32).with_nlist(20);
+        batch.build(&refs).unwrap();
+
+        let mut streamed =
+            SpannVectorIndex::new("adapter-stream", DistanceMetric::Cosine, dim as u32)
+                .with_nlist(20);
+        let stats = streamed
+            .build_from_source(&SliceSource::new(&refs), 500 * entry_bytes(dim) / 5)
+            .unwrap();
+
+        assert!(
+            stats.groups > 1,
+            "expected a split at a fifth of the corpus"
+        );
+        assert_eq!(batch.len(), streamed.len());
+
+        // Same answers from both, which is what a caller switching entry
+        // points actually cares about.
+        for q in data.iter().take(20) {
+            let a = batch.search(q, 10).unwrap();
+            let b = streamed.search(q, 10).unwrap();
+            assert_eq!(
+                a.iter().map(|r| r.id).collect::<Vec<_>>(),
+                b.iter().map(|r| r.id).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// What the streaming build actually costs and saves, at 768d.
+    ///
+    /// Ignored because it is a measurement, not a guard: it prints the
+    /// tradeoff rather than asserting a threshold that would drift.
+    /// `cargo test -p veda-index --lib report_the_streaming_build -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn report_the_streaming_build_memory_tradeoff() {
+        let dim = 768;
+        let n = 20_000;
+        let data = clustered(n, dim, 40);
+        let refs: Vec<&[f32]> = data.iter().map(|v| v.as_slice()).collect();
+        let corpus = n * entry_bytes(dim);
+
+        println!("\ncorpus: {n} x {dim}d = {:.1} MB\n", corpus as f64 / 1e6);
+        println!(
+            "{:>10}  {:>7}  {:>7}  {:>12}  {:>9}  {:>11}",
+            "budget", "groups", "passes", "peak buffered", "vs corpus", "big list"
+        );
+        for divisor in [1usize, 4, 16, 64] {
+            let budget = corpus / divisor;
+            let store: Arc<dyn RangeStore> = Arc::new(MemStore::default());
+            let (idx, s) = SpannIndex::build_into_streaming(
+                store,
+                "idx",
+                &SliceSource::new(&refs),
+                200,
+                DistanceMetric::Cosine,
+                budget,
+            )
+            .unwrap();
+            let biggest = idx
+                .manifest
+                .spans
+                .iter()
+                .map(|sp| sp.len as usize)
+                .max()
+                .unwrap_or(0);
+            println!(
+                "{:>9.1}M  {:>7}  {:>7}  {:>11.1}M  {:>8.1}%  {:>10.1}M",
+                budget as f64 / 1e6,
+                s.groups,
+                s.passes,
+                s.peak_buffered_bytes as f64 / 1e6,
+                100.0 * s.peak_buffered_bytes as f64 / corpus as f64,
+                biggest as f64 / 1e6,
+            );
+        }
+        println!(
+            "\nin-memory build holds the whole {:.1} MB corpus before it starts.",
+            corpus as f64 / 1e6
+        );
+        println!(
+            "the floor is the largest posting list, not the budget: a list is never\n\
+             split across parts, so it is always buffered whole. nlist governs that\n\
+             floor -- a budget below it just costs extra passes for no saving."
+        );
     }
 }
