@@ -391,6 +391,73 @@ async fn create_collection_inner(
     }
 }
 
+/// Bind the embedding model to a vector field that declares `auto_embed`.
+///
+/// **Only `auto_embed` fields.** Veda produces those vectors, so the binding
+/// is unambiguous. A caller who supplies their own vectors keeps full control:
+/// binding those would start rejecting inserts after any embedder change,
+/// for a field Veda never embedded.
+///
+/// This is what makes the existing protection engage. `embed-insert` already
+/// refuses to mix models on a bound field, and `select_query_model` already
+/// refuses a bound model that is missing from the registry — but neither can
+/// fire while `model_id` is `None`, which is the default. On 2026-09-08 a
+/// corpus embedded with `jina-v5-omni-small` was queried with `BAAI/bge-m3`:
+/// same 1024 dimensions, orthogonal spaces, ranked plausible nonsense, and
+/// nothing in the system objected.
+///
+/// Silent when no model is registered for the modality. Collection creation
+/// must not depend on an embedder being configured — the alternative is
+/// failing a create because a sidecar is briefly down, and an unbound field
+/// is exactly the status quo.
+async fn bind_auto_embed_model(
+    state: &AppState,
+    field_def: veda_core::schema::FieldDefinition,
+) -> veda_core::schema::FieldDefinition {
+    use veda_core::embedding::Modality;
+    use veda_core::types::{AutoEmbedModality, FieldType};
+
+    let FieldType::Vector {
+        model_id: None,
+        auto_embed: Some(cfg),
+        ..
+    } = field_def.field_type()
+    else {
+        // Already bound, no auto_embed, or not a vector field.
+        return field_def;
+    };
+
+    let modality = match cfg.modality {
+        AutoEmbedModality::Text => Modality::Text,
+        AutoEmbedModality::Image => Modality::Image,
+        AutoEmbedModality::Video => Modality::Video,
+        AutoEmbedModality::Audio => Modality::Audio,
+    };
+
+    let registry = state.inner.embedding_registry.read().await;
+    let Some(model) = registry
+        .find_by_modality(modality)
+        .first()
+        .map(|c| c.name.clone())
+    else {
+        tracing::warn!(
+            field = field_def.name(),
+            modality = %modality,
+            "vector field declares auto_embed but no model is registered for its modality; \
+             leaving it unbound, so a later embedder change will not be detected"
+        );
+        return field_def;
+    };
+    drop(registry);
+
+    tracing::info!(
+        field = field_def.name(),
+        model = %model,
+        "bound auto_embed vector field to its embedding model"
+    );
+    field_def.with_model_id(model)
+}
+
 async fn create_collection_impl(
     state: AppState,
     tenant: tenant::TenantId,
@@ -551,6 +618,7 @@ async fn create_collection_impl(
     for f in &req.fields {
         let field_def = parse_field_def(f)
             .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
+        let field_def = bind_auto_embed_model(&state, field_def).await;
         builder = builder.add_field(field_def);
     }
 

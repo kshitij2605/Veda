@@ -64,7 +64,7 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                     "collection": { "type": "string", "description": "Collection to search" },
                     "query": { "type": "string", "description": "Natural-language query text. Provide this OR query_image_b64, not both." },
                     "query_image_b64": { "type": "string", "description": "Base64-encoded image bytes used as the retrieval query (cross-modal). Provide this OR query, not both." },
-                    "mode": { "type": "string", "enum": ["auto", "dense", "hybrid", "sparse", "colpali"], "default": "auto", "description": "Retrieval mode. 'auto' (default) maps to dense. 'hybrid' fuses a dense leg with a BM25 lexical leg and needs a text query plus a bm25-enabled field; prefer it when the query carries distinctive literal terms (names, codes, error strings) that embeddings blur. 'sparse' needs a sparse_vector field." },
+                    "mode": { "type": "string", "enum": ["auto", "dense", "hybrid", "sparse", "colpali"], "default": "auto", "description": "Retrieval mode. 'auto' (default) runs dense, and upgrades to hybrid when the query looks lexical and the collection has a bm25 field — the response then reports \"mode\":\"hybrid\",\"mode_selected_by\":\"auto\". 'hybrid' fuses a dense leg with a BM25 lexical leg and needs a text query plus a bm25-enabled field; prefer it when the query carries distinctive literal terms (names, codes, error strings) that embeddings blur. 'sparse' needs a sparse_vector field." },
                     "bm25_field": { "type": "string", "description": "String field for the BM25 leg of mode 'hybrid' (optional; defaults to the collection's first bm25-enabled field)" },
                     "dense_weight": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5, "description": "Mode 'hybrid' only: the dense leg's share of the fused score. The BM25 leg takes the remainder." },
                     "fusion": { "type": "string", "enum": ["rrf", "weighted_sum"], "default": "rrf", "description": "Mode 'hybrid' only: 'rrf' fuses by rank and needs no score calibration; 'weighted_sum' min-max normalises each leg first, giving linear control via dense_weight." },
@@ -674,6 +674,32 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
         return ToolOutcome::invalid_args(crate::agent::field_guard::restricted_field_error(&bad));
     }
 
+    // ── `auto` routing ──────────────────────────────────────────────────
+    // `auto` used to be a synonym for dense. It now upgrades to hybrid when
+    // the query looks lexical AND the collection actually has a BM25 field.
+    //
+    // Strictly additive by design: a collection with no bm25 field behaves
+    // exactly as before, and an explicit `mode` is never overridden. That
+    // matters because `route_query` returns Hybrid for most agent traffic —
+    // question form or two capitalised words is enough — so an ungated
+    // upgrade would silently make hybrid the default for every search.
+    //
+    // The resolved mode is reported back in the response. A router that
+    // quietly changes what ran is the kind of thing that makes a later
+    // regression impossible to attribute.
+    let mut mode = mode;
+    let mut auto_resolved: Option<&'static str> = None;
+    if mode == SearchMode::Auto
+        && let Some(text) = query_text
+    {
+        let rec = route_query(text);
+        let has_bm25 = schema.fields().iter().any(|f| f.bm25());
+        if matches!(rec.strategy, veda_query::adaptive::RouteStrategy::Hybrid) && has_bm25 {
+            mode = SearchMode::Hybrid;
+            auto_resolved = Some("hybrid");
+        }
+    }
+
     // A hybrid query with no text has no lexical leg. Refused HERE, before
     // the embedding call below, for the same reason the sparse leg branches
     // early: there is no point paying for an image embedding only to discover
@@ -965,7 +991,7 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
             })
             .collect::<Vec<_>>();
         let total = results.len();
-        return hydrate_hits(
+        let mut out = hydrate_hits(
             ctx,
             &schema,
             collection,
@@ -976,6 +1002,15 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
             &keep_fields,
         )
         .await;
+        // Say what actually ran when `auto` chose it, so a later change in
+        // ranking can be attributed rather than guessed at.
+        if let Some(m) = auto_resolved
+            && let Some(obj) = out.content.as_object_mut()
+        {
+            obj.insert("mode".into(), serde_json::json!(m));
+            obj.insert("mode_selected_by".into(), serde_json::json!("auto"));
+        }
+        return out;
     }
 
     // Map mode → QueryBody. Only the dense leg is executable in the MVP.
