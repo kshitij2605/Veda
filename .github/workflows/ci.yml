@@ -31,6 +31,8 @@ jobs:
           sudo docker image prune --all --force || true
           df -h /
       - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy, rustfmt
       - name: Install protoc (prost-build needs it for veda-log)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
@@ -54,6 +56,8 @@ jobs:
           sudo docker image prune --all --force || true
           df -h /
       - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy, rustfmt
       - name: Install protoc (prost-build needs it for veda-log)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
@@ -75,19 +79,20 @@ jobs:
   # and run on hardware; see the module docs in gpu_cuvs.rs.
   #
   # WHY THIS IS NOT A BLOCKING JOB, and what would make it one:
-  # cuvs-sys's CMake needs a CUDA toolkit. `nvcc` is not available as a
-  # usable pip wheel, and the `nvidia-*-cu12` wheels install a split
-  # layout (nvidia/cuda_runtime/, nvidia/cublas/, ...) that CMake's
-  # FindCUDAToolkit does not recognise. Installing the real toolkit is
-  # ~3 GB on a runner this workflow already has to scrub disk space to
-  # keep alive. So this follows the same schedule-and-dispatch pattern
-  # above: schedule + manual dispatch rather than every push.
+  # It compiles and links but cannot *run* anything — ubuntu-latest has
+  # no GPU. So it stays on schedule + manual dispatch rather than every
+  # push, the authoritative verification stays on the GPU host, and the
+  # weekly run is what stops gpu_cuvs silently rotting again the way it
+  # did before. It becomes blocking the moment a CUDA runner exists.
   #
-  # This is weaker than it should be. It would become blocking the moment
-  # either (a) a CUDA-equipped runner is available, or (b) NVIDIA ships a
-  # pip layout FindCUDAToolkit accepts. Until then the authoritative
-  # verification is on the GPU host, and the weekly run is what stops
-  # gpu_cuvs silently rotting again the way it did before.
+  # THE CUDA COMPILER comes from NVIDIA's apt repo below, not pip: `nvcc`
+  # has no usable wheel, and the `nvidia-*-cu12` wheels install a split
+  # layout (nvidia/cuda_runtime/, nvidia/cublas/, ...) that CMake's
+  # FindCUDAToolkit does not recognise. Only the compiler and the cudart
+  # headers are installed, NOT the ~3 GB `cuda-toolkit` metapackage:
+  # cuvs arrives prebuilt as a wheel, so nvcc is here to satisfy
+  # cuvs-sys's `project(... CUDA)` language declaration and compile its
+  # own thin kernels — not to build RAPIDS from source.
   gpu-cuvs-feature:
     name: cargo build (veda-index/gpu_cuvs)
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
@@ -100,8 +105,25 @@ jobs:
           sudo docker image prune --all --force || true
           df -h /
       - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy, rustfmt
       - name: Install protoc (prost-build needs it for veda-log)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install a CUDA compiler (nvcc + cudart headers only)
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          REPO="ubuntu$(echo "$VERSION_ID" | tr -d .)"
+          curl -fsSLO "https://developer.download.nvidia.com/compute/cuda/repos/$REPO/x86_64/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cuda-nvcc-12-6 cuda-cudart-dev-12-6
+          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
+          echo "CUDACXX=/usr/local/cuda-12.6/bin/nvcc" >> "$GITHUB_ENV"
+          echo "CUDA_PATH=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
+          /usr/local/cuda-12.6/bin/nvcc --version
+          ls -l /usr/local/cuda-12.6/lib64/libcudart.so
+          df -h /
       - name: Cache the cuVS toolchain wheels
         uses: actions/cache@v4
         with:
@@ -130,9 +152,11 @@ jobs:
           export PATH="$HOME/cuvs-venv/bin:$PATH"
           export LIBCLANG_PATH="$V/clang/native"
           # The pip libclang wheel ships no builtin headers, so point clang
-          # at gcc's; without this it cannot find limits.h.
+          # at gcc's; without this it cannot find limits.h. cuvs's c_api.h
+          # then includes <cuda_runtime.h>, which lives in the apt CUDA
+          # tree rather than the wheel — bindgen needs both roots.
           GCC_INC="$(echo /usr/lib/gcc/x86_64-linux-gnu/*/include | tr ' ' '\n' | tail -1)"
-          export BINDGEN_EXTRA_CLANG_ARGS="-I$GCC_INC"
+          export BINDGEN_EXTRA_CLANG_ARGS="-I$GCC_INC -I$CUDA_PATH/include"
           # cmake-rs blanks CMAKE_PREFIX_PATH, so each package is located
           # by its own _DIR variable instead.
           export cuvs_DIR="$V/libcuvs/lib64/cmake/cuvs"
@@ -147,8 +171,8 @@ jobs:
           # Keep the workflow-level -Dwarnings: setting RUSTFLAGS here
           # replaces it wholesale, and clippy does not build this feature,
           # so dropping it would leave gpu_cuvs with no lint coverage.
-          export RUSTFLAGS="-Dwarnings -L native=$V/libcuvs/lib64"
-          export LD_LIBRARY_PATH="$V/libcuvs/lib64:$V/libraft/lib64:$V/librmm/lib64:$V/rapids_logger/lib64:${LD_LIBRARY_PATH:-}"
+          export RUSTFLAGS="-Dwarnings -L native=$V/libcuvs/lib64 -L native=$CUDA_PATH/lib64"
+          export LD_LIBRARY_PATH="$V/libcuvs/lib64:$V/libraft/lib64:$V/librmm/lib64:$V/rapids_logger/lib64:$CUDA_PATH/lib64:${LD_LIBRARY_PATH:-}"
           cargo build -p veda-index --features gpu_cuvs --tests
 
   # All unit + integration tests.
@@ -163,6 +187,8 @@ jobs:
           sudo docker image prune --all --force || true
           df -h /
       - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy, rustfmt
       - name: Install protoc (prost-build needs it for veda-log)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
@@ -181,7 +207,7 @@ jobs:
           df -h /
       - uses: dtolnay/rust-toolchain@1.96.0
         with:
-          components: clippy
+          components: clippy, rustfmt
       - name: Install protoc (prost-build needs it for veda-log)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
@@ -195,7 +221,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
         with:
-          components: rustfmt
+          components: clippy, rustfmt
       - run: cargo fmt --all --check
 
   # Python SDK install + tests across the declared Python range. There was
