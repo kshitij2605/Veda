@@ -91,6 +91,26 @@ pub async fn embed_insert(
 
     let registry = state.inner.embedding_registry.read().await;
 
+    // Sparse (SPLADE) auto-embed targets, resolved exactly as
+    // `ingest_common` resolves them for the `process-document` path. This
+    // handler never did, so a collection declaring `auto_embed` on a
+    // `sparse_vector` field was inserted with that field silently empty --
+    // verified live: a SPLADE stub logged zero calls while this endpoint
+    // answered `{"inserted":1}`.
+    let mut sparse_text_targets: Vec<(String, String)> = Vec::new(); // (target, source)
+    for field_def in schema.fields() {
+        if let FieldType::SparseVector {
+            auto_embed: Some(cfg),
+            ..
+        } = field_def.field_type()
+        {
+            use veda_core::types::AutoEmbedModality;
+            if matches!(cfg.modality, AutoEmbedModality::Text) {
+                sparse_text_targets.push((field_def.name().to_owned(), cfg.source.clone()));
+            }
+        }
+    }
+
     // UX-1 fix (2026-05-21): infer auto_embed mappings from the
     // schema when the caller didn't supply one. Iterate vector
     // fields that have `FieldType::Vector { auto_embed: Some(cfg) }`
@@ -122,15 +142,20 @@ pub async fn embed_insert(
                 "embed_insert: inferred auto_embed mappings from collection schema"
             );
             req.auto_embed = inferred;
-        } else {
+        } else if sparse_text_targets.is_empty() {
             // No request map AND nothing to infer — return a clear
             // error rather than the silent 422 "missing field" the
             // pre-2026-05-21 client got.
+            //
+            // A collection whose ONLY auto-embed field is sparse is not this
+            // case: it has work to do, just no *dense* work. It used to be
+            // rejected here outright, so such a collection could not use this
+            // endpoint at all. It now falls through with an empty dense map.
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: format!(
-                        "no `auto_embed` mappings supplied and the schema for collection '{name}' has no vector field with auto_embed configured. Pass {{\"auto_embed\":{{\"<vector_field>\":{{\"source_field\":\"<source>\"}}}}}} or set the auto_embed property on the field at create-collection time."
+                        "no `auto_embed` mappings supplied and the schema for collection '{name}' has no vector or sparse_vector field with auto_embed configured. Pass {{\"auto_embed\":{{\"<vector_field>\":{{\"source_field\":\"<source>\"}}}}}} or set the auto_embed property on the field at create-collection time."
                     ),
                 }),
             ));
@@ -378,6 +403,41 @@ pub async fn embed_insert(
                 continue;
             }
         };
+
+        // SPLADE auto-embed. Set on the parsed `Record` rather than injected
+        // into `augmented` as JSON, because `json_to_field_value` has no
+        // sparse case — the same reason `ingest_common` sets it directly.
+        if !sparse_text_targets.is_empty() {
+            let splade_guard = state.inner.splade_client.read().await;
+            if let Some(splade) = splade_guard.as_ref() {
+                for (target_field, source_field) in &sparse_text_targets {
+                    let Some(input) = raw.get(source_field).and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    match splade.encode(input).await {
+                        Ok(enc) => {
+                            if let Ok(sv) =
+                                veda_core::sparse::SparseVec::new(enc.indices, enc.values)
+                            {
+                                record.set(target_field, FieldValue::SparseVector(sv));
+                            }
+                        }
+                        Err(e) => {
+                            // Same contract as the document path: a failed
+                            // encode skips the field rather than failing the
+                            // record, so one flaky encoder call does not lose
+                            // the row's dense vector and content too.
+                            tracing::warn!(field = %target_field, error = %e, "splade encoding failed, skipping sparse field");
+                        }
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    target_count = sparse_text_targets.len(),
+                    "sparse_vector field requested SPLADE auto_embed but VEDA_SPLADE_ENDPOINT is unset"
+                );
+            }
+        }
 
         // Screen using the text-modality embedding just computed above — no
         // extra embed call. Fails open: a skipped verdict stamps only

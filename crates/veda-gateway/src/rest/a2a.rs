@@ -63,12 +63,16 @@ pub async fn agent_card(
             )
         })?;
 
-    // Skills are the agent's tool specs (empty whitelist = all builtins),
-    // mapped one-to-one onto A2A skills.
+    // Skills are the agent's tool specs (empty whitelist = all builtins
+    // plus this tenant's custom tools), mapped one-to-one onto A2A skills.
+    // A stored preset is exactly the sort of capability an A2A peer should
+    // discover, so it belongs on the card alongside the builtins.
+    let card_ctx = crate::agent::catalog::ToolContext::new(&state, &tenant);
     let skills: Vec<serde_json::Value> = state
         .inner
         .tool_catalog
-        .specs_for(&agent.tool_ids)
+        .specs_for_agent(&card_ctx, &agent.tool_ids)
+        .await
         .iter()
         .map(|s| {
             serde_json::json!({
