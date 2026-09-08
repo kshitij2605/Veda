@@ -16,3 +16,4 @@ __pycache__/
 # Runtime data dirs + test artifacts
 /veda-data*/
 linearisability-history.jsonl
+tools/omni-embed/.venv/
