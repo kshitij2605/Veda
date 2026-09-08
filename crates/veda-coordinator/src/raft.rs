@@ -1,34 +1,39 @@
-//! openraft scaffolding for distributed cluster consensus.
+//! openraft type configuration for the `_meta` consensus group.
 //!
 //! ## Status
 //!
-//! The types and trait skeleton here are the integration surface — they
-//! exist so the rest of the codebase can refer to a real Raft type, and so
-//! that the migration from the current channel-based coordinator (see
-//! `network.rs`) to a fully distributed Raft is a localised change.
+//! This module is the type surface only: the `VedaTypeConfig` that wires
+//! [`ClusterCommand`] / [`ClusterResponse`] into openraft, plus the snapshot
+//! payload shape. The implementations live next door —
+//! [`crate::raft_storage`] (log + state machine, durable via
+//! [`crate::raft_wal`]), [`crate::raft_tonic`] (gRPC transport),
+//! [`crate::raft_coordinator`] (the `execute` / `query_state` handle), and
+//! [`crate::peer_health`] (cross-node liveness).
 //!
-//! What works today:
-//!   * Type aliases for the openraft type-config.
-//!   * `VedaTypeConfig` — wires our existing `ClusterCommand`/`ClusterResponse`
-//!     types into openraft's request/response surface.
-//!   * A `MemRaftLogStorage` skeleton that delegates to our in-memory
-//!     [`crate::store::LogStore`].
+//! **What this module's header used to say was wrong for three months.** It
+//! described `RaftLogStorage` methods, the state-machine adapter, the Tonic
+//! transport and cluster bootstrap as unimplemented stubs. All four shipped
+//! on 2026-05-19/20 (`6ef5d46`, `7374a3e`, `0641a1f`, `9095454`); no such
+//! stub remains anywhere in this crate. That stale text was
+//! copied into the project's task list and cost a later session real time,
+//! which is why this note is here rather than a silent deletion.
 //!
-//! What does NOT yet work, and is intentionally left as `unimplemented!()`
-//! with a `// TODO(raft):` marker:
-//!   * `RaftLogStorage` trait methods other than `get_log_entries` and
-//!     `append`. Requires implementing log truncation, snapshotting, and
-//!     persistent vote storage.
-//!   * `RaftStateMachine` adapter around `ClusterStateMachine` — needs
-//!     snapshot install / build plus the new applied-state hooks.
-//!   * `RaftNetwork` — the existing `ChannelNetwork` is a placeholder for
-//!     in-process tests; a real implementation needs a Tonic/gRPC transport
-//!     keyed by `NodeId` -> `address`.
-//!   * Cluster bootstrap / membership change orchestration.
+//! ## Scope: `_meta` only
 //!
-//! See `documentation/raft-migration.md` for the staged plan from current
-//! single-leader state to a 3-node Raft quorum.
-
+//! Per ADR-013 this group carries **metadata** — schema, shard plan, node
+//! membership, TSO leases, transaction commit records, aliases, region
+//! topology. It does **not** carry record writes. Those go through per-shard
+//! `veda-log` (BookKeeper-style `(E, Qw, Qa)` quorum with epoch fencing).
+//!
+//! Routing every record write through one Raft group was the original design
+//! and was abandoned deliberately: it caps write throughput at a single
+//! leader's speed and grows the metadata snapshot linearly with the dataset.
+//! The `ClusterCommand::InsertRecord` / `TxnWrite` / `BeginTxn` / `CommitTxn`
+//! / `AbortTxn` variants that design needed were hard-removed in `c8baf29`.
+//!
+//! See `documentation/raft-migration.md` for the historical staging (its
+//! Phase 4-6 sections describe the abandoned record-write path) and
+//! `documentation/rearchitecture-overview.md` for where it landed.
 use openraft::{BasicNode, declare_raft_types};
 use serde::{Deserialize, Serialize};
 
