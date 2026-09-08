@@ -1615,7 +1615,9 @@ pub struct HybridLegs {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_hybrid_dense_bm25(
+/// Shared with the agent `search` tool's hybrid leg, so both surfaces fuse
+/// identically. A second implementation would drift.
+pub(crate) async fn execute_hybrid_dense_bm25(
     state: &AppState,
     collection: &str,
     executor: &DistributedQueryExecutor,
