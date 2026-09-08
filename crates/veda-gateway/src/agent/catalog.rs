@@ -248,6 +248,29 @@ impl ToolCatalog {
             .collect()
     }
 
+    /// [`Self::specs_for`] plus this tenant's stored custom tools.
+    ///
+    /// Async because custom tools live in `saved_objects`, which is why the
+    /// sync `specs_for` cannot simply be extended — it is called from
+    /// non-async contexts and the unit tests. Advertising matters as much as
+    /// dispatch: without a spec a custom tool would run correctly and never
+    /// be called, because the model would not know it exists.
+    pub async fn specs_for_agent(
+        &self,
+        ctx: &ToolContext<'_>,
+        whitelist: &[String],
+    ) -> Vec<ToolSpec> {
+        let mut specs = self.specs_for(whitelist);
+        for tool in super::tools::custom::list_for_tenant(ctx).await {
+            // Same whitelist rule the builtins use: empty means "all of
+            // them", non-empty selects by id.
+            if whitelist.is_empty() || whitelist.iter().any(|w| w == &tool.id) {
+                specs.push(super::tools::custom::spec_for(&tool));
+            }
+        }
+        specs
+    }
+
     /// Route a tool call to its built-in implementation by id. Unknown
     /// ids return an error [`ToolOutcome`] rather than panicking.
     async fn dispatch_inner(
@@ -255,6 +278,7 @@ impl ToolCatalog {
         ctx: &ToolContext<'_>,
         tool_id: &str,
         args: serde_json::Value,
+        custom: Option<&crate::agent::model::AgentTool>,
     ) -> ToolOutcome {
         match tool_id {
             "list_collections" => builtins::list_collections(ctx, args).await,
@@ -280,7 +304,13 @@ impl ToolCatalog {
             // (an alias for `internal`) made it a 500. The message is
             // unchanged: MCP matches on "unknown tool" to return the
             // JSON-RPC "method not found" code.
-            other => ToolOutcome::not_found(format!("unknown tool: {other}")),
+            // Not a builtin — it may be a stored custom tool. Already
+            // resolved by `dispatch` (which needs the same lookup for its
+            // guards), so this is a branch, not a second read.
+            other => match custom {
+                Some(tool) => super::tools::custom::dispatch(ctx, tool, args).await,
+                None => ToolOutcome::not_found(format!("unknown tool: {other}")),
+            },
         }
     }
 
@@ -302,11 +332,28 @@ impl ToolCatalog {
         tool_id: &str,
         args: serde_json::Value,
     ) -> ToolOutcome {
+        // Resolve a stored custom tool once, here, because both the
+        // dispatch below and the guards after it need it. A preset's args
+        // carry only `query`, so the collection those guards key off has to
+        // come from the preset's config — otherwise they resolve against
+        // `None` and silently enforce less than the builtin being wrapped.
+        let custom = if self.builtins.iter().any(|s| s.id == tool_id) {
+            None
+        } else {
+            super::tools::custom::load(ctx, tool_id).await
+        };
         let collection = args
             .get("collection")
             .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        let outcome = self.dispatch_inner(ctx, tool_id, args).await;
+            .map(str::to_owned)
+            .or_else(|| {
+                custom
+                    .as_ref()
+                    .and_then(super::tools::custom::pinned_collection)
+            });
+        let outcome = self
+            .dispatch_inner(ctx, tool_id, args, custom.as_ref())
+            .await;
         if outcome.is_error {
             return outcome;
         }
@@ -462,6 +509,7 @@ fn apply_retrieval_guard(mut outcome: ToolOutcome, vector_field: Option<&str>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::model::AgentTool;
     use veda_core::record::{FieldValue, Record};
     use veda_core::schema::{CollectionSchema, FieldDefinition};
     use veda_core::types::{DistanceMetric, FieldType};
@@ -1481,4 +1529,156 @@ mod tests {
         let out = apply_retrieval_guard(outcome.clone(), None);
         assert_eq!(out, outcome);
     }
+
+    // ── custom tools (#74) ──────────────────────────────────────────────────
+
+    /// Store a custom tool for the default tenant, scoped the way the CRUD
+    /// handlers scope it.
+    async fn save_custom(state: &AppState, tenant: &crate::tenant::TenantId, tool: AgentTool) {
+        let mut scoped = tool.clone();
+        scoped.id = crate::tenant::scope(tenant, &tool.id);
+        crate::agent::store::save_tool(&state.inner.saved_objects, &scoped).await;
+    }
+
+    fn preset(id: &str, config: serde_json::Value) -> AgentTool {
+        AgentTool {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            description: String::new(),
+            kind: "search_preset".to_owned(),
+            config,
+        }
+    }
+
+    /// The regression that matters most for MCP: an id that names nothing is
+    /// still `not_found` with the exact wording MCP matches on. Adding the
+    /// custom-tool fallback must not turn this into something else.
+    #[tokio::test]
+    async fn unknown_id_is_still_not_found_after_the_custom_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat.dispatch(&ctx, "no-such-tool", serde_json::json!({})).await;
+        assert!(out.is_error);
+        assert_eq!(out.error_kind, Some(ToolErrorKind::NotFound));
+        assert!(
+            out.content["error"].as_str().unwrap().contains("unknown tool"),
+            "MCP matches on this wording: {:?}",
+            out.content
+        );
+    }
+
+    /// Without a spec the model never learns the tool exists, so dispatch
+    /// alone would be dead code. Empty whitelist = builtins + custom.
+    #[tokio::test]
+    async fn a_stored_preset_is_advertised_to_the_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        save_custom(&state, &tenant, preset("agg_preset", serde_json::json!({"collection": "agg"}))).await;
+
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let specs = cat.specs_for_agent(&ctx, &[]).await;
+
+        let found = specs.iter().find(|s| s.id == "agg_preset").expect("preset not advertised");
+        assert_eq!(found.kind, "custom");
+        assert!(found.read_only, "a preset can only run a read-only search");
+        // The caller supplies the query and nothing else.
+        let props = &found.input_schema["properties"];
+        assert!(props.get("query").is_some());
+        assert!(
+            props.get("collection").is_none(),
+            "the collection is pinned by the preset, not a caller argument"
+        );
+
+        // And a whitelist that does not name it excludes it.
+        let narrowed = cat.specs_for_agent(&ctx, &["search".to_owned()]).await;
+        assert!(narrowed.iter().all(|s| s.id != "agg_preset"));
+    }
+
+    /// The preset's pinned collection must actually reach the `search`
+    /// builtin. Pinning one that does not exist makes that observable
+    /// without needing an embedding backend: the error names the collection
+    /// that came out of `config`.
+    #[tokio::test]
+    async fn a_preset_passes_its_pinned_collection_through_to_search() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        save_custom(
+            &state,
+            &tenant,
+            preset("pinned", serde_json::json!({"collection": "no_such_collection"})),
+        )
+        .await;
+
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat
+            .dispatch(&ctx, "pinned", serde_json::json!({"query": "anything"}))
+            .await;
+        assert!(out.is_error);
+        let msg = out.content["error"].as_str().unwrap_or_default().to_owned();
+        assert!(
+            msg.contains("no_such_collection"),
+            "the pinned collection should have reached search: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preset_without_a_query_is_a_caller_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        save_custom(&state, &tenant, preset("p", serde_json::json!({"collection": "agg"}))).await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat.dispatch(&ctx, "p", serde_json::json!({})).await;
+        assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
+        assert!(out.content["error"].as_str().unwrap().contains("query"));
+    }
+
+    #[tokio::test]
+    async fn a_preset_pinning_no_collection_is_a_configuration_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        save_custom(&state, &tenant, preset("p", serde_json::json!({}))).await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat.dispatch(&ctx, "p", serde_json::json!({"query": "x"})).await;
+        assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
+        assert!(out.content["error"].as_str().unwrap().contains("collection"));
+    }
+
+    /// An unrecognised `kind` is a stored-configuration problem an operator
+    /// can fix — not a missing tool, and not a 500.
+    #[tokio::test]
+    async fn an_unsupported_kind_is_invalid_args_not_internal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        let mut t = preset("callout", serde_json::json!({"url": "http://example.com"}));
+        t.kind = "http_callout".to_owned();
+        save_custom(&state, &tenant, t).await;
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &tenant);
+        let out = cat.dispatch(&ctx, "callout", serde_json::json!({"query": "x"})).await;
+        assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
+        assert!(out.content["error"].as_str().unwrap().contains("http_callout"));
+    }
+
+    /// Tenant isolation: one tenant's stored tool is neither advertised to
+    /// nor dispatchable by another.
+    #[tokio::test]
+    async fn a_preset_is_scoped_to_its_tenant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, tenant) = seeded_agg_state(tmp.path()).await;
+        save_custom(&state, &tenant, preset("mine", serde_json::json!({"collection": "agg"}))).await;
+
+        let other = crate::tenant::TenantId::parse("other").unwrap();
+        let cat = ToolCatalog::new();
+        let ctx = ToolContext::new(&state, &other);
+        assert!(cat.specs_for_agent(&ctx, &[]).await.iter().all(|s| s.id != "mine"));
+        let out = cat.dispatch(&ctx, "mine", serde_json::json!({"query": "x"})).await;
+        assert_eq!(out.error_kind, Some(ToolErrorKind::NotFound));
+    }
+
 }
