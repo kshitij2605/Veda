@@ -1142,12 +1142,42 @@ async fn execute_external(
         )));
     }
 
+    // `explain` and `truncate_to` were silently ignored, which is worse than
+    // refusing them: a caller asking for an explain plan got results with no
+    // plan and no indication why, and a caller asking to truncate vectors got
+    // untruncated ones. Both look like the feature working.
+    if req.explain {
+        return Err(bad_request(format!(
+            "explain is not available on external collection '{name}': the plan describes \
+             segment and index selection, and external data is scanned in place with \
+             neither."
+        )));
+    }
+    if req.truncate_to.is_some() {
+        return Err(bad_request(format!(
+            "truncate_to is not available on external collection '{name}': it truncates \
+             stored Matryoshka vectors, and external data is read at the source's own \
+             dimension."
+        )));
+    }
+
     let Some(ref vec_query) = req.query.vector else {
         return Err(bad_request(format!(
             "external collection '{name}' supports dense vector search and scalar \
              filters only"
         )));
     };
+
+    // An external collection has exactly one vector column, named by the
+    // source. A query naming a different field was silently searched against
+    // that column anyway — so a typo, or a query written for a different
+    // collection, returned confident results from the wrong field.
+    if vec_query.field != src.vector_field {
+        return Err(bad_request(format!(
+            "external collection '{name}' has one vector column '{}', but the query asked              for field '{}'",
+            src.vector_field, vec_query.field
+        )));
+    }
 
     // Freshness, then cache. This runs before every query — the dataset
     // lives entirely in memory, so an undetected source change would serve
@@ -1297,6 +1327,14 @@ async fn execute_external(
             if let Some(&row) = id_to_row.get(id.as_str()) {
                 let record = dataset.record_at(row);
                 for (field_name, value) in record.fields() {
+                    // The id column is already `SearchHit.id`. Emitting it
+                    // again inside `fields` made external hits shaped
+                    // differently from internal ones, where hydration skips
+                    // the identifier — so a client iterating `fields` saw a
+                    // phantom column on external collections only.
+                    if field_name == &src.id_field {
+                        continue;
+                    }
                     fields.insert(
                         field_name.clone(),
                         super::records::field_value_to_json(value),

@@ -185,6 +185,22 @@ impl FieldDefinition {
 
     /// Set the valid MRL truncation lengths for a vector field.
     /// Has no effect on non-vector fields.
+    /// Bind this vector field to the embedding model that produces its
+    /// vectors.
+    ///
+    /// No-op on a non-vector field. Set at collection creation for fields
+    /// that declare `auto_embed`: two models of the same dimension produce
+    /// mutually orthogonal spaces, and a query embedded by the wrong one is
+    /// accepted and returns confident nonsense. `model_id` is what lets
+    /// `embed-insert` refuse to mix models and `select_query_model` refuse a
+    /// model missing from the registry; neither can fire while it is `None`.
+    pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+        if let FieldType::Vector { model_id: slot, .. } = &mut self.field_type {
+            *slot = Some(model_id.into());
+        }
+        self
+    }
+
     pub fn with_mrl_dims(mut self, dims: Vec<u32>) -> Self {
         if let FieldType::Vector { mrl_dims, .. } = &mut self.field_type {
             *mrl_dims = Some(dims);
