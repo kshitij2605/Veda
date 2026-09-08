@@ -26,6 +26,92 @@ use crate::search::{
 /// bucket on every restart.
 ///
 /// For unknown / non-vector index types, falls back to `Flat`.
+/// A [`VectorSource`] over a sealed segment.
+///
+/// `SegmentReader::get_vector` hands back a borrowed `&[f32]` straight out of
+/// the mmap, so a pass over the corpus allocates nothing at all — which is
+/// the whole point. `SpannIndex::build_into_streaming` re-reads the source
+/// several times (one sampling pass for k-means, one counting pass, then one
+/// per centroid group), and each pass must see every vector under the same
+/// id, which is why this is a re-readable trait and not an `Iterator`.
+struct SegmentVectorSource<'a> {
+    reader: &'a veda_storage::segment::SegmentReader,
+    field: &'a str,
+    row_count: u32,
+    dimension: usize,
+}
+
+impl veda_index::spann::VectorSource for SegmentVectorSource<'_> {
+    fn len(&self) -> usize {
+        self.row_count as usize
+    }
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+    fn for_each(&self, f: &mut dyn FnMut(u32, &[f32]) -> Result<()>) -> Result<()> {
+        for doc_id in 0..self.row_count {
+            f(doc_id, self.reader.get_vector(self.field, doc_id)?)?;
+        }
+        Ok(())
+    }
+}
+
+/// Peak corpus bytes the SPANN streaming build may buffer.
+///
+/// Tunable because the right value depends on the node, not the index: too
+/// small forces more passes over the segment, too large gives back the memory
+/// the streaming build exists to save. Note the real floor is the largest
+/// posting list — a list is never split across parts, so it is always
+/// buffered whole and `nlist` governs that floor. A budget below it does not
+/// reduce peak memory, it only adds passes.
+fn spann_build_budget_bytes() -> usize {
+    const DEFAULT: usize = 64 * 1024 * 1024; // 64 MiB
+    std::env::var("VEDA_SPANN_BUILD_BUDGET_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT)
+}
+
+/// MRL rungs for a field whose primary index streams.
+///
+/// The rungs are HNSW and inherently in-memory, but the SPANN path never
+/// materialises the corpus, so there is no shared buffer for them to borrow.
+/// Each rung therefore reads the truncated prefixes it needs directly from
+/// the segment. Only the SPANN path uses this; every other index type keeps
+/// the shared-buffer ordering below.
+fn build_mrl_from_reader(
+    reader: &veda_storage::segment::SegmentReader,
+    field: &str,
+    dims: &[u32],
+    dimension: u32,
+    metric: DistanceMetric,
+    prefix_base: &str,
+) -> Result<HashMap<u32, Box<dyn VectorIndex>>> {
+    let row_count = reader.row_count() as u32;
+    let mut per_dim: HashMap<u32, Box<dyn VectorIndex>> = HashMap::new();
+    for &d in dims {
+        if d == 0 || d >= dimension {
+            continue;
+        }
+        let dim_usize = d as usize;
+        let mut truncated: Vec<Vec<f32>> = Vec::with_capacity(row_count as usize);
+        for doc_id in 0..row_count {
+            let v = reader.get_vector(field, doc_id)?;
+            truncated.push(v[..dim_usize.min(v.len())].to_vec());
+        }
+        let idx = build_vector_index(
+            IndexType::Hnsw,
+            metric,
+            d,
+            truncated,
+            &format!("{prefix_base}/mrl{d}"),
+        )?;
+        per_dim.insert(d, idx);
+    }
+    Ok(per_dim)
+}
+
 fn build_vector_index(
     index_type: IndexType,
     metric: DistanceMetric,
@@ -156,6 +242,15 @@ pub struct LocalShardSearcher {
     muvera_encoders: HashMap<String, crate::muvera::MuveraEncoder>,
     /// Per-doc MUVERA FDEs: `seg_id -> field -> Vec<(doc_id, fde)>`.
     muvera_fdes: MuveraFdes,
+    /// What each SPANN streaming build actually cost, keyed by
+    /// `seg_id -> field`.
+    ///
+    /// Recorded rather than only logged because a build that quietly
+    /// buffered the whole corpus would return a correct index AND a correct
+    /// recall figure — the streaming property is invisible to every
+    /// behavioural assertion you could make about the result. These stats are
+    /// the only evidence that the cheap path was the one taken.
+    spann_build_stats: HashMap<Uuid, HashMap<String, veda_index::spann::StreamingBuildStats>>,
 }
 
 impl LocalShardSearcher {
@@ -167,7 +262,19 @@ impl LocalShardSearcher {
             mrl_indexes: HashMap::new(),
             muvera_encoders: HashMap::new(),
             muvera_fdes: HashMap::new(),
+            spann_build_stats: HashMap::new(),
         }
+    }
+
+    /// What the SPANN streaming build cost for `segment`/`field`, when that
+    /// field built through the streaming path. `None` for any other index
+    /// type, and for a SPANN field that has not been built yet.
+    pub fn spann_build_stats(
+        &self,
+        segment: &Uuid,
+        field: &str,
+    ) -> Option<&veda_index::spann::StreamingBuildStats> {
+        self.spann_build_stats.get(segment)?.get(field)
     }
 
     /// Look up a full record by UUID across this shard's segments.
@@ -209,6 +316,12 @@ impl LocalShardSearcher {
             // field declared mrl_dims.
             let mut field_mrl: HashMap<String, HashMap<u32, Box<dyn VectorIndex>>> = HashMap::new();
 
+            // Streaming-build evidence for this segment's SPANN fields.
+            let mut spann_stats_for_segment: HashMap<
+                String,
+                veda_index::spann::StreamingBuildStats,
+            > = HashMap::new();
+
             for field_def in schema.vector_fields() {
                 if let FieldType::Vector {
                     dimension,
@@ -217,6 +330,58 @@ impl LocalShardSearcher {
                     ..
                 } = field_def.field_type()
                 {
+                    let prefix_base = format!("spann/{seg_id}/{}", field_def.name());
+
+                    // SPANN reads the segment one vector at a time instead of
+                    // materialising it. Taken BEFORE the allocation below,
+                    // because doing it after would defeat the entire point:
+                    // choosing `spann` is supposed to lower what a node needs
+                    // to *build* a collection, not only what it needs to
+                    // serve one. Every other index type takes `&[&[f32]]` and
+                    // genuinely needs the batch, so they fall through to the
+                    // unchanged path — including the ordering fix that lets
+                    // the primary consume `vectors` by value.
+                    if matches!(field_def.index_type(), IndexType::Spann) {
+                        if let Some(dims) = mrl_dims {
+                            let per_dim = build_mrl_from_reader(
+                                reader,
+                                field_def.name(),
+                                dims,
+                                *dimension,
+                                *metric,
+                                &prefix_base,
+                            )?;
+                            if !per_dim.is_empty() {
+                                field_mrl.insert(field_def.name().to_owned(), per_dim);
+                            }
+                        }
+                        let source = SegmentVectorSource {
+                            reader,
+                            field: field_def.name(),
+                            row_count,
+                            dimension: *dimension as usize,
+                        };
+                        let mut idx = veda_index::spann::SpannVectorIndex::new(
+                            &prefix_base,
+                            *metric,
+                            *dimension,
+                        );
+                        let stats = idx.build_from_source(&source, spann_build_budget_bytes())?;
+                        spann_stats_for_segment
+                            .insert(field_def.name().to_owned(), stats);
+                        tracing::debug!(
+                            segment = ?seg_id,
+                            field = field_def.name(),
+                            passes = stats.passes,
+                            groups = stats.groups,
+                            peak_buffered_bytes = stats.peak_buffered_bytes,
+                            "built SPANN index without materialising the segment"
+                        );
+                        field_indexes
+                            .insert(field_def.name().to_owned(), Box::new(idx) as Box<dyn VectorIndex>);
+                        continue;
+                    }
+
                     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(row_count as usize);
                     for doc_id in 0..row_count {
                         let vec = reader.get_vector(field_def.name(), doc_id)?;
@@ -264,12 +429,15 @@ impl LocalShardSearcher {
                         *metric,
                         *dimension,
                         vectors,
-                        &format!("spann/{seg_id}/{}", field_def.name()),
+                        &prefix_base,
                     )?;
                     field_indexes.insert(field_def.name().to_owned(), index);
                 }
             }
 
+            if !spann_stats_for_segment.is_empty() {
+                self.spann_build_stats.insert(seg_id, spann_stats_for_segment);
+            }
             self.indexes.insert(seg_id, field_indexes);
             if !field_mrl.is_empty() {
                 self.mrl_indexes.insert(seg_id, field_mrl);
