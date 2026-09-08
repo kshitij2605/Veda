@@ -1,5 +1,31 @@
 # Niriksha Feature Audit
 
+> **STATUS: the "what still needs building" list below is from 2026-05-18 and
+> was never updated. Most of it was built in the following weeks. Re-verified
+> 2026-09-09 — do not plan from the original text.**
+>
+> | Original claim | Verified 2026-09-09 |
+> |---|---|
+> | "`process-document` … no UI — flagship feature" | **Built.** `pages/Pipelines.tsx` (678 lines) + `api/pipelines.ts` multipart-POSTs `/v1/collections/{name}/process-document`; routed at `/pipelines`. Landed 2026-06-10 (`6445f03`). |
+> | "No login page; token never set" | **Built.** `pages/Login.tsx`, `lib/auth.ts` posts `/v1/auth/login`; routed at `/login`. Landed 2026-06-11 (`f64ca6d`). |
+> | "SearchPlayground … only `vector` is reachable" | **Built.** `QueryMode = 'dense' \| 'sparse' \| 'bm25' \| 'hybrid'`, with bm25 field/weight and hybrid explain. Last touched 2026-08-17 (`02896ba`). |
+> | "VectorAtlas … PCA … method dropdown is locked" | **Built.** `atlas/AtlasPage.tsx` defaults to UMAP, runs it in a web worker with epoch progress. Landed 2026-06-10 (`6445f03`). |
+> | "IndexManager — read-only" | **Still true.** Zero mutating API calls in the page. Blocked on the server, which exposes no reindex / metric / quantization mutation — a backend addition has to come first. |
+>
+> A session on 2026-09-09 came within one step of rebuilding the
+> `process-document` UI because this file said it did not exist. This header
+> exists so the next reader checks the code before planning against the list.
+>
+> **What is genuinely open here is one item — IndexManager mutations — and it
+> is blocked on backend endpoints that do not exist.** Adding them is engine
+> work, not UI work.
+>
+> The endpoint-coverage table below has NOT been re-audited line by line; only
+> the five headline claims above were checked. Treat the rest as 2026-05-18
+> data.
+
+---
+
 Dev server: `http://gpu-host-a.internal.example:5174/niriksha`
 (`npm run dev -- --host 0.0.0.0 --port 5174` from `niriksha/`).
 
