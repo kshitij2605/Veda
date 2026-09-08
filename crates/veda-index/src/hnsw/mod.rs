@@ -29,12 +29,9 @@ use crate::traits::{SearchResult, VectorIndex};
 /// parameters).
 pub struct HnswIndex {
     graph: HnswGraph,
-    // TODO(perf): CSR adjacency layout. The per-node `Vec<Vec<u32>>`
-    // neighbour lists (graph.rs) still scatter every edge walk across
-    // the heap. Flattening them into CSR (offsets + a single contiguous
-    // edge array) is the next structural win, but it touches the graph
-    // serialization format — deferred to a later cycle. The vector slab
-    // below already removed the per-row distance-probe cache miss.
+    // CSR adjacency: measured and declined 2026-09-09 — non-distance cost is
+    // ~6% of query time at the 1024d this product runs. See
+    // documentation/2026-09-09-hnsw-csr-measured-and-declined.md.
     /// Internal vector copies packed into a single contiguous slab so
     /// each distance probe reads `slab.row(id)` from a predictable
     /// location instead of chasing a per-row heap pointer. For Cosine
