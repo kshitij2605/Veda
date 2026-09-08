@@ -1751,3 +1751,137 @@ async fn describe_collection_marks_an_external_collection_instead_of_reporting_z
         "the note must point at the route that does work: {body}"
     );
 }
+
+// ── Silently-ignored request knobs (2026-09-09) ──────────────────────────
+//
+// `explain` and `truncate_to` were accepted and then ignored on external
+// collections. That is worse than refusing them: the caller who asked for a
+// plan got results with no plan and no reason, and the caller who asked to
+// truncate got untruncated vectors. Both read as the feature working.
+
+async fn ext_search(base: &str, coll: &str, body: Value) -> (u16, String) {
+    let r = client()
+        .post(format!("{base}/v1/collections/{coll}/search"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = r.status().as_u16();
+    (status, r.text().await.unwrap())
+}
+
+fn dense_query() -> Value {
+    json!({ "vector": { "field": "embedding", "values": [1.0, 0.0, 0.0] } })
+}
+
+#[tokio::test]
+async fn external_explain_is_rejected_not_ignored() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+    let r = register_external(&base, "ext_explain", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    let (status, body) = ext_search(
+        &base,
+        "ext_explain",
+        json!({ "query": dense_query(), "limit": 10, "explain": true }),
+    )
+    .await;
+    assert_eq!(status, 400, "explain should be refused: {body}");
+    assert!(body.contains("explain"), "{body}");
+    assert!(body.contains("ext_explain"), "{body}");
+}
+
+#[tokio::test]
+async fn external_truncate_to_is_rejected_not_ignored() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+    let r = register_external(&base, "ext_trunc", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    let (status, body) = ext_search(
+        &base,
+        "ext_trunc",
+        json!({ "query": dense_query(), "limit": 10, "truncate_to": 2 }),
+    )
+    .await;
+    assert_eq!(status, 400, "truncate_to should be refused: {body}");
+    assert!(body.contains("truncate_to"), "{body}");
+}
+
+/// An external collection has exactly one vector column. A query naming a
+/// different field was searched against that column anyway, so a typo — or a
+/// query written for another collection — returned confident results from the
+/// wrong field.
+#[tokio::test]
+async fn external_rejects_a_query_naming_the_wrong_vector_field() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+    let r = register_external(&base, "ext_field", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    let (status, body) = ext_search(
+        &base,
+        "ext_field",
+        json!({
+            "query": { "vector": { "field": "not_the_column", "values": [1.0, 0.0, 0.0] } },
+            "limit": 10
+        }),
+    )
+    .await;
+    assert_eq!(status, 400, "wrong field should be refused: {body}");
+    assert!(
+        body.contains("not_the_column") && body.contains("embedding"),
+        "the message must name both the asked-for and the real column: {body}"
+    );
+
+    // The correct field still works — the check must not reject everything.
+    let (status, body) = ext_search(
+        &base,
+        "ext_field",
+        json!({ "query": dense_query(), "limit": 10 }),
+    )
+    .await;
+    assert_eq!(status, 200, "the declared field must still work: {body}");
+}
+
+/// The id column belongs in `SearchHit.id`, not also inside `fields`.
+/// Internal collections skip the identifier during hydration, so emitting it
+/// here made external hits a different shape — a client iterating `fields`
+/// saw a phantom column on external collections only.
+#[tokio::test]
+async fn external_hit_does_not_repeat_the_id_inside_fields() {
+    let (base, _tmp) = start_server().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let file_path = data_dir.path().join("data.parquet");
+    write_parquet(&file_path, &["a", "b", "c"], Some(3));
+    let r = register_external(&base, "ext_id", &file_uri(&file_path)).await;
+    assert_eq!(r.status(), 201, "create: {}", r.text().await.unwrap());
+
+    let (status, body) = ext_search(
+        &base,
+        "ext_id",
+        json!({ "query": dense_query(), "limit": 3 }),
+    )
+    .await;
+    assert_eq!(status, 200, "search failed: {body}");
+    let out: Value = serde_json::from_str(&body).unwrap();
+    let results = out["results"].as_array().expect("results array");
+    assert!(!results.is_empty(), "no hits: {body}");
+    for hit in results {
+        assert!(
+            hit["id"].as_str().is_some(),
+            "hit must carry its id at the top level: {hit}"
+        );
+        assert!(
+            hit["fields"].get("id").is_none(),
+            "the id column must not be repeated inside fields: {hit}"
+        );
+    }
+}
