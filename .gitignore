@@ -1,6 +1,7 @@
 /target
 /test_data
 competitive_advantages.md
+REMAINING-TASKS.md
 .env
 .env.*
 !.env.example

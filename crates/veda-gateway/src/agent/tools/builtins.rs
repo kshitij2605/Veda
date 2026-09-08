@@ -15,7 +15,7 @@ use veda_query::adaptive::route_query;
 use veda_query::filter::ast::FilterExpr;
 use veda_query::filter::parser::FilterParser;
 use veda_query::filter::record_eval::evaluate_record;
-use veda_query::search::VectorSearchRequest;
+use veda_query::search::{SearchResponse, SparseSearchRequest, VectorSearchRequest};
 
 use crate::agent::catalog::{ToolContext, ToolOutcome, ToolSpec};
 use crate::agent::retrieval_guard::enforcement_enabled;
@@ -506,6 +506,88 @@ fn reject_if_external(
     })
 }
 
+/// Hydrate each hit's record fields and apply the optional projection.
+///
+/// Shared by [`search`]'s dense and sparse legs. They differ only in how the
+/// query is encoded and which executor entry runs; everything from here on is
+/// identical, and a second copy would let the two drift apart silently.
+async fn hydrate_hits(
+    ctx: &ToolContext<'_>,
+    schema: &veda_core::schema::CollectionSchema,
+    collection: &str,
+    response: SearchResponse,
+    keep_fields: &Option<Vec<String>>,
+) -> ToolOutcome {
+    // Hydrate each hit's record fields (O(1) UUID→Record lookup per hit,
+    // skipping vector fields), then apply the optional `fields` projection.
+    // Mirrors REST `/search` field hydration so the agent surface matches.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let vector_field_names: std::collections::HashSet<&str> = schema
+        .fields()
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.field_type(),
+                FieldType::Vector { .. }
+                    | FieldType::MultiVector { .. }
+                    | FieldType::SparseVector { .. }
+            )
+        })
+        .map(|f| f.name())
+        .collect();
+    let managers = ctx.state.inner.segment_managers.read().await;
+    let shard_map = managers.get(collection);
+
+    let hits: Vec<serde_json::Value> = response
+        .results
+        .into_iter()
+        .map(|r| {
+            let mut fields = serde_json::Map::new();
+            if let Some(shard_map) = shard_map {
+                let rec = shard_map
+                    .values()
+                    .find_map(|sm| sm.lookup_record_at(r.id, now_secs));
+                if let Some(rec) = rec {
+                    for field_def in schema.fields() {
+                        let name = field_def.name();
+                        if vector_field_names.contains(name) {
+                            continue;
+                        }
+                        if let Some(value) = rec.get(name) {
+                            fields.insert(name.to_string(), field_value_to_json(value));
+                        }
+                    }
+                    // The retrieval-guardrail/TTL fields are RESERVED, not
+                    // schema-declared (segment.rs's WAL writer persists them
+                    // "even when not declared in the schema") — no
+                    // `CollectionSchema` a real `/v1/collections` call
+                    // produces ever lists them, so the loop above never
+                    // hydrates them and every hit classifies `Unscreened`.
+                    // Fetch them directly so the dispatch-level guard
+                    // (`apply_retrieval_guard` in `agent/catalog.rs`) has
+                    // something to classify on every real collection, not
+                    // only ones a test happens to declare them on.
+                    for reserved in RESERVED_GUARD_FIELDS {
+                        if let Some(value) = rec.get(reserved) {
+                            fields.insert((*reserved).to_owned(), field_value_to_json(value));
+                        }
+                    }
+                }
+            }
+            project_fields(&mut fields, keep_fields);
+            serde_json::json!({
+                "id": r.id.to_string(),
+                "distance": r.distance,
+                "fields": fields,
+            })
+        })
+        .collect();
+    ToolOutcome::ok(serde_json::json!({ "hits": hits, "count": hits.len() }))
+}
+
 pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
     let Some(user_collection) = args["collection"].as_str() else {
         return ToolOutcome::invalid_args("collection is required");
@@ -582,6 +664,97 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
     // so the query is refused instead.
     if let Some(bad) = withheld_field_in_filter(&filter_expr, &withheld_fields(ctx, &schema)) {
         return ToolOutcome::invalid_args(crate::agent::field_guard::restricted_field_error(&bad));
+    }
+
+    // ── Sparse leg ──────────────────────────────────────────────────────
+    // Handled before dense field resolution on purpose: a collection can
+    // carry a sparse_vector field and no dense one, and the resolution below
+    // would reject it as having "no vector fields" before the sparse query
+    // ever ran. It also skips the dense embedding call, which sparse does not
+    // use.
+    //
+    // `build_query_body` still refuses `sparse` — that path maps a *dense*
+    // query vector onto the REST `QueryBody`, and a sparse query never
+    // reaches it.
+    if mode == SearchMode::Sparse {
+        if !supports_sparse(&schema) {
+            return ToolOutcome::invalid_args(format!(
+                "collection '{user_collection}' has no sparse_vector field, so mode 'sparse' \
+                 cannot run; use 'dense' or 'auto'"
+            ));
+        }
+        let sparse_field = match args["field"].as_str() {
+            Some(f) => f.to_owned(),
+            None => match schema
+                .fields()
+                .iter()
+                .find(|f| matches!(f.field_type(), FieldType::SparseVector { .. }))
+            {
+                Some(f) => f.name().to_owned(),
+                None => {
+                    return ToolOutcome::invalid_args(format!(
+                        "collection '{user_collection}' has no sparse_vector field"
+                    ));
+                }
+            },
+        };
+        let Some(text) = query_text else {
+            return ToolOutcome::invalid_args(
+                "mode 'sparse' needs a text query: a sparse encoder scores lexical terms, so \
+                 there is nothing for it to read in an image",
+            );
+        };
+        // The encoder is optional infrastructure, so its absence is a caller
+        // error with a fix in it rather than an opaque internal failure.
+        let encoded = {
+            let guard = ctx.state.inner.splade_client.read().await;
+            let Some(client) = guard.as_ref() else {
+                return ToolOutcome::invalid_args(
+                    "mode 'sparse' requires a sparse query encoder; set VEDA_SPLADE_ENDPOINT \
+                     on the server, or use mode 'dense'",
+                );
+            };
+            match client.encode(text).await {
+                Ok(e) => e,
+                Err(e) => {
+                    return ToolOutcome::internal(format!("sparse query encoding failed: {e}"));
+                }
+            }
+        };
+        let query = match veda_core::sparse::SparseVec::new(encoded.indices, encoded.values) {
+            Ok(v) => v,
+            Err(e) => {
+                return ToolOutcome::internal(format!(
+                    "sparse encoder returned an invalid vector: {e}"
+                ));
+            }
+        };
+        let metric = schema
+            .get_field(&sparse_field)
+            .and_then(|f| match f.field_type() {
+                FieldType::SparseVector { metric, .. } => Some(*metric),
+                _ => None,
+            })
+            .unwrap_or(DistanceMetric::Cosine);
+
+        let executors = ctx.state.inner.query_executors.read().await;
+        let Some(executor) = executors.get(collection) else {
+            return ToolOutcome::internal("no query executor");
+        };
+        let request = SparseSearchRequest {
+            field: sparse_field,
+            query,
+            k: limit,
+            metric,
+            filter,
+            filter_expr,
+            read_ts: None,
+        };
+        let response = match executor.search_sparse(&request) {
+            Ok((response, _)) => response,
+            Err(e) => return ToolOutcome::internal(format!("sparse search failed: {e}")),
+        };
+        return hydrate_hits(ctx, &schema, collection, response, &keep_fields).await;
     }
 
     // Resolve target vector field.
@@ -661,74 +834,7 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
         Err(e) => return ToolOutcome::internal(format!("search failed: {e}")),
     };
 
-    // Hydrate each hit's record fields (O(1) UUID→Record lookup per hit,
-    // skipping vector fields), then apply the optional `fields` projection.
-    // Mirrors REST `/search` field hydration so the agent surface matches.
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let vector_field_names: std::collections::HashSet<&str> = schema
-        .fields()
-        .iter()
-        .filter(|f| {
-            matches!(
-                f.field_type(),
-                FieldType::Vector { .. }
-                    | FieldType::MultiVector { .. }
-                    | FieldType::SparseVector { .. }
-            )
-        })
-        .map(|f| f.name())
-        .collect();
-    let managers = ctx.state.inner.segment_managers.read().await;
-    let shard_map = managers.get(collection);
-
-    let hits: Vec<serde_json::Value> = response
-        .results
-        .into_iter()
-        .map(|r| {
-            let mut fields = serde_json::Map::new();
-            if let Some(shard_map) = shard_map {
-                let rec = shard_map
-                    .values()
-                    .find_map(|sm| sm.lookup_record_at(r.id, now_secs));
-                if let Some(rec) = rec {
-                    for field_def in schema.fields() {
-                        let name = field_def.name();
-                        if vector_field_names.contains(name) {
-                            continue;
-                        }
-                        if let Some(value) = rec.get(name) {
-                            fields.insert(name.to_string(), field_value_to_json(value));
-                        }
-                    }
-                    // The retrieval-guardrail/TTL fields are RESERVED, not
-                    // schema-declared (segment.rs's WAL writer persists them
-                    // "even when not declared in the schema") — no
-                    // `CollectionSchema` a real `/v1/collections` call
-                    // produces ever lists them, so the loop above never
-                    // hydrates them and every hit classifies `Unscreened`.
-                    // Fetch them directly so the dispatch-level guard
-                    // (`apply_retrieval_guard` in `agent/catalog.rs`) has
-                    // something to classify on every real collection, not
-                    // only ones a test happens to declare them on.
-                    for reserved in RESERVED_GUARD_FIELDS {
-                        if let Some(value) = rec.get(reserved) {
-                            fields.insert((*reserved).to_owned(), field_value_to_json(value));
-                        }
-                    }
-                }
-            }
-            project_fields(&mut fields, &keep_fields);
-            serde_json::json!({
-                "id": r.id.to_string(),
-                "distance": r.distance,
-                "fields": fields,
-            })
-        })
-        .collect();
-    ToolOutcome::ok(serde_json::json!({ "hits": hits, "count": hits.len() }))
+    hydrate_hits(ctx, &schema, collection, response, &keep_fields).await
 }
 
 pub async fn upsert_record(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutcome {
