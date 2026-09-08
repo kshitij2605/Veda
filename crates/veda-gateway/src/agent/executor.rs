@@ -445,7 +445,8 @@ async fn run_core<M: ChatModel>(
     let max_steps = max_steps.max(1);
 
     let tools: Vec<ToolDef> = catalog
-        .specs_for(&agent.tool_ids)
+        .specs_for_agent(ctx, &agent.tool_ids)
+        .await
         .iter()
         .map(|s| s.to_openai_tooldef())
         .collect();

@@ -6,5 +6,6 @@
 //! additive.
 
 pub mod builtins;
+pub mod custom;
 pub mod ops;
 pub mod web;
