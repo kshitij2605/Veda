@@ -64,7 +64,10 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                     "collection": { "type": "string", "description": "Collection to search" },
                     "query": { "type": "string", "description": "Natural-language query text. Provide this OR query_image_b64, not both." },
                     "query_image_b64": { "type": "string", "description": "Base64-encoded image bytes used as the retrieval query (cross-modal). Provide this OR query, not both." },
-                    "mode": { "type": "string", "enum": ["auto", "dense", "hybrid", "sparse", "colpali"], "default": "auto", "description": "Retrieval mode. 'auto' (default) maps to dense for the MVP." },
+                    "mode": { "type": "string", "enum": ["auto", "dense", "hybrid", "sparse", "colpali"], "default": "auto", "description": "Retrieval mode. 'auto' (default) maps to dense. 'hybrid' fuses a dense leg with a BM25 lexical leg and needs a text query plus a bm25-enabled field; prefer it when the query carries distinctive literal terms (names, codes, error strings) that embeddings blur. 'sparse' needs a sparse_vector field." },
+                    "bm25_field": { "type": "string", "description": "String field for the BM25 leg of mode 'hybrid' (optional; defaults to the collection's first bm25-enabled field)" },
+                    "dense_weight": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5, "description": "Mode 'hybrid' only: the dense leg's share of the fused score. The BM25 leg takes the remainder." },
+                    "fusion": { "type": "string", "enum": ["rrf", "weighted_sum"], "default": "rrf", "description": "Mode 'hybrid' only: 'rrf' fuses by rank and needs no score calibration; 'weighted_sum' min-max normalises each leg first, giving linear control via dense_weight." },
                     "field": { "type": "string", "description": "Vector field name (optional; defaults to the first vector field on the collection)" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 },
                     "filter": { "type": "string", "description": "Optional SQL-like filter expression, e.g. \"category = 'electronics' AND price < 500\"" },
@@ -378,8 +381,13 @@ pub fn build_query_body(
                     .to_owned(),
             )
         }
+        // Handled in `search` before this point, like `sparse`: hybrid runs
+        // dense + BM25 through the REST fusion path, which needs the raw
+        // query text and a bm25 field, neither of which a `QueryBody` built
+        // from a lone dense vector can express. Reaching here means a caller
+        // used `build_query_body` directly.
         SearchMode::Hybrid => Err(
-            "mode 'hybrid' is not yet supported via the agent search tool; use 'dense' or 'auto'"
+            "mode 'hybrid' is handled by the search tool's hybrid leg, not by build_query_body"
                 .to_owned(),
         ),
         SearchMode::Colpali => Err(
@@ -666,6 +674,17 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
         return ToolOutcome::invalid_args(crate::agent::field_guard::restricted_field_error(&bad));
     }
 
+    // A hybrid query with no text has no lexical leg. Refused HERE, before
+    // the embedding call below, for the same reason the sparse leg branches
+    // early: there is no point paying for an image embedding only to discover
+    // the mode cannot run. And refusing beats silently degrading to dense —
+    // the model would otherwise believe it had run a hybrid search.
+    if mode == SearchMode::Hybrid && query_text.is_none() {
+        return ToolOutcome::invalid_args(
+            "mode 'hybrid' needs a text query: the BM25 leg scores lexical terms, so an image query has no lexical half; use 'dense'",
+        );
+    }
+
     // ── Sparse leg ──────────────────────────────────────────────────────
     // Handled before dense field resolution on purpose: a collection can
     // carry a sparse_vector field and no dense one, and the resolution below
@@ -803,6 +822,161 @@ pub async fn search(ctx: &ToolContext<'_>, args: serde_json::Value) -> ToolOutco
         },
         (None, None) => unreachable!("modality was resolved above"),
     };
+
+    // ── Hybrid leg ──────────────────────────────────────────────────────
+    // Dense + BM25, fused by the same code `/v1/collections/{name}/search`
+    // uses. Placed AFTER the dense embedding because hybrid needs that
+    // vector, and before `build_query_body`, which only knows how to map a
+    // dense vector onto a `QueryBody`.
+    //
+    // Delegating to `execute_hybrid_dense_bm25` rather than fusing here is
+    // deliberate: RRF and weighted-sum score calibration are subtle enough
+    // that a second implementation would drift from the REST one, and the
+    // agent surface would quietly rank differently from the API it claims to
+    // wrap.
+    if mode == SearchMode::Hybrid {
+        let Some(text) = query_text else {
+            return ToolOutcome::invalid_args(
+                "mode 'hybrid' needs a text query: the BM25 leg scores lexical terms, so an \
+                 image query has no lexical half; use 'dense'",
+            );
+        };
+        let bm25_field = match args["bm25_field"].as_str() {
+            Some(f) => f.to_owned(),
+            None => match schema.fields().iter().find(|f| f.bm25()) {
+                Some(f) => f.name().to_owned(),
+                None => {
+                    return ToolOutcome::invalid_args(format!(
+                        "collection '{user_collection}' has no bm25-enabled string field, so \
+                         mode 'hybrid' has no lexical leg; use 'dense', or recreate the \
+                         collection with `bm25: true` on a string field"
+                    ));
+                }
+            },
+        };
+        if schema.get_field(&bm25_field).map(|f| f.bm25()) != Some(true) {
+            return ToolOutcome::invalid_args(format!(
+                "field '{bm25_field}' is not bm25-enabled on collection '{user_collection}'"
+            ));
+        }
+
+        let dense_weight = args["dense_weight"].as_f64().unwrap_or(0.5) as f32;
+        if !(0.0..=1.0).contains(&dense_weight) {
+            return ToolOutcome::invalid_args(
+                "dense_weight must be between 0 and 1: it is the dense leg's share of the \
+                 fused score, and the BM25 leg takes the remainder",
+            );
+        }
+        let fusion = args["fusion"].as_str().unwrap_or("rrf").to_owned();
+        if fusion != "rrf" && fusion != "weighted_sum" {
+            return ToolOutcome::invalid_args(format!(
+                "unknown fusion '{fusion}'; expected 'rrf' or 'weighted_sum'"
+            ));
+        }
+
+        let hybrid = crate::rest::search::HybridQuery {
+            dense: crate::rest::search::SingleVectorQuery {
+                field: field_name.clone(),
+                values: vector,
+            },
+            bm25: crate::rest::search::Bm25Query {
+                field: bm25_field,
+                query: text.to_owned(),
+                // Rank-safe: never prune the lexical leg on the agent's
+                // behalf. A pruned BM25 leg can silently drop true top-k
+                // documents, and the model has no way to notice.
+                prune_theta: None,
+            },
+            dense_weight,
+            fusion,
+        };
+
+        let req = crate::rest::search::SearchRequest {
+            query: crate::rest::search::QueryBody {
+                vector: None,
+                sparse_vector: None,
+                colpali: None,
+                multi_vector: None,
+                bm25: None,
+                match_phrase: None,
+                // `execute_hybrid_dense_bm25` takes the hybrid query as its
+                // own argument and reads only filter/limit off the request,
+                // so carrying a copy here would buy nothing and force
+                // `Clone` onto three shared REST types.
+                hybrid: None,
+                fusion: None,
+                fusion_params: None,
+            },
+            filter: filter.clone(),
+            filter_expr: filter_expr.clone(),
+            limit,
+            explain: false,
+            truncate_to: None,
+            rerank: None,
+            at: None,
+            num_candidates: None,
+        };
+
+        let executors = ctx.state.inner.query_executors.read().await;
+        let Some(executor) = executors.get(collection) else {
+            return ToolOutcome::internal("no query executor");
+        };
+        let fused = crate::rest::search::execute_hybrid_dense_bm25(
+            ctx.state,
+            collection,
+            executor,
+            &hybrid,
+            &req,
+            metric,
+            limit,
+            None,
+            filter_expr.as_ref(),
+        )
+        .await;
+        let (hits, _legs) = match fused {
+            Ok(v) => v,
+            Err((status, axum::Json(e))) => {
+                return if status == axum::http::StatusCode::BAD_REQUEST {
+                    ToolOutcome::invalid_args(e.error)
+                } else {
+                    ToolOutcome::internal(e.error)
+                };
+            }
+        };
+
+        // Re-shape into the executor's response so hydration is IDENTICAL to
+        // the dense path. This is not cosmetic: `hydrate_hits` is what
+        // attaches the reserved `_guardrail_*` columns, and the retrieval
+        // guard in `catalog::dispatch` classifies on exactly those. Returning
+        // the REST hits' own `fields` map would skip that and every fused hit
+        // would arrive `Unscreened` — enforcement silently weaker than the
+        // dense leg it sits beside.
+        let results = hits
+            .iter()
+            .filter_map(|h| {
+                uuid::Uuid::parse_str(&h.id)
+                    .ok()
+                    .map(|id| veda_query::search::ScoredRecord {
+                        id,
+                        segment_id: uuid::Uuid::nil(),
+                        doc_id: 0,
+                        distance: h.distance,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let total = results.len();
+        return hydrate_hits(
+            ctx,
+            &schema,
+            collection,
+            SearchResponse {
+                results,
+                total_candidates: total,
+            },
+            &keep_fields,
+        )
+        .await;
+    }
 
     // Map mode → QueryBody. Only the dense leg is executable in the MVP.
     let query_body = match build_query_body(mode, &field_name, vector, supports_sparse(&schema)) {
