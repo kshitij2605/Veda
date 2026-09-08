@@ -8,10 +8,15 @@ pub struct HnswNode {
     /// The level this node was assigned during insertion.
     pub level: usize,
     /// Neighbors per layer: `neighbors[layer]` is the list of neighbor IDs at that layer.
-    // TODO(perf): flat contiguous vector slab + CSR adjacency layout. This
-    // per-node `Vec<Vec<u32>>` scatters edge lists across the heap (a cache
-    // miss per neighbour walk); a CSR (offsets + flat neighbour array) would
-    // make traversal cache-friendly. Deferred — rewrite + on-disk format change.
+    // CSR adjacency was measured and declined on 2026-09-09; the vector-slab
+    // half of the original TODO shipped. Fitting `time = fixed + k*dim` to the
+    // ann_benchmark points puts everything non-distance — traversal, heap,
+    // cache misses, i.e. the whole envelope CSR could attack — at ~34% of
+    // query time at 128d but only ~8% at 768d and ~6% at the 1024d this
+    // product runs. Distance dominates; the pointer chase does not.
+    // See documentation/2026-09-09-hnsw-csr-measured-and-declined.md.
+    // Reopen only with a case at low dimension or very large N, not on
+    // cache-locality reasoning.
     pub neighbors: Vec<Vec<u32>>,
 }
 
