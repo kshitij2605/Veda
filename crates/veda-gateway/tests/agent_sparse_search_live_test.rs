@@ -40,7 +40,10 @@ struct Stub {
 /// of `{index, value}` out (outer dimension is one entry per input string).
 async fn embed_sparse(State(stub): State<Stub>, Json(body): Json<Value>) -> Json<Value> {
     stub.calls.fetch_add(1, Ordering::SeqCst);
-    let text = body["inputs"][0].as_str().unwrap_or_default().to_lowercase();
+    let text = body["inputs"][0]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
     stub.seen.lock().unwrap().push(text.clone());
 
     let idx: &[u32] = if text.contains("alpha") {

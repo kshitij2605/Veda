@@ -367,8 +367,7 @@ impl LocalShardSearcher {
                             *dimension,
                         );
                         let stats = idx.build_from_source(&source, spann_build_budget_bytes())?;
-                        spann_stats_for_segment
-                            .insert(field_def.name().to_owned(), stats);
+                        spann_stats_for_segment.insert(field_def.name().to_owned(), stats);
                         tracing::debug!(
                             segment = ?seg_id,
                             field = field_def.name(),
@@ -377,8 +376,10 @@ impl LocalShardSearcher {
                             peak_buffered_bytes = stats.peak_buffered_bytes,
                             "built SPANN index without materialising the segment"
                         );
-                        field_indexes
-                            .insert(field_def.name().to_owned(), Box::new(idx) as Box<dyn VectorIndex>);
+                        field_indexes.insert(
+                            field_def.name().to_owned(),
+                            Box::new(idx) as Box<dyn VectorIndex>,
+                        );
                         continue;
                     }
 
@@ -436,7 +437,8 @@ impl LocalShardSearcher {
             }
 
             if !spann_stats_for_segment.is_empty() {
-                self.spann_build_stats.insert(seg_id, spann_stats_for_segment);
+                self.spann_build_stats
+                    .insert(seg_id, spann_stats_for_segment);
             }
             self.indexes.insert(seg_id, field_indexes);
             if !field_mrl.is_empty() {
