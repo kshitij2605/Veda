@@ -151,9 +151,11 @@ jobs:
           export PATH="$HOME/cuvs-venv/bin:$PATH"
           export LIBCLANG_PATH="$V/clang/native"
           # The pip libclang wheel ships no builtin headers, so point clang
-          # at gcc's; without this it cannot find limits.h.
+          # at gcc's; without this it cannot find limits.h. cuvs's c_api.h
+          # then includes <cuda_runtime.h>, which lives in the apt CUDA
+          # tree rather than the wheel — bindgen needs both roots.
           GCC_INC="$(echo /usr/lib/gcc/x86_64-linux-gnu/*/include | tr ' ' '\n' | tail -1)"
-          export BINDGEN_EXTRA_CLANG_ARGS="-I$GCC_INC"
+          export BINDGEN_EXTRA_CLANG_ARGS="-I$GCC_INC -I$CUDA_PATH/include"
           # cmake-rs blanks CMAKE_PREFIX_PATH, so each package is located
           # by its own _DIR variable instead.
           export cuvs_DIR="$V/libcuvs/lib64/cmake/cuvs"
