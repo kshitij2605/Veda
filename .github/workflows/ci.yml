@@ -122,6 +122,7 @@ jobs:
           echo "CUDACXX=/usr/local/cuda-12.6/bin/nvcc" >> "$GITHUB_ENV"
           echo "CUDA_PATH=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
           /usr/local/cuda-12.6/bin/nvcc --version
+          ls -l /usr/local/cuda-12.6/lib64/libcudart.so
           df -h /
       - name: Cache the cuVS toolchain wheels
         uses: actions/cache@v4
@@ -170,8 +171,8 @@ jobs:
           # Keep the workflow-level -Dwarnings: setting RUSTFLAGS here
           # replaces it wholesale, and clippy does not build this feature,
           # so dropping it would leave gpu_cuvs with no lint coverage.
-          export RUSTFLAGS="-Dwarnings -L native=$V/libcuvs/lib64"
-          export LD_LIBRARY_PATH="$V/libcuvs/lib64:$V/libraft/lib64:$V/librmm/lib64:$V/rapids_logger/lib64:${LD_LIBRARY_PATH:-}"
+          export RUSTFLAGS="-Dwarnings -L native=$V/libcuvs/lib64 -L native=$CUDA_PATH/lib64"
+          export LD_LIBRARY_PATH="$V/libcuvs/lib64:$V/libraft/lib64:$V/librmm/lib64:$V/rapids_logger/lib64:$CUDA_PATH/lib64:${LD_LIBRARY_PATH:-}"
           cargo build -p veda-index --features gpu_cuvs --tests
 
   # All unit + integration tests.
