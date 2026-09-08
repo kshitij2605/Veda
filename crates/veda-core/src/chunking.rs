@@ -299,13 +299,23 @@ pub fn chunk_markdown(text: &str, strategy: &ChunkingStrategy) -> Vec<TextChunk>
 /// Anthropic-style contextual retrieval helper. For each chunk, prepend
 /// a 1-2 sentence document-level context produced by an LLM.
 ///
-/// Synchronous, sequential, slow: one LLM call per chunk. Production
-/// callers should batch and cache the document-level prompt prefix.
+/// Sequential and slow: one LLM call per chunk. Production callers should
+/// batch and cache the document-level prompt prefix.
+///
+/// **Async, and that is not cosmetic.** This used to build a
+/// `reqwest::blocking::Client`, which panics with "Cannot drop a runtime in a
+/// context where blocking is not allowed" the moment its internal runtime is
+/// dropped inside a Tokio worker — and every ingest path that would call this
+/// is async. It was never a live defect only because nothing called it: it
+/// would have panicked on first use. The identical bug did ship in
+/// `splade_client` and was fixed in PR #22, which is why this one was worth
+/// fixing rather than annotating.
 ///
 /// Returns chunks with their `text` field rewritten as
-/// `"<context>\n\n<original chunk text>"`. If `llm_endpoint` is empty or
-/// the call fails, the chunk is returned unchanged.
-pub fn contextualize_chunks(
+/// `"<context>\n\n<original chunk text>"`. If `llm_endpoint` is empty or the
+/// call fails, the chunk is returned unchanged — contextualisation is an
+/// enrichment, and losing it must not lose the chunk.
+pub async fn contextualize_chunks(
     document: &str,
     chunks: Vec<TextChunk>,
     llm_endpoint: &str,
@@ -315,57 +325,60 @@ pub fn contextualize_chunks(
     if llm_endpoint.is_empty() || chunks.is_empty() {
         return chunks;
     }
-    let client = reqwest::blocking::Client::new();
-    chunks
-        .into_iter()
-        .map(|mut chunk| {
-            let prompt = format!(
-                "<document>\n{document}\n</document>\n\n\
-                Here is the chunk we want to situate within the whole document:\n\
-                <chunk>\n{chunk_text}\n</chunk>\n\n\
-                Provide a short (1-2 sentence) succinct context to situate this chunk \
-                within the overall document for the purposes of improving search retrieval \
-                of the chunk. Answer only with the succinct context and nothing else.",
-                chunk_text = chunk.text
-            );
-            let body = serde_json::json!({
-                "model": llm_model,
-                "messages": [{ "role": "user", "content": prompt }],
-                "max_tokens": 200,
-                "temperature": 0.0,
-            });
-            let url = format!("{}/v1/chat/completions", llm_endpoint.trim_end_matches('/'));
-            let mut req = client
-                .post(&url)
-                .json(&body)
-                .timeout(std::time::Duration::from_secs(30));
-            if let Some(key) = llm_api_key
-                && !key.is_empty()
-            {
-                req = req.bearer_auth(key);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return chunks,
+    };
+    let url = format!("{}/v1/chat/completions", llm_endpoint.trim_end_matches('/'));
+
+    let mut out = Vec::with_capacity(chunks.len());
+    for mut chunk in chunks {
+        let prompt = format!(
+            "<document>\n{document}\n</document>\n\n\
+            Here is the chunk we want to situate within the whole document:\n\
+            <chunk>\n{chunk_text}\n</chunk>\n\n\
+            Provide a short (1-2 sentence) succinct context to situate this chunk \
+            within the overall document for the purposes of improving search retrieval \
+            of the chunk. Answer only with the succinct context and nothing else.",
+            chunk_text = chunk.text
+        );
+        let body = serde_json::json!({
+            "model": llm_model,
+            "messages": [{ "role": "user", "content": prompt }],
+            "max_tokens": 200,
+            "temperature": 0.0,
+        });
+        let mut req = client.post(&url).json(&body);
+        if let Some(key) = llm_api_key
+            && !key.is_empty()
+        {
+            req = req.bearer_auth(key);
+        }
+        let context = match req.send().await {
+            Ok(r) => match r.json::<serde_json::Value>().await {
+                Ok(j) => j["choices"][0]["message"]["content"]
+                    .as_str()
+                    .map(|s| s.trim().to_owned()),
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
+        if let Some(ctx) = context
+            && !ctx.is_empty()
+        {
+            chunk.text = format!("{ctx}\n\n{}", chunk.text);
+            // Replace placeholder tag with completed marker.
+            chunk.content_types.retain(|t| t != "contextual_pending");
+            if !chunk.content_types.iter().any(|t| t == "contextualised") {
+                chunk.content_types.push("contextualised".to_owned());
             }
-            let context = req
-                .send()
-                .ok()
-                .and_then(|r| r.json::<serde_json::Value>().ok())
-                .and_then(|j| {
-                    j["choices"][0]["message"]["content"]
-                        .as_str()
-                        .map(|s| s.trim().to_owned())
-                });
-            if let Some(ctx) = context
-                && !ctx.is_empty()
-            {
-                chunk.text = format!("{ctx}\n\n{}", chunk.text);
-                // Replace placeholder tag with completed marker.
-                chunk.content_types.retain(|t| t != "contextual_pending");
-                if !chunk.content_types.iter().any(|t| t == "contextualised") {
-                    chunk.content_types.push("contextualised".to_owned());
-                }
-            }
-            chunk
-        })
-        .collect()
+        }
+        out.push(chunk);
+    }
+    out
 }
 
 // ── Hierarchical ──────────────────────────────────────────────────────────

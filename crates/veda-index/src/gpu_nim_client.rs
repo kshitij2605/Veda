@@ -91,6 +91,21 @@ impl GpuNimConfig {
 /// little-endian f32. Caller is responsible for serializing in that
 /// shape — typically that's just `bytemuck::cast_slice` over a
 /// `&[f32]` accumulated by row.
+/// **Blocking on purpose — call it from a blocking context.** This uses
+/// `reqwest::blocking`, which panics ("Cannot drop a runtime in a context
+/// where blocking is not allowed") if its runtime is dropped inside a Tokio
+/// worker. That is the bug PR #22 fixed in `splade_client` and that sat
+/// latent in `chunking::contextualize_chunks`.
+///
+/// The fix here is NOT to make this async. The whole index-build path is
+/// synchronous — `LocalShardSearcher::build_indexes` is a `pub fn`, and every
+/// other index type builds on the calling thread — so an async variant would
+/// have no caller able to await it. When this is wired up, the caller must be
+/// inside `tokio::task::spawn_blocking`, which is both correct for a
+/// CPU/IO-heavy index build and safe for a blocking client.
+///
+/// It has no callers today, so this is a constraint to honour rather than a
+/// live defect.
 #[cfg(feature = "gpu_nim")]
 pub fn build_on_nim(
     cfg: &GpuNimConfig,
