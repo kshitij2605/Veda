@@ -1559,11 +1559,16 @@ mod tests {
         let (state, tenant) = seeded_agg_state(tmp.path()).await;
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
-        let out = cat.dispatch(&ctx, "no-such-tool", serde_json::json!({})).await;
+        let out = cat
+            .dispatch(&ctx, "no-such-tool", serde_json::json!({}))
+            .await;
         assert!(out.is_error);
         assert_eq!(out.error_kind, Some(ToolErrorKind::NotFound));
         assert!(
-            out.content["error"].as_str().unwrap().contains("unknown tool"),
+            out.content["error"]
+                .as_str()
+                .unwrap()
+                .contains("unknown tool"),
             "MCP matches on this wording: {:?}",
             out.content
         );
@@ -1575,13 +1580,21 @@ mod tests {
     async fn a_stored_preset_is_advertised_to_the_model() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, tenant) = seeded_agg_state(tmp.path()).await;
-        save_custom(&state, &tenant, preset("agg_preset", serde_json::json!({"collection": "agg"}))).await;
+        save_custom(
+            &state,
+            &tenant,
+            preset("agg_preset", serde_json::json!({"collection": "agg"})),
+        )
+        .await;
 
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
         let specs = cat.specs_for_agent(&ctx, &[]).await;
 
-        let found = specs.iter().find(|s| s.id == "agg_preset").expect("preset not advertised");
+        let found = specs
+            .iter()
+            .find(|s| s.id == "agg_preset")
+            .expect("preset not advertised");
         assert_eq!(found.kind, "custom");
         assert!(found.read_only, "a preset can only run a read-only search");
         // The caller supplies the query and nothing else.
@@ -1608,7 +1621,10 @@ mod tests {
         save_custom(
             &state,
             &tenant,
-            preset("pinned", serde_json::json!({"collection": "no_such_collection"})),
+            preset(
+                "pinned",
+                serde_json::json!({"collection": "no_such_collection"}),
+            ),
         )
         .await;
 
@@ -1629,7 +1645,12 @@ mod tests {
     async fn a_preset_without_a_query_is_a_caller_error() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, tenant) = seeded_agg_state(tmp.path()).await;
-        save_custom(&state, &tenant, preset("p", serde_json::json!({"collection": "agg"}))).await;
+        save_custom(
+            &state,
+            &tenant,
+            preset("p", serde_json::json!({"collection": "agg"})),
+        )
+        .await;
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
         let out = cat.dispatch(&ctx, "p", serde_json::json!({})).await;
@@ -1644,9 +1665,16 @@ mod tests {
         save_custom(&state, &tenant, preset("p", serde_json::json!({}))).await;
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
-        let out = cat.dispatch(&ctx, "p", serde_json::json!({"query": "x"})).await;
+        let out = cat
+            .dispatch(&ctx, "p", serde_json::json!({"query": "x"}))
+            .await;
         assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
-        assert!(out.content["error"].as_str().unwrap().contains("collection"));
+        assert!(
+            out.content["error"]
+                .as_str()
+                .unwrap()
+                .contains("collection")
+        );
     }
 
     /// An unrecognised `kind` is a stored-configuration problem an operator
@@ -1660,9 +1688,16 @@ mod tests {
         save_custom(&state, &tenant, t).await;
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &tenant);
-        let out = cat.dispatch(&ctx, "callout", serde_json::json!({"query": "x"})).await;
+        let out = cat
+            .dispatch(&ctx, "callout", serde_json::json!({"query": "x"}))
+            .await;
         assert_eq!(out.error_kind, Some(ToolErrorKind::InvalidArgs));
-        assert!(out.content["error"].as_str().unwrap().contains("http_callout"));
+        assert!(
+            out.content["error"]
+                .as_str()
+                .unwrap()
+                .contains("http_callout")
+        );
     }
 
     /// Tenant isolation: one tenant's stored tool is neither advertised to
@@ -1671,14 +1706,25 @@ mod tests {
     async fn a_preset_is_scoped_to_its_tenant() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, tenant) = seeded_agg_state(tmp.path()).await;
-        save_custom(&state, &tenant, preset("mine", serde_json::json!({"collection": "agg"}))).await;
+        save_custom(
+            &state,
+            &tenant,
+            preset("mine", serde_json::json!({"collection": "agg"})),
+        )
+        .await;
 
         let other = crate::tenant::TenantId::parse("other").unwrap();
         let cat = ToolCatalog::new();
         let ctx = ToolContext::new(&state, &other);
-        assert!(cat.specs_for_agent(&ctx, &[]).await.iter().all(|s| s.id != "mine"));
-        let out = cat.dispatch(&ctx, "mine", serde_json::json!({"query": "x"})).await;
+        assert!(
+            cat.specs_for_agent(&ctx, &[])
+                .await
+                .iter()
+                .all(|s| s.id != "mine")
+        );
+        let out = cat
+            .dispatch(&ctx, "mine", serde_json::json!({"query": "x"}))
+            .await;
         assert_eq!(out.error_kind, Some(ToolErrorKind::NotFound));
     }
-
 }
