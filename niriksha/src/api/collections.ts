@@ -337,3 +337,58 @@ export const evaluateCollection = (
     sample?: number
   },
 ) => api.get<EvaluateResponse>(`/collections/${name}/evaluate`, { params })
+
+// ── Index maintenance ────────────────────────────────────────────────────
+// The server has exposed these since before Niriksha's audit was written; the
+// audit's "IndexManager is read-only … the server doesn't expose those
+// mutations either" was stale on both halves.
+
+export interface ShardOptimizeResult {
+  shard_id: number
+  segments_before: number
+  segments_after: number
+}
+
+export interface OptimizeResponse {
+  collection: string
+  per_shard: ShardOptimizeResult[]
+}
+
+/**
+ * Force-merge every shard's sealed segments down to one, then rebuild the
+ * query executors.
+ *
+ * Safe to run at any time and safe to repeat — a collection that is already
+ * consolidated merges nothing. Worth doing on a fragmented collection: a bulk
+ * load that seals into many segments makes each per-segment ANN search hand
+ * fewer true neighbours to the cross-segment merge, which is the recall
+ * collapse `recall_at_scale_many_hnsw_segments` covers.
+ */
+export const optimizeCollection = (name: string) =>
+  api.post<OptimizeResponse>(`/collections/${name}/optimize`, {})
+
+export interface ReindexRequest {
+  /** Re-run the embedding model over each chunk. Expensive. */
+  re_embed?: boolean
+  /** Source field holding chunk text. Server default: "content". */
+  text_field?: string
+}
+
+export interface ReindexResponse {
+  /** New collection created with the same schema, then alias-swapped in. */
+  target: string
+  status: string
+}
+
+/**
+ * Rebuild the collection into a fresh one and alias-swap it in.
+ *
+ * NOT the same weight class as `optimizeCollection`. This copies every
+ * record into a new collection and, with `re_embed`, re-runs the embedding
+ * model over the whole corpus — minutes to hours and real cost against the
+ * embedding endpoint on anything large. The UI gates it behind a typed
+ * confirmation for that reason, not because it is destructive: the alias swap
+ * is atomic and the prior data is not deleted.
+ */
+export const reindexCollection = (name: string, body: ReindexRequest = {}) =>
+  api.post<ReindexResponse>(`/collections/${name}/reindex`, body)
