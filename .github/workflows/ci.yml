@@ -229,11 +229,18 @@ jobs:
   # so a broken build or a failing test reached main unnoticed. Same shape as
   # the gpu_cuvs gap — a check that exists but never runs.
   #
-  # `tsc -b` and `vitest` only. `eslint` is deliberately NOT wired yet: the
-  # tree currently has two standing errors in IndexManager.tsx (a
-  # set-state-in-effect and an empty catch block), both predating this job.
-  # Adding a lint gate that fails on arrival would either block every PR or be
-  # switched off immediately. Fix those two, then add `npm run lint` here.
+  # `tsc -b` and `vitest` only. `eslint` is deliberately NOT wired, and the
+  # reason is a measurement rather than a guess: `react-hooks/set-state-in-effect`
+  # rejects the classic "set loading, fetch, set data" effect, and 13 of the 38
+  # files using `useEffect` do exactly that. Satisfying it is a data-fetching
+  # refactor of the whole dashboard, not a lint cleanup. A gate that fails on
+  # arrival gets switched off within a day.
+  #
+  # eslint over `src` also takes >5 minutes here, so it would be the slowest
+  # job in this workflow by some margin.
+  #
+  # Revisit if the dashboard moves to a query library or React 19 `use()`,
+  # which is what would remove the pattern wholesale.
   niriksha:
     name: niriksha (typecheck + tests)
     runs-on: ubuntu-latest
