@@ -224,6 +224,36 @@ jobs:
           components: clippy, rustfmt
       - run: cargo fmt --all --check
 
+  # Niriksha typecheck + tests. There was no frontend job at all: the dashboard
+  # ships 21 test files / 45 tests and a lint config, and CI ran none of them,
+  # so a broken build or a failing test reached main unnoticed. Same shape as
+  # the gpu_cuvs gap — a check that exists but never runs.
+  #
+  # `tsc -b` and `vitest` only. `eslint` is deliberately NOT wired yet: the
+  # tree currently has two standing errors in IndexManager.tsx (a
+  # set-state-in-effect and an empty catch block), both predating this job.
+  # Adding a lint gate that fails on arrival would either block every PR or be
+  # switched off immediately. Fix those two, then add `npm run lint` here.
+  niriksha:
+    name: niriksha (typecheck + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: niriksha/package-lock.json
+      - name: Install
+        working-directory: niriksha
+        run: npm ci
+      - name: Typecheck
+        working-directory: niriksha
+        run: npx tsc -b --noEmit
+      - name: Tests
+        working-directory: niriksha
+        run: npm test
+
   # Python SDK install + tests across the declared Python range. There was
   # no Python job before, so two SDK ship-blockers reached main: an invalid
   # `hatchling.backends` build-backend, and PEP 604 `X | None` annotations
