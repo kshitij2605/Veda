@@ -201,7 +201,7 @@ function MaintenancePanel({
 export function IndexManager() {
   const { collections, fetchCollections } = useCollectionStore()
   const [selectedCollection, setSelectedCollection] = useState('')
-  const [schema, setSchema] = useState<CollectionInfo | null>(null)
+  const [fetched, setFetched] = useState<CollectionInfo | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -211,18 +211,37 @@ export function IndexManager() {
 
   useEffect(() => {
     if (!selectedCollection) {
-      setSchema(null)
+      // Nothing to fetch, and nothing to clear: `schema` below is derived
+      // against the current selection, so a stale value cannot be rendered.
+      // Clearing it here synchronously is what tripped
+      // react-hooks/set-state-in-effect.
       return
     }
     setLoading(true)
     setError(null)
+    let cancelled = false
     fetchCollection(selectedCollection)
-      .then(({ data }) => setSchema(data))
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : 'Failed to load collection'),
-      )
-      .finally(() => setLoading(false))
+      .then(({ data }) => {
+        if (!cancelled) setFetched(data)
+      })
+      .catch((err) => {
+        if (!cancelled)
+          setError(err instanceof Error ? err.message : 'Failed to load collection')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    // Switching collections mid-flight would otherwise let the slower
+    // response overwrite the newer one.
+    return () => {
+      cancelled = true
+    }
   }, [selectedCollection])
+
+  // Derived, not stored: an in-flight or stale fetch for a previous selection
+  // can never be rendered against the current one.
+  const schema =
+    selectedCollection && fetched?.name === selectedCollection ? fetched : null
 
   const vectorFields = schema?.fields.filter((f) => VECTOR_TYPES.has(f.type)) ?? []
   const scalarFields =
@@ -280,7 +299,7 @@ export function IndexManager() {
               // optimize/reindex, so re-read rather than trusting the copy
               // this page loaded before the mutation.
               fetchCollection(selectedCollection)
-                .then(({ data }) => setSchema(data))
+                .then(({ data }) => setFetched(data))
                 .catch(() => undefined)
             }}
           />
@@ -475,7 +494,9 @@ function IndexAdvisory() {
           onClick={() => {
             try {
               window.localStorage.setItem(KEY, '1')
-            } catch {}
+            } catch {
+              // localStorage can throw in private mode; dismissal is best-effort.
+            }
             setDismissed(true)
           }}
           aria-label="Dismiss advisory"
