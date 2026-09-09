@@ -224,6 +224,49 @@ jobs:
           components: clippy, rustfmt
       - run: cargo fmt --all --check
 
+  # Niriksha typecheck + tests. There was no frontend job at all: the dashboard
+  # ships 21 test files / 45 tests and a lint config, and CI ran none of them,
+  # so a broken build or a failing test reached main unnoticed. Same shape as
+  # the gpu_cuvs gap — a check that exists but never runs.
+  #
+  # `tsc -b` and `vitest` only. `eslint` is deliberately NOT wired, and the
+  # reason is a measured backlog rather than a guess. `eslint src` on
+  # 2026-09-09 reports **32 problems (26 errors, 6 warnings)**:
+  #
+  #   8  react-hooks/set-state-in-effect      ("set loading, fetch, set data")
+  #   7  react-hooks/refs
+  #   5  react-refresh/only-export-components
+  #   4  react-hooks/exhaustive-deps
+  #   2  react-hooks/incompatible-library
+  #   2  other (no-unused-vars, no-danger)
+  #
+  # That is several rule families, not one bad pattern, and the hooks ones are
+  # a data-fetching/ref-handling refactor rather than a cleanup. A gate that
+  # fails on arrival gets switched off within a day, so it stays out until the
+  # backlog is cleared deliberately.
+  #
+  # eslint over `src` also takes >5 minutes here, which would make it the
+  # slowest job in this workflow by some margin.
+  niriksha:
+    name: niriksha (typecheck + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: niriksha/package-lock.json
+      - name: Install
+        working-directory: niriksha
+        run: npm ci
+      - name: Typecheck
+        working-directory: niriksha
+        run: npx tsc -b --noEmit
+      - name: Tests
+        working-directory: niriksha
+        run: npm test
+
   # Python SDK install + tests across the declared Python range. There was
   # no Python job before, so two SDK ship-blockers reached main: an invalid
   # `hatchling.backends` build-backend, and PEP 604 `X | None` annotations
