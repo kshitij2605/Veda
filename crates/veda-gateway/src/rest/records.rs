@@ -497,14 +497,15 @@ pub async fn list_records(
 
 #[derive(Debug, Deserialize, Default)]
 pub struct GetRecordQuery {
-    /// When true and the gateway is in Raft mode, read the
-    /// record from the Raft state machine after a barrier
-    /// `Noop` client_write. This gives linearisable
-    /// semantics: the returned value reflects every Insert
-    /// that committed before this GET arrived. Without the
-    /// flag, the read goes straight to the local SegmentManager
-    /// — fast but bounded by the reconcile interval on
-    /// followers.
+    /// **Refused with 501.** This read the record out of the Raft state
+    /// machine after a barrier `Noop` client_write, which ADR-013 Phase E
+    /// removed (`ClusterStateMachine.records` is gone; record writes go
+    /// through per-shard `veda-log`). The flag survived the removal and
+    /// silently degraded to "pay a Raft round-trip, then do the ordinary
+    /// local read" — no additional guarantee.
+    ///
+    /// Kept in the request type so the refusal can explain itself rather
+    /// than the parameter being ignored as unknown.
     #[serde(default)]
     pub linearisable: bool,
     /// Phase F: MVCC snapshot timestamp (HLC u128, decimal). When
@@ -542,31 +543,40 @@ pub async fn get_record(
     // Raft state by up to VEDA_RAFT_RECONCILE_INTERVAL_SECS on
     // followers) and gives strict linearisability at the cost
     // of one Raft round trip per read.
+    // `?linearisable=true` no longer delivers what its name promises, so it
+    // is refused rather than silently under-delivering.
+    //
+    // It was built to issue a Noop barrier and then read the record out of
+    // `ClusterState.records`, bypassing the local SegmentManager. ADR-013
+    // Phase E removed that: `ClusterCommand::InsertRecord` and
+    // `ClusterStateMachine.records` were hard-removed in `c8baf29`, and
+    // record writes now flow through per-shard `veda-log`. What was left
+    // behind paid a full Raft round-trip and then fell through to exactly the
+    // ordinary local read — no extra guarantee, measurable extra latency.
+    //
+    // Measured 2026-09-11 on a live 3-node cluster: insert on node-1, then
+    // read from node-2 with the flag set — 404, identical to the plain read,
+    // while the writer node returned 200. The harness reported 8,846
+    // stale_read violations across 26,857 invocations *with the barrier
+    // enabled*. `documentation/raft-migration.md` still recorded "0
+    // violations" from before Phase E.
+    //
+    // A false consistency guarantee is worse than an absent one: a caller
+    // asking for linearisable reads will build on the answer. Refusing names
+    // the real options instead.
     if q.linearisable {
-        let raft_guard = state.inner.raft.read().await;
-        if let Some(coord) = raft_guard.as_ref() {
-            let cs = coord.linearisable_query_state().await.map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("linearisable read: {e}"),
-                    }),
-                )
-            })?;
-            if !cs.collections.contains_key(&name) {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: format!("collection '{name}' not found"),
-                    }),
-                ));
-            }
-            // Phase E hard-remove: `cs.records` is gone. After
-            // the Noop barrier commits, record state lives in
-            // per-shard `veda-log` and the local SegmentManager
-            // (driven by the log applier on followers). Fall
-            // through to the segment-manager read.
-        }
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "linearisable=true is not available for record reads. It read from \
+                        the Raft state machine, which ADR-013 Phase E removed: record \
+                        writes now go through per-shard veda-log, and this flag would pay \
+                        a Raft round-trip and then serve the same possibly-stale local \
+                        read. For read-your-writes, read from the node that accepted the \
+                        write; follower visibility is bounded by the log applier."
+                    .to_owned(),
+            }),
+        ));
     }
 
     // Check collection exists; extract rls_owner_field for later.
