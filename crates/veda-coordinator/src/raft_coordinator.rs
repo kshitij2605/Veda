@@ -406,6 +406,36 @@ impl RaftCoordinator {
         }
     }
 
+    /// Why this node is not ready to serve, if it is not. `None` means ready.
+    ///
+    /// **The case this exists for.** A node whose persisted `raft_state.bin`
+    /// fails to deserialise starts with empty membership (the load failure is
+    /// non-fatal by design), then declines to bootstrap because its log is
+    /// *not* empty — which is also correct on its own, since re-initialising a
+    /// node that has history would be far worse. The two compose into a
+    /// voter-less Learner: it holds a log, is a voter in no configuration,
+    /// cannot elect or be elected, and has no peer to learn membership from
+    /// when every node is in the same state.
+    ///
+    /// Liveness is untouched throughout — the process is up, HTTP works,
+    /// storage is fine — so `/v1/admin/health` returns 200 and an operator
+    /// watching health checks sees three green nodes and no quorum. Observed
+    /// on 2026-09-09 bringing a cluster up on volumes written by an older
+    /// binary; see
+    /// `documentation/2026-09-09-raft-state-load-failure-silent-learner.md`.
+    ///
+    /// Readiness rather than liveness is deliberate. Failing fast would take
+    /// down a node whose log is intact and recoverable; reporting not-ready
+    /// pulls it out of rotation, leaves the data in place, and makes the
+    /// condition visible to orchestration and to anyone reading the endpoint.
+    ///
+    /// Checks the invariant, not the cause: any voter-less node holding a
+    /// non-empty log is wedged, however it got there.
+    pub fn not_ready_reason(&self) -> Option<String> {
+        let m = self.membership_snapshot();
+        not_ready_reason_for(m.voters.is_empty(), m.last_log_index)
+    }
+
     /// Submit a `ClusterCommand` to the Raft leader and wait for it to
     /// be committed and applied. Returns the `ClusterResponse` from
     /// the state machine.
@@ -482,6 +512,65 @@ pub struct RaftMembershipSnapshot {
     pub voters: Vec<NodeId>,
     pub last_applied_index: u64,
     pub last_log_index: u64,
+}
+
+/// The readiness decision, split out from [`RaftCoordinator::not_ready_reason`]
+/// so the invariant is testable without standing up a wedged cluster.
+///
+/// Wedged means: a voter in no configuration, while holding a log. Such a node
+/// can neither elect nor be elected, and bootstrap will not re-initialise it
+/// because its log is non-empty.
+///
+/// The `last_log_index > 0` conjunct is load-bearing, not defensive. A
+/// brand-new node is voter-less too — that is the state every node passes
+/// through between process start and bootstrap. Reporting not-ready on empty
+/// membership alone would mark every node unready at startup, and if that is
+/// wired to orchestration a cluster could never form.
+fn not_ready_reason_for(voters_empty: bool, last_log_index: u64) -> Option<String> {
+    if voters_empty && last_log_index > 0 {
+        return Some(format!(
+            "raft membership is empty but this node holds a non-empty log \
+             (last_log_index={last_log_index}): it is a voter in no configuration, so \
+             it can neither elect nor be elected, and bootstrap will not re-initialise \
+             a node whose log is non-empty. Recover by restoring raft_state.bin, or by \
+             clearing this node's raft directory so it rejoins from the leader."
+        ));
+    }
+    None
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::not_ready_reason_for;
+
+    /// The wedged case: history on disk, membership in none.
+    #[test]
+    fn voterless_with_a_log_is_not_ready() {
+        let r = not_ready_reason_for(true, 2_618_142).expect("should be not-ready");
+        assert!(
+            r.contains("2618142"),
+            "the reason must carry the index: {r}"
+        );
+        assert!(
+            r.contains("raft_state.bin") && r.contains("clearing"),
+            "the reason must name both recovery paths: {r}"
+        );
+    }
+
+    /// A fresh node is voter-less too, and must NOT be reported wedged. That
+    /// is the state every node passes through before bootstrap; failing
+    /// readiness there would stop a cluster from ever forming.
+    #[test]
+    fn voterless_with_an_empty_log_is_ready() {
+        assert!(not_ready_reason_for(true, 0).is_none());
+    }
+
+    /// A normal member, at any log position.
+    #[test]
+    fn a_voter_is_ready_at_any_log_position() {
+        assert!(not_ready_reason_for(false, 0).is_none());
+        assert!(not_ready_reason_for(false, 999).is_none());
+    }
 }
 
 /// Errors that can stop us from constructing a `RaftCoordinator`.
