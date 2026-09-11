@@ -128,10 +128,16 @@ cleanup() {
     docker exec "$c" tc qdisc del dev eth0 root 2>/dev/null || true
     docker start "$c" >/dev/null 2>&1 || true
   done
-  rm -f /tmp/raft-soak-writes.$$ /tmp/raft-soak-lock.$$ /tmp/raft-soak-pause.$$ 2>/dev/null || true
+  # Count BEFORE removing. These two were the other way round, so the file
+  # was always gone by the time it was tested and `total_writes` could only
+  # ever report 0 — on a 24h run that applied over a million entries. The
+  # summary line is what an operator reads to decide whether a soak was
+  # meaningful, and "0 writes" reads as "the cluster sat idle", which would
+  # make every PASS in the run worthless.
   if [[ -f /tmp/raft-soak-writes.$$ ]]; then
     total_writes=$(wc -l < /tmp/raft-soak-writes.$$ 2>/dev/null || echo 0)
   fi
+  rm -f /tmp/raft-soak-writes.$$ /tmp/raft-soak-lock.$$ /tmp/raft-soak-pause.$$ 2>/dev/null || true
   log "soak done: ${iteration} iterations, ${total_writes} writes, ${failures} failures"
   if [[ "$failures" -gt 0 ]]; then exit 1; else exit 0; fi
 }
