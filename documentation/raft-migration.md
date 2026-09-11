@@ -293,14 +293,24 @@ What was added in the third follow-up pass (commits `d544634`,
 `bf16879`):
 
 - **Cross-node linearisable reads** (`?linearisable=true`):
-  GET /v1/collections/{name}/records/{id}?linearisable=true
-  in raft mode issues a Noop barrier client_write and then
-  reads from `ClusterState.records` directly, bypassing the
-  local SegmentManager. Verified with the linearisability
-  harness in multi-node mode (3 nodes, 3 clients, 30 s,
-  VEDA_LIN_BARRIER=1): 7,065 invocations, **0 violations**
-  (vs ~2,290 stale_read without the flag). Cost: one Raft
-  round-trip per read.
+  **SUPERSEDED — the flag is refused with 501 as of 2026-09-11.**
+  It issued a Noop barrier and then read from
+  `ClusterState.records`. ADR-013 Phase E removed that map
+  (`c8baf29`); record writes go through per-shard `veda-log`.
+  The flag outlived the mechanism and degraded to "pay a Raft
+  round-trip, then do the ordinary local read" — no additional
+  guarantee.
+
+  The "7,065 invocations, 0 violations" below was measured
+  BEFORE Phase E and does not describe current behaviour.
+  Re-measured 2026-09-11 on a live 3-node cluster with the
+  barrier enabled: **8,846 stale_read violations across 26,857
+  invocations**, and a direct probe (insert on node-1, read on
+  node-2 with the flag) returned 404 — identical to the plain
+  read, while the writer node returned 200.
+
+  Genuine cross-node linearisable reads would need a read-index
+  against the per-shard log. Not built.
 
 - **MultiGroupCoordinator (removed 2026-05-27)**: this was a
   coordinator that hosted N openraft instances per process keyed
