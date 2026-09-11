@@ -54,6 +54,32 @@ done.
 > customer-facing, because the path is **opt-in** — `IndexType::Spann` still builds through the
 > in-memory route, so ingest cost is unchanged for anyone selecting `spann` on a collection. Say
 > ingest is cheaper only once a segment-backed `VectorSource` is wired into `build_indexes`.
+>
+> **Update 2026-09-11 — the gate above is met, with one correction to how it is phrased.**
+> The segment-backed `VectorSource` is wired into `build_indexes` (#73). Measured at **1024d**,
+> the dimension this product runs, budget 8 MiB:
+>
+> | vectors | corpus | peak | peak/corpus | passes |
+> |---|---|---|---|---|
+> | 25,000 | 97.7 MiB | 8.0 MiB | 8.2% | 15 |
+> | 50,000 | 195.3 MiB | 6.3 MiB | 3.2% | 34 |
+> | 100,000 | 390.6 MiB | 12.2 MiB | 3.1% | 67 |
+>
+> Corpus grew 4.0×, peak grew 1.5×.
+>
+> **Say:** choosing `spann` bounds peak *build memory* near a configurable budget rather than the
+> corpus — 3.1% of a 390 MiB corpus at 100k × 1024d.
+>
+> **Still do NOT say "ingest is cheaper" unqualified.** Bounded memory is bought with more I/O:
+> passes over the segment grew 15 → 34 → 67 across those sizes. It is a memory/IO trade. Nothing
+> here supports a claim that ingest is *faster*, and **wall-clock build time was not isolated** —
+> do not quote one.
+>
+> **Say "bounded near", not "capped at".** Peak exceeded the 8 MiB budget at 100k (12.2 MiB). That
+> is the documented floor — a posting list is never split across parts, so it is buffered whole
+> and `nlist` governs the floor.
+>
+> Full numbers and method: `documentation/2026-09-11-spann-ingest-memory-measured.md`.
 
 **Do NOT publish latency comparisons for it.** The exact-scan baseline moved 100× between two
 runs on the build host. Only the recall and byte figures above are trustworthy.
