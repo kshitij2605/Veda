@@ -72,9 +72,25 @@ pub async fn health(State(_state): State<AppState>) -> Json<HealthResponse> {
 }
 
 pub async fn readiness(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Result<Json<HealthResponse>, (StatusCode, Json<HealthResponse>)> {
-    let checks = run_health_checks().await;
+    let mut checks = run_health_checks().await;
+
+    // Raft readiness. Liveness deliberately does NOT carry this: a node whose
+    // membership failed to load still serves HTTP and still holds an intact
+    // log, so killing it would destroy a recoverable state rather than route
+    // around it. Readiness pulls it from rotation and says why.
+    //
+    // Without this, a voter-less node holding a non-empty log answered 200 on
+    // every check while belonging to no cluster — three green nodes and no
+    // quorum. See
+    // documentation/2026-09-09-raft-state-load-failure-silent-learner.md.
+    if let Some(raft) = state.inner.raft.read().await.as_ref()
+        && let Some(reason) = raft.not_ready_reason()
+    {
+        checks.insert("raft".into(), format!("unavailable: {reason}"));
+    }
+
     let status = compute_status(&checks);
     let resp = HealthResponse {
         status: status.clone(),
@@ -363,10 +379,15 @@ pub async fn metrics(
 
 fn compute_status(checks: &HashMap<String, String>) -> String {
     let any_critical_down = checks.get("minio").is_some_and(|s| s == "unavailable")
-        || checks.get("nats").is_some_and(|s| s == "unavailable");
+        || checks.get("nats").is_some_and(|s| s == "unavailable")
+        // A node that is in no raft configuration cannot serve consistent
+        // reads or accept writes, so it is not merely degraded.
+        || checks
+            .get("raft")
+            .is_some_and(|s| s.starts_with("unavailable"));
     if any_critical_down {
         "unhealthy".into()
-    } else if checks.values().any(|s| s == "unavailable") {
+    } else if checks.values().any(|s| s.starts_with("unavailable")) {
         "degraded".into()
     } else {
         "healthy".into()
