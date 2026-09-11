@@ -228,6 +228,21 @@ impl History {
             });
         }
         events.sort_by_key(|e| (e.time, e.index));
+
+        // Re-number densely AFTER the sort. `jepsen.history/dense-history`
+        // requires indices to be 0..n-1 in file order and `assoc`s each event
+        // into a vector at its index; anything else fails with
+        // "Key must be integer" before a single check runs.
+        //
+        // The indices assigned above encode the invocation's position in the
+        // list, which the time-sort then scrambles — so every dump this
+        // harness has ever produced was unreadable by elle-cli, which is why
+        // the cross-check the migration doc describes had never been run.
+        // The ordering itself is correct; only the labels were stale.
+        for (i, e) in events.iter_mut().enumerate() {
+            e.index = i as u64;
+        }
+
         for e in &events {
             let line = serde_json::to_string(e)
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;

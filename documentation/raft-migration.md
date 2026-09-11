@@ -581,15 +581,47 @@ $ VEDA_LIN_DURATION_SECS=120 cargo run --release \
 
 ### Run elle-cli against the Elle dump
 
-`elle-cli` is published as a JAR + Docker image; running via Docker is
-the lowest-friction path:
+**The invocation this section used to give never worked.** `jepsen/elle-cli`
+does not exist on Docker Hub, and neither does `ligurio/elle-cli` — confirmed
+2026-09-11 against a `hello-world` control pull, so not a network or auth
+problem. That is why there is no record of anyone having run it.
+
+What actually works: the JAR from elle-cli's GitHub releases, under a **full**
+JDK 21.
 
 ```
-docker run --rm -v "$PWD:/w" -w /w jepsen/elle-cli \
-  lein run check --model rw-register \
-    --consistency-models linearizable \
-    linearisability-history.jsonl.elle.jsonl
+curl -sSL -o elle.zip \
+  https://github.com/ligurio/elle-cli/releases/download/0.1.11/elle-cli-bin-0.1.11.zip
+unzip -q elle.zip          # -> target/elle-cli-0.1.11-standalone.jar
+
+docker run --rm -v "$PWD:/w" -w /w eclipse-temurin:21 \
+  java -jar target/elle-cli-0.1.11-standalone.jar \
+    -m rw-register linearisability-history.jsonl.elle.jsonl
 ```
+
+**Status 2026-09-11: the toolchain runs, the cross-check does not yet.**
+elle-cli starts and prints usage under the recipe above, but rejects this
+harness's dump inside `jepsen.history/add-dense-indices` with
+`IllegalArgumentException: Key must be integer`. One real cause was found and
+fixed — the dump assigned indices from each invocation's list position and
+then sorted the events by time, so the indices were unique but not in file
+order; `dense-history` requires 0..n-1 in order. Dumps are now dense
+(verified). A second format delta remains and is NOT characterised: the
+failure persists with dense indices, with the `index` field removed entirely,
+and with a `.json` extension (format is detected by extension — `.jsonl` is
+not recognised, which produces a different error: `read_history is null`).
+
+So the independent cross-check has still never run. Veda's own
+`check_history` passes (single-node, 6,927 ops, 0 violations), but that is the
+simple sequential model this section exists to supplement, not replace.
+
+Two version traps, both hit on the way to that line:
+
+- **Java 21 or newer.** 0.1.11 uses `java.util.SequencedCollection`; on JDK 17
+  it dies with `NoClassDefFoundError`.
+- **The full JDK image, not `-jre`.** `eclipse-temurin:21-jre` is jlink'd
+  without `jdk.random`, so it fails with "No implementation of the random
+  number generator algorithm L64X128MixRandom is available".
 
 A passing run prints `{:valid? true}`. A failing run prints one or
 more anomaly classes (`:G0`, `:G1a`, `:G1b`, `:G2-item`,
