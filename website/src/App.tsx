@@ -17,7 +17,9 @@ export function AppRoutes() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    // Must match Vite's `base` or deep links 404 under a sub-path deploy.
+    // Reading BASE_URL keeps them from drifting apart.
+    <BrowserRouter basename={import.meta.env.BASE_URL}>
       <AppRoutes />
     </BrowserRouter>
   )

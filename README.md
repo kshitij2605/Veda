@@ -10,7 +10,7 @@
   <a href="#features">Features</a> ·
   <a href="#comparison">Comparison</a> ·
   <a href="#niriksha-dashboard">Niriksha</a> ·
-  <a href="https://docs.veda.example">Docs</a> ·
+  <a href="https://kshitij2605.github.io/Veda/docs/introduction">Docs</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
@@ -18,6 +18,7 @@
   <img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue">
   <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-orange">
   <img alt="MCP" src="https://img.shields.io/badge/MCP-server-green">
+  <a href="https://kshitij2605.github.io/Veda/"><img alt="Docs &amp; site" src="https://img.shields.io/badge/docs-veda-blue"></a>
 </p>
 
 > **Veda** is an **open-source multimodal vector database and RAG platform** written in **Rust**.
@@ -90,10 +91,10 @@ curl -X POST localhost:6340/v1/collections/kb/search -H 'content-type: applicati
 ```
 
 Prefer a UI? Open **[Niriksha](#niriksha-dashboard)** and use the search playground. Python users:
-`pip install veda-client` (see the [Python SDK docs](https://docs.veda.example/docs/python-sdk)).
+`pip install veda-client` (see the [Python SDK docs](https://kshitij2605.github.io/Veda/docs/python-sdk)).
 
 > Veda speaks its own API — it is **not** a drop-in Pinecone/Qdrant clone. See the
-> [REST API reference](https://docs.veda.example/docs/rest-api) for exact request shapes.
+> [REST API reference](https://kshitij2605.github.io/Veda/docs/rest-api) for exact request shapes.
 
 ## Features
 
@@ -151,14 +152,14 @@ AIOps insights. (React 19 / TypeScript; source-available under FSL-1.1.)
 
 ## Documentation
 
-- [Quick start &amp; installation](https://docs.veda.example/docs/quickstart)
-- [Multimodal &amp; cross-modal search](https://docs.veda.example/docs/multimodal)
-- [Document pipeline](https://docs.veda.example/docs/document-pipeline) ·
-  [Indexes](https://docs.veda.example/docs/indexes) ·
-  [Search &amp; fusion](https://docs.veda.example/docs/search)
-- [Agents &amp; MCP](https://docs.veda.example/docs/agents-mcp) ·
-  [REST API](https://docs.veda.example/docs/rest-api) ·
-  [Python SDK](https://docs.veda.example/docs/python-sdk)
+- [Quick start &amp; installation](https://kshitij2605.github.io/Veda/docs/quickstart)
+- [Multimodal &amp; cross-modal search](https://kshitij2605.github.io/Veda/docs/multimodal)
+- [Document pipeline](https://kshitij2605.github.io/Veda/docs/document-pipeline) ·
+  [Indexes](https://kshitij2605.github.io/Veda/docs/indexes) ·
+  [Search &amp; fusion](https://kshitij2605.github.io/Veda/docs/search)
+- [Agents &amp; MCP](https://kshitij2605.github.io/Veda/docs/agents-mcp) ·
+  [REST API](https://kshitij2605.github.io/Veda/docs/rest-api) ·
+  [Python SDK](https://kshitij2605.github.io/Veda/docs/python-sdk)
 
 ## License
 

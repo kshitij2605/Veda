@@ -1,0 +1,85 @@
+name: pages
+
+# Build and publish the marketing site to GitHub Pages.
+#
+# PREREQUISITE, and it is not a code one: Pages is unavailable for a private
+# repository on this account's plan —
+#   POST /repos/kshitij2605/Veda/pages
+#   -> 422 "Your current plan does not support GitHub Pages for this repository."
+# So one of these has to be true before this workflow can publish:
+#   (a) the repository is public, or
+#   (b) the plan includes Pages for private repos (GitHub Pro and above), or
+#   (c) this workflow is moved to a separate public repo holding only `dist`.
+# Until then it builds and uploads the artifact but the deploy step will fail
+# at the Pages API, which is the honest failure rather than a silent no-op.
+#
+# SITE_URL drives every absolute URL in the output — canonical tags, Open
+# Graph, sitemap.xml, robots.txt, llms.txt. It must match where the site is
+# actually served or search engines index a dead host. SITE_BASE is the
+# sub-path Vite builds asset links against: "/Veda/" for a project Pages site,
+# "/" for a user site or custom domain.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; a half-published site is worse than a late one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Project Pages site for kshitij2605/Veda. Change BOTH together if the
+      # site moves to a custom domain or a user site: SITE_BASE to "/" and
+      # SITE_URL to the new origin.
+      SITE_BASE: /Veda/
+      SITE_URL: https://kshitij2605.github.io/Veda
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - name: Install
+        working-directory: website
+        run: npm ci
+      - name: Build
+        working-directory: website
+        run: npm run build
+      - name: Verify the placeholder domain is gone
+        working-directory: website
+        # Belt and braces: `set-site-url.mjs` already fails on a leftover, but
+        # a future build step appended after it would not be covered.
+        run: |
+          if grep -rq "veda\.example" dist; then
+            echo "::error::veda.example survived the rewrite — the deployed site would advertise a dead host"
+            grep -rl "veda\.example" dist | head
+            exit 1
+          fi
+          echo "no placeholder URLs remain"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
