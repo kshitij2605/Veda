@@ -2,7 +2,7 @@ import { StrictMode } from 'react'
 import { renderToString } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
 import { AppRoutes } from './App'
-import { FLAT } from './docs/registry'
+import { DOCS, FLAT } from './docs/registry'
 
 // The prerender needs the canonical doc page list. Exporting it from the SSR
 // bundle keeps ONE source of truth — docs/registry.ts, which also drives the
@@ -14,6 +14,11 @@ export const docPages: { slug: string; title: string }[] = FLAT.map(({ slug, tit
   slug,
   title,
 }))
+
+/** The same pages, grouped, for generators that need the section headings. */
+export const docGroups: { label: string; items: { slug: string; title: string }[] }[] = DOCS.map(
+  (g) => ({ label: g.label, items: g.items.map(({ slug, title }) => ({ slug, title })) }),
+)
 
 // Server-render the app at a given route to an HTML string. Used by
 // scripts/prerender.mjs to generate static per-route HTML. MemoryRouter is a

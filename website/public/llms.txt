@@ -23,6 +23,8 @@
 - [Document pipeline](https://veda.example/docs/document-pipeline): OCR → chunk → embed → insert
 - [Agents & MCP](https://veda.example/docs/agents-mcp): agent framework + MCP server tool catalog
 - [Web Connectors](https://veda.example/docs/web-connectors): web ingestion + agentic web search
+- [External collections](https://veda.example/docs/external-collections): read-in-place Parquet — query files where they are, no ingestion, no second copy
+- [Multi-hop retrieval](https://veda.example/docs/multi-hop): iterative retrieve→reason→retrieve for questions no single document answers
 
 ## Reference
 - [REST API](https://veda.example/docs/rest-api): the HTTP API surface
@@ -36,6 +38,8 @@
 - [Node Resource Signals](https://veda.example/docs/resource-signals): disk/CPU/load/fd/mem monitoring
 - [Service Reliability](https://veda.example/docs/service-reliability): SLOs, error budgets, synthetics, AI triage
 - [RAG & AIOps Intelligence](https://veda.example/docs/rag-aiops): faithfulness, citations, eval, forecasting
+- [Retrieval guardrails](https://veda.example/docs/retrieval-guardrails): screening retrieved documents for indirect prompt injection (OWASP)
+- [RAG Auto-Tuning](https://veda.example/docs/auto-tuning): generate a labelled test set from your own data, then search the pipeline's configuration space
 
 ## Compare
 - [Veda vs Elasticsearch](https://veda.example/docs/vs-elasticsearch): benchmarked recall/latency comparison, capability differences
