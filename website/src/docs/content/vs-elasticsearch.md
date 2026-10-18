@@ -9,7 +9,7 @@ honest, benchmarked comparison.
 > Elasticsearch is a mature, battle-tested platform for **text and log search at scale**.
 > Veda is the place to **ingest any document — PDF, Office, or scans — and search and reason
 > across text, images, audio, and video together**, with RAG quality controls built in, and,
-> on equal hardware, dense-vector search that's faster too.
+> on equal hardware and a compacted collection, dense-vector search that's faster too.
 
 ## Dense-vector performance — benchmarked head-to-head
 
@@ -25,7 +25,25 @@ index from the machine it runs on:
 | ingest throughput | 1,837 docs/s | ~200 docs/s | ~250–310 docs/s |
 
 On comparable hardware, Veda's dense search is **roughly 13× faster than Elasticsearch** at
-equal recall. The 36.6 ms figure on the contended host wasn't an index problem — direct
+equal recall — **on a compacted collection**. That qualifier is load-bearing and the table
+above does not show it, so here it is plainly.
+
+Veda builds ANN indexes **per sealed segment** and merges across them at query time. The
+default bulk-load path seals a segment roughly every 500 records and compacts only
+opportunistically, so a freshly bulk-loaded 30k-row collection settles at **~38 segments**.
+There, recall falls to **0.265** against Elasticsearch's 1.000 and Veda is the slower of the
+two (~47 ms vs ~7 ms server-side). Recall degrades monotonically with fragmentation:
+**1 segment → 1.000, ~4 → 0.853, ~38 → 0.265.**
+
+So the honest summary is narrower than the headline: **a single-segment Veda HNSW is exact and
+several times faster than Elasticsearch; a fragmented one is neither.** Call
+`POST /v1/collections/{name}/optimize` after a bulk load to force-merge, then the numbers in
+the table are the ones you get. Full methodology, including the case Elasticsearch wins, is in
+[`reports/2026-06-21-veda-vs-es-benchmark.md`](https://github.com/kshitij2605/Veda/blob/main/reports/2026-06-21-veda-vs-es-benchmark.md)
+— note that it measured Elasticsearch force-merged to one segment against Veda left
+fragmented, because Veda had no optimize endpoint on the day it was run.
+
+The 36.6 ms figure on the contended host wasn't an index problem — direct
 instrumentation showed the HNSW graph visiting only ~1.5% of nodes per query (healthy, not
 near-exhaustive); the gap was memory-bandwidth contention from other workloads sharing that
 box. **Always benchmark on dedicated hardware** — the same code can look dramatically

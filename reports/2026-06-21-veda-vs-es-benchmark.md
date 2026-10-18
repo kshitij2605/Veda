@@ -1,5 +1,23 @@
 # Veda vs Elasticsearch — Dense-Vector Head-to-Head Benchmark
 
+> **Correction, 2026-10-18.** Two things below are no longer accurate, and both understate
+> Veda:
+>
+> 1. **"There is no force-merge / optimize API" is obsolete.** `POST
+>    /v1/collections/{name}/optimize` landed in `2d5a0e7` at 19:36 on 2026-06-21 — 3h32m
+>    after this report was committed, evidently in response to it. The fragmentation this
+>    report measures is now addressable.
+> 2. **The comparison was asymmetric.** Elasticsearch was force-merged to a single segment
+>    before timing (see Setup); Veda was left at the ~38 segments its bulk-load path produces.
+>    That was unavoidable when this ran — there was no way to compact Veda — but it means
+>    "ES wins the dense case" compares a consolidated ES index against a fragmented Veda one.
+>    This report's own single-segment figures (recall 1.000, ~2 ms server) are the
+>    apples-to-apples point, and they favour Veda.
+>
+> Re-running the 30k case with `optimize` called first is the measurement that would settle
+> it. That has **not** been done, so nothing here has been restated as a win.
+
+
 **Date:** 2026-06-21
 **Author:** automated benchmark (gpu-host-a)
 **Scope:** Dense single-vector ANN retrieval only (cosine, 1024-d). This is Elasticsearch's strongest vector footing. Veda's multimodal / any-format ingestion advantages are categorical (ES cannot do them) and are deliberately out of scope here — this report measures only the apples-to-apples dense case.
