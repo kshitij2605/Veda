@@ -13,6 +13,14 @@ export default defineConfig({
   server: {
     // Vite 8 blocks non-local Host headers by default; allow the gpu-host-a
     // hostname so the dev server is reachable from a workstation.
-    allowedHosts: ['.internal.example', 'localhost'],
+    // Vite 8 blocks non-local Host headers. The real hostname used to be
+    // hardcoded here; it was scrubbed out of history on 2026-10-18 before the
+    // repo went public, which would otherwise leave `npm run dev` unreachable
+    // from anything but localhost. Supply it at run time instead:
+    //   VITE_ALLOWED_HOSTS=.example.internal npm run dev -- --host 0.0.0.0
+    allowedHosts: [
+      ...(process.env.VITE_ALLOWED_HOSTS?.split(',').filter(Boolean) ?? []),
+      'localhost',
+    ],
   },
 })
