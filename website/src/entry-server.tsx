@@ -2,6 +2,18 @@ import { StrictMode } from 'react'
 import { renderToString } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
 import { AppRoutes } from './App'
+import { FLAT } from './docs/registry'
+
+// The prerender needs the canonical doc page list. Exporting it from the SSR
+// bundle keeps ONE source of truth — docs/registry.ts, which also drives the
+// sidebar and the router — instead of a second hand-maintained copy in
+// scripts/prerender.mjs. That copy had silently drifted by four pages
+// (auto-tuning, external-collections, multi-hop, retrieval-guardrails), which
+// shipped as 404s while being linked from the docs body and the sidebar.
+export const docPages: { slug: string; title: string }[] = FLAT.map(({ slug, title }) => ({
+  slug,
+  title,
+}))
 
 // Server-render the app at a given route to an HTML string. Used by
 // scripts/prerender.mjs to generate static per-route HTML. MemoryRouter is a

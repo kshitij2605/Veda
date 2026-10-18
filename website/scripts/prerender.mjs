@@ -2,54 +2,28 @@
 // Runs after `vite build` (client) + `vite build --ssr src/entry-server.tsx`.
 // vite-react-ssg can't run on this Vite 8 / react-router 7 stack, so this is a
 // small custom SSR-prerender instead. The client (main.tsx) hydrates the markup.
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { render } from '../dist-ssr/entry-server.js'
+import { render, docPages } from '../dist-ssr/entry-server.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const dist = join(__dirname, '..', 'dist')
 const SITE_URL = 'https://veda.example' // placeholder — see src/lib/site.ts
 
-const docs = [
-  ['introduction', 'Introduction'],
-  ['quickstart', 'Quick start'],
-  ['installation', 'Installation & config'],
-  ['collections', 'Collections & fields'],
-  ['indexes', 'Indexes'],
-  ['search', 'Search & fusion'],
-  ['multimodal', 'Multimodal & cross-modal'],
-  ['document-pipeline', 'Document pipeline'],
-  ['agents-mcp', 'Agents & MCP'],
-  ['web-connectors', 'Web Connectors'],
-  ['rest-api', 'REST API'],
-  ['python-sdk', 'Python SDK'],
-  ['observability', 'Observability'],
-  ['apm-observability', 'APM & Performance'],
-  ['llm-observability', 'LLM Observability'],
-  ['aiops', 'AIOps'],
-  ['ops-advisor', 'Ops Advisor'],
-  ['log-insights', 'Log Insights'],
-  ['resource-signals', 'Node Resource Signals'],
-  ['service-reliability', 'Service Reliability'],
-  ['rag-aiops', 'RAG & AIOps Intelligence'],
-  ['contributing', 'Contributing'],
-]
 
 // Comparison pages get their own title/description (marketing intent, not the
 // generic "<title> — Veda Docs" doc template) so search snippets read well.
-const comparisons = [
-  {
-    slug: 'vs-elasticsearch',
+const SEO = {
+  'vs-elasticsearch': {
     title: 'Veda vs Elasticsearch — Multimodal Vector Search Compared',
     desc: 'A benchmarked, honest comparison of Veda and Elasticsearch for vector and multimodal search: recall, latency, document ingestion, and RAG quality.',
   },
-  {
-    slug: 'vs-pinecone',
+  'vs-pinecone': {
     title: 'Veda vs Pinecone — Open-Source Alternative to a Managed Vector DB',
     desc: 'How Veda, an open-source self-hostable multimodal vector database, compares to Pinecone, a managed proprietary vector store.',
   },
-]
+}
 
 const routes = [
   {
@@ -57,13 +31,30 @@ const routes = [
     title: 'Veda — Multimodal Vector Database & RAG Platform (Rust)',
     desc: 'Veda is an open-source, Rust-native multimodal vector database and RAG platform: one unified vector space for text, images, audio, video and documents, with hybrid search, reranking, and a built-in MCP server.',
   },
-  ...docs.map(([slug, title]) => ({
+  ...docPages.map(({ slug, title }) => ({
     path: `/docs/${slug}`,
-    title: `${title} — Veda Docs`,
-    desc: `${title} — documentation for Veda, the open-source multimodal vector database and RAG platform.`,
+    title: SEO[slug]?.title ?? `${title} — Veda Docs`,
+    desc:
+      SEO[slug]?.desc ??
+      `${title} — documentation for Veda, the open-source multimodal vector database and RAG platform.`,
   })),
-  ...comparisons.map((c) => ({ path: `/docs/${c.slug}`, title: c.title, desc: c.desc })),
 ]
+
+// Every markdown file under docs/content must be registered, or it is built
+// into the bundle, linked from the prose, and served as a 404. Deriving routes
+// from the registry fixes the drift; this catches the next new page that is
+// added to content/ but never registered.
+const onDisk = readdirSync(join(__dirname, '..', 'src', 'docs', 'content'))
+  .filter((f) => f.endsWith('.md'))
+  .map((f) => f.replace(/\.md$/, ''))
+const unrouted = onDisk.filter((slug) => !docPages.some((p) => p.slug === slug))
+if (unrouted.length > 0) {
+  console.error(
+    'PRERENDER_FAIL: content file(s) with no route — add them to src/docs/registry.ts:',
+    unrouted.join(', '),
+  )
+  process.exit(1)
+}
 
 const esc = (s) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
