@@ -9,9 +9,15 @@ import { AppRoutes } from './App'
 // matching `url`. All browser-API work in the app is inside effects, which do
 // not run during renderToString, so this is SSR-safe.
 export function render(url: string): string {
+  // The client mounts BrowserRouter with basename=BASE_URL. MemoryRouter must
+  // be given the same basename or every <Link> renders a base-less href into
+  // the prerendered HTML — "/docs/search" instead of "/Veda/docs/search" —
+  // which 404s on a project Pages site. `initialEntries` is a real location, so
+  // it carries the basename too; react-router strips it before matching.
+  const base = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
   return renderToString(
     <StrictMode>
-      <MemoryRouter initialEntries={[url]}>
+      <MemoryRouter basename={import.meta.env.BASE_URL} initialEntries={[base + url]}>
         <AppRoutes />
       </MemoryRouter>
     </StrictMode>,

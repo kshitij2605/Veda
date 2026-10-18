@@ -1,3 +1,4 @@
+import { withBase } from '../lib/withBase'
 import { BrandMark } from './BrandMark'
 import { GitHubIcon } from './GitHubIcon'
 
@@ -43,7 +44,7 @@ export function Footer() {
               {c.links.map(([label, href]) => (
                 <li key={label}>
                   <a
-                    href={href}
+                    href={withBase(href)}
                     className="text-[14px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-accent)]"
                   >
                     {label}

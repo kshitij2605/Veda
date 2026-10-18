@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { cn } from '../lib/cn'
+import { withBase } from '../lib/withBase'
 import { Button } from './primitives/Button'
 import { BrandMark } from './BrandMark'
 import { GitHubIcon } from './GitHubIcon'
@@ -29,7 +30,7 @@ export function Nav({ solid = false }: { solid?: boolean }) {
       )}
     >
       <div className="mx-auto flex h-16 max-w-[1320px] items-center gap-3 px-6 md:px-10">
-        <a href="/" className="flex items-center gap-2.5">
+        <a href={withBase("/")} className="flex items-center gap-2.5">
           <BrandMark size={20} />
           <span className="text-[19px] font-bold tracking-tight [font-family:var(--font-display)] text-[var(--color-text)]">
             Veda
@@ -39,7 +40,7 @@ export function Nav({ solid = false }: { solid?: boolean }) {
           {LINKS.map((l) => (
             <a
               key={l.label}
-              href={l.href}
+              href={withBase(l.href)}
               className="mono-label rounded-[var(--radius-sm)] px-3 py-2 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
             >
               {l.label}

@@ -1,6 +1,7 @@
 import { isValidElement, type ReactElement, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { withBase } from '../../lib/withBase'
 import { slugify } from '../../docs/slugify'
 import { CodeBlock } from './CodeBlock'
 
@@ -56,7 +57,7 @@ export function DocMarkdown({ md }: { md: string }) {
         },
         a: ({ href, children }) => (
           <a
-            href={href}
+            href={withBase(String(href ?? ''))}
             className="text-[var(--color-accent)] underline decoration-[rgba(255,178,36,0.4)] underline-offset-4 transition-colors hover:decoration-[var(--color-accent)]"
           >
             {children}
@@ -102,7 +103,7 @@ export function DocMarkdown({ md }: { md: string }) {
           if (!/\.(mp4|webm)$/i.test(s)) {
             return (
               <img
-                src={s}
+                src={withBase(s)}
                 alt={alt ?? ''}
                 className="my-6 w-full rounded-[var(--radius-md)] border border-[var(--color-border)]"
               />
@@ -111,8 +112,8 @@ export function DocMarkdown({ md }: { md: string }) {
           return (
             <figure className="my-8">
               <video
-                src={s}
-                poster={s.replace(/\.(mp4|webm)$/i, '.jpg')}
+                src={withBase(s)}
+                poster={withBase(s.replace(/\.(mp4|webm)$/i, '.jpg'))}
                 controls
                 muted
                 playsInline

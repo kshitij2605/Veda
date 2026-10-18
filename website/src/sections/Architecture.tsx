@@ -1,5 +1,6 @@
 import { Check } from 'lucide-react'
 import { Section } from '../components/Section'
+import { withBase } from '../lib/withBase'
 
 const SERVICES: [string, string][] = [
   ['Veda', 'API, indexing, search — one Rust binary'],
@@ -55,7 +56,7 @@ export function Architecture() {
           <p className="mt-6 text-[14px] text-[var(--color-text-muted)]">
             One compose file brings all three up together —{' '}
             <a
-              href="/docs/quickstart"
+              href={withBase("/docs/quickstart")}
               className="text-[var(--color-accent)] underline decoration-[rgba(255,178,36,0.4)] underline-offset-4 transition-colors hover:decoration-[var(--color-accent)]"
             >
               see the quick start

@@ -1,4 +1,5 @@
 import { Section } from '../components/Section'
+import { withBase } from '../lib/withBase'
 import { useReveal } from '../lib/useReveal'
 
 /** Short demos recorded against a running Veda — no mockups. */
@@ -63,8 +64,8 @@ export function SeeItInAction() {
       <div ref={ref} className="mt-14">
         <figure className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)]">
           <video
-            src="/videos/multimodal.mp4"
-            poster="/videos/multimodal.jpg"
+            src={withBase('/videos/multimodal.mp4')}
+            poster={withBase('/videos/multimodal.jpg')}
             controls
             muted
             playsInline
