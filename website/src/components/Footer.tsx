@@ -8,14 +8,14 @@ const COLS: { title: string; links: [string, string][] }[] = [
     links: [
       ['Features', '#features'],
       ['Architecture', '#architecture'],
-      ['Dashboard', '/niriksha'],
+      ['Dashboard', 'https://github.com/kshitij2605/Veda#niriksha-dashboard'],
     ],
   },
   {
     title: 'Developers',
     links: [
       ['Docs', '/docs'],
-      ['Python SDK', 'https://github.com/kshitij2605/Veda'],
+      ['Python SDK', '/docs/python-sdk'],
       ['GitHub', 'https://github.com/kshitij2605/Veda'],
       ['Contributing', 'https://github.com/kshitij2605/Veda/blob/main/CONTRIBUTING.md'],
     ],

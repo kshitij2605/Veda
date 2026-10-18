@@ -95,4 +95,32 @@ for (const r of routes) {
   console.log('prerendered', r.path, '(', app.length, 'bytes )')
   n++
 }
+// `/docs` is a client-side redirect to `/docs/introduction` (App.tsx), so a
+// static host has nothing to serve for it: a direct hit, an external link or a
+// crawler gets a 404 — and both the nav and the footer link there. Emit a real
+// redirect stub. SITE_BASE is the same variable vite.config.ts builds `base`
+// from, so the target carries the deploy sub-path.
+const base = (process.env.SITE_BASE || '/').replace(/\/+$/, '')
+const docsTarget = `${base}/docs/introduction`
+mkdirSync(join(dist, 'docs'), { recursive: true })
+writeFileSync(
+  join(dist, 'docs', 'index.html'),
+  `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Veda Docs</title>
+    <link rel="canonical" href="${SITE_URL}/docs/introduction" />
+    <meta http-equiv="refresh" content="0; url=${docsTarget}" />
+    <meta name="robots" content="noindex" />
+  </head>
+  <body>
+    <p>Redirecting to <a href="${docsTarget}">the Veda documentation</a>.</p>
+  </body>
+</html>
+`,
+)
+console.log('prerendered /docs (redirect stub -> ' + docsTarget + ')')
+
 console.log('PRERENDER_DONE', n, 'routes')
